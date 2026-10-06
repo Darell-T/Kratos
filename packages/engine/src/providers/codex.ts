@@ -1,4 +1,6 @@
-import { connectCodex } from '@kratos/codex';
+import { connectCodex, type v2 } from '@kratos/codex';
+
+type UserInput = v2.UserInput;
 
 interface Plugin {
   name: string;
@@ -8,7 +10,7 @@ interface Plugin {
 
 const codex = await connectCodex({ clientInfo: { name: 'kratos', title: 'Kratos', version: '0.0.0' } });
 const activeTurns = new Map<string, string>();
-const queuedMessages = new Map<string, string[]>();
+const queuedMessages = new Map<string, UserInput[][]>();
 
 codex.onNotification('item/agentMessage/delta', (params) => process.stdout.write(params.delta));
 
@@ -17,9 +19,9 @@ codex.onNotification('turn/completed', (params) => {
   activeTurns.delete(params.threadId);
 
   const waiting = queuedMessages.get(params.threadId);
-  if (waiting) {
+  if (waiting?.length) {
     queuedMessages.delete(params.threadId);
-    void startTurn(params.threadId, waiting.join('\n\n'));
+    void startTurn(params.threadId, waiting.flat());
   }
 });
 
@@ -65,20 +67,35 @@ async function startThread(folder: string) {
   return result.thread.id;
 }
 
-async function startTurn(threadId: string, text: string) {
+async function startTurn(threadId: string, input: UserInput[]) {
   // Busy from this moment, so a message sent before Codex confirms the turn still gets queued.
   activeTurns.set(threadId, '');
-  const { turn } = await codex.request('turn/start', { threadId, input: [{ type: 'text', text, text_elements: [] }] });
+  const { turn } = await codex.request('turn/start', { threadId, input });
   if (activeTurns.has(threadId)) activeTurns.set(threadId, turn.id);
 }
 
-async function sendMessage(threadId: string, message: string) {
+export async function steerTurn(threadId: string, input: UserInput[]) {
+  const turnId = activeTurns.get(threadId);
+  if (!turnId) return;
+
+  const waiting = queuedMessages.get(threadId);
+  if (waiting) {
+    const steered = JSON.stringify(input);
+    const index = waiting.findIndex((queued) => JSON.stringify(queued) === steered);
+    if (index !== -1) waiting.splice(index, 1);
+    if (waiting.length === 0) queuedMessages.delete(threadId);
+  }
+
+  await codex.request('turn/steer', { threadId, expectedTurnId: turnId, input });
+}
+
+async function sendMessage(threadId: string, input: UserInput[]) {
   if (activeTurns.has(threadId)) {
     const waiting = queuedMessages.get(threadId) ?? [];
-    waiting.push(message);
+    waiting.push(input);
     queuedMessages.set(threadId, waiting);
   } else {
-    await startTurn(threadId, message);
+    await startTurn(threadId, input);
   }
 }
 
@@ -96,8 +113,8 @@ function waitUntilIdle(threadId: string) {
 const threadId = await startThread(process.cwd());
 console.log('opened thread', threadId);
 
-await sendMessage(threadId, 'What is 2 + 2? Answer with just the number.');
-await sendMessage(threadId, 'Now double it. Answer with just the number.');
+await sendMessage(threadId, [{ type: 'text', text: 'What is 2 + 2? Answer with just the number.', text_elements: [] }]);
+await sendMessage(threadId, [{ type: 'text', text: 'Now double it. Answer with just the number.', text_elements: [] }]);
 await waitUntilIdle(threadId);
 
 await codex.close();
