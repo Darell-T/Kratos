@@ -7,16 +7,65 @@ interface Plugin {
   marketplace: string;
   enabled: boolean;
 }
+interface Skill {
+  details: string;
+  path: string;
+}
+interface Model {
+  id: string;
+  details: string;
+}
+type Permission = 'askMe' | 'approveForMe' | 'fullAccess';
+type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';
+
+interface ThreadState {
+  model?: string;
+  turnId?: string;
+  permissions?: Permission;
+}
 
 const codex = await connectCodex({ clientInfo: { name: 'kratos', title: 'Kratos', version: '0.0.0' } });
-const activeTurns = new Map<string, string>();
 const queuedMessages = new Map<string, UserInput[][]>();
+const stoppedTurns = new Set<string>();
+const threads = new Map<string, ThreadState>();
+const pendingCommands = new Map<string, { command: string | null; resolve: (decision: ApprovalDecision) => void }>();
+
+function activity(item: v2.ThreadItem): string | undefined {
+  if (item.type === 'fileChange') {
+    const paths = item.changes.map((change) => change.path).join(', ');
+    return paths ? `editing ${paths}` : 'editing';
+  }
+  if (item.type === 'imageView') return `viewing ${item.path}`;
+  if (item.type !== 'commandExecution') return;
+
+  const reads = item.commandActions.filter((action) => action.type === 'read');
+  if (reads.length > 0 && reads.length === item.commandActions.length) {
+    return `reading ${reads.map((action) => action.path).join(', ')}`;
+  }
+  return `running ${item.command}`;
+}
 
 codex.onNotification('item/agentMessage/delta', (params) => process.stdout.write(params.delta));
+codex.onNotification('item/started', (params) => {
+  const line = activity(params.item);
+  if (line) console.log(line);
+});
+codex.onServerRequest('item/commandExecution/requestApproval', (params) => {
+  if (threads.get(params.threadId)?.permissions !== 'askMe') return { decision: 'accept' };
 
+  console.log('approval needed', params.command);
+  return new Promise<{ decision: ApprovalDecision }>((resolve) => {
+    pendingCommands.get(params.threadId)?.resolve('cancel');
+    pendingCommands.set(params.threadId, {
+      command: params.command ?? null,
+      resolve: (decision) => resolve({ decision }),
+    });
+  });
+});
 codex.onNotification('turn/completed', (params) => {
   console.log();
-  activeTurns.delete(params.threadId);
+  const state = threads.get(params.threadId);
+  if (state) delete state.turnId;
 
   const waiting = queuedMessages.get(params.threadId);
   if (waiting?.length) {
@@ -33,9 +82,12 @@ async function isSignedIn() {
 async function findSkills() {
   const codexSkills = await codex.request('skills/list', { cwds: [process.cwd()] });
 
-  const userSkills: Map<string, string> = new Map();
+  const userSkills: Map<string, Skill> = new Map();
   for (const entry of codexSkills.data) {
-    for (const skill of entry.skills) userSkills.set(skill.name, skill.description);
+    for (const skill of entry.skills) {
+      const skillData: Skill = { details: skill.description, path: skill.path };
+      userSkills.set(skill.name, skillData);
+    }
   }
   return userSkills;
 }
@@ -53,6 +105,16 @@ async function findPlugins() {
   }
   return userPlugins;
 }
+export async function providerModels() {
+  const codexModels: Map<string, Model> = new Map();
+  const models = await codex.request('model/list', { cursor: null, limit: null, includeHidden: null });
+
+  for (const entry of models.data) {
+    const model: Model = { id: entry.model, details: entry.description };
+    codexModels.set(entry.displayName, model);
+  }
+  return codexModels;
+}
 
 if (!(await isSignedIn())) console.error('Codex is not signed in. Run: codex login');
 
@@ -67,15 +129,48 @@ async function startThread(folder: string) {
   return result.thread.id;
 }
 
+export function setThreadModel(threadId: string, model: string) {
+  const state = threads.get(threadId);
+  if (state) state.model = model;
+  else threads.set(threadId, { model });
+}
+
+export function commandWaiting(threadId: string): string | null | undefined {
+  return pendingCommands.get(threadId)?.command;
+}
+
+export function decideCommand(threadId: string, decision: ApprovalDecision) {
+  const pending = pendingCommands.get(threadId);
+  if (!pending) return;
+  pendingCommands.delete(threadId);
+  pending.resolve(decision);
+}
+
+export function setThreadPermissions(threadId: string, permissions: Permission) {
+  const state = threads.get(threadId);
+  if (state) state.permissions = permissions;
+  else threads.set(threadId, { permissions });
+}
+
 async function startTurn(threadId: string, input: UserInput[]) {
   // Busy from this moment, so a message sent before Codex confirms the turn still gets queued.
-  activeTurns.set(threadId, '');
-  const { turn } = await codex.request('turn/start', { threadId, input });
-  if (activeTurns.has(threadId)) activeTurns.set(threadId, turn.id);
+  const state = threads.get(threadId) ?? {};
+  state.turnId = '';
+  threads.set(threadId, state);
+  const { turn } = await codex.request(
+    'turn/start',
+    state.model === undefined ? { threadId, input } : { threadId, input, model: state.model },
+  );
+  if (stoppedTurns.delete(threadId)) {
+    delete state.turnId;
+    await codex.request('turn/interrupt', { threadId, turnId: turn.id });
+    return;
+  }
+  if (state.turnId !== undefined) state.turnId = turn.id;
 }
 
 export async function steerTurn(threadId: string, input: UserInput[]) {
-  const turnId = activeTurns.get(threadId);
+  const turnId = threads.get(threadId)?.turnId;
   if (!turnId) return;
 
   const waiting = queuedMessages.get(threadId);
@@ -88,9 +183,23 @@ export async function steerTurn(threadId: string, input: UserInput[]) {
 
   await codex.request('turn/steer', { threadId, expectedTurnId: turnId, input });
 }
+export async function stopTurn(threadId: string) {
+  const state = threads.get(threadId);
+  const turnId = state?.turnId;
+  if (!state || turnId === undefined) return;
+
+  queuedMessages.delete(threadId);
+  if (turnId === '') {
+    stoppedTurns.add(threadId);
+    return;
+  }
+
+  delete state.turnId;
+  await codex.request('turn/interrupt', { threadId, turnId });
+}
 
 async function sendMessage(threadId: string, input: UserInput[]) {
-  if (activeTurns.has(threadId)) {
+  if (threads.get(threadId)?.turnId !== undefined) {
     const waiting = queuedMessages.get(threadId) ?? [];
     waiting.push(input);
     queuedMessages.set(threadId, waiting);
@@ -102,7 +211,7 @@ async function sendMessage(threadId: string, input: UserInput[]) {
 function waitUntilIdle(threadId: string) {
   return new Promise<void>((resolve) => {
     const stop = codex.onNotification('turn/completed', (params) => {
-      if (params.threadId === threadId && !activeTurns.has(threadId)) {
+      if (params.threadId === threadId && threads.get(threadId)?.turnId === undefined) {
         stop();
         resolve();
       }
