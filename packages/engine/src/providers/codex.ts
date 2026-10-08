@@ -23,12 +23,23 @@ interface ThreadState {
   turnId?: string;
   permissions?: Permission;
 }
+type TurnStartRequest = {
+  threadId: string;
+  input: UserInput[];
+  model?: string;
+  approvalsReviewer?: 'user' | 'auto_review';
+  sandboxPolicy?: {
+    type: 'dangerFullAccess';
+  };
+  approvalPolicy?: 'never';
+};
 
 const codex = await connectCodex({ clientInfo: { name: 'kratos', title: 'Kratos', version: '0.0.0' } });
 const queuedMessages = new Map<string, UserInput[][]>();
 const stoppedTurns = new Set<string>();
 const threads = new Map<string, ThreadState>();
 const pendingCommands = new Map<string, { command: string | null; resolve: (decision: ApprovalDecision) => void }>();
+const pendingFiles = new Map<string, { reason: string | null; resolve: (decision: ApprovalDecision) => void }>();
 
 function activity(item: v2.ThreadItem): string | undefined {
   if (item.type === 'fileChange') {
@@ -58,6 +69,16 @@ codex.onServerRequest('item/commandExecution/requestApproval', (params) => {
     pendingCommands.get(params.threadId)?.resolve('cancel');
     pendingCommands.set(params.threadId, {
       command: params.command ?? null,
+      resolve: (decision) => resolve({ decision }),
+    });
+  });
+});
+codex.onServerRequest('item/fileChange/requestApproval', (params) => {
+  if (threads.get(params.threadId)?.permissions !== 'askMe') return { decision: 'accept' };
+  return new Promise<{ decision: ApprovalDecision }>((resolve) => {
+    pendingFiles.get(params.threadId)?.resolve('cancel');
+    pendingFiles.set(params.threadId, {
+      reason: params.reason ?? null,
       resolve: (decision) => resolve({ decision }),
     });
   });
@@ -145,6 +166,12 @@ export function decideCommand(threadId: string, decision: ApprovalDecision) {
   pendingCommands.delete(threadId);
   pending.resolve(decision);
 }
+export function decideFile(threadId: string, decision: ApprovalDecision) {
+  const pending = pendingFiles.get(threadId);
+  if (!pending) return;
+  pendingFiles.delete(threadId);
+  pending.resolve(decision);
+}
 
 export function setThreadPermissions(threadId: string, permissions: Permission) {
   const state = threads.get(threadId);
@@ -154,19 +181,45 @@ export function setThreadPermissions(threadId: string, permissions: Permission) 
 
 async function startTurn(threadId: string, input: UserInput[]) {
   // Busy from this moment, so a message sent before Codex confirms the turn still gets queued.
+  const request: TurnStartRequest = {
+    threadId,
+    input,
+  };
   const state = threads.get(threadId) ?? {};
   state.turnId = '';
   threads.set(threadId, state);
-  const { turn } = await codex.request(
-    'turn/start',
-    state.model === undefined ? { threadId, input } : { threadId, input, model: state.model },
-  );
+  if (state.model) {
+    request.model = state.model;
+  }
+  if (state.permissions === 'askMe') {
+    request.approvalsReviewer = 'user';
+  }
+  if (state.permissions === 'approveForMe') {
+    request.approvalsReviewer = 'auto_review';
+  }
+  if (state.permissions === 'fullAccess') {
+    request.sandboxPolicy = {
+      type: 'dangerFullAccess',
+    };
+    request.approvalPolicy = 'never';
+  }
+
+  let turn: { id: string };
+  try {
+    ({ turn } = await codex.request('turn/start', request));
+  } catch (error) {
+    delete state.turnId;
+    stoppedTurns.delete(threadId);
+    throw error;
+  }
   if (stoppedTurns.delete(threadId)) {
     delete state.turnId;
     await codex.request('turn/interrupt', { threadId, turnId: turn.id });
     return;
   }
-  if (state.turnId !== undefined) state.turnId = turn.id;
+  if (state.turnId !== undefined) {
+    state.turnId = turn.id;
+  }
 }
 
 export async function steerTurn(threadId: string, input: UserInput[]) {
