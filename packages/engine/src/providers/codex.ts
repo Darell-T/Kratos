@@ -1,4 +1,5 @@
 import { connectCodex, type v2 } from '@kratos/codex';
+import { createCodexApprovals, type Permission } from './codex-approvals';
 
 type UserInput = v2.UserInput;
 
@@ -15,8 +16,6 @@ interface Model {
   id: string;
   details: string;
 }
-type Permission = 'askMe' | 'approveForMe' | 'fullAccess';
-type ApprovalDecision = 'accept' | 'acceptForSession' | 'decline' | 'cancel';
 
 interface ThreadState {
   model?: string;
@@ -28,18 +27,18 @@ type TurnStartRequest = {
   input: UserInput[];
   model?: string;
   approvalsReviewer?: 'user' | 'auto_review';
-  sandboxPolicy?: {
-    type: 'dangerFullAccess';
-  };
-  approvalPolicy?: 'never';
+  sandboxPolicy?: v2.SandboxPolicy;
+  approvalPolicy?: v2.AskForApproval;
 };
 
 const codex = await connectCodex({ clientInfo: { name: 'kratos', title: 'Kratos', version: '0.0.0' } });
 const queuedMessages = new Map<string, UserInput[][]>();
 const stoppedTurns = new Set<string>();
 const threads = new Map<string, ThreadState>();
-const pendingCommands = new Map<string, { command: string | null; resolve: (decision: ApprovalDecision) => void }>();
-const pendingFiles = new Map<string, { reason: string | null; resolve: (decision: ApprovalDecision) => void }>();
+export const { commandWaiting, fileWaiting, approvalsWaiting, decideCommand, decideFile } = createCodexApprovals(
+  codex,
+  (threadId) => threads.get(threadId)?.permissions,
+);
 
 function activity(item: v2.ThreadItem): string | undefined {
   if (item.type === 'fileChange') {
@@ -60,28 +59,6 @@ codex.onNotification('item/agentMessage/delta', (params) => process.stdout.write
 codex.onNotification('item/started', (params) => {
   const line = activity(params.item);
   if (line) console.log(line);
-});
-codex.onServerRequest('item/commandExecution/requestApproval', (params) => {
-  if (threads.get(params.threadId)?.permissions !== 'askMe') return { decision: 'accept' };
-
-  console.log('approval needed', params.command);
-  return new Promise<{ decision: ApprovalDecision }>((resolve) => {
-    pendingCommands.get(params.threadId)?.resolve('cancel');
-    pendingCommands.set(params.threadId, {
-      command: params.command ?? null,
-      resolve: (decision) => resolve({ decision }),
-    });
-  });
-});
-codex.onServerRequest('item/fileChange/requestApproval', (params) => {
-  if (threads.get(params.threadId)?.permissions !== 'askMe') return { decision: 'accept' };
-  return new Promise<{ decision: ApprovalDecision }>((resolve) => {
-    pendingFiles.get(params.threadId)?.resolve('cancel');
-    pendingFiles.set(params.threadId, {
-      reason: params.reason ?? null,
-      resolve: (decision) => resolve({ decision }),
-    });
-  });
 });
 codex.onNotification('turn/completed', (params) => {
   console.log();
@@ -147,6 +124,7 @@ for (const [id, plugin] of plugins) console.log(`${id}: ${plugin.name} from ${pl
 
 async function startThread(folder: string) {
   const result = await codex.request('thread/start', { cwd: folder, ephemeral: true }); //dont save the damn test thread
+  setThreadPermissions(result.thread.id, 'askMe');
   return result.thread.id;
 }
 
@@ -154,23 +132,6 @@ export function setThreadModel(threadId: string, model: string) {
   const state = threads.get(threadId);
   if (state) state.model = model;
   else threads.set(threadId, { model });
-}
-
-export function commandWaiting(threadId: string): string | null | undefined {
-  return pendingCommands.get(threadId)?.command;
-}
-
-export function decideCommand(threadId: string, decision: ApprovalDecision) {
-  const pending = pendingCommands.get(threadId);
-  if (!pending) return;
-  pendingCommands.delete(threadId);
-  pending.resolve(decision);
-}
-export function decideFile(threadId: string, decision: ApprovalDecision) {
-  const pending = pendingFiles.get(threadId);
-  if (!pending) return;
-  pendingFiles.delete(threadId);
-  pending.resolve(decision);
 }
 
 export function setThreadPermissions(threadId: string, permissions: Permission) {
@@ -192,10 +153,27 @@ async function startTurn(threadId: string, input: UserInput[]) {
     request.model = state.model;
   }
   if (state.permissions === 'askMe') {
+    request.sandboxPolicy = {
+      type: 'workspaceWrite',
+      writableRoots: [],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    };
+    request.approvalPolicy = 'on-request';
     request.approvalsReviewer = 'user';
   }
   if (state.permissions === 'approveForMe') {
+    request.sandboxPolicy = {
+      type: 'workspaceWrite',
+      writableRoots: [],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    };
+
     request.approvalsReviewer = 'auto_review';
+    request.approvalPolicy = 'on-request';
   }
   if (state.permissions === 'fullAccess') {
     request.sandboxPolicy = {

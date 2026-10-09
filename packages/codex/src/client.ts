@@ -31,7 +31,10 @@ export interface CodexClient {
   onNotification<M extends NotificationMethod>(method: M, handler: (params: NotificationParams<M>) => void): () => void;
   onServerRequest<M extends ServerRequestMethod>(
     method: M,
-    handler: (params: ServerRequestParams<M>) => ServerRequestResult<M> | Promise<ServerRequestResult<M>>,
+    handler: (
+      params: ServerRequestParams<M>,
+      id: string | number,
+    ) => ServerRequestResult<M> | Promise<ServerRequestResult<M>>,
   ): () => void;
   onExit(handler: (code: number | null) => void): () => void;
   close(): Promise<void>;
@@ -71,7 +74,8 @@ class CodexConnection implements CodexClient {
   private nextId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly notificationHandlers = new Map<string, Set<(params: unknown) => void>>();
-  private readonly serverRequestHandlers = new Map<string, (params: unknown) => unknown>();
+  private readonly serverRequestHandlers = new Map<string, (params: unknown, id: string | number) => unknown>();
+  private readonly unansweredServerRequests = new Set<string | number>();
   private readonly exitHandlers = new Set<(code: number | null) => void>();
   private ended: CodexExitedError | CodexNotFoundError | undefined;
   private exitCode: number | null = null;
@@ -120,9 +124,12 @@ class CodexConnection implements CodexClient {
 
   onServerRequest<M extends ServerRequestMethod>(
     method: M,
-    handler: (params: ServerRequestParams<M>) => ServerRequestResult<M> | Promise<ServerRequestResult<M>>,
+    handler: (
+      params: ServerRequestParams<M>,
+      id: string | number,
+    ) => ServerRequestResult<M> | Promise<ServerRequestResult<M>>,
   ): () => void {
-    const untypedHandler = handler as (params: unknown) => unknown;
+    const untypedHandler = handler as (params: unknown, id: string | number) => unknown;
     this.serverRequestHandlers.set(method, untypedHandler);
     return () => {
       // A newer registration replaced this one, so it is no longer ours to remove.
@@ -155,6 +162,10 @@ class CodexConnection implements CodexClient {
         this.settle(message);
         break;
       case 'notification':
+        if (message.method === 'serverRequest/resolved') {
+          const id = resolvedRequestId(message.params);
+          if (id !== undefined) this.unansweredServerRequests.delete(id);
+        }
         for (const handler of this.notificationHandlers.get(message.method) ?? []) {
           runHandler(message.method, () => handler(message.params));
         }
@@ -181,12 +192,14 @@ class CodexConnection implements CodexClient {
       this.write(encode({ id, error: { code: METHOD_NOT_FOUND, message: `Method not handled by Kratos: ${method}` } }));
       return;
     }
+    this.unansweredServerRequests.add(id);
     try {
-      const result = await handler(params);
-      this.write(encode({ id, result: result ?? null }));
+      const result = await handler(params, id);
+      if (this.unansweredServerRequests.delete(id)) this.write(encode({ id, result: result ?? null }));
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.write(encode({ id, error: { code: INTERNAL_ERROR, message } }));
+      if (this.unansweredServerRequests.delete(id))
+        this.write(encode({ id, error: { code: INTERNAL_ERROR, message } }));
     }
   }
 
@@ -197,11 +210,19 @@ class CodexConnection implements CodexClient {
 
     for (const request of this.pending.values()) request.reject(reason);
     this.pending.clear();
+    // Exit subscribers may settle approval promises; their answers must not go to a closed process.
+    this.unansweredServerRequests.clear();
 
     const handlers = [...this.exitHandlers];
     this.exitHandlers.clear();
     for (const handler of handlers) runHandler('exit', () => handler(this.exitCode));
   }
+}
+
+function resolvedRequestId(params: unknown): string | number | undefined {
+  if (typeof params !== 'object' || params === null || !('requestId' in params)) return;
+  const id = params.requestId;
+  return typeof id === 'string' || typeof id === 'number' ? id : undefined;
 }
 
 // One misbehaving subscriber must not stop the others or take down the process that reads Codex's output.

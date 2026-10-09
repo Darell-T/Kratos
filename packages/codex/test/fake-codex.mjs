@@ -29,7 +29,11 @@ const handlers = {
   },
   'test/pid': ({ id }) => reply(id, process.pid),
   'test/ask': ({ id, params }) => {
-    send({ id: 'ask-1', method: params.method, params: params.params });
+    send({ id: params.requestId ?? 'ask-1', method: params.method, params: params.params });
+    reply(id, null);
+  },
+  'test/emit': ({ id, params }) => {
+    send({ method: params.method, params: params.params });
     reply(id, null);
   },
   'test/spawnChild': ({ id }) => {
@@ -61,8 +65,9 @@ function handleRequest(request) {
   }
 }
 
-function handleClientAnswer({ result, error }) {
+function handleClientAnswer({ id, result, error }) {
   send({ method: 'test/answered', params: { result, error } });
+  send({ method: 'test/answeredWithId', params: { id, result, error } });
 }
 
 createInterface({ input: process.stdin }).on('line', (line) => {
