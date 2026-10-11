@@ -2,6 +2,13 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 
 let initialized = false;
+const turnRequests = [];
+const pendingTurns = new Map();
+
+function holdTurn(request) {
+  turnRequests.push({ method: request.method, params: request.params });
+  pendingTurns.set(request.id, request);
+}
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -16,6 +23,19 @@ function fail(id, code, message) {
 }
 
 const handlers = {
+  'turn/start': holdTurn,
+  'turn/interrupt': holdTurn,
+  'test/turnRequests': ({ id }) => reply(id, turnRequests),
+  'test/settleTurn': ({ id, params }) => {
+    const pending = [...pendingTurns.values()].find(
+      (request) => request.method === params.method && request.params.threadId === params.threadId,
+    );
+    if (!pending) return fail(id, -32000, 'No matching pending turn request');
+    pendingTurns.delete(pending.id);
+    if (params.error) fail(pending.id, -32000, params.error);
+    else reply(pending.id, params.result);
+    reply(id, null);
+  },
   'test/echo': ({ id, params }) => reply(id, params),
   'test/fail': ({ id }) => fail(id, -32000, 'boom'),
   'test/environment': ({ id }) => reply(id, { codexHome: process.env.CODEX_HOME, cwd: process.cwd() }),

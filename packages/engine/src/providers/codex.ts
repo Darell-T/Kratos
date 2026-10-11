@@ -17,11 +17,27 @@ interface Model {
   details: string;
 }
 
+interface StartingTurn {
+  kind: 'starting';
+  startPromise: Promise<ActiveTurn | undefined>;
+  completedTurnIds: Set<string>;
+  stopPromise?: Promise<void>;
+}
+
+interface ActiveTurn {
+  kind: 'running' | 'stopping';
+  turnId: string;
+  stopPromise?: Promise<void>;
+}
+
+type TurnState = { kind: 'idle' } | StartingTurn | ActiveTurn;
+
 interface ThreadState {
   model?: string;
-  turnId?: string;
+  turn: TurnState;
   permissions?: Permission;
 }
+
 type TurnStartRequest = {
   threadId: string;
   input: UserInput[];
@@ -33,14 +49,13 @@ type TurnStartRequest = {
 
 const codex = await connectCodex({ clientInfo: { name: 'kratos', title: 'Kratos', version: '0.0.0' } });
 const queuedMessages = new Map<string, UserInput[][]>();
-const stoppedTurns = new Set<string>();
 const threads = new Map<string, ThreadState>();
 export const { commandWaiting, fileWaiting, approvalsWaiting, decideCommand, decideFile } = createCodexApprovals(
   codex,
   (threadId) => threads.get(threadId)?.permissions,
 );
 
-function activity(item: v2.ThreadItem): string | undefined {
+function describeActivity(item: v2.ThreadItem): string | undefined {
   if (item.type === 'fileChange') {
     const paths = item.changes.map((change) => change.path).join(', ');
     return paths ? `editing ${paths}` : 'editing';
@@ -57,19 +72,12 @@ function activity(item: v2.ThreadItem): string | undefined {
 
 codex.onNotification('item/agentMessage/delta', (params) => process.stdout.write(params.delta));
 codex.onNotification('item/started', (params) => {
-  const line = activity(params.item);
+  const line = describeActivity(params.item);
   if (line) console.log(line);
 });
 codex.onNotification('turn/completed', (params) => {
   console.log();
-  const state = threads.get(params.threadId);
-  if (state) delete state.turnId;
-
-  const waiting = queuedMessages.get(params.threadId);
-  if (waiting?.length) {
-    queuedMessages.delete(params.threadId);
-    void startTurn(params.threadId, waiting.flat());
-  }
+  completeTurn(params.threadId, params.turn.id);
 });
 
 async function isSignedIn() {
@@ -103,6 +111,7 @@ async function findPlugins() {
   }
   return userPlugins;
 }
+
 export async function providerModels() {
   const codexModels: Map<string, Model> = new Map();
   const models = await codex.request('model/list', { cursor: null, limit: null, includeHidden: null });
@@ -114,16 +123,8 @@ export async function providerModels() {
   return codexModels;
 }
 
-if (!(await isSignedIn())) console.error('Codex is not signed in. Run: codex login');
-
-const skills = await findSkills();
-console.log(`${skills.size} skills:`, [...skills.keys()].join(', '));
-
-const plugins = await findPlugins();
-for (const [id, plugin] of plugins) console.log(`${id}: ${plugin.name} from ${plugin.marketplace}`);
-
 async function startThread(folder: string) {
-  const result = await codex.request('thread/start', { cwd: folder, ephemeral: true }); //dont save the damn test thread
+  const result = await codex.request('thread/start', { cwd: folder, ephemeral: true });
   setThreadPermissions(result.thread.id, 'askMe');
   return result.thread.id;
 }
@@ -131,23 +132,32 @@ async function startThread(folder: string) {
 export function setThreadModel(threadId: string, model: string) {
   const state = threads.get(threadId);
   if (state) state.model = model;
-  else threads.set(threadId, { model });
+  else threads.set(threadId, { model, turn: { kind: 'idle' } });
 }
 
 export function setThreadPermissions(threadId: string, permissions: Permission) {
   const state = threads.get(threadId);
   if (state) state.permissions = permissions;
-  else threads.set(threadId, { permissions });
+  else threads.set(threadId, { permissions, turn: { kind: 'idle' } });
+}
+
+export async function sendMessage(threadId: string, input: UserInput[]) {
+  const state = threads.get(threadId);
+  if (state && state.turn.kind !== 'idle') {
+    const waiting = queuedMessages.get(threadId) ?? [];
+    waiting.push(input);
+    queuedMessages.set(threadId, waiting);
+  } else {
+    await startTurn(threadId, input);
+  }
 }
 
 async function startTurn(threadId: string, input: UserInput[]) {
-  // Busy from this moment, so a message sent before Codex confirms the turn still gets queued.
   const request: TurnStartRequest = {
     threadId,
     input,
   };
-  const state = threads.get(threadId) ?? {};
-  state.turnId = '';
+  const state: ThreadState = threads.get(threadId) ?? { turn: { kind: 'idle' } };
   threads.set(threadId, state);
   if (state.model) {
     request.model = state.model;
@@ -182,27 +192,53 @@ async function startTurn(threadId: string, input: UserInput[]) {
     request.approvalPolicy = 'never';
   }
 
-  let turn: { id: string };
-  try {
-    ({ turn } = await codex.request('turn/start', request));
-  } catch (error) {
-    delete state.turnId;
-    stoppedTurns.delete(threadId);
-    throw error;
-  }
-  if (stoppedTurns.delete(threadId)) {
-    delete state.turnId;
-    await codex.request('turn/interrupt', { threadId, turnId: turn.id });
+  const startingTurn: StartingTurn = {
+    kind: 'starting',
+    completedTurnIds: new Set(),
+    startPromise: codex.request('turn/start', request).then(
+      ({ turn }) => {
+        if (state.turn !== startingTurn) return;
+        const activeTurn: ActiveTurn = { kind: 'running', turnId: turn.id };
+        if (startingTurn.stopPromise) activeTurn.stopPromise = startingTurn.stopPromise;
+        state.turn = activeTurn;
+        if (startingTurn.completedTurnIds.has(turn.id) || turn.status !== 'inProgress') {
+          completeTurn(threadId, turn.id);
+          return;
+        }
+        return activeTurn;
+      },
+      (error: unknown) => {
+        if (state.turn === startingTurn) state.turn = { kind: 'idle' };
+        throw error;
+      },
+    ),
+  };
+  state.turn = startingTurn;
+  await startingTurn.startPromise;
+}
+
+function completeTurn(threadId: string, turnId: string) {
+  const state = threads.get(threadId);
+  if (!state || state.turn.kind === 'idle') return;
+  if (state.turn.kind === 'starting') {
+    state.turn.completedTurnIds.add(turnId);
     return;
   }
-  if (state.turnId !== undefined) {
-    state.turnId = turn.id;
+  if (state.turn.turnId !== turnId) return;
+  state.turn = { kind: 'idle' };
+
+  const waiting = queuedMessages.get(threadId);
+  if (waiting?.length) {
+    queuedMessages.delete(threadId);
+    void startTurn(threadId, waiting.flat()).catch((error: unknown) =>
+      console.error('Codex turn failed to start', error),
+    );
   }
 }
 
 export async function steerTurn(threadId: string, input: UserInput[]) {
-  const turnId = threads.get(threadId)?.turnId;
-  if (!turnId) return;
+  const turn = threads.get(threadId)?.turn;
+  if (turn?.kind !== 'running') return;
 
   const waiting = queuedMessages.get(threadId);
   if (waiting) {
@@ -212,49 +248,64 @@ export async function steerTurn(threadId: string, input: UserInput[]) {
     if (waiting.length === 0) queuedMessages.delete(threadId);
   }
 
-  await codex.request('turn/steer', { threadId, expectedTurnId: turnId, input });
+  await codex.request('turn/steer', { threadId, expectedTurnId: turn.turnId, input });
 }
+
 export async function stopTurn(threadId: string) {
   const state = threads.get(threadId);
-  const turnId = state?.turnId;
-  if (!state || turnId === undefined) return;
+  const turn = state?.turn;
+  if (!state || !turn || turn.kind === 'idle') return;
+  if (turn.stopPromise) return turn.stopPromise;
 
-  queuedMessages.delete(threadId);
-  if (turnId === '') {
-    stoppedTurns.add(threadId);
-    return;
-  }
-
-  delete state.turnId;
-  await codex.request('turn/interrupt', { threadId, turnId });
-}
-
-async function sendMessage(threadId: string, input: UserInput[]) {
-  if (threads.get(threadId)?.turnId !== undefined) {
-    const waiting = queuedMessages.get(threadId) ?? [];
-    waiting.push(input);
-    queuedMessages.set(threadId, waiting);
-  } else {
-    await startTurn(threadId, input);
-  }
+  const interrupt = async () => {
+    const activeTurn = turn.kind === 'starting' ? await turn.startPromise : turn;
+    if (!activeTurn || state.turn !== activeTurn) return;
+    activeTurn.kind = 'stopping';
+    try {
+      await codex.request('turn/interrupt', { threadId, turnId: activeTurn.turnId });
+    } catch (error) {
+      if (state.turn === activeTurn) {
+        activeTurn.kind = 'running';
+        delete activeTurn.stopPromise;
+      }
+      throw error;
+    }
+  };
+  turn.stopPromise = interrupt();
+  return turn.stopPromise;
 }
 
 function waitUntilIdle(threadId: string) {
   return new Promise<void>((resolve) => {
-    const stop = codex.onNotification('turn/completed', (params) => {
-      if (params.threadId === threadId && threads.get(threadId)?.turnId === undefined) {
-        stop();
+    const unsubscribe = codex.onNotification('turn/completed', (params) => {
+      const state = threads.get(threadId);
+      if (params.threadId === threadId && (!state || state.turn.kind === 'idle')) {
+        unsubscribe();
         resolve();
       }
     });
   });
 }
 
-const threadId = await startThread(process.cwd());
-console.log('opened thread', threadId);
+if (import.meta.main) {
+  if (!(await isSignedIn())) console.error('Codex is not signed in. Run: codex login');
 
-await sendMessage(threadId, [{ type: 'text', text: 'What is 2 + 2? Answer with just the number.', text_elements: [] }]);
-await sendMessage(threadId, [{ type: 'text', text: 'Now double it. Answer with just the number.', text_elements: [] }]);
-await waitUntilIdle(threadId);
+  const skills = await findSkills();
+  console.log(`${skills.size} skills:`, [...skills.keys()].join(', '));
 
-await codex.close();
+  const plugins = await findPlugins();
+  for (const [id, plugin] of plugins) console.log(`${id}: ${plugin.name} from ${plugin.marketplace}`);
+
+  const threadId = await startThread(process.cwd());
+  console.log('opened thread', threadId);
+
+  await sendMessage(threadId, [
+    { type: 'text', text: 'What is 2 + 2? Answer with just the number.', text_elements: [] },
+  ]);
+  await sendMessage(threadId, [
+    { type: 'text', text: 'Now double it. Answer with just the number.', text_elements: [] },
+  ]);
+  await waitUntilIdle(threadId);
+
+  await codex.close();
+}
