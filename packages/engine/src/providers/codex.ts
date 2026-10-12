@@ -3,6 +3,16 @@ import { createCodexApprovals, type Permission } from './codex-approvals';
 
 type UserInput = v2.UserInput;
 
+export type CodexEvent =
+  | ({ kind: 'message.delta' } & v2.AgentMessageDeltaNotification)
+  | ({ kind: 'item.started' } & v2.ItemStartedNotification)
+  | ({ kind: 'item.completed' } & v2.ItemCompletedNotification)
+  | ({ kind: 'turn.started' } & v2.TurnStartedNotification)
+  | ({ kind: 'turn.completed' } & v2.TurnCompletedNotification)
+  | ({ kind: 'error' } & v2.ErrorNotification)
+  | { kind: 'turn.startFailed'; threadId: string; message: string }
+  | { kind: 'provider.exited'; exitCode: number | null };
+
 interface Plugin {
   name: string;
   marketplace: string;
@@ -50,10 +60,28 @@ type TurnStartRequest = {
 const codex = await connectCodex({ clientInfo: { name: 'kratos', title: 'Kratos', version: '0.0.0' } });
 const queuedMessages = new Map<string, UserInput[][]>();
 const threads = new Map<string, ThreadState>();
+const eventListeners = new Set<(event: CodexEvent) => void>();
 export const { commandWaiting, fileWaiting, approvalsWaiting, decideCommand, decideFile } = createCodexApprovals(
   codex,
   (threadId) => threads.get(threadId)?.permissions,
 );
+
+export function onEvent(listener: (event: CodexEvent) => void): () => void {
+  eventListeners.add(listener);
+  return () => {
+    eventListeners.delete(listener);
+  };
+}
+
+function emitEvent(event: CodexEvent) {
+  for (const listener of eventListeners) {
+    try {
+      listener(event);
+    } catch (error) {
+      console.error('Codex event listener threw', error);
+    }
+  }
+}
 
 function describeActivity(item: v2.ThreadItem): string | undefined {
   if (item.type === 'fileChange') {
@@ -70,15 +98,16 @@ function describeActivity(item: v2.ThreadItem): string | undefined {
   return `running ${item.command}`;
 }
 
-codex.onNotification('item/agentMessage/delta', (params) => process.stdout.write(params.delta));
-codex.onNotification('item/started', (params) => {
-  const line = describeActivity(params.item);
-  if (line) console.log(line);
-});
+codex.onNotification('item/agentMessage/delta', (params) => emitEvent({ kind: 'message.delta', ...params }));
+codex.onNotification('item/started', (params) => emitEvent({ kind: 'item.started', ...params }));
+codex.onNotification('item/completed', (params) => emitEvent({ kind: 'item.completed', ...params }));
+codex.onNotification('turn/started', (params) => emitEvent({ kind: 'turn.started', ...params }));
 codex.onNotification('turn/completed', (params) => {
-  console.log();
   completeTurn(params.threadId, params.turn.id);
+  emitEvent({ kind: 'turn.completed', ...params });
 });
+codex.onNotification('error', (params) => emitEvent({ kind: 'error', ...params }));
+codex.onExit((exitCode) => emitEvent({ kind: 'provider.exited', exitCode }));
 
 async function isSignedIn() {
   const { account } = await codex.request('account/read', {});
@@ -209,6 +238,11 @@ async function startTurn(threadId: string, input: UserInput[]) {
       },
       (error: unknown) => {
         if (state.turn === startingTurn) state.turn = { kind: 'idle' };
+        emitEvent({
+          kind: 'turn.startFailed',
+          threadId,
+          message: error instanceof Error ? error.message : String(error),
+        });
         throw error;
       },
     ),
@@ -230,9 +264,7 @@ function completeTurn(threadId: string, turnId: string) {
   const waiting = queuedMessages.get(threadId);
   if (waiting?.length) {
     queuedMessages.delete(threadId);
-    void startTurn(threadId, waiting.flat()).catch((error: unknown) =>
-      console.error('Codex turn failed to start', error),
-    );
+    void startTurn(threadId, waiting.flat()).catch(() => undefined);
   }
 }
 
@@ -288,6 +320,17 @@ function waitUntilIdle(threadId: string) {
 }
 
 if (import.meta.main) {
+  const unsubscribe = onEvent((event) => {
+    if (event.kind === 'message.delta') process.stdout.write(event.delta);
+    if (event.kind === 'item.started') {
+      const line = describeActivity(event.item);
+      if (line) console.log(line);
+    }
+    if (event.kind === 'turn.completed') console.log();
+    if (event.kind === 'error') console.error(event.error.message);
+    if (event.kind === 'turn.startFailed') console.error('Codex turn failed to start', event.message);
+  });
+
   if (!(await isSignedIn())) console.error('Codex is not signed in. Run: codex login');
 
   const skills = await findSkills();
@@ -308,4 +351,5 @@ if (import.meta.main) {
   await waitUntilIdle(threadId);
 
   await codex.close();
+  unsubscribe();
 }
