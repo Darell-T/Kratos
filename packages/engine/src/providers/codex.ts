@@ -166,9 +166,13 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     return message;
   }
 
-  function pause(state: ThreadState, error: string | null) {
-    state.settings.pausedError = error;
-    store.saveCodexThread(state.settings);
+  function saveThreadSettings(state: ThreadState, settings: CodexThread) {
+    store.saveCodexThread(settings);
+    state.settings = settings;
+  }
+
+  function setQueueError(state: ThreadState, error: string | null) {
+    saveThreadSettings(state, { ...state.settings, pausedError: error });
   }
 
   function settleWaiters(state: ThreadState) {
@@ -222,7 +226,6 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     clearApprovals(threadId);
     clearRequests(threadId);
     try {
-      pause(state, state.settings.pausedError ?? error.message);
       for (const message of store.codexMessages(threadId))
         if (message.status === 'submitting') {
           updateMessage(message.id, 'unknown', message.turnId, error.message);
@@ -250,14 +253,16 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       }
       void (async () => {
         const error = new CodexTimeoutError('turn', turnTimeoutMs);
-        pause(state, error.message);
+        setQueueError(state, error.message);
         emitEvent({ kind: 'turn.timedOut', threadId, turnId: turn.turnId, message: error.message });
         try {
           await stopTurn(threadId);
         } catch {
           if (state.turn === turn) await close();
         }
-      })().catch((error: unknown) => console.error(error));
+      })().catch((error: unknown) => {
+        failProvider(threadId, state, error);
+      });
     }, turnTimeoutMs);
   }
 
@@ -275,7 +280,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     clearRequests(threadId, turn.id);
     state.turn = { kind: 'idle' };
     try {
-      if (turn.status === 'failed') pause(state, turnFailure(turn));
+      if (turn.status === 'failed') setQueueError(state, turnFailure(turn));
     } catch (error) {
       failProvider(threadId, state, error);
       return;
@@ -332,7 +337,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     return active;
   }
 
-  async function startTurn(threadId: string, message: CodexMessage): Promise<void> {
+  function startTurn(threadId: string, message: CodexMessage): Promise<ActiveTurn | undefined> {
     const state = requireThread(threadId);
     const request: v2.TurnStartParams = {
       threadId,
@@ -365,7 +370,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
         const reason = messageText(error);
         try {
           updateMessage(message.id, beforeExecution(error) ? 'failed' : 'unknown', null, reason);
-          pause(state, reason);
+          setQueueError(state, reason);
         } catch (storageError) {
           throw failProvider(threadId, state, storageError);
         }
@@ -376,26 +381,20 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       }
     };
     emitEvent({ kind: 'message.updated', message: submitting });
-    await starting.startPromise;
+    return starting.startPromise;
   }
 
   async function dispatchQueue(threadId: string): Promise<void> {
     const state = requireThread(threadId);
     if (state.turn.kind !== 'idle' || state.settings.pausedError || state.steering.size) return;
-    const next = store.codexMessages(threadId).find((message) => !['accepted', 'cancelled'].includes(message.status));
-    if (next?.status !== 'queued') return;
     try {
+      const next = store.codexMessages(threadId).find((message) => !['accepted', 'cancelled'].includes(message.status));
+      if (next?.status !== 'queued') return;
       await startTurn(threadId, next);
     } catch (error) {
-      if (!state.settings.pausedError) {
-        state.settings.pausedError = messageText(error);
-        try {
-          store.saveCodexThread(state.settings);
-        } catch {
-          /* Report the original storage error. */
-        }
-        emitEvent({ kind: 'turn.startFailed', threadId, message: state.settings.pausedError });
-        settleWaiters(state);
+      if (!state.settings.pausedError && threads.get(threadId)?.turn.kind !== 'unavailable') {
+        const failure = failProvider(threadId, state, error);
+        emitEvent({ kind: 'turn.startFailed', threadId, message: failure.message });
       }
       throw error;
     }
@@ -447,7 +446,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
             const delivered = await findAcceptedTurn(threadId, messageId).catch(() => undefined);
             if (delivered) return updateMessage(messageId, 'accepted', delivered.id);
             updateMessage(messageId, 'unknown', turnId, messageText(error));
-            pause(state, messageText(error));
+            setQueueError(state, messageText(error));
           }
         } catch (storageError) {
           throw failProvider(threadId, state, storageError);
@@ -505,15 +504,14 @@ export async function createCodexProvider(options: CodexProviderOptions) {
   function setThreadModel(threadId: string, model: string) {
     const state = requireThread(threadId);
     if (!model.trim()) throw new Error('Model must not be empty');
-    state.settings.model = model;
-    store.saveCodexThread(state.settings);
+    saveThreadSettings(state, { ...state.settings, model });
   }
 
   function setThreadPermissions(threadId: string, permission: Permission) {
     const state = requireThread(threadId);
     if (state.turn.kind !== 'idle' || state.steering.size) throw new Error('Stop the turn before changing permissions');
-    state.settings.permissions = z.enum(['askMe', 'approveForMe', 'fullAccess']).parse(permission);
-    store.saveCodexThread(state.settings);
+    const permissions = z.enum(['askMe', 'approveForMe', 'fullAccess']).parse(permission);
+    saveThreadSettings(state, { ...state.settings, permissions });
   }
 
   function removeQueuedMessage(threadId: string, messageId: string): boolean {
@@ -525,7 +523,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       message.status === 'failed' &&
       !store.codexMessages(threadId).some((item) => ['failed', 'unknown'].includes(item.status))
     )
-      pause(state, null);
+      setQueueError(state, null);
     void dispatchQueue(threadId).catch(() => undefined);
     return true;
   }
@@ -536,7 +534,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     if (!message || message.threadId !== threadId || message.status !== 'failed')
       throw new Error('Only messages confirmed not to have executed can be retried');
     updateMessage(messageId, 'queued');
-    pause(state, null);
+    setQueueError(state, null);
     await dispatchQueue(threadId);
     return store.getCodexMessage(messageId) ?? message;
   }
@@ -564,7 +562,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     const state = requireThread(threadId);
     if (store.codexMessages(threadId).some((message) => ['failed', 'unknown', 'submitting'].includes(message.status)))
       throw new Error('Resolve undelivered messages before resuming the queue');
-    pause(state, null);
+    setQueueError(state, null);
     await dispatchQueue(threadId);
   }
 
@@ -611,6 +609,9 @@ export async function createCodexProvider(options: CodexProviderOptions) {
   }
 
   function restoreTurn(threadId: string, state: ThreadState, thread: v2.Thread) {
+    const unresolved = store.codexMessages(threadId).find((message) => ['unknown', 'failed'].includes(message.status));
+    if (unresolved && !state.settings.pausedError)
+      setQueueError(state, unresolved.error ?? 'Resolve undelivered messages before resuming the queue');
     const active = thread.turns.findLast((turn) => turn.status === 'inProgress');
     if (thread.status.type === 'active') {
       if (!active) {
@@ -622,21 +623,19 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       startTurnTimeout(threadId, state, turn);
       return;
     }
-    if (thread.status.type === 'systemError' || thread.status.type === 'notLoaded') {
+    if (['systemError', 'notLoaded'].includes(thread.status.type)) {
       unavailable(threadId, state, new Error('Codex thread has a system error'));
       return;
     }
     const last = thread.turns.at(-1);
-    if (last?.status === 'failed') {
-      pause(state, turnFailure(last));
-      return;
+    switch (last?.status) {
+      case 'failed':
+        setQueueError(state, turnFailure(last));
+        return;
+      case 'inProgress':
+        setQueueError(state, 'Last turn was interrupted before completion');
+        return;
     }
-    if (last?.status === 'inProgress') {
-      pause(state, 'Last turn was interrupted before completion');
-      return;
-    }
-    if (!store.codexMessages(threadId).some((message) => ['unknown', 'failed'].includes(message.status)))
-      pause(state, null);
   }
 
   async function resumeThread(threadId: string): Promise<string> {

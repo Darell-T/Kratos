@@ -274,6 +274,75 @@ describe('Codex message delivery', () => {
 });
 
 describe('Codex lifecycle', () => {
+  it.each(['permissions', 'model'] as const)('keeps the previous %s setting when saving fails', async (setting) => {
+    const provider = await setup();
+    vi.spyOn(provider.store, 'saveCodexThread').mockImplementationOnce(() => {
+      throw new Error('Database write failed');
+    });
+    expect(() => {
+      if (setting === 'permissions') provider.setThreadPermissions('thread-A', 'fullAccess');
+      else provider.setThreadModel('thread-A', 'different-model');
+    }).toThrow('Database write failed');
+    expect(provider.store.getCodexThread('thread-A')).toMatchObject({ permissions: 'askMe', model: 'fake-model' });
+
+    await active(provider);
+    expect((await provider.requests())[0]).toMatchObject({
+      model: 'fake-model',
+      sandboxPolicy: { type: 'workspaceWrite' },
+    });
+  });
+
+  it('closes and rejects idle waiters when saving a timeout pause fails', async () => {
+    const provider = await setup({ turnTimeoutMs: 50 });
+    vi.useFakeTimers();
+    await active(provider);
+    await provider.sendMessage('thread-A', input('Dependent work'), 'message-B');
+    let outcome: unknown;
+    void provider.waitUntilIdle('thread-A').then(
+      () => {
+        outcome = 'idle';
+      },
+      (error: unknown) => {
+        outcome = error;
+      },
+    );
+    vi.spyOn(provider.store, 'saveCodexThread').mockImplementation(() => {
+      throw new Error('Database write failed');
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await vi.advanceTimersByTimeAsync(50);
+
+    expect(outcome).toMatchObject({ message: 'Database write failed' });
+    await expect(provider.sendMessage('thread-A', input('C'))).rejects.toThrow('closed');
+    expect(provider.messages('thread-A')[1]?.status).toBe('queued');
+  });
+
+  it.each(['read', 'write'] as const)(
+    'rejects idle waiters when a queue %s fails after completion',
+    async (operation) => {
+      const provider = await setup();
+      await active(provider);
+      await provider.sendMessage('thread-A', input('B'), 'message-B');
+      const idle = provider.waitUntilIdle('thread-A').catch((error: unknown) => error);
+      const error = `Database ${operation} failed`;
+      vi.spyOn(provider.store, operation === 'read' ? 'codexMessages' : 'updateCodexMessage').mockImplementationOnce(
+        () => {
+          throw new Error(error);
+        },
+      );
+      await provider.complete('turn-A');
+
+      expect(await idle).toMatchObject({ message: error });
+      await expect(provider.sendMessage('thread-A', input('C'))).rejects.toThrow('closed');
+      expect(provider.messages('thread-A')[1]?.status).toBe('queued');
+      expect(provider.events).toContainEqual({
+        kind: 'turn.startFailed',
+        threadId: 'thread-A',
+        message: error,
+      });
+    },
+  );
+
   it('settles immediately when already idle, including a terminal start response', async () => {
     const provider = await setup();
     await provider.waitUntilIdle('thread-A');
@@ -466,6 +535,63 @@ describe('Codex lifecycle', () => {
 });
 
 describe('Codex restart recovery', () => {
+  it('keeps unresolved delivery paused after a restored live turn completes', async () => {
+    const previous = await setup();
+    previous.store.addCodexMessage('uncertain', 'thread-A', input('Uncertain work'));
+    previous.store.updateCodexMessage('uncertain', 'submitting');
+    previous.store.addCodexMessage('queued', 'thread-A', input('Dependent work'));
+    const next = await previous.restart();
+    await next.control('test/setThread', {
+      thread: {
+        id: 'thread-A',
+        cwd: 'C:\\project',
+        status: { type: 'active' },
+        turns: [turn('live-turn')],
+      },
+    });
+    await next.provider.resumeThread('thread-A');
+    const idle = next.provider.waitUntilIdle('thread-A').catch((error: unknown) => error);
+    await next.control('test/emit', {
+      method: 'turn/completed',
+      params: { threadId: 'thread-A', turn: turn('live-turn', 'completed') },
+    });
+    expect(await idle).toBeInstanceOf(Error);
+    expect(next.provider.messages('thread-A')).toMatchObject([{ status: 'unknown' }, { status: 'queued' }]);
+    expect(await next.control('test/turnRequests', {})).toEqual([]);
+  });
+
+  it('preserves a timeout pause across restart until the user resumes the queue', async () => {
+    const previous = await setup({ turnTimeoutMs: 50 });
+    vi.useFakeTimers();
+    await active(previous);
+    await previous.sendMessage('thread-A', input('Dependent work'), 'message-B');
+    await vi.advanceTimersByTimeAsync(50);
+    await previous.interrupt();
+    await previous.complete('turn-A');
+    expect(previous.store.getCodexThread('thread-A')?.pausedError).toContain('timed out');
+
+    vi.useRealTimers();
+    const next = await previous.restart();
+    await next.control('test/setThread', {
+      thread: {
+        id: 'thread-A',
+        cwd: 'C:\\project',
+        model: 'fake-model',
+        status: { type: 'idle' },
+        turns: [turn('turn-A', 'interrupted')],
+      },
+    });
+    await next.provider.resumeThread('thread-A');
+    expect(await next.control('test/turnRequests', {})).toEqual([]);
+    await expect(next.provider.waitUntilIdle('thread-A')).rejects.toThrow('timed out');
+    expect(next.provider.messages('thread-A')[1]?.status).toBe('queued');
+
+    const resumed = next.provider.resumeQueue('thread-A');
+    await next.start('turn-B');
+    await resumed;
+    expect(next.provider.messages('thread-A')[1]).toMatchObject({ status: 'accepted', turnId: 'turn-B' });
+  });
+
   it('shares concurrent resumes without losing the restored turn state', async () => {
     const previous = await setup();
     previous.store.addCodexMessage('retained', 'thread-A', input('Retained work'));
