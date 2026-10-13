@@ -3,13 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { CodexExitedError, CodexNotFoundError, CodexRequestError, connectCodex } from '../src';
+import { CodexExitedError, CodexNotFoundError, CodexRequestError, CodexTimeoutError, connectCodex } from '../src';
 import type { CodexOptions } from '../src';
 
 // The fake speaks made-up `test/*` methods that are not in the generated protocol, so tests use an untyped view.
 interface FakeClient {
   info: { userAgent: string; codexHome: string };
-  request(method: string, params?: unknown): Promise<unknown>;
+  request(method: string, params?: unknown, options?: { timeoutMs: number }): Promise<unknown>;
   onNotification(method: string, handler: (params: unknown) => void): () => void;
   onServerRequest(method: string, handler: (params: unknown) => unknown): () => void;
   onExit(handler: (code: number | null) => void): () => void;
@@ -75,6 +75,12 @@ describe('connectCodex', () => {
     const client = await connectFake();
 
     await expect(client.request('test/echo', { first: true })).resolves.toEqual({ first: true });
+  });
+
+  it('rejects a malformed successful handshake', async () => {
+    await expect(
+      connectCodex({ command: process.execPath, args: [fakeCodexPath, '--bad-initialize'] }),
+    ).rejects.toThrow('Invalid Codex initialize response');
   });
 
   it('passes the working directory and CODEX_HOME to the process', async () => {
@@ -263,6 +269,28 @@ describe('when the process exits', () => {
     await client.request('test/exit', { code: 1 }).catch(() => undefined);
 
     expect(exitCodes).toEqual([]);
+  });
+});
+
+describe('request deadlines', () => {
+  it('rejects a stalled request without breaking later requests', async () => {
+    const client = await connectFake();
+    vi.useFakeTimers();
+    const failed = expect(client.request('test/hang', {}, { timeoutMs: 20 })).rejects.toBeInstanceOf(CodexTimeoutError);
+    await vi.advanceTimersByTimeAsync(20);
+    await failed;
+    await expect(client.request('test/echo', { still: 'alive' })).resolves.toEqual({ still: 'alive' });
+    vi.useRealTimers();
+  });
+
+  it('bounds a stalled initialization and closes its process', async () => {
+    vi.useFakeTimers();
+    const failed = expect(
+      connectCodex({ command: process.execPath, args: [fakeCodexPath, '--hang-initialize'], requestTimeoutMs: 20 }),
+    ).rejects.toBeInstanceOf(CodexTimeoutError);
+    await vi.advanceTimersByTimeAsync(20);
+    vi.useRealTimers();
+    await failed;
   });
 });
 

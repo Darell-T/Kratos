@@ -24,3 +24,13 @@ export class CodexNotFoundError extends Error {
     this.name = 'CodexNotFoundError';
   }
 }
+
+export class CodexTimeoutError extends Error {
+  constructor(
+    readonly method: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`Codex ${method} timed out after ${timeoutMs} ms`);
+    this.name = 'CodexTimeoutError';
+  }
+}

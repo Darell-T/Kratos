@@ -1,8 +1,10 @@
-import { connectCodex, type v2 } from '@kratos/codex';
-import { createCodexApprovals, type Permission } from './codex-approvals';
+import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
+import { connectCodex, CodexRequestError, CodexTimeoutError, type CodexOptions, type v2 } from '@kratos/codex';
+import { codexInputSchema, type Store, type CodexMessage, type CodexThread } from '../store';
+import { createCodexApprovals, type Approval, type Permission } from './codex-approvals';
 
 type UserInput = v2.UserInput;
-
 export type CodexEvent =
   | ({ kind: 'message.delta' } & v2.AgentMessageDeltaNotification)
   | ({ kind: 'item.started' } & v2.ItemStartedNotification)
@@ -10,28 +12,20 @@ export type CodexEvent =
   | ({ kind: 'turn.started' } & v2.TurnStartedNotification)
   | ({ kind: 'turn.completed' } & v2.TurnCompletedNotification)
   | ({ kind: 'error' } & v2.ErrorNotification)
+  | ({ kind: 'serverRequest.resolved' } & v2.ServerRequestResolvedNotification)
   | { kind: 'turn.startFailed'; threadId: string; message: string }
-  | { kind: 'provider.exited'; exitCode: number | null };
+  | { kind: 'turn.timedOut'; threadId: string; turnId: string; message: string }
+  | { kind: 'thread.closed'; threadId: string }
+  | { kind: 'message.updated'; message: CodexMessage }
+  | { kind: 'provider.exited'; exitCode: number | null }
+  | { kind: 'approvals.changed'; threadId: string; approvals: Approval[] }
+  | { kind: 'userInput.requested'; requestId: string | number; params: v2.ToolRequestUserInputParams }
+  | { kind: 'permissions.requested'; requestId: string | number; params: v2.PermissionsRequestApprovalParams }
+  | { kind: 'elicitation.requested'; requestId: string | number; params: v2.McpServerElicitationRequestParams };
 
-interface Plugin {
-  name: string;
-  marketplace: string;
-  enabled: boolean;
-}
-interface Skill {
-  details: string;
-  path: string;
-}
-interface Model {
-  id: string;
-  details: string;
-}
-
-interface StartingTurn {
-  kind: 'starting';
-  startPromise: Promise<ActiveTurn | undefined>;
-  completedTurnIds: Set<string>;
-  stopPromise?: Promise<void>;
+export interface CodexProviderOptions extends CodexOptions {
+  store: Store;
+  turnTimeoutMs?: number;
 }
 
 interface ActiveTurn {
@@ -39,317 +33,858 @@ interface ActiveTurn {
   turnId: string;
   stopPromise?: Promise<void>;
 }
-
-type TurnState = { kind: 'idle' } | StartingTurn | ActiveTurn;
-
+interface StartingTurn {
+  kind: 'starting';
+  messageId: string;
+  startPromise: Promise<ActiveTurn | undefined>;
+  completedTurns: Map<string, v2.Turn>;
+  stopPromise?: Promise<void>;
+}
+type TurnState = { kind: 'idle' } | StartingTurn | ActiveTurn | { kind: 'unavailable'; error: Error };
 interface ThreadState {
-  model?: string;
+  settings: CodexThread;
   turn: TurnState;
-  permissions?: Permission;
+  steering: Map<string, Promise<CodexMessage>>;
+  waiters: Set<{ resolve: () => void; reject: (error: Error) => void }>;
+  timer?: NodeJS.Timeout;
+  lastCompletedTurnId?: string;
 }
 
-type TurnStartRequest = {
-  threadId: string;
-  input: UserInput[];
-  model?: string;
-  approvalsReviewer?: 'user' | 'auto_review';
-  sandboxPolicy?: v2.SandboxPolicy;
-  approvalPolicy?: v2.AskForApproval;
-};
+const turnSchema = z.object({
+  id: z.string().min(1),
+  status: z.enum(['inProgress', 'completed', 'failed', 'interrupted']),
+  error: z.object({ message: z.string() }).nullable().optional(),
+});
+const historyTurnSchema = turnSchema.extend({
+  items: z.array(z.object({ type: z.string(), clientId: z.string().nullable().optional() })),
+});
+const threadSchema = z.object({
+  id: z.string().min(1),
+  cwd: z.string().min(1),
+  turns: z.array(historyTurnSchema),
+  status: z.object({ type: z.enum(['notLoaded', 'idle', 'active', 'systemError']) }),
+});
+const turnFailure = (turn: v2.Turn) => turn.error?.message ?? 'Codex turn failed';
+const messageText = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const beforeExecution = (error: unknown) =>
+  error instanceof CodexRequestError && [-32700, -32600, -32601, -32602].includes(error.code);
 
-const codex = await connectCodex({ clientInfo: { name: 'kratos', title: 'Kratos', version: '0.0.0' } });
-const queuedMessages = new Map<string, UserInput[][]>();
-const threads = new Map<string, ThreadState>();
-const eventListeners = new Set<(event: CodexEvent) => void>();
-export const { commandWaiting, fileWaiting, approvalsWaiting, decideCommand, decideFile } = createCodexApprovals(
-  codex,
-  (threadId) => threads.get(threadId)?.permissions,
-);
-
-export function onEvent(listener: (event: CodexEvent) => void): () => void {
-  eventListeners.add(listener);
-  return () => {
-    eventListeners.delete(listener);
+function permissions(
+  permissions: Permission,
+): Required<Pick<v2.TurnStartParams, 'sandboxPolicy' | 'approvalPolicy' | 'approvalsReviewer'>> {
+  if (permissions === 'fullAccess')
+    return { sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never', approvalsReviewer: 'user' };
+  return {
+    sandboxPolicy: {
+      type: 'workspaceWrite',
+      writableRoots: [],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    },
+    approvalPolicy: 'on-request',
+    approvalsReviewer: permissions === 'approveForMe' ? 'auto_review' : 'user',
   };
 }
 
-function emitEvent(event: CodexEvent) {
-  for (const listener of eventListeners) {
-    try {
-      listener(event);
-    } catch (error) {
-      console.error('Codex event listener threw', error);
-    }
-  }
+function threadPermissions(permission: Permission) {
+  const { approvalPolicy, approvalsReviewer } = permissions(permission);
+  const sandbox: v2.SandboxMode = permission === 'fullAccess' ? 'danger-full-access' : 'workspace-write';
+  return { sandbox, approvalPolicy, approvalsReviewer };
 }
 
-function describeActivity(item: v2.ThreadItem): string | undefined {
-  if (item.type === 'fileChange') {
-    const paths = item.changes.map((change) => change.path).join(', ');
-    return paths ? `editing ${paths}` : 'editing';
-  }
-  if (item.type === 'imageView') return `viewing ${item.path}`;
-  if (item.type !== 'commandExecution') return;
+export async function createCodexProvider(options: CodexProviderOptions) {
+  const { store, turnTimeoutMs = 600000, ...connectionOptions } = options;
+  if (!Number.isFinite(turnTimeoutMs) || turnTimeoutMs <= 0) throw new Error('Turn timeout must be positive');
+  const codex = await connectCodex({
+    clientInfo: { name: 'kratos', title: 'Kratos', version: '0.1.0' },
+    ...connectionOptions,
+    capabilities: { ...connectionOptions.capabilities, experimentalApi: true, requestAttestation: false },
+  });
+  const threads = new Map<string, ThreadState>();
+  const eventListeners = new Set<(event: CodexEvent) => unknown>();
+  const submissions = new Map<string, Promise<CodexMessage>>();
+  const resumes = new Map<string, Promise<string>>();
+  let closed = false;
+  let closePromise: Promise<void> | undefined;
+  const { clearApprovals, ...approvals } = createCodexApprovals(
+    codex,
+    (id) => {
+      const state = threads.get(id);
+      return closed || state?.turn.kind === 'unavailable' ? undefined : state?.settings.permissions;
+    },
+    (threadId) => emitEvent({ kind: 'approvals.changed', threadId, approvals: approvals.approvalsWaiting(threadId) }),
+  );
+  const userInputs = new Map<
+    string | number,
+    { params: v2.ToolRequestUserInputParams; resolve: (reply: v2.ToolRequestUserInputResponse) => void }
+  >();
+  const permissionRequests = new Map<
+    string | number,
+    { params: v2.PermissionsRequestApprovalParams; resolve: (reply: v2.PermissionsRequestApprovalResponse) => void }
+  >();
+  const elicitations = new Map<
+    string | number,
+    { params: v2.McpServerElicitationRequestParams; resolve: (reply: v2.McpServerElicitationRequestResponse) => void }
+  >();
 
-  const reads = item.commandActions.filter((action) => action.type === 'read');
-  if (reads.length > 0 && reads.length === item.commandActions.length) {
-    return `reading ${reads.map((action) => action.path).join(', ')}`;
-  }
-  return `running ${item.command}`;
-}
-
-codex.onNotification('item/agentMessage/delta', (params) => emitEvent({ kind: 'message.delta', ...params }));
-codex.onNotification('item/started', (params) => emitEvent({ kind: 'item.started', ...params }));
-codex.onNotification('item/completed', (params) => emitEvent({ kind: 'item.completed', ...params }));
-codex.onNotification('turn/started', (params) => emitEvent({ kind: 'turn.started', ...params }));
-codex.onNotification('turn/completed', (params) => {
-  completeTurn(params.threadId, params.turn.id);
-  emitEvent({ kind: 'turn.completed', ...params });
-});
-codex.onNotification('error', (params) => emitEvent({ kind: 'error', ...params }));
-codex.onExit((exitCode) => emitEvent({ kind: 'provider.exited', exitCode }));
-
-async function isSignedIn() {
-  const { account } = await codex.request('account/read', {});
-  return account !== null;
-}
-
-async function findSkills() {
-  const codexSkills = await codex.request('skills/list', { cwds: [process.cwd()] });
-
-  const userSkills: Map<string, Skill> = new Map();
-  for (const entry of codexSkills.data) {
-    for (const skill of entry.skills) {
-      const skillData: Skill = { details: skill.description, path: skill.path };
-      userSkills.set(skill.name, skillData);
-    }
-  }
-  return userSkills;
-}
-
-async function findPlugins() {
-  const codexPlugins = await codex.request('plugin/installed', { cwds: [process.cwd()] });
-
-  const userPlugins: Map<string, Plugin> = new Map();
-  for (const marketplace of codexPlugins.marketplaces) {
-    for (const plugin of marketplace.plugins) {
-      if (plugin.installed) {
-        userPlugins.set(plugin.id, { name: plugin.name, marketplace: marketplace.name, enabled: plugin.enabled });
+  function emitEvent(event: CodexEvent) {
+    for (const listener of eventListeners) {
+      try {
+        const result = listener(structuredClone(event));
+        if (result instanceof Promise)
+          void result.catch((error: unknown) => console.error('Codex event listener threw', error));
+      } catch (error) {
+        console.error('Codex event listener threw', error);
       }
     }
   }
-  return userPlugins;
-}
 
-export async function providerModels() {
-  const codexModels: Map<string, Model> = new Map();
-  const models = await codex.request('model/list', { cursor: null, limit: null, includeHidden: null });
-
-  for (const entry of models.data) {
-    const model: Model = { id: entry.model, details: entry.description };
-    codexModels.set(entry.displayName, model);
-  }
-  return codexModels;
-}
-
-async function startThread(folder: string) {
-  const result = await codex.request('thread/start', { cwd: folder, ephemeral: true });
-  setThreadPermissions(result.thread.id, 'askMe');
-  return result.thread.id;
-}
-
-export function setThreadModel(threadId: string, model: string) {
-  const state = threads.get(threadId);
-  if (state) state.model = model;
-  else threads.set(threadId, { model, turn: { kind: 'idle' } });
-}
-
-export function setThreadPermissions(threadId: string, permissions: Permission) {
-  const state = threads.get(threadId);
-  if (state) state.permissions = permissions;
-  else threads.set(threadId, { permissions, turn: { kind: 'idle' } });
-}
-
-export async function sendMessage(threadId: string, input: UserInput[]) {
-  const state = threads.get(threadId);
-  if (state && state.turn.kind !== 'idle') {
-    const waiting = queuedMessages.get(threadId) ?? [];
-    waiting.push(input);
-    queuedMessages.set(threadId, waiting);
-  } else {
-    await startTurn(threadId, input);
-  }
-}
-
-async function startTurn(threadId: string, input: UserInput[]) {
-  const request: TurnStartRequest = {
-    threadId,
-    input,
-  };
-  const state: ThreadState = threads.get(threadId) ?? { turn: { kind: 'idle' } };
-  threads.set(threadId, state);
-  if (state.model) {
-    request.model = state.model;
-  }
-  if (state.permissions === 'askMe') {
-    request.sandboxPolicy = {
-      type: 'workspaceWrite',
-      writableRoots: [],
-      networkAccess: false,
-      excludeTmpdirEnvVar: false,
-      excludeSlashTmp: false,
+  function onEvent(listener: (event: CodexEvent) => unknown): () => void {
+    eventListeners.add(listener);
+    return () => {
+      eventListeners.delete(listener);
     };
-    request.approvalPolicy = 'on-request';
-    request.approvalsReviewer = 'user';
-  }
-  if (state.permissions === 'approveForMe') {
-    request.sandboxPolicy = {
-      type: 'workspaceWrite',
-      writableRoots: [],
-      networkAccess: false,
-      excludeTmpdirEnvVar: false,
-      excludeSlashTmp: false,
-    };
-
-    request.approvalsReviewer = 'auto_review';
-    request.approvalPolicy = 'on-request';
-  }
-  if (state.permissions === 'fullAccess') {
-    request.sandboxPolicy = {
-      type: 'dangerFullAccess',
-    };
-    request.approvalPolicy = 'never';
   }
 
-  const startingTurn: StartingTurn = {
-    kind: 'starting',
-    completedTurnIds: new Set(),
-    startPromise: codex.request('turn/start', request).then(
-      ({ turn }) => {
-        if (state.turn !== startingTurn) return;
-        const activeTurn: ActiveTurn = { kind: 'running', turnId: turn.id };
-        if (startingTurn.stopPromise) activeTurn.stopPromise = startingTurn.stopPromise;
-        state.turn = activeTurn;
-        if (startingTurn.completedTurnIds.has(turn.id) || turn.status !== 'inProgress') {
-          completeTurn(threadId, turn.id);
-          return;
-        }
-        return activeTurn;
-      },
-      (error: unknown) => {
-        if (state.turn === startingTurn) state.turn = { kind: 'idle' };
-        emitEvent({
-          kind: 'turn.startFailed',
-          threadId,
-          message: error instanceof Error ? error.message : String(error),
-        });
-        throw error;
-      },
-    ),
-  };
-  state.turn = startingTurn;
-  await startingTurn.startPromise;
-}
-
-function completeTurn(threadId: string, turnId: string) {
-  const state = threads.get(threadId);
-  if (!state || state.turn.kind === 'idle') return;
-  if (state.turn.kind === 'starting') {
-    state.turn.completedTurnIds.add(turnId);
-    return;
-  }
-  if (state.turn.turnId !== turnId) return;
-  state.turn = { kind: 'idle' };
-
-  const waiting = queuedMessages.get(threadId);
-  if (waiting?.length) {
-    queuedMessages.delete(threadId);
-    void startTurn(threadId, waiting.flat()).catch(() => undefined);
-  }
-}
-
-export async function steerTurn(threadId: string, input: UserInput[]) {
-  const turn = threads.get(threadId)?.turn;
-  if (turn?.kind !== 'running') return;
-
-  const waiting = queuedMessages.get(threadId);
-  if (waiting) {
-    const steered = JSON.stringify(input);
-    const index = waiting.findIndex((queued) => JSON.stringify(queued) === steered);
-    if (index !== -1) waiting.splice(index, 1);
-    if (waiting.length === 0) queuedMessages.delete(threadId);
+  function requireThread(id: string): ThreadState {
+    if (closed) throw new Error('Codex provider is closed');
+    const state = threads.get(id);
+    if (!state) throw new Error('Start or resume thread ' + id + ' before using it');
+    if (state.turn.kind === 'unavailable') throw state.turn.error;
+    return state;
   }
 
-  await codex.request('turn/steer', { threadId, expectedTurnId: turn.turnId, input });
-}
+  function updateMessage(
+    id: string,
+    status: CodexMessage['status'],
+    turnId: string | null = null,
+    error: string | null = null,
+  ) {
+    const message = store.updateCodexMessage(id, status, turnId, error);
+    emitEvent({ kind: 'message.updated', message });
+    return message;
+  }
 
-export async function stopTurn(threadId: string) {
-  const state = threads.get(threadId);
-  const turn = state?.turn;
-  if (!state || !turn || turn.kind === 'idle') return;
-  if (turn.stopPromise) return turn.stopPromise;
+  function pause(state: ThreadState, error: string | null) {
+    state.settings.pausedError = error;
+    store.saveCodexThread(state.settings);
+  }
 
-  const interrupt = async () => {
-    const activeTurn = turn.kind === 'starting' ? await turn.startPromise : turn;
-    if (!activeTurn || state.turn !== activeTurn) return;
-    activeTurn.kind = 'stopping';
+  function settleWaiters(state: ThreadState) {
+    if (state.turn.kind !== 'idle' && state.turn.kind !== 'unavailable') return;
+    if (state.steering.size) return;
+    const error =
+      state.turn.kind === 'unavailable'
+        ? state.turn.error
+        : state.settings.pausedError
+          ? new Error(state.settings.pausedError)
+          : undefined;
+    for (const waiter of state.waiters) {
+      if (error) waiter.reject(error);
+      else waiter.resolve();
+    }
+    state.waiters.clear();
+  }
+
+  function clearRequests(threadId?: string, turnId?: string) {
+    const matches = (params: { threadId: string; turnId: string | null }) =>
+      (threadId === undefined || params.threadId === threadId) && (turnId === undefined || params.turnId === turnId);
+    for (const [id, request] of userInputs)
+      if (matches(request.params)) {
+        userInputs.delete(id);
+        request.resolve({ answers: {} });
+      }
+    for (const [id, request] of permissionRequests)
+      if (matches(request.params)) {
+        permissionRequests.delete(id);
+        request.resolve({ permissions: {}, scope: 'turn' });
+      }
+    for (const [id, request] of elicitations)
+      if (matches(request.params)) {
+        elicitations.delete(id);
+        request.resolve({ action: 'cancel', content: null, _meta: null });
+      }
+  }
+
+  function pendingInput(threadId: string): boolean {
+    return (
+      approvals.approvalsWaiting(threadId).length > 0 ||
+      [...userInputs.values()].some(({ params }) => params.threadId === threadId && params.isBlocking) ||
+      [...permissionRequests.values(), ...elicitations.values()].some((request) => request.params.threadId === threadId)
+    );
+  }
+
+  function unavailable(threadId: string, state: ThreadState, error: Error) {
+    clearTimeout(state.timer);
+    state.turn = { kind: 'unavailable', error };
+    state.steering.clear();
+    clearApprovals(threadId);
+    clearRequests(threadId);
     try {
-      await codex.request('turn/interrupt', { threadId, turnId: activeTurn.turnId });
+      pause(state, state.settings.pausedError ?? error.message);
+      for (const message of store.codexMessages(threadId))
+        if (message.status === 'submitting') {
+          updateMessage(message.id, 'unknown', message.turnId, error.message);
+        }
     } catch (error) {
-      if (state.turn === activeTurn) {
-        activeTurn.kind = 'running';
-        delete activeTurn.stopPromise;
+      console.error('Could not save Codex recovery state', error);
+    } finally {
+      settleWaiters(state);
+    }
+  }
+
+  function failProvider(threadId: string, state: ThreadState, reason: unknown): Error {
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    unavailable(threadId, state, error);
+    void close().catch((error: unknown) => console.error(error));
+    return error;
+  }
+
+  function startTurnTimeout(threadId: string, state: ThreadState, turn: ActiveTurn) {
+    state.timer = setTimeout(() => {
+      if (state.turn !== turn) return;
+      if (pendingInput(threadId)) {
+        startTurnTimeout(threadId, state, turn);
+        return;
+      }
+      void (async () => {
+        const error = new CodexTimeoutError('turn', turnTimeoutMs);
+        pause(state, error.message);
+        emitEvent({ kind: 'turn.timedOut', threadId, turnId: turn.turnId, message: error.message });
+        try {
+          await stopTurn(threadId);
+        } catch {
+          if (state.turn === turn) await close();
+        }
+      })().catch((error: unknown) => console.error(error));
+    }, turnTimeoutMs);
+  }
+
+  function completeTurn(threadId: string, turn: v2.Turn) {
+    turnSchema.parse(turn);
+    const state = threads.get(threadId);
+    if (!state || state.turn.kind === 'unavailable') return;
+    if (state.turn.kind === 'starting') {
+      state.turn.completedTurns.set(turn.id, turn);
+      return;
+    }
+    if (state.turn.kind === 'idle' || state.turn.turnId !== turn.id) return;
+    clearTimeout(state.timer);
+    clearApprovals(threadId, turn.id);
+    clearRequests(threadId, turn.id);
+    state.turn = { kind: 'idle' };
+    try {
+      if (turn.status === 'failed') pause(state, turnFailure(turn));
+    } catch (error) {
+      failProvider(threadId, state, error);
+      return;
+    }
+    void dispatchQueue(threadId).catch(() => undefined);
+    settleWaiters(state);
+  }
+
+  async function findAcceptedTurn(threadId: string, messageId: string): Promise<v2.Turn | undefined> {
+    const { thread } = await codex.request('thread/read', { threadId, includeTurns: true });
+    threadSchema.extend({ id: z.literal(threadId) }).parse(thread);
+    const turn = thread.turns.find((turn) =>
+      turn.items.some((item) => item.type === 'userMessage' && item.clientId === messageId),
+    );
+    if (turn) turnSchema.parse(turn);
+    return turn;
+  }
+
+  async function requestStart(request: v2.TurnStartParams) {
+    try {
+      return await codex.request('turn/start', request);
+    } catch (error) {
+      if (!beforeExecution(error)) throw error;
+      return codex.request('turn/start', request);
+    }
+  }
+
+  function finishStart(
+    threadId: string,
+    state: ThreadState,
+    starting: StartingTurn,
+    turn: v2.Turn,
+  ): ActiveTurn | undefined {
+    turnSchema.parse(turn);
+    try {
+      updateMessage(starting.messageId, 'accepted', turn.id);
+    } catch (error) {
+      throw failProvider(threadId, state, error);
+    }
+    if (state.turn !== starting) return undefined;
+    const active: ActiveTurn = { kind: 'running', turnId: turn.id };
+    if (starting.stopPromise) active.stopPromise = starting.stopPromise;
+    state.turn = active;
+    const completed = starting.completedTurns.get(turn.id);
+    if (completed || turn.status !== 'inProgress') {
+      completeTurn(threadId, completed ?? turn);
+      if (!completed && state.lastCompletedTurnId !== turn.id) {
+        state.lastCompletedTurnId = turn.id;
+        emitEvent({ kind: 'turn.completed', threadId, turn });
+      }
+      return undefined;
+    }
+    startTurnTimeout(threadId, state, active);
+    return active;
+  }
+
+  async function startTurn(threadId: string, message: CodexMessage): Promise<void> {
+    const state = requireThread(threadId);
+    const request: v2.TurnStartParams = {
+      threadId,
+      input: message.input,
+      clientUserMessageId: message.id,
+      model: state.settings.model,
+      ...permissions(state.settings.permissions),
+    };
+    const submitting = store.updateCodexMessage(message.id, 'submitting');
+    const starting: StartingTurn = {
+      kind: 'starting',
+      messageId: message.id,
+      completedTurns: new Map(),
+      startPromise: Promise.resolve().then(() => submit()),
+    };
+    state.turn = starting;
+    const submit = async (): Promise<ActiveTurn | undefined> => {
+      try {
+        if (closed) throw new Error('Codex provider is closed');
+        const { turn } = await requestStart(request);
+        return finishStart(threadId, state, starting, turn);
+      } catch (error) {
+        if (state.turn !== starting) throw error;
+        const turn = beforeExecution(error)
+          ? undefined
+          : await findAcceptedTurn(threadId, message.id).catch(() => undefined);
+        if (state.turn !== starting) throw error;
+        if (turn) return finishStart(threadId, state, starting, turn);
+        state.turn = { kind: 'idle' };
+        const reason = messageText(error);
+        try {
+          updateMessage(message.id, beforeExecution(error) ? 'failed' : 'unknown', null, reason);
+          pause(state, reason);
+        } catch (storageError) {
+          throw failProvider(threadId, state, storageError);
+        }
+        emitEvent({ kind: 'turn.startFailed', threadId, message: reason });
+        settleWaiters(state);
+        if (error instanceof CodexTimeoutError) await close();
+        throw error;
+      }
+    };
+    emitEvent({ kind: 'message.updated', message: submitting });
+    await starting.startPromise;
+  }
+
+  async function dispatchQueue(threadId: string): Promise<void> {
+    const state = requireThread(threadId);
+    if (state.turn.kind !== 'idle' || state.settings.pausedError || state.steering.size) return;
+    const next = store.codexMessages(threadId).find((message) => !['accepted', 'cancelled'].includes(message.status));
+    if (next?.status !== 'queued') return;
+    try {
+      await startTurn(threadId, next);
+    } catch (error) {
+      if (!state.settings.pausedError) {
+        state.settings.pausedError = messageText(error);
+        try {
+          store.saveCodexThread(state.settings);
+        } catch {
+          /* Report the original storage error. */
+        }
+        emitEvent({ kind: 'turn.startFailed', threadId, message: state.settings.pausedError });
+        settleWaiters(state);
       }
       throw error;
     }
-  };
-  turn.stopPromise = interrupt();
-  return turn.stopPromise;
-}
+  }
 
-function waitUntilIdle(threadId: string) {
-  return new Promise<void>((resolve) => {
-    const unsubscribe = codex.onNotification('turn/completed', (params) => {
-      const state = threads.get(threadId);
-      if (params.threadId === threadId && (!state || state.turn.kind === 'idle')) {
-        unsubscribe();
-        resolve();
+  async function sendMessage(
+    threadId: string,
+    input: UserInput[],
+    messageId: string = randomUUID(),
+  ): Promise<CodexMessage> {
+    requireThread(threadId);
+    const message = store.addCodexMessage(messageId, threadId, codexInputSchema.parse(input));
+    const existing = submissions.get(messageId);
+    if (existing) return existing;
+    if (message.status !== 'queued') return message;
+    const sending = dispatchQueue(threadId).then(() => store.getCodexMessage(messageId) ?? message);
+    submissions.set(messageId, sending);
+    try {
+      return await sending;
+    } finally {
+      submissions.delete(messageId);
+    }
+  }
+
+  async function steerTurn(threadId: string, messageId: string): Promise<CodexMessage> {
+    const state = requireThread(threadId);
+    const message = store.getCodexMessage(messageId);
+    if (!message || message.threadId !== threadId) throw new Error('Unknown queued message ' + messageId);
+    const existing = state.steering.get(messageId);
+    if (existing) return existing;
+    if (message.status !== 'queued' || state.turn.kind !== 'running') return message;
+    const turnId = state.turn.turnId;
+    updateMessage(messageId, 'submitting', turnId);
+    const steering = (async () => {
+      try {
+        const result = await codex.request('turn/steer', {
+          threadId,
+          expectedTurnId: turnId,
+          input: message.input,
+          clientUserMessageId: messageId,
+        });
+        if (result.turnId !== turnId) throw new Error('Codex steering returned a different turn');
+        return updateMessage(messageId, 'accepted', turnId);
+      } catch (error) {
+        if (state.turn.kind === 'unavailable') throw error;
+        try {
+          if (beforeExecution(error)) updateMessage(messageId, 'queued');
+          else {
+            const delivered = await findAcceptedTurn(threadId, messageId).catch(() => undefined);
+            if (delivered) return updateMessage(messageId, 'accepted', delivered.id);
+            updateMessage(messageId, 'unknown', turnId, messageText(error));
+            pause(state, messageText(error));
+          }
+        } catch (storageError) {
+          throw failProvider(threadId, state, storageError);
+        }
+        throw error;
+      } finally {
+        state.steering.delete(messageId);
+        void dispatchQueue(threadId).catch(() => undefined);
+        settleWaiters(state);
+      }
+    })();
+    state.steering.set(messageId, steering);
+    return steering;
+  }
+
+  async function stopTurn(threadId: string) {
+    const state = requireThread(threadId);
+    const turn = state.turn;
+    if (turn.kind === 'idle') return;
+    if (turn.kind === 'unavailable') throw turn.error;
+    if (turn.stopPromise) return turn.stopPromise;
+    const interrupt = async () => {
+      const activeTurn = turn.kind === 'starting' ? await turn.startPromise : turn;
+      if (!activeTurn || state.turn !== activeTurn) return;
+      activeTurn.kind = 'stopping';
+      try {
+        await codex.request('turn/interrupt', { threadId, turnId: activeTurn.turnId }, { timeoutMs: 5000 });
+        if (state.turn === activeTurn) {
+          clearTimeout(state.timer);
+          state.timer = setTimeout(() => {
+            if (state.turn === activeTurn) void close().catch((error: unknown) => console.error(error));
+          }, 5000);
+        }
+      } catch (error) {
+        if (state.turn === activeTurn) {
+          activeTurn.kind = 'running';
+          delete activeTurn.stopPromise;
+        }
+        throw error;
+      }
+    };
+    turn.stopPromise = interrupt();
+    return turn.stopPromise;
+  }
+
+  async function waitUntilIdle(threadId: string) {
+    const state = requireThread(threadId);
+    if (state.turn.kind === 'idle' && !state.steering.size) {
+      if (state.settings.pausedError) throw new Error(state.settings.pausedError);
+      return;
+    }
+    return new Promise<void>((resolve, reject) => state.waiters.add({ resolve, reject }));
+  }
+
+  function setThreadModel(threadId: string, model: string) {
+    const state = requireThread(threadId);
+    if (!model.trim()) throw new Error('Model must not be empty');
+    state.settings.model = model;
+    store.saveCodexThread(state.settings);
+  }
+
+  function setThreadPermissions(threadId: string, permission: Permission) {
+    const state = requireThread(threadId);
+    if (state.turn.kind !== 'idle' || state.steering.size) throw new Error('Stop the turn before changing permissions');
+    state.settings.permissions = z.enum(['askMe', 'approveForMe', 'fullAccess']).parse(permission);
+    store.saveCodexThread(state.settings);
+  }
+
+  function removeQueuedMessage(threadId: string, messageId: string): boolean {
+    const state = requireThread(threadId);
+    const message = store.getCodexMessage(messageId);
+    if (!message || message.threadId !== threadId || !['queued', 'failed'].includes(message.status)) return false;
+    updateMessage(messageId, 'cancelled');
+    if (
+      message.status === 'failed' &&
+      !store.codexMessages(threadId).some((item) => ['failed', 'unknown'].includes(item.status))
+    )
+      pause(state, null);
+    void dispatchQueue(threadId).catch(() => undefined);
+    return true;
+  }
+
+  async function retryMessage(threadId: string, messageId: string): Promise<CodexMessage> {
+    const state = requireThread(threadId);
+    const message = store.getCodexMessage(messageId);
+    if (!message || message.threadId !== threadId || message.status !== 'failed')
+      throw new Error('Only messages confirmed not to have executed can be retried');
+    updateMessage(messageId, 'queued');
+    pause(state, null);
+    await dispatchQueue(threadId);
+    return store.getCodexMessage(messageId) ?? message;
+  }
+
+  async function discardMessage(threadId: string, messageId: string): Promise<CodexMessage> {
+    const state = requireThread(threadId);
+    const message = store.getCodexMessage(messageId);
+    if (!message || message.threadId !== threadId || message.status !== 'unknown')
+      throw new Error('Only messages with uncertain delivery can be discarded');
+    const idle = state.turn;
+    if (idle.kind !== 'idle' || state.steering.size) throw new Error('Stop the turn before discarding a message');
+    const { thread } = await codex.request('thread/read', { threadId, includeTurns: true });
+    threadSchema.extend({ id: z.literal(threadId) }).parse(thread);
+    if (requireThread(threadId) !== state || state.turn !== idle || thread.status.type !== 'idle')
+      throw new Error('Codex must be idle before discarding a message');
+    const accepted = thread.turns.find((turn) =>
+      turn.items.some((item) => item.type === 'userMessage' && item.clientId === messageId),
+    );
+    if (accepted) return updateMessage(messageId, 'accepted', accepted.id);
+    // Discarding prevents a replay. It cannot undo work Codex may already have performed.
+    return updateMessage(messageId, 'cancelled', message.turnId, message.error);
+  }
+
+  async function resumeQueue(threadId: string) {
+    const state = requireThread(threadId);
+    if (store.codexMessages(threadId).some((message) => ['failed', 'unknown', 'submitting'].includes(message.status)))
+      throw new Error('Resolve undelivered messages before resuming the queue');
+    pause(state, null);
+    await dispatchQueue(threadId);
+  }
+
+  function registerThread(settings: CodexThread): ThreadState {
+    store.saveCodexThread(settings);
+    const state: ThreadState = { settings, turn: { kind: 'idle' }, steering: new Map(), waiters: new Set() };
+    threads.set(settings.id, state);
+    return state;
+  }
+
+  async function startThread(
+    folder: string,
+    settings: { model?: string; permissions?: Permission } = {},
+  ): Promise<string> {
+    if (closed) throw new Error('Codex provider is closed');
+    const permission = z.enum(['askMe', 'approveForMe', 'fullAccess']).parse(settings.permissions ?? 'askMe');
+    const result = await codex.request('thread/start', {
+      cwd: folder,
+      ephemeral: false,
+      ...(settings.model ? { model: settings.model } : {}),
+      ...threadPermissions(permission),
+    });
+    z.object({ thread: threadSchema, model: z.string().min(1) }).parse(result);
+    if (closed) throw new Error('Codex provider is closed');
+    registerThread({
+      id: result.thread.id,
+      folder: result.thread.cwd,
+      model: result.model,
+      permissions: permission,
+      pausedError: null,
+    });
+    return result.thread.id;
+  }
+
+  function reconcileMessages(threadId: string, turns: v2.Turn[]) {
+    for (const message of store.codexMessages(threadId)) {
+      if (!['unknown', 'submitting'].includes(message.status)) continue;
+      const turn = turns.find((turn) =>
+        turn.items.some((item) => item.type === 'userMessage' && item.clientId === message.id),
+      );
+      if (turn) updateMessage(message.id, 'accepted', turn.id);
+      else updateMessage(message.id, 'unknown', message.turnId, message.error ?? 'Delivery was interrupted');
+    }
+  }
+
+  function restoreTurn(threadId: string, state: ThreadState, thread: v2.Thread) {
+    const active = thread.turns.findLast((turn) => turn.status === 'inProgress');
+    if (thread.status.type === 'active') {
+      if (!active) {
+        unavailable(threadId, state, new Error('Could not establish the native thread state'));
+        return;
+      }
+      const turn: ActiveTurn = { kind: 'running', turnId: active.id };
+      state.turn = turn;
+      startTurnTimeout(threadId, state, turn);
+      return;
+    }
+    if (thread.status.type === 'systemError' || thread.status.type === 'notLoaded') {
+      unavailable(threadId, state, new Error('Codex thread has a system error'));
+      return;
+    }
+    const last = thread.turns.at(-1);
+    if (last?.status === 'failed') {
+      pause(state, turnFailure(last));
+      return;
+    }
+    if (last?.status === 'inProgress') {
+      pause(state, 'Last turn was interrupted before completion');
+      return;
+    }
+    if (!store.codexMessages(threadId).some((message) => ['unknown', 'failed'].includes(message.status)))
+      pause(state, null);
+  }
+
+  async function resumeThread(threadId: string): Promise<string> {
+    if (closed) throw new Error('Codex provider is closed');
+    const current = threads.get(threadId);
+    if (current && current.turn.kind !== 'unavailable') return threadId;
+    const existing = resumes.get(threadId);
+    if (existing) return existing;
+    const resuming = (async () => {
+      const saved = store.getCodexThread(threadId);
+      const permission = saved?.permissions ?? 'askMe';
+      const result = await codex.request('thread/resume', {
+        threadId,
+        ...(saved ? { cwd: saved.folder, model: saved.model } : {}),
+        ...threadPermissions(permission),
+      });
+      z.object({
+        thread: threadSchema.extend({ id: z.literal(threadId) }),
+        model: z.string().min(1),
+      }).parse(result);
+      if (closed) throw new Error('Codex provider is closed');
+      const state = registerThread({
+        id: threadId,
+        folder: result.thread.cwd,
+        model: result.model,
+        permissions: permission,
+        pausedError: saved?.pausedError ?? null,
+      });
+      try {
+        reconcileMessages(threadId, result.thread.turns);
+        restoreTurn(threadId, state, result.thread);
+      } catch (error) {
+        throw failProvider(threadId, state, error);
+      }
+      void dispatchQueue(threadId).catch(() => undefined);
+      return threadId;
+    })();
+    resumes.set(threadId, resuming);
+    try {
+      return await resuming;
+    } finally {
+      resumes.delete(threadId);
+    }
+  }
+
+  async function providerModels() {
+    const models = new Map<string, { id: string; details: string; name: string }>();
+    let cursor: string | null = null;
+    const cursors = new Set<string>();
+    do {
+      const result: v2.ModelListResponse = await codex.request('model/list', {
+        cursor,
+        limit: null,
+        includeHidden: null,
+      });
+      z.object({
+        data: z.array(z.object({ model: z.string().min(1), displayName: z.string(), description: z.string() })),
+        nextCursor: z.string().nullable(),
+      }).parse(result);
+      for (const model of result.data)
+        models.set(model.model, { id: model.model, name: model.displayName, details: model.description });
+      cursor = result.nextCursor;
+      if (cursor && cursors.has(cursor)) throw new Error('Codex repeated a model page');
+      if (cursor) cursors.add(cursor);
+    } while (cursor);
+    return models;
+  }
+
+  async function findSkills(folder: string) {
+    const result = await codex.request('skills/list', { cwds: [folder] });
+    return new Map(
+      result.data.flatMap((entry) =>
+        entry.skills.map(
+          (skill) => [skill.path, { name: skill.name, details: skill.description, path: skill.path }] as const,
+        ),
+      ),
+    );
+  }
+
+  async function findPlugins(folder: string) {
+    const result = await codex.request('plugin/installed', { cwds: [folder] });
+    return new Map(
+      result.marketplaces.flatMap((marketplace) =>
+        marketplace.plugins
+          .filter((plugin) => plugin.installed)
+          .map(
+            (plugin) =>
+              [plugin.id, { name: plugin.name, marketplace: marketplace.name, enabled: plugin.enabled }] as const,
+          ),
+      ),
+    );
+  }
+
+  async function isSignedIn() {
+    return (await codex.request('account/read', {})).account !== null;
+  }
+
+  async function close() {
+    if (closePromise) return closePromise;
+    closed = true;
+    closePromise = Promise.resolve().then(async () => {
+      try {
+        const error = new Error('Codex provider closed');
+        for (const [id, state] of threads) unavailable(id, state, error);
+        clearRequests();
+      } finally {
+        await codex.close();
       }
     });
-  });
-}
+    return closePromise;
+  }
 
-if (import.meta.main) {
-  const unsubscribe = onEvent((event) => {
-    if (event.kind === 'message.delta') process.stdout.write(event.delta);
-    if (event.kind === 'item.started') {
-      const line = describeActivity(event.item);
-      if (line) console.log(line);
+  codex.onNotification('item/agentMessage/delta', (params) => emitEvent({ ...params, kind: 'message.delta' }));
+  codex.onNotification('item/started', (params) => emitEvent({ ...params, kind: 'item.started' }));
+  codex.onNotification('item/completed', (params) => emitEvent({ ...params, kind: 'item.completed' }));
+  codex.onNotification('turn/started', (params) => emitEvent({ ...params, kind: 'turn.started' }));
+  codex.onNotification('turn/completed', (params) => {
+    completeTurn(params.threadId, params.turn);
+    const state = threads.get(params.threadId);
+    if (state?.lastCompletedTurnId === params.turn.id) return;
+    if (state) state.lastCompletedTurnId = params.turn.id;
+    emitEvent({ ...params, kind: 'turn.completed' });
+  });
+  codex.onNotification('error', (params) => emitEvent({ ...params, kind: 'error' }));
+  codex.onNotification('thread/closed', ({ threadId }) => {
+    const state = threads.get(threadId);
+    if (state) unavailable(threadId, state, new Error('Codex thread closed'));
+    emitEvent({ kind: 'thread.closed', threadId });
+  });
+  codex.onExit((exitCode) => {
+    closed = true;
+    for (const [id, state] of threads) unavailable(id, state, new Error('Codex exited'));
+    clearRequests();
+    emitEvent({ kind: 'provider.exited', exitCode });
+  });
+
+  codex.onServerRequest('item/tool/requestUserInput', (params, requestId) => {
+    if (closed || !threads.has(params.threadId) || threads.get(params.threadId)?.turn.kind === 'unavailable')
+      return { answers: {} };
+    return new Promise<v2.ToolRequestUserInputResponse>((resolve) => {
+      userInputs.set(requestId, { params, resolve });
+      emitEvent({ kind: 'userInput.requested', requestId, params });
+    });
+  });
+  codex.onServerRequest('item/permissions/requestApproval', (params, requestId) => {
+    if (closed || !threads.has(params.threadId) || threads.get(params.threadId)?.turn.kind === 'unavailable')
+      return { permissions: {}, scope: 'turn' };
+    return new Promise<v2.PermissionsRequestApprovalResponse>((resolve) => {
+      permissionRequests.set(requestId, { params, resolve });
+      emitEvent({ kind: 'permissions.requested', requestId, params });
+    });
+  });
+  codex.onServerRequest('mcpServer/elicitation/request', (params, requestId) => {
+    if (closed || !threads.has(params.threadId) || threads.get(params.threadId)?.turn.kind === 'unavailable')
+      return { action: 'cancel', content: null, _meta: null };
+    return new Promise<v2.McpServerElicitationRequestResponse>((resolve) => {
+      elicitations.set(requestId, { params, resolve });
+      emitEvent({ kind: 'elicitation.requested', requestId, params });
+    });
+  });
+  codex.onNotification('serverRequest/resolved', (params) => {
+    const { requestId } = params;
+    const question = userInputs.get(requestId);
+    if (question) {
+      userInputs.delete(requestId);
+      question.resolve({ answers: {} });
     }
-    if (event.kind === 'turn.completed') console.log();
-    if (event.kind === 'error') console.error(event.error.message);
-    if (event.kind === 'turn.startFailed') console.error('Codex turn failed to start', event.message);
+    const permission = permissionRequests.get(requestId);
+    if (permission) {
+      permissionRequests.delete(requestId);
+      permission.resolve({ permissions: {}, scope: 'turn' });
+    }
+    const elicitation = elicitations.get(requestId);
+    if (elicitation) {
+      elicitations.delete(requestId);
+      elicitation.resolve({ action: 'cancel', content: null, _meta: null });
+    }
+    emitEvent({ ...params, kind: 'serverRequest.resolved' });
   });
 
-  if (!(await isSignedIn())) console.error('Codex is not signed in. Run: codex login');
+  function answerUserInput(requestId: string | number, response: v2.ToolRequestUserInputResponse): boolean {
+    if (closed) return false;
+    const request = userInputs.get(requestId);
+    if (!request) return false;
+    userInputs.delete(requestId);
+    request.resolve(response);
+    return true;
+  }
 
-  const skills = await findSkills();
-  console.log(`${skills.size} skills:`, [...skills.keys()].join(', '));
+  function decidePermissions(requestId: string | number, response: v2.PermissionsRequestApprovalResponse): boolean {
+    if (closed) return false;
+    const request = permissionRequests.get(requestId);
+    if (!request) return false;
+    permissionRequests.delete(requestId);
+    request.resolve(response);
+    return true;
+  }
 
-  const plugins = await findPlugins();
-  for (const [id, plugin] of plugins) console.log(`${id}: ${plugin.name} from ${plugin.marketplace}`);
+  function answerElicitation(requestId: string | number, response: v2.McpServerElicitationRequestResponse): boolean {
+    if (closed) return false;
+    const request = elicitations.get(requestId);
+    if (!request) return false;
+    elicitations.delete(requestId);
+    request.resolve(response);
+    return true;
+  }
 
-  const threadId = await startThread(process.cwd());
-  console.log('opened thread', threadId);
-
-  await sendMessage(threadId, [
-    { type: 'text', text: 'What is 2 + 2? Answer with just the number.', text_elements: [] },
-  ]);
-  await sendMessage(threadId, [
-    { type: 'text', text: 'Now double it. Answer with just the number.', text_elements: [] },
-  ]);
-  await waitUntilIdle(threadId);
-
-  await codex.close();
-  unsubscribe();
+  return {
+    startThread,
+    resumeThread,
+    sendMessage,
+    steerTurn,
+    stopTurn,
+    waitUntilIdle,
+    retryMessage,
+    discardMessage,
+    removeQueuedMessage,
+    resumeQueue,
+    setThreadModel,
+    setThreadPermissions,
+    providerModels,
+    findSkills,
+    findPlugins,
+    isSignedIn,
+    onEvent,
+    close,
+    messages: (threadId: string) => store.codexMessages(threadId),
+    answerUserInput,
+    decidePermissions,
+    answerElicitation,
+    userInputsWaiting: (threadId: string) =>
+      [...userInputs]
+        .filter(([, request]) => request.params.threadId === threadId)
+        .map(([requestId, request]) => structuredClone({ requestId, params: request.params })),
+    permissionsWaiting: (threadId: string) =>
+      [...permissionRequests]
+        .filter(([, request]) => request.params.threadId === threadId)
+        .map(([requestId, request]) => structuredClone({ requestId, params: request.params })),
+    elicitationsWaiting: (threadId: string) =>
+      [...elicitations]
+        .filter(([, request]) => request.params.threadId === threadId)
+        .map(([requestId, request]) => structuredClone({ requestId, params: request.params })),
+    ...approvals,
+    decideCommand: (requestId: string | number, decision: v2.CommandExecutionApprovalDecision) =>
+      !closed && approvals.decideCommand(requestId, decision),
+    decideFile: (requestId: string | number, decision: v2.FileChangeApprovalDecision) =>
+      !closed && approvals.decideFile(requestId, decision),
+  };
 }
+
+export type CodexProvider = Awaited<ReturnType<typeof createCodexProvider>>;

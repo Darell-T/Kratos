@@ -1,67 +1,7 @@
-import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  connectCodex,
-  type CodexClient,
-  type NotificationMethod,
-  type NotificationParams,
-  type v2,
-} from '@kratos/codex';
+import { describe, expect, it, vi } from 'vitest';
+import type { v2 } from '@kratos/codex';
 import type { CodexEvent } from '../src/providers/codex';
-
-interface FakeControls {
-  request(method: string, params: unknown): Promise<unknown>;
-}
-
-const clients: CodexClient[] = [];
-afterEach(async () => {
-  await Promise.all(clients.splice(0).map((client) => client.close()));
-  vi.doUnmock('@kratos/codex');
-  vi.restoreAllMocks();
-});
-
-async function setup() {
-  const client = await connectCodex({
-    command: process.execPath,
-    args: [fileURLToPath(new URL('../../codex/test/fake-codex.mjs', import.meta.url))],
-  });
-  clients.push(client);
-  const controls = client as unknown as FakeControls;
-  vi.resetModules();
-  vi.doMock('@kratos/codex', () => ({ connectCodex: () => Promise.resolve(client) }));
-  const provider = await import('../src/providers/codex');
-  const events: CodexEvent[] = [];
-  provider.onEvent((event) => events.push(event));
-  provider.setThreadPermissions('thread-A', 'askMe');
-
-  return {
-    ...provider,
-    events,
-    emit: <M extends NotificationMethod>(method: M, params: NotificationParams<M>) =>
-      controls.request('test/emit', { method, params }),
-    settleStart: (result?: { turn: v2.Turn }, error?: string) =>
-      controls.request('test/settleTurn', { method: 'turn/start', threadId: 'thread-A', result, error }),
-    requests: () => controls.request('test/turnRequests', {}),
-    crash: () => controls.request('test/exit', { code: 3 }).catch(() => undefined),
-  };
-}
-
-function input(text: string): v2.UserInput[] {
-  return [{ type: 'text', text, text_elements: [] }];
-}
-
-function turn(id: string, status: v2.Turn['status'] = 'inProgress', error: v2.TurnError | null = null): v2.Turn {
-  return {
-    id,
-    status,
-    error,
-    items: [],
-    itemsView: 'full',
-    startedAt: 100,
-    completedAt: status === 'inProgress' ? null : 102,
-    durationMs: status === 'inProgress' ? null : 2000,
-  };
-}
+import { setup, input, turn } from './codex-fixture';
 
 describe('Codex structured output through the client transport', () => {
   it('keeps interleaved text attributed to its thread, turn and item without printing it', async () => {
@@ -87,7 +27,7 @@ describe('Codex structured output through the client transport', () => {
       delta: ' world',
     });
 
-    expect(provider.events).toEqual([
+    expect(provider.events.filter((event) => event.kind !== 'message.updated')).toEqual([
       { kind: 'message.delta', threadId: 'thread-A', turnId: 'turn-A', itemId: 'message-A', delta: 'Hello' },
       { kind: 'message.delta', threadId: 'thread-B', turnId: 'turn-B', itemId: 'message-B', delta: 'Another reply' },
       { kind: 'message.delta', threadId: 'thread-A', turnId: 'turn-A', itemId: 'message-A', delta: ' world' },
@@ -133,7 +73,7 @@ describe('Codex structured output through the client transport', () => {
       },
     });
 
-    expect(provider.events).toMatchObject([
+    expect(provider.events.filter((event) => event.kind !== 'message.updated')).toMatchObject([
       {
         kind: 'item.completed',
         threadId: 'thread-A',
@@ -164,7 +104,7 @@ describe('Codex structured output through the client transport', () => {
       },
     });
 
-    expect(provider.events).toMatchObject([
+    expect(provider.events.filter((event) => event.kind !== 'message.updated')).toMatchObject([
       {
         kind: 'item.started',
         threadId: 'thread-A',
@@ -188,7 +128,7 @@ describe('Codex structured output through the client transport', () => {
     await provider.emit('turn/started', { threadId: 'thread-A', turn: turn('turn-A') });
     await provider.emit('turn/completed', { threadId: 'thread-A', turn: turn('turn-A', status, error) });
 
-    expect(provider.events).toMatchObject([
+    expect(provider.events.filter((event) => event.kind !== 'message.updated')).toMatchObject([
       { kind: 'turn.started', threadId: 'thread-A', turn: { id: 'turn-A', status: 'inProgress' } },
       { kind: 'turn.completed', threadId: 'thread-A', turn: { id: 'turn-A', status, error, durationMs: 2000 } },
     ]);
@@ -212,8 +152,11 @@ describe('Codex structured output through the client transport', () => {
       delta: 'Second',
     });
 
-    expect(received).toMatchObject([{ delta: 'First' }]);
-    expect(provider.events).toMatchObject([{ delta: 'First' }, { delta: 'Second' }]);
+    expect(received.filter((event) => event.kind !== 'message.updated')).toMatchObject([{ delta: 'First' }]);
+    expect(provider.events.filter((event) => event.kind !== 'message.updated')).toMatchObject([
+      { delta: 'First' },
+      { delta: 'Second' },
+    ]);
   });
 
   it('keeps delivery and queued work running when a listener throws', async () => {
@@ -230,11 +173,10 @@ describe('Codex structured output through the client transport', () => {
     await provider.sendMessage('thread-A', input('B'));
     await provider.emit('turn/completed', { threadId: 'thread-A', turn: turn('turn-A', 'completed') });
 
-    expect(received).toMatchObject([{ kind: 'turn.completed', threadId: 'thread-A', turn: { id: 'turn-A' } }]);
-    expect(await provider.requests()).toMatchObject([
-      { method: 'turn/start', params: { input: input('A') } },
-      { method: 'turn/start', params: { input: input('B') } },
+    expect(received.filter((event) => event.kind !== 'message.updated')).toMatchObject([
+      { kind: 'turn.completed', threadId: 'thread-A', turn: { id: 'turn-A' } },
     ]);
+    expect(await provider.requests()).toMatchObject([{ input: input('A') }, { input: input('B') }]);
     await provider.settleStart({ turn: turn('turn-B') });
   });
 
@@ -244,7 +186,9 @@ describe('Codex structured output through the client transport', () => {
     await provider.settleStart(undefined, 'Start rejected');
     await sent;
 
-    expect(provider.events).toEqual([{ kind: 'turn.startFailed', threadId: 'thread-A', message: 'Start rejected' }]);
+    expect(provider.events.filter((event) => event.kind !== 'message.updated')).toEqual([
+      { kind: 'turn.startFailed', threadId: 'thread-A', message: 'Start rejected' },
+    ]);
   });
 
   it('exposes a background queued start failure through events', async () => {
@@ -256,8 +200,9 @@ describe('Codex structured output through the client transport', () => {
     await provider.sendMessage('thread-A', input('B'));
     await provider.emit('turn/completed', { threadId: 'thread-A', turn: turn('turn-A', 'completed') });
     await provider.settleStart(undefined, 'Queued start rejected');
+    await provider.flush();
 
-    expect(provider.events).toMatchObject([
+    expect(provider.events.filter((event) => event.kind !== 'message.updated')).toMatchObject([
       { kind: 'turn.completed', turn: { id: 'turn-A' } },
       { kind: 'turn.startFailed', threadId: 'thread-A', message: 'Queued start rejected' },
     ]);
@@ -279,7 +224,7 @@ describe('Codex structured output through the client transport', () => {
     });
     await provider.crash();
 
-    expect(provider.events).toMatchObject([
+    expect(provider.events.filter((event) => event.kind !== 'message.updated')).toMatchObject([
       {
         kind: 'error',
         threadId: 'thread-A',

@@ -2,8 +2,8 @@ import type { ChildProcessByStdio } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { spawn } from 'cross-spawn';
-import { CodexExitedError, CodexNotFoundError, CodexRequestError } from './errors';
-import type { InitializeResponse } from './generated';
+import { CodexExitedError, CodexNotFoundError, CodexRequestError, CodexTimeoutError } from './errors';
+import type { InitializeCapabilities, InitializeResponse } from './generated';
 import type {
   NotificationMethod,
   NotificationParams,
@@ -23,11 +23,18 @@ export interface CodexOptions {
   cwd?: string;
   codexHome?: string;
   clientInfo?: { name: string; title: string; version: string };
+  capabilities?: InitializeCapabilities;
+  requestTimeoutMs?: number;
+  closeTimeoutMs?: number;
 }
 
 export interface CodexClient {
   readonly info: InitializeResponse;
-  request<M extends RequestMethod>(method: M, params: RequestParams<M>): Promise<RequestResult<M>>;
+  request<M extends RequestMethod>(
+    method: M,
+    params: RequestParams<M>,
+    options?: { timeoutMs: number },
+  ): Promise<RequestResult<M>>;
   onNotification<M extends NotificationMethod>(method: M, handler: (params: NotificationParams<M>) => void): () => void;
   onServerRequest<M extends ServerRequestMethod>(
     method: M,
@@ -43,28 +50,55 @@ export interface CodexClient {
 const DEFAULT_CLIENT_INFO = { name: 'kratos', title: 'Kratos', version: '0.1.0' };
 
 type CodexProcess = ChildProcessByStdio<Writable, Readable, null>;
-type PendingRequest = { resolve: (result: unknown) => void; reject: (error: Error) => void };
+type PendingRequest = { resolve: (result: unknown) => void; reject: (error: Error) => void; timer?: NodeJS.Timeout };
+
+function connectionTimeouts(options: CodexOptions) {
+  for (const timeout of [options.requestTimeoutMs, options.closeTimeoutMs]) {
+    if (timeout !== undefined && (!Number.isFinite(timeout) || timeout <= 0))
+      throw new Error('Codex timeouts must be positive');
+  }
+  return { request: options.requestTimeoutMs ?? 30000, close: options.closeTimeoutMs ?? 5000 };
+}
 
 export async function connectCodex(options: CodexOptions = {}): Promise<CodexClient> {
+  const timeouts = connectionTimeouts(options);
   const command = options.command ?? process.env.CODEX_EXE ?? 'codex';
   const child = spawn(command, options.args ?? ['app-server'], {
     cwd: options.cwd,
+    windowsHide: true,
     env: options.codexHome === undefined ? process.env : { ...process.env, CODEX_HOME: options.codexHome },
     stdio: ['pipe', 'pipe', 'inherit'],
   });
-  const connection = new CodexConnection(child, command);
+  const connection = new CodexConnection(child, command, timeouts.request, timeouts.close);
 
   try {
-    connection.info = await connection.request('initialize', {
-      clientInfo: options.clientInfo ?? DEFAULT_CLIENT_INFO,
-      capabilities: null,
-    });
+    connection.info = parseInitializeResponse(
+      await connection.request('initialize', {
+        clientInfo: options.clientInfo ?? DEFAULT_CLIENT_INFO,
+        capabilities: options.capabilities ?? null,
+      }),
+    );
     connection.notify('initialized');
   } catch (error) {
     await connection.close();
     throw error;
   }
   return connection;
+}
+
+function parseInitializeResponse(value: unknown): InitializeResponse {
+  if (typeof value !== 'object' || value === null) throw new Error('Invalid Codex initialize response');
+  const stringField = (key: keyof InitializeResponse): string => {
+    const field: unknown = Reflect.get(value, key);
+    if (typeof field !== 'string') throw new Error('Invalid Codex initialize response: ' + key);
+    return field;
+  };
+  return {
+    userAgent: stringField('userAgent'),
+    codexHome: stringField('codexHome'),
+    platformFamily: stringField('platformFamily'),
+    platformOs: stringField('platformOs'),
+  };
 }
 
 class CodexConnection implements CodexClient {
@@ -79,31 +113,62 @@ class CodexConnection implements CodexClient {
   private readonly exitHandlers = new Set<(code: number | null) => void>();
   private ended: CodexExitedError | CodexNotFoundError | undefined;
   private exitCode: number | null = null;
+  private closePromise: Promise<void> | undefined;
+  private processClosed = false;
 
   constructor(
     private readonly child: CodexProcess,
     command: string,
+    private readonly requestTimeoutMs: number,
+    private readonly closeTimeoutMs: number,
   ) {
     createInterface({ input: child.stdout }).on('line', (line) => {
       const message = decode(line);
       if (message) this.dispatch(message);
     });
 
-    // Writing to a dead process emits an error here. The exit handling below reports the real cause.
-    child.stdin.on('error', () => undefined);
+    // A broken input pipe makes the connection unusable even if the process has not exited yet.
+    child.stdin.on('error', () => {
+      this.handleEnd(new CodexExitedError(null));
+      stopProcessTree(child);
+    });
     child.on('error', (error: NodeJS.ErrnoException) => {
       this.handleEnd(error.code === 'ENOENT' ? new CodexNotFoundError(command) : new CodexExitedError(null));
     });
     // 'close' fires after stdout is drained, so no output is lost before pending requests are rejected.
-    child.on('close', (code) => this.handleEnd(new CodexExitedError(code)));
+    child.on('close', (code) => {
+      this.processClosed = true;
+      this.handleEnd(new CodexExitedError(code));
+    });
   }
 
-  request<M extends RequestMethod>(method: M, params: RequestParams<M>): Promise<RequestResult<M>> {
+  request<M extends RequestMethod>(
+    method: M,
+    params: RequestParams<M>,
+    options?: { timeoutMs: number },
+  ): Promise<RequestResult<M>> {
     if (this.ended) return Promise.reject(this.ended);
+    if (this.closePromise) return Promise.reject(new CodexExitedError(this.exitCode));
+
+    const timeoutMs = options?.timeoutMs ?? this.requestTimeoutMs;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
+      return Promise.reject(new Error('Codex timeout must be positive'));
+    let message: string;
+    try {
+      message = encode({ id: this.nextId, method, params });
+    } catch (error) {
+      return Promise.reject(error instanceof Error ? error : new Error(String(error)));
+    }
 
     const id = this.nextId++;
-    const result = new Promise<unknown>((resolve, reject) => this.pending.set(id, { resolve, reject }));
-    this.write(encode({ id, method, params }));
+    const result = new Promise<unknown>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new CodexTimeoutError(method, timeoutMs));
+      }, timeoutMs);
+      this.pending.set(id, { resolve, reject, timer });
+    });
+    this.write(message);
     return result as Promise<RequestResult<M>>;
   }
 
@@ -147,8 +212,22 @@ class CodexConnection implements CodexClient {
   }
 
   async close(): Promise<void> {
-    if (!this.ended) stopProcessTree(this.child);
-    await new Promise<void>((resolve) => this.onExit(() => resolve()));
+    if (this.closePromise) return this.closePromise;
+    if (this.processClosed) return;
+    this.closePromise = new Promise<void>((resolve, reject) => {
+      const complete = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      const timer = setTimeout(() => {
+        this.child.off('close', complete);
+        this.child.kill('SIGKILL');
+        reject(new CodexTimeoutError('close', this.closeTimeoutMs));
+      }, this.closeTimeoutMs);
+      this.child.once('close', complete);
+      stopProcessTree(this.child);
+    });
+    return this.closePromise;
   }
 
   private write(text: string): void {
@@ -182,6 +261,7 @@ class CodexConnection implements CodexClient {
     if (!request) return;
 
     this.pending.delete(message.id);
+    clearTimeout(request.timer);
     if (message.kind === 'response') request.resolve(message.result);
     else request.reject(new CodexRequestError(message.code, message.message));
   }
@@ -208,7 +288,10 @@ class CodexConnection implements CodexClient {
     this.ended = reason;
     if (reason instanceof CodexExitedError) this.exitCode = reason.exitCode;
 
-    for (const request of this.pending.values()) request.reject(reason);
+    for (const request of this.pending.values()) {
+      clearTimeout(request.timer);
+      request.reject(reason);
+    }
     this.pending.clear();
     // Exit subscribers may settle approval promises; their answers must not go to a closed process.
     this.unansweredServerRequests.clear();
@@ -236,9 +319,17 @@ function runHandler(what: string, handler: () => void): void {
 
 // The npm launcher on Windows starts child processes of its own, so killing only our direct child leaves Codex running.
 function stopProcessTree(child: CodexProcess): void {
+  if (child.exitCode !== null) return;
   if (process.platform !== 'win32' || child.pid === undefined) {
     child.kill('SIGTERM');
     return;
   }
-  spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }).on('error', () => child.kill());
+  const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
+  const fallback = () => {
+    if (child.exitCode === null) child.kill('SIGKILL');
+  };
+  killer.on('error', fallback);
+  killer.on('close', (code) => {
+    if (code !== 0) fallback();
+  });
 }
