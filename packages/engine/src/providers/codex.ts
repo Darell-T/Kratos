@@ -427,7 +427,11 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     if (existing) return existing;
     if (message.status !== 'queued' || state.turn.kind !== 'running') return message;
     const turnId = state.turn.turnId;
-    updateMessage(messageId, 'submitting', turnId);
+    try {
+      updateMessage(messageId, 'submitting', turnId);
+    } catch (error) {
+      throw failProvider(threadId, state, error);
+    }
     const steering = (async () => {
       try {
         const result = await codex.request('turn/steer', {
@@ -723,7 +727,15 @@ export async function createCodexProvider(options: CodexProviderOptions) {
           .filter((plugin) => plugin.installed)
           .map(
             (plugin) =>
-              [plugin.id, { name: plugin.name, marketplace: marketplace.name, enabled: plugin.enabled }] as const,
+              [
+                plugin.id,
+                {
+                  name: plugin.name,
+                  marketplace: marketplace.name,
+                  enabled: plugin.enabled,
+                  interface: plugin.interface,
+                },
+              ] as const,
           ),
       ),
     );
