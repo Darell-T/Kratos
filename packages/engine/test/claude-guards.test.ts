@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { A, B, C, D, flush, folder, input, setup } from './claude-fixture';
 
 const readOnly = { behavior: 'deny', message: 'This Kratos thread is read-only' };
+const readOnlyLaunch = {
+  permissionMode: 'plan',
+  disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell'],
+};
 
 describe('Claude read-only threads', () => {
   it('plans instead of acting, denies every request but questions, and keeps the setting across settings changes and restarts', async () => {
@@ -12,7 +16,7 @@ describe('Claude read-only threads', () => {
     claude.setThreadPermissions(claude.thread, 'fullAccess');
     claude.setThreadReadOnly(claude.thread, true);
     await claude.start(A);
-    expect(claude.launch().options).toMatchObject({ permissionMode: 'plan' });
+    expect(claude.launch().options).toMatchObject(readOnlyLaunch);
     expect(Object.keys(claude.launch().options)).not.toContain('allowDangerouslySkipPermissions');
 
     expect(await claude.ask('Bash', { command: 'rm -rf build' }).answer).toEqual(readOnly);
@@ -35,6 +39,7 @@ describe('Claude read-only threads', () => {
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
     });
+    expect(Object.keys(claude.launch().options)).not.toContain('disallowedTools');
     expect(await claude.ask('Bash', { command: 'rm -rf build' }).answer).toMatchObject({ behavior: 'allow' });
     await claude.finish([B]);
 
@@ -44,7 +49,7 @@ describe('Claude read-only threads', () => {
     await restored.resumeThread(claude.thread);
     const sent = restored.sendMessage(claude.thread, input('C'), C);
     await flush();
-    expect(claude.launch().options).toMatchObject({ cwd: folder, resume: claude.thread, permissionMode: 'plan' });
+    expect(claude.launch().options).toMatchObject({ cwd: folder, resume: claude.thread, ...readOnlyLaunch });
     expect(await claude.ask('Write', { file_path: 'a.ts' }).answer).toEqual(readOnly);
     await claude.accept(C);
     await sent;
@@ -71,6 +76,7 @@ describe('Claude turn changes', () => {
 
     await claude.start(C);
     await claude.useTool('PostToolUse', 'Read', { file_path: 'a.ts' });
+    expect(await claude.useTool('PostToolUse', 'Edit', { file_path: 42 })).toEqual([{ continue: true }]);
     await claude.finish([C]);
 
     await claude.start(D);

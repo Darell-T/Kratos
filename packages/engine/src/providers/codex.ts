@@ -806,7 +806,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     const state = threads.get(params.threadId);
     if (state?.lastCompletedTurnId === params.turn.id) return;
     if (state) state.lastCompletedTurnId = params.turn.id;
-    emitEvent({ ...params, kind: 'turn.completed', changes: state?.changes.take() ?? createTurnChanges().take() });
+    emitEvent({ ...params, kind: 'turn.completed', changes: state?.changes.take() ?? { files: [], checked: true } });
   });
   codex.onNotification('error', (params) => emitEvent({ ...params, kind: 'error' }));
   codex.onNotification('thread/closed', ({ threadId }) => {

@@ -44,8 +44,6 @@ const permissionModes = {
   approveForMe: { permissionMode: 'auto' },
   fullAccess: { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true },
 } satisfies Record<Permission, Options>;
-const readOnlyMode = { permissionMode: 'plan' } satisfies Options;
-
 const editPathKeys: Record<string, 'file_path' | 'notebook_path'> = {
   Edit: 'file_path',
   Write: 'file_path',
@@ -53,6 +51,11 @@ const editPathKeys: Record<string, 'file_path' | 'notebook_path'> = {
   NotebookEdit: 'notebook_path',
 };
 const commandTools = ['Bash', 'PowerShell'];
+// Disallowed tools are deny rules, which win over any allow rule the user's settings grant.
+const readOnlyMode = {
+  permissionMode: 'plan',
+  disallowedTools: [...Object.keys(editPathKeys), ...commandTools],
+} satisfies Options;
 const toolUseSchema = z.object({
   tool_name: z.string(),
   tool_input: z.object({ file_path: z.string().optional(), notebook_path: z.string().optional() }),
@@ -72,11 +75,14 @@ function toolHooks(onToolUse: ClaudeSessionOptions['onToolUse']): NonNullable<Op
   const hook =
     (succeeded: boolean): HookCallback =>
     (input) => {
-      const { tool_name, tool_input } = toolUseSchema.parse(input);
-      const pathKey = editPathKeys[tool_name];
-      const path = pathKey && tool_input[pathKey];
-      if (commandTools.includes(tool_name)) onToolUse({ kind: 'command' });
-      else if (succeeded && path) onToolUse({ kind: 'edit', path });
+      const use = toolUseSchema.safeParse(input);
+      if (use.success) {
+        const { tool_name, tool_input } = use.data;
+        const pathKey = editPathKeys[tool_name];
+        const path = pathKey && tool_input[pathKey];
+        if (commandTools.includes(tool_name)) onToolUse({ kind: 'command' });
+        else if (succeeded && path) onToolUse({ kind: 'edit', path });
+      }
       return Promise.resolve({ continue: true });
     };
   return { PostToolUse: [{ hooks: [hook(true)] }], PostToolUseFailure: [{ hooks: [hook(false)] }] };
