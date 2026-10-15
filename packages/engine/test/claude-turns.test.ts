@@ -123,11 +123,12 @@ describe('Claude turns through a scripted SDK', () => {
     const idle = claude.waitUntilIdle(claude.thread).catch((error: unknown) => error);
 
     claude.failInterrupts('hang');
-    void claude.stopTurn(claude.thread);
+    const stopped = claude.stopTurn(claude.thread);
     await vi.advanceTimersByTimeAsync(5000);
     await flush();
     const message = 'Claude did not stop the turn; its process was closed';
     expect(claude.launch().closed).toBe(true);
+    await expect(stopped).resolves.toBeUndefined();
     expect(await idle).toMatchObject({ message });
     expect(claude.events).toContainEqual({
       kind: 'session.exited',
