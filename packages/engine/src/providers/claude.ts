@@ -71,7 +71,11 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
   const { canUseTool, onElicitation, clearRequests, pendingInput, ...requests } = createClaudeApprovals((threadId) => {
     const state = threads.get(threadId);
     if (closed || !state || state.turn.kind === 'unavailable') return undefined;
-    return { permissions: state.settings.permissions, turnId: isActive(state.turn) ? state.turn.turnId : null };
+    return {
+      permissions: state.settings.permissions,
+      readOnly: state.settings.readOnly,
+      turnId: isActive(state.turn) ? state.turn.turnId : null,
+    };
   }, emitEvent);
 
   function emitEvent(event: ClaudeEvent) {
@@ -316,6 +320,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
           folder: state.settings.folder,
           model: state.settings.model,
           permissions: state.settings.permissions,
+          readOnly: state.settings.readOnly,
           canUseTool: canUseTool(threadId),
           onElicitation: onElicitation(threadId),
         },
@@ -475,6 +480,13 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     closeSession(state);
   }
 
+  function setThreadReadOnly(threadId: string, readOnly: boolean) {
+    const state = requireThread(threadId);
+    if (isActive(state.turn)) throw new Error('Stop the turn before changing permissions');
+    saveThreadSettings(state, { ...state.settings, readOnly });
+    closeSession(state);
+  }
+
   function removeQueuedMessage(threadId: string, messageId: string): boolean {
     const state = requireThread(threadId);
     const message = store.getClaudeMessage(messageId);
@@ -533,12 +545,20 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
 
   async function startThread(
     folder: string,
-    settings: { model?: string; permissions?: Permission } = {},
+    settings: { model?: string; permissions?: Permission; readOnly?: boolean } = {},
   ): Promise<string> {
     if (closed) throw new Error('Claude provider is closed');
     const permissions = permissionSchema.parse(settings.permissions ?? 'askMe');
     const id = randomUUID();
-    registerThread({ id, folder, model: settings.model || null, permissions, pausedError: null, runningTurn: null });
+    registerThread({
+      id,
+      folder,
+      model: settings.model || null,
+      permissions,
+      readOnly: settings.readOnly ?? false,
+      pausedError: null,
+      runningTurn: null,
+    });
     return Promise.resolve(id);
   }
 
@@ -640,6 +660,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     resumeQueue,
     setThreadModel,
     setThreadPermissions,
+    setThreadReadOnly,
     providerModels,
     findSkills,
     findPlugins,

@@ -19,6 +19,7 @@ export interface ClaudeSessionOptions {
   folder: string;
   model: string | null;
   permissions: Permission;
+  readOnly: boolean;
   canUseTool: CanUseTool;
   onElicitation: OnElicitation;
 }
@@ -41,6 +42,7 @@ const permissionModes = {
   approveForMe: { permissionMode: 'auto' },
   fullAccess: { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true },
 } satisfies Record<Permission, Options>;
+const readOnlyMode = { permissionMode: 'plan' } satisfies Options;
 
 const initSchema = z.object({ model: z.string().min(1) });
 const replaySchema = z.object({ uuid: z.string().min(1) });
@@ -106,7 +108,7 @@ export async function openClaudeSession(
     options: {
       cwd: options.folder,
       ...(options.model ? { model: options.model } : {}),
-      ...permissionModes[options.permissions],
+      ...(options.readOnly ? readOnlyMode : permissionModes[options.permissions]),
       ...(resume ? { resume: options.threadId } : { sessionId: options.threadId }),
       settingSources,
       persistSession: true,

@@ -71,7 +71,14 @@ const beforeExecution = (error: unknown) =>
 
 function permissions(
   permissions: Permission,
+  readOnly: boolean,
 ): Required<Pick<v2.TurnStartParams, 'sandboxPolicy' | 'approvalPolicy' | 'approvalsReviewer'>> {
+  if (readOnly)
+    return {
+      sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      approvalPolicy: 'never',
+      approvalsReviewer: 'user',
+    };
   if (permissions === 'fullAccess')
     return { sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never', approvalsReviewer: 'user' };
   return {
@@ -87,9 +94,13 @@ function permissions(
   };
 }
 
-function threadPermissions(permission: Permission) {
-  const { approvalPolicy, approvalsReviewer } = permissions(permission);
-  const sandbox: v2.SandboxMode = permission === 'fullAccess' ? 'danger-full-access' : 'workspace-write';
+function threadPermissions(permission: Permission, readOnly: boolean) {
+  const { approvalPolicy, approvalsReviewer } = permissions(permission, readOnly);
+  const sandbox: v2.SandboxMode = readOnly
+    ? 'read-only'
+    : permission === 'fullAccess'
+      ? 'danger-full-access'
+      : 'workspace-write';
   return { sandbox, approvalPolicy, approvalsReviewer };
 }
 
@@ -344,7 +355,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       input: message.input,
       clientUserMessageId: message.id,
       model: state.settings.model,
-      ...permissions(state.settings.permissions),
+      ...permissions(state.settings.permissions, state.settings.readOnly),
     };
     const submitting = store.updateCodexMessage(message.id, 'submitting');
     const starting: StartingTurn = {
@@ -518,6 +529,12 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     saveThreadSettings(state, { ...state.settings, permissions });
   }
 
+  function setThreadReadOnly(threadId: string, readOnly: boolean) {
+    const state = requireThread(threadId);
+    if (state.turn.kind !== 'idle' || state.steering.size) throw new Error('Stop the turn before changing permissions');
+    saveThreadSettings(state, { ...state.settings, readOnly });
+  }
+
   function removeQueuedMessage(threadId: string, messageId: string): boolean {
     const state = requireThread(threadId);
     const message = store.getCodexMessage(messageId);
@@ -579,15 +596,16 @@ export async function createCodexProvider(options: CodexProviderOptions) {
 
   async function startThread(
     folder: string,
-    settings: { model?: string; permissions?: Permission } = {},
+    settings: { model?: string; permissions?: Permission; readOnly?: boolean } = {},
   ): Promise<string> {
     if (closed) throw new Error('Codex provider is closed');
     const permission = z.enum(['askMe', 'approveForMe', 'fullAccess']).parse(settings.permissions ?? 'askMe');
+    const readOnly = settings.readOnly ?? false;
     const result = await codex.request('thread/start', {
       cwd: folder,
       ephemeral: false,
       ...(settings.model ? { model: settings.model } : {}),
-      ...threadPermissions(permission),
+      ...threadPermissions(permission, readOnly),
     });
     z.object({ thread: threadSchema, model: z.string().min(1) }).parse(result);
     if (closed) throw new Error('Codex provider is closed');
@@ -596,6 +614,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       folder: result.thread.cwd,
       model: result.model,
       permissions: permission,
+      readOnly,
       pausedError: null,
     });
     return result.thread.id;
@@ -651,10 +670,11 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     const resuming = (async () => {
       const saved = store.getCodexThread(threadId);
       const permission = saved?.permissions ?? 'askMe';
+      const readOnly = saved?.readOnly ?? false;
       const result = await codex.request('thread/resume', {
         threadId,
         ...(saved ? { cwd: saved.folder, model: saved.model } : {}),
-        ...threadPermissions(permission),
+        ...threadPermissions(permission, readOnly),
       });
       z.object({
         thread: threadSchema.extend({ id: z.literal(threadId) }),
@@ -666,6 +686,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
         folder: result.thread.cwd,
         model: result.model,
         permissions: permission,
+        readOnly,
         pausedError: saved?.pausedError ?? null,
       });
       try {
@@ -868,6 +889,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     resumeQueue,
     setThreadModel,
     setThreadPermissions,
+    setThreadReadOnly,
     providerModels,
     findSkills,
     findPlugins,
