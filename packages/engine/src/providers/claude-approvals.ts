@@ -136,7 +136,7 @@ export function createClaudeApprovals(
       const thread = threadFor(threadId);
       if (!thread || options.signal.aborted) return unavailable;
       if (thread.plan && toolName === 'ExitPlanMode') return planOn;
-      if (thread.permissions === 'fullAccess' && toolName !== 'AskUserQuestion')
+      if (thread.permissions === 'fullAccess' && !thread.plan && toolName !== 'AskUserQuestion')
         return { behavior: 'allow', updatedInput: input };
       return ask(threadId, thread.turnId, toolName, input, options);
     };

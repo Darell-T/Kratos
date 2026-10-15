@@ -1,23 +1,23 @@
 export interface TurnChanges {
   files: string[];
-  checked: boolean;
+  editedSinceCommand: boolean;
 }
 
 export function createTurnChanges() {
   const files = new Set<string>();
-  let checked = true;
+  let editedSinceCommand = false;
   return {
     edited(path: string) {
       files.add(path);
-      checked = false;
+      editedSinceCommand = true;
     },
     ran() {
-      checked = true;
+      editedSinceCommand = false;
     },
     take(): TurnChanges {
-      const taken = { files: [...files], checked };
+      const taken = { files: [...files], editedSinceCommand };
       files.clear();
-      checked = true;
+      editedSinceCommand = false;
       return taken;
     },
   };

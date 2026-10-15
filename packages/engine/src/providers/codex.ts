@@ -82,7 +82,14 @@ const beforeExecution = (error: unknown) =>
 
 function permissions(
   permissions: Permission,
+  plan: boolean,
 ): Required<Pick<v2.TurnStartParams, 'sandboxPolicy' | 'approvalPolicy' | 'approvalsReviewer'>> {
+  if (plan)
+    return {
+      sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+    };
   if (permissions === 'fullAccess')
     return { sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never', approvalsReviewer: 'user' };
   return {
@@ -98,9 +105,13 @@ function permissions(
   };
 }
 
-function threadPermissions(permission: Permission) {
-  const { approvalPolicy, approvalsReviewer } = permissions(permission);
-  const sandbox: v2.SandboxMode = permission === 'fullAccess' ? 'danger-full-access' : 'workspace-write';
+function threadPermissions(permission: Permission, plan: boolean) {
+  const { approvalPolicy, approvalsReviewer } = permissions(permission, plan);
+  const sandbox: v2.SandboxMode = plan
+    ? 'read-only'
+    : permission === 'fullAccess'
+      ? 'danger-full-access'
+      : 'workspace-write';
   return { sandbox, approvalPolicy, approvalsReviewer };
 }
 
@@ -122,7 +133,8 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     codex,
     (id) => {
       const state = threads.get(id);
-      return closed || state?.turn.kind === 'unavailable' ? undefined : state?.settings.permissions;
+      if (closed || !state || state.turn.kind === 'unavailable') return undefined;
+      return state.settings.plan ? 'askMe' : state.settings.permissions;
     },
     (threadId) => emitEvent({ kind: 'approvals.changed', threadId, approvals: approvals.approvalsWaiting(threadId) }),
   );
@@ -337,10 +349,11 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     state.turn = active;
     const completed = starting.completedTurns.get(turn.id);
     if (completed || turn.status !== 'inProgress') {
+      const changes = !completed && state.lastCompletedTurnId !== turn.id ? state.changes.take() : null;
       completeTurn(threadId, completed ?? turn);
-      if (!completed && state.lastCompletedTurnId !== turn.id) {
+      if (changes) {
         state.lastCompletedTurnId = turn.id;
-        emitEvent({ kind: 'turn.completed', threadId, turn, changes: state.changes.take() });
+        emitEvent({ kind: 'turn.completed', threadId, turn, changes });
       }
       return undefined;
     }
@@ -355,7 +368,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       input: message.input,
       clientUserMessageId: message.id,
       model: state.settings.model,
-      ...permissions(state.settings.permissions),
+      ...permissions(state.settings.permissions, state.settings.plan),
       collaborationMode: {
         mode: state.settings.plan ? 'plan' : 'default',
         settings: { model: state.settings.model, reasoning_effort: null, developer_instructions: null },
@@ -616,7 +629,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       cwd: folder,
       ephemeral: false,
       ...(settings.model ? { model: settings.model } : {}),
-      ...threadPermissions(permission),
+      ...threadPermissions(permission, plan),
     });
     z.object({ thread: threadSchema, model: z.string().min(1) }).parse(result);
     if (closed) throw new Error('Codex provider is closed');
@@ -685,7 +698,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       const result = await codex.request('thread/resume', {
         threadId,
         ...(saved ? { cwd: saved.folder, model: saved.model } : {}),
-        ...threadPermissions(permission),
+        ...threadPermissions(permission, plan),
       });
       z.object({
         thread: threadSchema.extend({ id: z.literal(threadId) }),
@@ -805,11 +818,14 @@ export async function createCodexProvider(options: CodexProviderOptions) {
   });
   codex.onNotification('turn/started', (params) => emitEvent({ ...params, kind: 'turn.started' }));
   codex.onNotification('turn/completed', (params) => {
-    completeTurn(params.threadId, params.turn);
     const state = threads.get(params.threadId);
-    if (state?.lastCompletedTurnId === params.turn.id) return;
+    const duplicate = state?.lastCompletedTurnId === params.turn.id;
+    // Taken before completeTurn, which starts the next queued turn and resets the record.
+    const changes = duplicate ? null : (state?.changes.take() ?? { files: [], editedSinceCommand: false });
+    completeTurn(params.threadId, params.turn);
+    if (!changes) return;
     if (state) state.lastCompletedTurnId = params.turn.id;
-    emitEvent({ ...params, kind: 'turn.completed', changes: state?.changes.take() ?? { files: [], checked: true } });
+    emitEvent({ ...params, kind: 'turn.completed', changes });
   });
   codex.onNotification('error', (params) => emitEvent({ ...params, kind: 'error' }));
   codex.onNotification('thread/closed', ({ threadId }) => {
