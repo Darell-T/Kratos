@@ -4,13 +4,16 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, vi } from 'vitest';
 import type {
+  AccountInfo,
   CanUseTool,
   ElicitationRequest,
+  ModelInfo,
   OnElicitation,
   Options,
   PermissionUpdate,
   SDKMessage,
   SDKUserMessage,
+  SlashCommand,
 } from '@anthropic-ai/claude-agent-sdk';
 import type { ClaudeEvent, ClaudeProvider, ClaudeProviderOptions } from '../src/providers/claude';
 import { Store, type ClaudeInput } from '../src/store';
@@ -52,7 +55,19 @@ export function input(text: string): ClaudeInput {
 
 export const flush = () => new Promise<void>((resolve) => flushEvents(resolve));
 
-function fakeQuery(prompt: AsyncIterable<SDKUserMessage>, options: Options, interruptError: () => Error | undefined) {
+export interface FakeCli {
+  account: AccountInfo;
+  models: ModelInfo[];
+  commands: SlashCommand[];
+  plugins: { name: string; path: string; source?: string }[];
+}
+
+function fakeQuery(
+  prompt: AsyncIterable<SDKUserMessage>,
+  options: Options,
+  interruptError: () => Error | undefined,
+  cli: FakeCli,
+) {
   const output: SDKMessage[] = [];
   let wake: (() => void) | undefined;
   let ended: { error?: Error } | undefined;
@@ -92,6 +107,8 @@ function fakeQuery(prompt: AsyncIterable<SDKUserMessage>, options: Options, inte
       launch.closed = true;
       launch.exit();
     },
+    initializationResult: () => Promise.resolve({ account: cli.account, models: cli.models, commands: cli.commands }),
+    reloadPlugins: () => Promise.resolve({ plugins: cli.plugins }),
   });
   return { launch, query };
 }
@@ -100,10 +117,16 @@ function fakeSdk() {
   const launches: Launch[] = [];
   const transcripts = new Map<string, string[]>();
   let interruptError: Error | undefined;
+  const cli: FakeCli = {
+    account: { tokenSource: 'none', apiProvider: 'firstParty' },
+    models: [],
+    commands: [],
+    plugins: [],
+  };
   const transcriptKey = (sessionId: string, dir?: string) => JSON.stringify([dir, sessionId]);
   const module = {
     query: ({ prompt, options }: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => {
-      const { launch, query } = fakeQuery(prompt, options, () => interruptError);
+      const { launch, query } = fakeQuery(prompt, options, () => interruptError, cli);
       launches.push(launch);
       return query;
     },
@@ -128,7 +151,7 @@ function fakeSdk() {
   const failInterrupts = (error?: Error) => {
     interruptError = error;
   };
-  return { launches, module, record, failInterrupts };
+  return { launches, module, record, failInterrupts, cli };
 }
 
 async function loadProvider(store: Store, module: object, options: Partial<Omit<ClaudeProviderOptions, 'store'>>) {
@@ -141,7 +164,7 @@ async function loadProvider(store: Store, module: object, options: Partial<Omit<
 export async function setup(options: Partial<Omit<ClaudeProviderOptions, 'store'>> = {}) {
   const home = mkdtempSync(join(tmpdir(), 'kratos-claude-'));
   const store = new Store(home);
-  const { launches, module, record, failInterrupts } = fakeSdk();
+  const { launches, module, record, failInterrupts, cli } = fakeSdk();
   const provider = await loadProvider(store, module, options);
   const context = { provider, store, home };
   contexts.push(context);
@@ -180,6 +203,7 @@ export async function setup(options: Partial<Omit<ClaudeProviderOptions, 'store'
     launch,
     record: (messageId: string) => record(thread, messageId),
     failInterrupts,
+    cli,
     init,
     accept,
     start: async (messageId: string) => {

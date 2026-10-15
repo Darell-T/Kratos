@@ -613,7 +613,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     const usable = (source: string | undefined) => source !== undefined && source !== 'none';
     // Cloud providers such as Bedrock authenticate outside Claude Code and report no token source.
     if ((account.apiProvider ?? 'firstParty') !== 'firstParty') return true;
-    return usable(account.tokenSource) || usable(account.apiKeySource);
+    return account.email !== undefined || usable(account.tokenSource) || usable(account.apiKeySource);
   }
 
   function close(): Promise<void> {

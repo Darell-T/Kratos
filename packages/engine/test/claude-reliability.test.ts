@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ClaudeEvent } from '../src/providers/claude';
-import { A, B, C, D, flush, input, setup } from './claude-fixture';
+import { A, B, C, D, flush, folder, input, setup } from './claude-fixture';
 
 describe('Claude delivery when Claude Code exits', () => {
   it('fails a message the process never started, and judges later losses by the transcript', async () => {
@@ -182,5 +182,31 @@ describe('Claude restart recovery and settings', () => {
     ]);
     await expect(claude.sendMessage(claude.thread, input('C'))).rejects.toThrow('Claude provider is closed');
     await expect(claude.startThread('C:\\project-B')).rejects.toThrow('Claude provider is closed');
+  });
+
+  it('reports discovery from Claude Code without sending a prompt, and recognizes each kind of sign-in', async () => {
+    const claude = await setup();
+    claude.cli.models = [{ value: 'sonnet', displayName: 'Sonnet', description: 'Everyday coding' }];
+    claude.cli.commands = [{ name: 'review', description: 'Review the diff', argumentHint: '' }];
+    claude.cli.plugins = [{ name: 'pstack', path: 'C:\\plugins\\pstack', source: 'marketplace' }];
+    expect(await claude.providerModels()).toEqual(
+      new Map([['sonnet', { id: 'sonnet', name: 'Sonnet', details: 'Everyday coding' }]]),
+    );
+    expect(await claude.findSkills(folder)).toEqual(
+      new Map([['review', { name: 'review', details: 'Review the diff' }]]),
+    );
+    expect(await claude.findPlugins(folder)).toEqual(
+      new Map([['C:\\plugins\\pstack', { name: 'pstack', path: 'C:\\plugins\\pstack' }]]),
+    );
+    expect(claude.launch().options).toMatchObject({ cwd: folder, settingSources: ['user', 'project', 'local'] });
+    expect(claude.launches.every((launch) => launch.written.length === 0 && launch.closed)).toBe(true);
+
+    expect(await claude.isSignedIn()).toBe(false);
+    claude.cli.account = { email: 'dev@example.com', subscriptionType: 'Claude Pro', apiProvider: 'firstParty' };
+    expect(await claude.isSignedIn()).toBe(true);
+    claude.cli.account = { apiKeySource: 'ANTHROPIC_API_KEY', apiProvider: 'firstParty' };
+    expect(await claude.isSignedIn()).toBe(true);
+    claude.cli.account = { apiProvider: 'bedrock' };
+    expect(await claude.isSignedIn()).toBe(true);
   });
 });
