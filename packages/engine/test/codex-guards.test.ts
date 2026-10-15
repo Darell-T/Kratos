@@ -22,6 +22,35 @@ describe('Codex read-only threads', () => {
     await codex.start('turn-A', id);
     await sent;
     expect(await codex.requests()).toMatchObject([{ threadId: id, ...readOnly }]);
+    const commandAnswer = codex.answers();
+    await codex.ask('item/commandExecution/requestApproval', 'write', {
+      kind: 'command',
+      threadId: id,
+      turnId: 'turn-A',
+      itemId: 'command-A',
+      startedAtMs: 100,
+      environmentId: null,
+      command: 'rm -rf build',
+      reason: null,
+      cwd: 'C:\\project-C',
+    });
+    await codex.flush();
+    expect(codex.approvalsWaiting(id)).toEqual([]);
+    expect(await commandAnswer).toMatchObject({ id: 'write', result: { decision: 'cancel' } });
+    const permissionAnswer = codex.answers();
+    await codex.ask('item/permissions/requestApproval', 'widen', {
+      threadId: id,
+      turnId: 'turn-A',
+      itemId: 'permission-A',
+      environmentId: null,
+      startedAtMs: 100,
+      cwd: 'C:\\project-C',
+      reason: null,
+      permissions: { network: null, fileSystem: null },
+    });
+    await codex.flush();
+    expect(codex.permissionsWaiting(id)).toEqual([]);
+    expect(await permissionAnswer).toMatchObject({ id: 'widen', result: { permissions: {}, scope: 'turn' } });
     expect(() => codex.setThreadReadOnly(id, false)).toThrow('Stop the turn before changing permissions');
     await codex.complete('turn-A', id, 'completed');
 
@@ -108,6 +137,7 @@ describe('Codex turn changes', () => {
     await done('thread-A', 'turn-D', fileChange('f6', 'completed', 'n.ts'));
     await done('thread-A', 'turn-D', command('c4', 'failed'));
     await end('thread-A', 'turn-D');
+    await done('thread-A', 'turn-D', fileChange('late', 'completed', 'late.ts'));
 
     const sent = codex.sendMessage('thread-A', input('turn-E'));
     await done('thread-A', 'turn-E', fileChange('f7', 'completed', 'e.ts'));

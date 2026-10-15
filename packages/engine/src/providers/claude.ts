@@ -28,7 +28,7 @@ export type ClaudeEvent =
   | { kind: 'turn.startFailed'; threadId: string; message: string }
   | { kind: 'turn.timedOut'; threadId: string; turnId: string; message: string }
   | { kind: 'output'; threadId: string; turnId: string | null; message: SDKMessage }
-  | { kind: 'session.exited'; threadId: string; message: string }
+  | { kind: 'session.exited'; threadId: string; message: string; changes: TurnChanges }
   | { kind: 'message.updated'; message: ClaudeMessage }
   | ClaudeRequestEvent;
 
@@ -181,6 +181,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
   // A lost Claude Code process affects only its own thread, which reopens the session on its next turn.
   function retire(threadId: string, state: ThreadState, error: Error) {
     const initialized = state.session?.initialized ?? false;
+    const changes = state.changes.take();
     closeSession(state);
     clearTimeout(state.timer);
     clearRequests(threadId);
@@ -198,7 +199,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
         else updateMessage(message.id, initialized ? 'unknown' : 'failed', message.turnId, error.message);
       }
       settleWaiters(state);
-      emitEvent({ kind: 'session.exited', threadId, message: error.message });
+      emitEvent({ kind: 'session.exited', threadId, message: error.message, changes });
     })().catch((reason: unknown) => failProvider(threadId, state, reason));
   }
 
@@ -277,7 +278,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
       return;
     }
     closeSession(state);
-    emitEvent({ kind: 'session.exited', threadId, message: error.message });
+    emitEvent({ kind: 'session.exited', threadId, message: error.message, changes: state.changes.take() });
   }
 
   function acceptMessage(state: ThreadState, messageId: string) {
@@ -361,6 +362,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
   async function startTurn(threadId: string, state: ThreadState, message: ClaudeMessage): Promise<ClaudeMessage> {
     const turn: ActiveTurn = { kind: 'running', turnId: message.id, pending: new Set([message.id]) };
     state.turn = turn;
+    state.changes.take();
     turn.opening = openSession(threadId, state, turn, message);
     const session = await turn.opening;
     delete turn.opening;

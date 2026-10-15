@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { A, B, C, D, flush, folder, input, setup } from './claude-fixture';
+import { A, B, C, D, E, flush, folder, input, setup } from './claude-fixture';
 
 const readOnly = { behavior: 'deny', message: 'This Kratos thread is read-only' };
 const readOnlyLaunch = {
   permissionMode: 'plan',
-  disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell'],
+  disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'Monitor'],
 };
+const F = '00000000-0000-4000-8000-00000000000f';
 
 describe('Claude read-only threads', () => {
   it('plans instead of acting, denies every request but questions, and keeps the setting across settings changes and restarts', async () => {
@@ -83,6 +84,19 @@ describe('Claude turn changes', () => {
     await claude.useTool('PostToolUse', 'Edit', { file_path: 'e.ts' });
     await claude.finish([D]);
 
+    await claude.start(E);
+    await claude.useTool('PostToolUse', 'Edit', { file_path: 'f.ts' });
+    await claude.exit(new Error('Claude Code process exited with code 3'));
+    await flush();
+    expect(claude.events.filter((event) => event.kind === 'session.exited')).toMatchObject([
+      { changes: { files: ['f.ts'], checked: false } },
+    ]);
+    await claude.resumeQueue(claude.thread);
+    await claude.useTool('PostToolUse', 'Edit', { file_path: 'late.ts' });
+    await claude.start(F);
+    await claude.useTool('PostToolUse', 'Monitor', { command: 'npm run dev' });
+    await claude.finish([F]);
+
     expect(
       claude.events.flatMap((event) => (event.kind === 'turn.completed' ? [[event.turnId, event.changes]] : [])),
     ).toEqual([
@@ -90,6 +104,7 @@ describe('Claude turn changes', () => {
       [B, { files: ['n.ipynb', 'm.ts'], checked: true }],
       [C, { files: [], checked: true }],
       [D, { files: ['e.ts'], checked: false }],
+      [F, { files: [], checked: true }],
     ]);
   });
 });

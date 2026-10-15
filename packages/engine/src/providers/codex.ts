@@ -124,7 +124,9 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     codex,
     (id) => {
       const state = threads.get(id);
-      return closed || state?.turn.kind === 'unavailable' ? undefined : state?.settings.permissions;
+      return closed || state?.turn.kind === 'unavailable' || state?.settings.readOnly
+        ? undefined
+        : state?.settings.permissions;
     },
     (threadId) => emitEvent({ kind: 'approvals.changed', threadId, approvals: approvals.approvalsWaiting(threadId) }),
   );
@@ -367,6 +369,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       startPromise: Promise.resolve().then(() => submit()),
     };
     state.turn = starting;
+    state.changes.take();
     const submit = async (): Promise<ActiveTurn | undefined> => {
       try {
         if (closed) throw new Error('Codex provider is closed');
@@ -830,7 +833,8 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     });
   });
   codex.onServerRequest('item/permissions/requestApproval', (params, requestId) => {
-    if (closed || !threads.has(params.threadId) || threads.get(params.threadId)?.turn.kind === 'unavailable')
+    const state = threads.get(params.threadId);
+    if (closed || !state || state.turn.kind === 'unavailable' || state.settings.readOnly)
       return { permissions: {}, scope: 'turn' };
     return new Promise<v2.PermissionsRequestApprovalResponse>((resolve) => {
       permissionRequests.set(requestId, { params, resolve });

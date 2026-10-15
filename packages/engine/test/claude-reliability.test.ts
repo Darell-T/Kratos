@@ -11,7 +11,12 @@ describe('Claude delivery when Claude Code exits', () => {
     await claude.exit(new Error(notLoggedIn));
     expect(await failed).toMatchObject({ message: notLoggedIn });
     expect(claude.messages(claude.thread)).toMatchObject([{ id: A, status: 'failed', error: notLoggedIn }]);
-    expect(claude.events).toContainEqual({ kind: 'session.exited', threadId: claude.thread, message: notLoggedIn });
+    expect(claude.events).toContainEqual({
+      kind: 'session.exited',
+      threadId: claude.thread,
+      message: notLoggedIn,
+      changes: { files: [], checked: true },
+    });
 
     const retried = claude.retryMessage(claude.thread, A);
     await flush();

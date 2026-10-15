@@ -119,7 +119,12 @@ describe('Claude turns through a scripted SDK', () => {
     const message = 'Claude did not stop the turn; its process was closed';
     expect(claude.launch().closed).toBe(true);
     expect(await idle).toMatchObject({ message });
-    expect(claude.events).toContainEqual({ kind: 'session.exited', threadId: claude.thread, message });
+    expect(claude.events).toContainEqual({
+      kind: 'session.exited',
+      threadId: claude.thread,
+      message,
+      changes: { files: [], checked: true },
+    });
     expect(claude.messages(claude.thread)).toMatchObject([
       { id: A, status: 'accepted' },
       { id: B, status: 'queued' },

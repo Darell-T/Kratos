@@ -50,7 +50,7 @@ const editPathKeys: Record<string, 'file_path' | 'notebook_path'> = {
   MultiEdit: 'file_path',
   NotebookEdit: 'notebook_path',
 };
-const commandTools = ['Bash', 'PowerShell'];
+const commandTools = ['Bash', 'PowerShell', 'Monitor'];
 // Disallowed tools are deny rules, which win over any allow rule the user's settings grant.
 const readOnlyMode = {
   permissionMode: 'plan',
