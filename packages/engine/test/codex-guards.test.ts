@@ -2,79 +2,70 @@ import { describe, expect, it } from 'vitest';
 import type { v2 } from '@kratos/codex';
 import { input, setup, turn } from './codex-fixture';
 
-const readOnly = { sandboxPolicy: { type: 'readOnly', networkAccess: false }, approvalPolicy: 'never' };
-
-describe('Codex read-only threads', () => {
-  it('starts, resumes and runs turns in the read-only sandbox without approvals, and changes only while idle', async () => {
+describe('Codex plan mode', () => {
+  it('sends the collaboration mode on every turn, leaves the sandbox to the thread permissions, and keeps the setting across restarts', async () => {
     const codex = await setup();
-    const id = await codex.startThread('C:\\project-C', { readOnly: true });
-    expect(codex.store.getCodexThread(id)?.readOnly).toBe(true);
-    expect(codex.store.getCodexThread('thread-A')?.readOnly).toBe(false);
-    expect(
-      (await codex.threadRequests()).map(({ method, params }) => [method, params.sandbox, params.approvalPolicy]),
-    ).toEqual([
-      ['thread/start', 'workspace-write', 'on-request'],
-      ['thread/start', 'workspace-write', 'on-request'],
-      ['thread/start', 'read-only', 'never'],
-    ]);
+    const id = await codex.startThread('C:\\project-C', { plan: true, model: 'plan-model' });
+    expect(codex.store.getCodexThread(id)).toMatchObject({ plan: true, model: 'plan-model' });
+    expect(codex.store.getCodexThread('thread-A')?.plan).toBe(false);
+    const run = async (turnId: string) => {
+      const sent = codex.sendMessage(id, input(turnId));
+      await codex.start(turnId, id);
+      await sent;
+    };
 
-    const sent = codex.sendMessage(id, input('A'));
-    await codex.start('turn-A', id);
-    await sent;
-    expect(await codex.requests()).toMatchObject([{ threadId: id, ...readOnly }]);
-    const commandAnswer = codex.answers();
-    await codex.ask('item/commandExecution/requestApproval', 'write', {
-      kind: 'command',
-      threadId: id,
-      turnId: 'turn-A',
-      itemId: 'command-A',
-      startedAtMs: 100,
-      environmentId: null,
-      command: 'rm -rf build',
-      reason: null,
-      cwd: 'C:\\project-C',
-    });
-    await codex.flush();
-    expect(codex.approvalsWaiting(id)).toEqual([]);
-    expect(await commandAnswer).toMatchObject({ id: 'write', result: { decision: 'cancel' } });
-    const permissionAnswer = codex.answers();
-    await codex.ask('item/permissions/requestApproval', 'widen', {
-      threadId: id,
-      turnId: 'turn-A',
-      itemId: 'permission-A',
-      environmentId: null,
-      startedAtMs: 100,
-      cwd: 'C:\\project-C',
-      reason: null,
-      permissions: { network: null, fileSystem: null },
-    });
-    await codex.flush();
-    expect(codex.permissionsWaiting(id)).toEqual([]);
-    expect(await permissionAnswer).toMatchObject({ id: 'widen', result: { permissions: {}, scope: 'turn' } });
-    expect(() => codex.setThreadReadOnly(id, false)).toThrow('Stop the turn before changing permissions');
+    await run('turn-A');
+    expect(await codex.requests()).toMatchObject([
+      {
+        threadId: id,
+        collaborationMode: {
+          mode: 'plan',
+          settings: { model: 'plan-model', reasoning_effort: null, developer_instructions: null },
+        },
+      },
+    ]);
+    expect(() => codex.setThreadPlanMode(id, false)).toThrow('Stop the turn before changing permissions');
+    expect(codex.store.getCodexThread(id)?.plan).toBe(true);
     await codex.complete('turn-A', id, 'completed');
 
-    codex.setThreadReadOnly(id, false);
-    const normal = codex.sendMessage(id, input('B'));
-    await codex.start('turn-B', id);
-    await normal;
-    expect((await codex.requests()).at(-1)).toMatchObject({
-      sandboxPolicy: { type: 'workspaceWrite' },
-      approvalPolicy: 'on-request',
-    });
+    codex.setThreadPlanMode(id, false);
+    await run('turn-B');
     await codex.complete('turn-B', id, 'completed');
+    codex.setThreadPermissions(id, 'fullAccess');
+    await run('turn-C');
+    await codex.complete('turn-C', id, 'completed');
+    codex.setThreadPlanMode(id, true);
+    await run('turn-D');
+    await codex.complete('turn-D', id, 'completed');
+    expect(
+      (await codex.requests()).map(({ collaborationMode, sandboxPolicy, approvalPolicy }) => [
+        collaborationMode?.mode,
+        sandboxPolicy?.type,
+        approvalPolicy,
+      ]),
+    ).toEqual([
+      ['plan', 'workspaceWrite', 'on-request'],
+      ['default', 'workspaceWrite', 'on-request'],
+      ['default', 'dangerFullAccess', 'never'],
+      ['plan', 'dangerFullAccess', 'never'],
+    ]);
 
-    codex.setThreadReadOnly(id, true);
     const next = await codex.restart();
     await next.provider.resumeThread(id);
-    expect(await next.control('test/threadRequests', {})).toMatchObject([
-      { method: 'thread/resume', params: { threadId: id, sandbox: 'read-only', approvalPolicy: 'never' } },
-    ]);
-    const resumed = next.provider.sendMessage(id, input('C'));
+    const resumed = next.provider.sendMessage(id, input('E'));
     await next.control('test/echo', {});
-    await next.control('test/settleTurn', { method: 'turn/start', threadId: id, result: { turn: turn('turn-C') } });
+    await next.control('test/settleTurn', { method: 'turn/start', threadId: id, result: { turn: turn('turn-E') } });
     await resumed;
-    expect(await next.control('test/turnRequests', {})).toMatchObject([{ method: 'turn/start', params: readOnly }]);
+    expect(await next.control('test/turnRequests', {})).toMatchObject([
+      {
+        method: 'turn/start',
+        params: {
+          collaborationMode: { mode: 'plan', settings: { model: 'plan-model' } },
+          sandboxPolicy: { type: 'dangerFullAccess' },
+          approvalPolicy: 'never',
+        },
+      },
+    ]);
   });
 });
 

@@ -3,7 +3,6 @@ import { createInterface } from 'node:readline';
 
 let initialized = false;
 const turnRequests = [];
-const threadRequests = [];
 const pendingTurns = new Map();
 const threads = new Map();
 let threadNumber = 0;
@@ -58,14 +57,12 @@ const handlers = {
   'turn/steer': holdTurn,
   'turn/interrupt': holdTurn,
   'thread/start': ({ id, params }) => {
-    threadRequests.push({ method: 'thread/start', params });
     const thread = threadData('thread-' + String.fromCharCode(65 + threadNumber++), params.cwd);
     if (params.model) thread.model = params.model;
     threads.set(thread.id, thread);
     reply(id, threadReply(thread));
   },
   'thread/resume': ({ id, params }) => {
-    threadRequests.push({ method: 'thread/resume', params });
     const thread = threads.get(params.threadId) ?? threadData(params.threadId, params.cwd);
     if (params.model) thread.model = params.model;
     threads.set(thread.id, thread);
@@ -98,7 +95,6 @@ const handlers = {
     reply(id, null);
   },
   'test/turnRequests': ({ id }) => reply(id, turnRequests),
-  'test/threadRequests': ({ id }) => reply(id, threadRequests),
   'test/settleTurn': ({ id, params }) => {
     const pending = [...pendingTurns.values()].find(
       (request) => request.method === params.method && request.params.threadId === params.threadId,

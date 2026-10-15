@@ -7,6 +7,7 @@ import {
   connectCodex,
   CodexRequestError,
   CodexTimeoutError,
+  type CollaborationMode,
   type NotificationMethod,
   type NotificationParams,
   type ServerRequestMethod,
@@ -25,11 +26,8 @@ interface TurnRequest {
     clientUserMessageId?: string;
     sandboxPolicy?: v2.SandboxPolicy;
     approvalPolicy?: v2.AskForApproval;
+    collaborationMode?: CollaborationMode;
   };
-}
-interface ThreadRequest {
-  method: string;
-  params: { threadId?: string; cwd?: string; sandbox?: v2.SandboxMode; approvalPolicy?: v2.AskForApproval };
 }
 interface FakeControls {
   request(method: string, params: unknown): Promise<unknown>;
@@ -137,7 +135,6 @@ export async function setup(options: Partial<Omit<CodexProviderOptions, 'store'>
       const requests = (await controls.request('test/turnRequests', {})) as TurnRequest[];
       return requests.filter((request) => request.method === method).map((request) => request.params);
     },
-    threadRequests: async () => (await controls.request('test/threadRequests', {})) as ThreadRequest[],
     settleStart: (result?: { turn: v2.Turn }, error?: string, code?: number) =>
       settle({ method: 'turn/start', threadId: 'thread-A', result, error, code }),
     start: (id: string, threadId = 'thread-A', status: v2.Turn['status'] = 'inProgress') =>

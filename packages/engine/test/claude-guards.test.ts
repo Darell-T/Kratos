@@ -1,28 +1,39 @@
 import { describe, expect, it } from 'vitest';
 import { A, B, C, D, E, flush, folder, input, setup } from './claude-fixture';
 
-const readOnly = { behavior: 'deny', message: 'This Kratos thread is read-only' };
-const readOnlyLaunch = {
-  permissionMode: 'plan',
-  disallowedTools: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Bash', 'PowerShell', 'Monitor'],
+const planOn = {
+  behavior: 'deny',
+  message: 'Plan mode is on. The user turns it off in Kratos to carry out the plan.',
 };
 const F = '00000000-0000-4000-8000-00000000000f';
 
-describe('Claude read-only threads', () => {
-  it('plans instead of acting, denies every request but questions, and keeps the setting across settings changes and restarts', async () => {
+describe('Claude plan mode', () => {
+  it('launches in the native plan mode, denies only ExitPlanMode, and keeps the setting across settings changes and restarts', async () => {
     const claude = await setup();
-    expect(claude.store.getClaudeThread(claude.thread)?.readOnly).toBe(false);
-    const created = await claude.startThread(folder, { readOnly: true });
-    expect(claude.store.getClaudeThread(created)?.readOnly).toBe(true);
-    claude.setThreadPermissions(claude.thread, 'fullAccess');
-    claude.setThreadReadOnly(claude.thread, true);
-    await claude.start(A);
-    expect(claude.launch().options).toMatchObject(readOnlyLaunch);
-    expect(Object.keys(claude.launch().options)).not.toContain('allowDangerouslySkipPermissions');
+    expect(claude.store.getClaudeThread(claude.thread)?.plan).toBe(false);
+    const created = await claude.startThread(folder, { plan: true });
+    expect(claude.store.getClaudeThread(created)?.plan).toBe(true);
 
-    expect(await claude.ask('Bash', { command: 'rm -rf build' }).answer).toEqual(readOnly);
-    expect(await claude.ask('ExitPlanMode', { plan: 'Delete the build folder' }).answer).toEqual(readOnly);
+    claude.setThreadPermissions(claude.thread, 'fullAccess');
+    claude.setThreadPlanMode(claude.thread, true);
+    await claude.start(A);
+    expect(claude.launch().options).toMatchObject({ permissionMode: 'plan' });
+    expect(Object.keys(claude.launch().options)).not.toContain('allowDangerouslySkipPermissions');
+    expect(await claude.ask('ExitPlanMode', { plan: 'Delete the build folder' }).answer).toEqual(planOn);
     expect(claude.approvalsWaiting(claude.thread)).toEqual([]);
+    await claude.finish([A]);
+
+    claude.setThreadPermissions(claude.thread, 'askMe');
+    await claude.start(B);
+    expect(claude.launch().options).toMatchObject({ permissionMode: 'plan' });
+    const command = claude.ask('Bash', { command: 'npm test' }, { toolUseID: 'command-1' });
+    await flush();
+    expect(await claude.ask('ExitPlanMode', { plan: 'Delete the build folder' }).answer).toEqual(planOn);
+    expect(claude.approvalsWaiting(claude.thread)).toMatchObject([
+      { requestId: 'command-1', toolName: 'Bash', input: { command: 'npm test' } },
+    ]);
+    expect(claude.decideApproval('command-1', 'allow')).toBe(true);
+    expect(await command.answer).toMatchObject({ behavior: 'allow' });
     const questions = [{ question: 'Which folder?', header: 'Folder', options: [], multiSelect: false }];
     const asked = claude.ask('AskUserQuestion', { questions }, { toolUseID: 'question-1' });
     await flush();
@@ -31,28 +42,29 @@ describe('Claude read-only threads', () => {
     expect(claude.answerQuestion('question-1', { 'Which folder?': 'build' })).toBe(true);
     expect(await asked.answer).toMatchObject({ behavior: 'allow' });
 
-    expect(() => claude.setThreadReadOnly(claude.thread, false)).toThrow('Stop the turn before changing permissions');
-    await claude.finish([A]);
-    claude.setThreadReadOnly(claude.thread, false);
-    expect(claude.launch().closed).toBe(true);
-    await claude.start(B);
-    expect(claude.launch().options).toMatchObject({
-      permissionMode: 'bypassPermissions',
-      allowDangerouslySkipPermissions: true,
-    });
-    expect(Object.keys(claude.launch().options)).not.toContain('disallowedTools');
-    expect(await claude.ask('Bash', { command: 'rm -rf build' }).answer).toMatchObject({ behavior: 'allow' });
+    expect(() => claude.setThreadPlanMode(claude.thread, false)).toThrow('Stop the turn before changing permissions');
+    expect(claude.store.getClaudeThread(claude.thread)?.plan).toBe(true);
     await claude.finish([B]);
-
-    claude.setThreadReadOnly(claude.thread, true);
-    const restored = await claude.restart();
-    expect(claude.store.getClaudeThread(claude.thread)).toMatchObject({ readOnly: true, permissions: 'fullAccess' });
-    await restored.resumeThread(claude.thread);
-    const sent = restored.sendMessage(claude.thread, input('C'), C);
+    claude.setThreadPlanMode(claude.thread, false);
+    expect(claude.launch().closed).toBe(true);
+    await claude.start(C);
+    expect(claude.launch().options).toMatchObject({ permissionMode: 'default' });
+    const exit = claude.ask('ExitPlanMode', { plan: 'Delete the build folder' }, { toolUseID: 'exit-1' });
     await flush();
-    expect(claude.launch().options).toMatchObject({ cwd: folder, resume: claude.thread, ...readOnlyLaunch });
-    expect(await claude.ask('Write', { file_path: 'a.ts' }).answer).toEqual(readOnly);
-    await claude.accept(C);
+    expect(claude.approvalsWaiting(claude.thread)).toMatchObject([{ requestId: 'exit-1', toolName: 'ExitPlanMode' }]);
+    expect(claude.decideApproval('exit-1', 'allow')).toBe(true);
+    expect(await exit.answer).toMatchObject({ behavior: 'allow' });
+    await claude.finish([C]);
+
+    claude.setThreadPlanMode(claude.thread, true);
+    const restored = await claude.restart();
+    expect(claude.store.getClaudeThread(claude.thread)).toMatchObject({ plan: true, permissions: 'askMe' });
+    await restored.resumeThread(claude.thread);
+    const sent = restored.sendMessage(claude.thread, input('D'), D);
+    await flush();
+    expect(claude.launch().options).toMatchObject({ cwd: folder, resume: claude.thread, permissionMode: 'plan' });
+    expect(await claude.ask('ExitPlanMode', { plan: 'Delete the build folder' }).answer).toEqual(planOn);
+    await claude.accept(D);
     await sent;
   });
 });

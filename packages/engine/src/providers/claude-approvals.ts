@@ -57,11 +57,14 @@ type ToolOptions = Parameters<CanUseTool>[2];
 
 const declined: PermissionResult = { behavior: 'deny', message: 'The user declined this action' };
 const unavailable: PermissionResult = { behavior: 'deny', message: 'This Kratos thread is not available' };
-const readOnly: PermissionResult = { behavior: 'deny', message: 'This Kratos thread is read-only' };
+const planOn: PermissionResult = {
+  behavior: 'deny',
+  message: 'Plan mode is on. The user turns it off in Kratos to carry out the plan.',
+};
 const questionSchema = z.object({ questions: z.array(z.unknown()) });
 
 export function createClaudeApprovals(
-  threadFor: (threadId: string) => { permissions: Permission; readOnly: boolean; turnId: string | null } | undefined,
+  threadFor: (threadId: string) => { permissions: Permission; plan: boolean; turnId: string | null } | undefined,
   emit: (event: ClaudeRequestEvent) => void,
 ) {
   const requests = new Map<string, Request>();
@@ -132,8 +135,7 @@ export function createClaudeApprovals(
     async (toolName, input, options) => {
       const thread = threadFor(threadId);
       if (!thread || options.signal.aborted) return unavailable;
-      if (thread.readOnly)
-        return toolName === 'AskUserQuestion' ? ask(threadId, thread.turnId, toolName, input, options) : readOnly;
+      if (thread.plan && toolName === 'ExitPlanMode') return planOn;
       if (thread.permissions === 'fullAccess') return { behavior: 'allow', updatedInput: input };
       return ask(threadId, thread.turnId, toolName, input, options);
     };

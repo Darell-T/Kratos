@@ -61,7 +61,7 @@ export interface CodexThread {
   folder: string;
   model: string;
   permissions: z.infer<typeof permission>;
-  readOnly: boolean;
+  plan: boolean;
   pausedError: string | null;
 }
 
@@ -99,7 +99,7 @@ export interface ClaudeThread {
   folder: string;
   model: string | null;
   permissions: z.infer<typeof permission>;
-  readOnly: boolean;
+  plan: boolean;
   pausedError: string | null;
   runningTurn: string | null;
 }
@@ -181,8 +181,8 @@ const migrations: readonly string[] = [
   CREATE INDEX claude_messages_by_thread ON claude_messages (thread_id);
   `,
   `
-  ALTER TABLE codex_threads ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
-  ALTER TABLE claude_threads ADD COLUMN read_only INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE codex_threads ADD COLUMN plan INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE claude_threads ADD COLUMN plan INTEGER NOT NULL DEFAULT 0;
   `,
 ];
 
@@ -340,11 +340,11 @@ export class Store {
   saveCodexThread(thread: CodexThread): void {
     this.db
       .prepare(
-        `INSERT INTO codex_threads (id, folder, model, permissions, read_only, paused_error) VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO codex_threads (id, folder, model, permissions, plan, paused_error) VALUES (?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET folder = excluded.folder, model = excluded.model,
-      permissions = excluded.permissions, read_only = excluded.read_only, paused_error = excluded.paused_error`,
+      permissions = excluded.permissions, plan = excluded.plan, paused_error = excluded.paused_error`,
       )
-      .run(thread.id, thread.folder, thread.model, thread.permissions, thread.readOnly ? 1 : 0, thread.pausedError);
+      .run(thread.id, thread.folder, thread.model, thread.permissions, thread.plan ? 1 : 0, thread.pausedError);
   }
 
   getCodexThread(id: string): CodexThread | undefined {
@@ -356,10 +356,10 @@ export class Store {
         folder: z.string(),
         model: z.string(),
         permissions: permission,
-        readOnly: z.boolean(),
+        plan: z.boolean(),
         pausedError: z.string().nullable(),
       })
-      .parse({ ...row, readOnly: row.read_only === 1, pausedError: row.paused_error });
+      .parse({ ...row, plan: row.plan === 1, pausedError: row.paused_error });
   }
 
   addCodexMessage(id: string, threadId: string, input: v2.UserInput[]): CodexMessage {
@@ -406,10 +406,10 @@ export class Store {
   saveClaudeThread(thread: ClaudeThread): void {
     this.db
       .prepare(
-        `INSERT INTO claude_threads (id, folder, model, permissions, read_only, paused_error, running_turn)
+        `INSERT INTO claude_threads (id, folder, model, permissions, plan, paused_error, running_turn)
       VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (id) DO UPDATE SET folder = excluded.folder, model = excluded.model,
-      permissions = excluded.permissions, read_only = excluded.read_only, paused_error = excluded.paused_error,
+      permissions = excluded.permissions, plan = excluded.plan, paused_error = excluded.paused_error,
       running_turn = excluded.running_turn`,
       )
       .run(
@@ -417,7 +417,7 @@ export class Store {
         thread.folder,
         thread.model,
         thread.permissions,
-        thread.readOnly ? 1 : 0,
+        thread.plan ? 1 : 0,
         thread.pausedError,
         thread.runningTurn,
       );
@@ -432,11 +432,11 @@ export class Store {
         folder: z.string(),
         model: z.string().nullable(),
         permissions: permission,
-        readOnly: z.boolean(),
+        plan: z.boolean(),
         pausedError: z.string().nullable(),
         runningTurn: z.string().nullable(),
       })
-      .parse({ ...row, readOnly: row.read_only === 1, pausedError: row.paused_error, runningTurn: row.running_turn });
+      .parse({ ...row, plan: row.plan === 1, pausedError: row.paused_error, runningTurn: row.running_turn });
   }
 
   addClaudeMessage(id: string, threadId: string, input: ClaudeInput): ClaudeMessage {

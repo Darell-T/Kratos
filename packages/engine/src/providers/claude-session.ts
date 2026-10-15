@@ -20,7 +20,7 @@ export interface ClaudeSessionOptions {
   folder: string;
   model: string | null;
   permissions: Permission;
-  readOnly: boolean;
+  plan: boolean;
   canUseTool: CanUseTool;
   onElicitation: OnElicitation;
   onToolUse: (use: { kind: 'edit'; path: string } | { kind: 'command' }) => void;
@@ -51,11 +51,7 @@ const editPathKeys: Record<string, 'file_path' | 'notebook_path'> = {
   NotebookEdit: 'notebook_path',
 };
 const commandTools = ['Bash', 'PowerShell', 'Monitor'];
-// Disallowed tools are deny rules, which win over any allow rule the user's settings grant.
-const readOnlyMode = {
-  permissionMode: 'plan',
-  disallowedTools: [...Object.keys(editPathKeys), ...commandTools],
-} satisfies Options;
+const planMode = { permissionMode: 'plan' } satisfies Options;
 const toolUseSchema = z.object({
   tool_name: z.string(),
   tool_input: z.object({ file_path: z.string().optional(), notebook_path: z.string().optional() }),
@@ -141,7 +137,7 @@ export async function openClaudeSession(
     options: {
       cwd: options.folder,
       ...(options.model ? { model: options.model } : {}),
-      ...(options.readOnly ? readOnlyMode : permissionModes[options.permissions]),
+      ...(options.plan ? planMode : permissionModes[options.permissions]),
       ...(resume ? { resume: options.threadId } : { sessionId: options.threadId }),
       settingSources,
       persistSession: true,

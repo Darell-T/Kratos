@@ -76,7 +76,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     if (closed || !state || state.turn.kind === 'unavailable') return undefined;
     return {
       permissions: state.settings.permissions,
-      readOnly: state.settings.readOnly,
+      plan: state.settings.plan,
       turnId: isActive(state.turn) ? state.turn.turnId : null,
     };
   }, emitEvent);
@@ -325,7 +325,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
           folder: state.settings.folder,
           model: state.settings.model,
           permissions: state.settings.permissions,
-          readOnly: state.settings.readOnly,
+          plan: state.settings.plan,
           canUseTool: canUseTool(threadId),
           onElicitation: onElicitation(threadId),
           onToolUse: (use) => (use.kind === 'edit' ? state.changes.edited(use.path) : state.changes.ran()),
@@ -487,10 +487,10 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     closeSession(state);
   }
 
-  function setThreadReadOnly(threadId: string, readOnly: boolean) {
+  function setThreadPlanMode(threadId: string, plan: boolean) {
     const state = requireThread(threadId);
     if (isActive(state.turn)) throw new Error('Stop the turn before changing permissions');
-    saveThreadSettings(state, { ...state.settings, readOnly });
+    saveThreadSettings(state, { ...state.settings, plan });
     closeSession(state);
   }
 
@@ -558,7 +558,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
 
   async function startThread(
     folder: string,
-    settings: { model?: string; permissions?: Permission; readOnly?: boolean } = {},
+    settings: { model?: string; permissions?: Permission; plan?: boolean } = {},
   ): Promise<string> {
     if (closed) throw new Error('Claude provider is closed');
     const permissions = permissionSchema.parse(settings.permissions ?? 'askMe');
@@ -568,7 +568,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
       folder,
       model: settings.model || null,
       permissions,
-      readOnly: settings.readOnly ?? false,
+      plan: settings.plan ?? false,
       pausedError: null,
       runningTurn: null,
     });
@@ -673,7 +673,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     resumeQueue,
     setThreadModel,
     setThreadPermissions,
-    setThreadReadOnly,
+    setThreadPlanMode,
     providerModels,
     findSkills,
     findPlugins,
