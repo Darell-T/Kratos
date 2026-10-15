@@ -26,6 +26,7 @@ interface TurnRequest {
     clientUserMessageId?: string;
     sandboxPolicy?: v2.SandboxPolicy;
     approvalPolicy?: v2.AskForApproval;
+    approvalsReviewer?: v2.ApprovalsReviewer;
     collaborationMode?: CollaborationMode;
   };
 }

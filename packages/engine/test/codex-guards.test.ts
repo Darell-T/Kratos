@@ -3,7 +3,7 @@ import type { v2 } from '@kratos/codex';
 import { input, setup, turn } from './codex-fixture';
 
 describe('Codex plan mode', () => {
-  it('sends the collaboration mode on every turn, leaves the sandbox to the thread permissions, and keeps the setting across restarts', async () => {
+  it('sends the collaboration mode on every turn, runs plan turns read-only with the user approving, and keeps the setting across restarts', async () => {
     const codex = await setup();
     const id = await codex.startThread('C:\\project-C', { plan: true, model: 'plan-model' });
     expect(codex.store.getCodexThread(id)).toMatchObject({ plan: true, model: 'plan-model' });
@@ -36,33 +36,52 @@ describe('Codex plan mode', () => {
     await codex.complete('turn-C', id, 'completed');
     codex.setThreadPlanMode(id, true);
     await run('turn-D');
+    await codex.ask('item/commandExecution/requestApproval', 'plan-command', {
+      kind: 'command',
+      threadId: id,
+      turnId: 'turn-D',
+      itemId: 'command-item',
+      startedAtMs: 100,
+      environmentId: null,
+      command: 'rm -rf build',
+      reason: 'Clean the build',
+      cwd: 'C:\\project-C',
+    });
+    expect(codex.approvalsWaiting(id)).toMatchObject([{ requestId: 'plan-command', command: 'rm -rf build' }]);
+    expect(codex.decideCommand('plan-command', 'decline')).toBe(true);
     await codex.complete('turn-D', id, 'completed');
+    codex.setThreadPermissions(id, 'approveForMe');
+    await run('turn-E');
+    await codex.complete('turn-E', id, 'completed');
     expect(
-      (await codex.requests()).map(({ collaborationMode, sandboxPolicy, approvalPolicy }) => [
+      (await codex.requests()).map(({ collaborationMode, sandboxPolicy, approvalPolicy, approvalsReviewer }) => [
         collaborationMode?.mode,
-        sandboxPolicy?.type,
+        sandboxPolicy,
         approvalPolicy,
+        approvalsReviewer,
       ]),
     ).toEqual([
-      ['plan', 'workspaceWrite', 'on-request'],
-      ['default', 'workspaceWrite', 'on-request'],
-      ['default', 'dangerFullAccess', 'never'],
-      ['plan', 'dangerFullAccess', 'never'],
+      ['plan', { type: 'readOnly', networkAccess: false }, 'on-request', 'user'],
+      ['default', expect.objectContaining({ type: 'workspaceWrite' }), 'on-request', 'user'],
+      ['default', { type: 'dangerFullAccess' }, 'never', 'user'],
+      ['plan', { type: 'readOnly', networkAccess: false }, 'on-request', 'user'],
+      ['plan', { type: 'readOnly', networkAccess: false }, 'on-request', 'user'],
     ]);
 
     const next = await codex.restart();
     await next.provider.resumeThread(id);
-    const resumed = next.provider.sendMessage(id, input('E'));
+    const resumed = next.provider.sendMessage(id, input('F'));
     await next.control('test/echo', {});
-    await next.control('test/settleTurn', { method: 'turn/start', threadId: id, result: { turn: turn('turn-E') } });
+    await next.control('test/settleTurn', { method: 'turn/start', threadId: id, result: { turn: turn('turn-F') } });
     await resumed;
     expect(await next.control('test/turnRequests', {})).toMatchObject([
       {
         method: 'turn/start',
         params: {
           collaborationMode: { mode: 'plan', settings: { model: 'plan-model' } },
-          sandboxPolicy: { type: 'dangerFullAccess' },
-          approvalPolicy: 'never',
+          sandboxPolicy: { type: 'readOnly', networkAccess: false },
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'user',
         },
       },
     ]);
@@ -97,7 +116,7 @@ function command(id: string, status: v2.CommandExecutionStatus): v2.ThreadItem {
 }
 
 describe('Codex turn changes', () => {
-  it('reports the files each thread edited per turn and whether a command ran after the last edit, ignoring declined work', async () => {
+  it('reports the files each thread edited per turn and whether one changed after the last command, even with a follow-up queued, ignoring declined work', async () => {
     const codex = await setup();
     const done = (threadId: string, turnId: string, item: v2.ThreadItem) =>
       codex.emit('item/completed', { threadId, turnId, completedAtMs: 102000, item });
@@ -116,10 +135,12 @@ describe('Codex turn changes', () => {
     await done('thread-A', 'turn-A', fileChange('f3', 'completed', 'b.ts', 'a.ts'));
     await done('thread-A', 'turn-A', fileChange('f4', 'declined', 'c.ts'));
     await done('thread-A', 'turn-A', command('c2', 'declined'));
+    const queued = codex.sendMessage('thread-A', input('turn-C'));
     await end('thread-A', 'turn-A');
     await end('thread-B', 'turn-B');
 
-    await begin('thread-A', 'turn-C');
+    await codex.start('turn-C', 'thread-A');
+    await queued;
     await done('thread-A', 'turn-C', fileChange('f5', 'declined', 'd.ts'));
     await done('thread-A', 'turn-C', command('c3', 'declined'));
     await end('thread-A', 'turn-C');
@@ -132,17 +153,19 @@ describe('Codex turn changes', () => {
 
     const sent = codex.sendMessage('thread-A', input('turn-E'));
     await done('thread-A', 'turn-E', fileChange('f7', 'completed', 'e.ts'));
+    const followUp = codex.sendMessage('thread-A', input('turn-F'));
     await codex.start('turn-E', 'thread-A', 'completed');
     await sent;
+    await followUp;
 
     expect(
       codex.events.flatMap((event) => (event.kind === 'turn.completed' ? [[event.turn.id, event.changes]] : [])),
     ).toEqual([
-      ['turn-A', { files: ['a.ts', 'b.ts'], checked: false }],
-      ['turn-B', { files: ['other.ts'], checked: false }],
-      ['turn-C', { files: [], checked: true }],
-      ['turn-D', { files: ['n.ts'], checked: true }],
-      ['turn-E', { files: ['e.ts'], checked: false }],
+      ['turn-A', { files: ['a.ts', 'b.ts'], editedSinceCommand: true }],
+      ['turn-B', { files: ['other.ts'], editedSinceCommand: true }],
+      ['turn-C', { files: [], editedSinceCommand: false }],
+      ['turn-D', { files: ['n.ts'], editedSinceCommand: false }],
+      ['turn-E', { files: ['e.ts'], editedSinceCommand: true }],
     ]);
   });
 });

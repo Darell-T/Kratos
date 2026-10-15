@@ -8,7 +8,7 @@ const planOn = {
 const F = '00000000-0000-4000-8000-00000000000f';
 
 describe('Claude plan mode', () => {
-  it('launches in the native plan mode, denies only ExitPlanMode, and keeps the setting across settings changes and restarts', async () => {
+  it('launches in the native plan mode, denies ExitPlanMode, asks before other tools even with full access, and keeps the setting across settings changes and restarts', async () => {
     const claude = await setup();
     expect(claude.store.getClaudeThread(claude.thread)?.plan).toBe(false);
     const created = await claude.startThread(folder, { plan: true });
@@ -20,7 +20,11 @@ describe('Claude plan mode', () => {
     expect(claude.launch().options).toMatchObject({ permissionMode: 'plan' });
     expect(Object.keys(claude.launch().options)).not.toContain('allowDangerouslySkipPermissions');
     expect(await claude.ask('ExitPlanMode', { plan: 'Delete the build folder' }).answer).toEqual(planOn);
-    expect(claude.approvalsWaiting(claude.thread)).toEqual([]);
+    const write = claude.ask('Write', { file_path: 'notes.ts' }, { toolUseID: 'write-1' });
+    await flush();
+    expect(claude.approvalsWaiting(claude.thread)).toMatchObject([{ requestId: 'write-1', toolName: 'Write' }]);
+    expect(claude.decideApproval('write-1', 'deny')).toBe(true);
+    expect(await write.answer).toEqual({ behavior: 'deny', message: 'The user declined this action' });
     await claude.finish([A]);
 
     claude.setThreadPermissions(claude.thread, 'askMe');
@@ -70,7 +74,7 @@ describe('Claude plan mode', () => {
 });
 
 describe('Claude turn changes', () => {
-  it('reports the files each turn edited and whether a command ran after the last edit', async () => {
+  it('reports the files each turn edited and whether one changed after the last command', async () => {
     const claude = await setup();
     await claude.start(A);
     expect(await claude.useTool('PostToolUse', 'Edit', { file_path: 'a.ts' })).toEqual([{ continue: true }]);
@@ -101,7 +105,7 @@ describe('Claude turn changes', () => {
     await claude.exit(new Error('Claude Code process exited with code 3'));
     await flush();
     expect(claude.events.filter((event) => event.kind === 'session.exited')).toMatchObject([
-      { changes: { files: ['f.ts'], checked: false } },
+      { changes: { files: ['f.ts'], editedSinceCommand: true } },
     ]);
     await claude.resumeQueue(claude.thread);
     await claude.useTool('PostToolUse', 'Edit', { file_path: 'late.ts' });
@@ -112,11 +116,11 @@ describe('Claude turn changes', () => {
     expect(
       claude.events.flatMap((event) => (event.kind === 'turn.completed' ? [[event.turnId, event.changes]] : [])),
     ).toEqual([
-      [A, { files: ['a.ts', 'b.ts'], checked: false }],
-      [B, { files: ['n.ipynb', 'm.ts'], checked: true }],
-      [C, { files: [], checked: true }],
-      [D, { files: ['e.ts'], checked: false }],
-      [F, { files: [], checked: true }],
+      [A, { files: ['a.ts', 'b.ts'], editedSinceCommand: true }],
+      [B, { files: ['n.ipynb', 'm.ts'], editedSinceCommand: false }],
+      [C, { files: [], editedSinceCommand: false }],
+      [D, { files: ['e.ts'], editedSinceCommand: true }],
+      [F, { files: [], editedSinceCommand: false }],
     ]);
   });
 });
