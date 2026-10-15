@@ -75,6 +75,14 @@ describe('Claude approvals and user requests', () => {
       updatedInput: { command: 'rm -rf build' },
     });
     expect(claude.approvalsWaiting(claude.thread)).toEqual([]);
+    const questions = [{ question: 'Which database?', header: 'Database', options: [], multiSelect: false }];
+    const asked = claude.ask('AskUserQuestion', { questions }, { toolUseID: 'question-full' });
+    await flush();
+    expect(claude.answerQuestion('question-full', { 'Which database?': 'SQLite' })).toBe(true);
+    expect(await asked.answer).toEqual({
+      behavior: 'allow',
+      updatedInput: { questions, answers: { 'Which database?': 'SQLite' } },
+    });
 
     await claude.close();
     expect(await claude.ask('Bash', { command: 'ls' }).answer).toEqual({
@@ -139,7 +147,12 @@ describe('Claude approvals and user requests', () => {
     const message = 'Claude turn timed out after 50 ms';
     expect(claude.launch().interrupts).toBe(1);
     expect(claude.events).toContainEqual({ kind: 'turn.timedOut', threadId: claude.thread, turnId: A, message });
-    await claude.finish([A], { subtype: 'error_during_execution', is_error: true, errors: [] });
+    await claude.finish([A], {
+      subtype: 'error_during_execution',
+      is_error: true,
+      errors: [],
+      terminal_reason: 'aborted_streaming',
+    });
     expect(await idle).toMatchObject({ message });
     expect(claude.written()).toEqual([A]);
   });

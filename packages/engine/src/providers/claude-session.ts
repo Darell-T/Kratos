@@ -29,7 +29,13 @@ export type ClaudeSessionEvent =
   | { kind: 'initialized'; model: string }
   | { kind: 'accepted'; messageId: string }
   | { kind: 'output'; message: SDKMessage }
-  | { kind: 'result'; messageIds: string[]; error: string | null; result: SDKResultMessage }
+  | {
+      kind: 'result';
+      messageIds: string[];
+      outcome: 'completed' | 'interrupted' | 'failed';
+      error: string | null;
+      result: SDKResultMessage;
+    }
   | { kind: 'exited'; error: Error };
 export interface ClaudeSession {
   submit(message: ClaudeMessage): void;
@@ -65,7 +71,9 @@ const resultSchema = z.object({
   errors: z.array(z.string()).optional(),
   user_message_uuid: z.string().optional(),
   user_message_uuids: z.array(z.string()).optional(),
+  terminal_reason: z.string().optional(),
 });
+const abortReasons = new Set<string | undefined>(['aborted_streaming', 'aborted_tools']);
 
 function toolHooks(onToolUse: ClaudeSessionOptions['onToolUse']): NonNullable<Options['hooks']> {
   const hook =
@@ -89,7 +97,13 @@ function resultEvent(message: SDKResultMessage): ClaudeSessionEvent {
   const messageIds = result.user_message_uuids ?? (result.user_message_uuid ? [result.user_message_uuid] : []);
   const failure = result.subtype === 'success' ? result.result : result.errors?.join('\n');
   const failed = result.subtype !== 'success' || result.is_error;
-  return { kind: 'result', messageIds, error: failed ? failure || 'Claude turn failed' : null, result: message };
+  return {
+    kind: 'result',
+    messageIds,
+    outcome: abortReasons.has(result.terminal_reason) ? 'interrupted' : failed ? 'failed' : 'completed',
+    error: failed ? failure || 'Claude turn failed' : null,
+    result: message,
+  };
 }
 
 function sessionEvent(message: SDKMessage): ClaudeSessionEvent {

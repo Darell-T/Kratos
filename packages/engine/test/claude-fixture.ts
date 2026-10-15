@@ -66,7 +66,7 @@ export interface FakeCli {
 function fakeQuery(
   prompt: AsyncIterable<SDKUserMessage>,
   options: Options,
-  interruptError: () => Error | undefined,
+  interruptOutcome: () => Error | 'hang' | undefined,
   cli: FakeCli,
 ) {
   const output: SDKMessage[] = [];
@@ -101,8 +101,9 @@ function fakeQuery(
   const query = Object.assign(messages(), {
     interrupt() {
       launch.interrupts += 1;
-      const error = interruptError();
-      return error ? Promise.reject(error) : Promise.resolve(undefined);
+      const outcome = interruptOutcome();
+      if (outcome === 'hang') return new Promise<void>(() => undefined);
+      return outcome ? Promise.reject(outcome) : Promise.resolve(undefined);
     },
     close() {
       launch.closed = true;
@@ -117,7 +118,7 @@ function fakeQuery(
 function fakeSdk() {
   const launches: Launch[] = [];
   const transcripts = new Map<string, string[]>();
-  let interruptError: Error | undefined;
+  let interruptOutcome: Error | 'hang' | undefined;
   const cli: FakeCli = {
     account: { tokenSource: 'none', apiProvider: 'firstParty' },
     models: [],
@@ -127,7 +128,7 @@ function fakeSdk() {
   const transcriptKey = (sessionId: string, dir?: string) => JSON.stringify([dir, sessionId]);
   const module = {
     query: ({ prompt, options }: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => {
-      const { launch, query } = fakeQuery(prompt, options, () => interruptError, cli);
+      const { launch, query } = fakeQuery(prompt, options, () => interruptOutcome, cli);
       launches.push(launch);
       return query;
     },
@@ -149,8 +150,8 @@ function fakeSdk() {
     const key = transcriptKey(sessionId, folder);
     transcripts.set(key, [...(transcripts.get(key) ?? []), messageId]);
   };
-  const failInterrupts = (error?: Error) => {
-    interruptError = error;
+  const failInterrupts = (outcome?: Error | 'hang') => {
+    interruptOutcome = outcome;
   };
   return { launches, module, record, failInterrupts, cli };
 }

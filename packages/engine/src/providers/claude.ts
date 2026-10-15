@@ -249,14 +249,13 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
         updateMessage(id, 'accepted', turn.turnId);
       turn.pending.delete(id);
     }
-    const outcome = turn.kind === 'stopping' ? 'interrupted' : event.error === null ? 'completed' : 'failed';
-    if (outcome === 'failed') setQueueError(state, event.error);
+    if (event.outcome === 'failed') setQueueError(state, event.error);
     emitEvent({
       kind: 'turn.completed',
       threadId,
       turnId: turn.turnId,
       messageIds: event.messageIds,
-      outcome,
+      outcome: event.outcome,
       error: event.error,
       changes: state.changes.take(),
       result: event.result,
@@ -437,21 +436,22 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     const session = turn.opening ? await turn.opening : state.session;
     if (state.turn !== turn || !session) return;
     turn.kind = 'stopping';
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => {
+      if (state.turn === turn)
+        retire(threadId, state, new Error('Claude did not stop the turn; its process was closed'));
+    }, 5000);
     try {
       await session.interrupt();
     } catch (error) {
       if (state.turn === turn) {
         turn.kind = 'running';
         delete turn.stopPromise;
+        clearTimeout(state.timer);
+        startTurnTimeout(threadId, state, turn);
       }
       throw error;
     }
-    if (state.turn !== turn || turn.kind !== 'stopping') return;
-    clearTimeout(state.timer);
-    state.timer = setTimeout(() => {
-      if (state.turn === turn)
-        retire(threadId, state, new Error('Claude did not stop the turn; its process was closed'));
-    }, 5000);
   }
 
   async function stopTurn(threadId: string) {
