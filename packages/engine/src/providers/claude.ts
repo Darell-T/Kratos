@@ -432,12 +432,12 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     try {
       await session.interrupt();
     } catch (error) {
-      if (state.turn === turn) {
-        turn.kind = 'running';
-        delete turn.stopPromise;
-        clearTimeout(state.timer);
-        startTurnTimeout(threadId, state, turn);
-      }
+      // The turn already ended, for example because the watchdog closed the session, so the Stop succeeded.
+      if (state.turn !== turn) return;
+      turn.kind = 'running';
+      delete turn.stopPromise;
+      clearTimeout(state.timer);
+      startTurnTimeout(threadId, state, turn);
       throw error;
     }
   }
