@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, type UUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -64,6 +64,44 @@ export interface CodexThread {
   pausedError: string | null;
 }
 
+export const claudeInputSchema = z
+  .array(
+    z.union([
+      z.object({ type: z.literal('text'), text: z.string() }),
+      z.object({
+        type: z.literal('image'),
+        source: z.union([
+          z.object({
+            type: z.literal('base64'),
+            media_type: z.enum(['image/png', 'image/jpeg', 'image/gif', 'image/webp']),
+            data: z.string(),
+          }),
+          z.object({ type: z.literal('url'), url: z.string() }),
+        ]),
+      }),
+    ]),
+  )
+  .min(1);
+export type ClaudeInput = z.infer<typeof claudeInputSchema>;
+// The ID doubles as the SDKUserMessage uuid, which Claude Code requires to be a UUID.
+const claudeMessageId = z.uuid().transform((id) => id as UUID);
+export interface ClaudeMessage {
+  id: UUID;
+  threadId: string;
+  input: ClaudeInput;
+  status: z.infer<typeof messageStatus>;
+  turnId: string | null;
+  error: string | null;
+}
+export interface ClaudeThread {
+  id: string;
+  folder: string;
+  model: string | null;
+  permissions: z.infer<typeof permission>;
+  pausedError: string | null;
+  runningTurn: string | null;
+}
+
 const providerList = providers.map((provider) => `'${provider}'`).join(', ');
 
 // Append only. Each entry runs once, in order, and PRAGMA user_version records how many have run.
@@ -119,6 +157,26 @@ const migrations: readonly string[] = [
     CHECK (status != 'accepted' OR turn_id IS NOT NULL)
   );
   CREATE INDEX codex_messages_by_thread ON codex_messages (thread_id);
+  `,
+  `
+  CREATE TABLE claude_threads (
+    id TEXT PRIMARY KEY,
+    folder TEXT NOT NULL,
+    model TEXT,
+    permissions TEXT NOT NULL CHECK (permissions IN ('askMe', 'approveForMe', 'fullAccess')),
+    paused_error TEXT,
+    running_turn TEXT
+  );
+  CREATE TABLE claude_messages (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES claude_threads (id),
+    input TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued', 'submitting', 'accepted', 'failed', 'unknown', 'cancelled')),
+    turn_id TEXT,
+    error TEXT,
+    CHECK (status != 'accepted' OR turn_id IS NOT NULL)
+  );
+  CREATE INDEX claude_messages_by_thread ON claude_messages (thread_id);
   `,
 ];
 
@@ -337,6 +395,94 @@ export class Store {
     if (!message) throw new Error(`Unknown message ${id}`);
     return message;
   }
+
+  saveClaudeThread(thread: ClaudeThread): void {
+    this.db
+      .prepare(
+        `INSERT INTO claude_threads (id, folder, model, permissions, paused_error, running_turn) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET folder = excluded.folder, model = excluded.model,
+      permissions = excluded.permissions, paused_error = excluded.paused_error, running_turn = excluded.running_turn`,
+      )
+      .run(thread.id, thread.folder, thread.model, thread.permissions, thread.pausedError, thread.runningTurn);
+  }
+
+  getClaudeThread(id: string): ClaudeThread | undefined {
+    const row = this.db.prepare('SELECT * FROM claude_threads WHERE id = ?').get(id);
+    if (!row) return undefined;
+    return z
+      .object({
+        id: z.string(),
+        folder: z.string(),
+        model: z.string().nullable(),
+        permissions: permission,
+        pausedError: z.string().nullable(),
+        runningTurn: z.string().nullable(),
+      })
+      .parse({ ...row, pausedError: row.paused_error, runningTurn: row.running_turn });
+  }
+
+  addClaudeMessage(id: string, threadId: string, input: ClaudeInput): ClaudeMessage {
+    const messageId = claudeMessageId.parse(id);
+    const parsed = claudeInputSchema.parse(input);
+    const existing = this.getClaudeMessage(messageId);
+    if (existing) {
+      if (existing.threadId !== threadId || JSON.stringify(existing.input) !== JSON.stringify(parsed)) {
+        throw new Error('Message ID already belongs to a different submission');
+      }
+      return existing;
+    }
+    this.db
+      .prepare("INSERT INTO claude_messages (id, thread_id, input, status) VALUES (?, ?, ?, 'queued')")
+      .run(messageId, threadId, JSON.stringify(parsed));
+    return { id: messageId, threadId, input: parsed, status: 'queued', turnId: null, error: null };
+  }
+
+  getClaudeMessage(id: string): ClaudeMessage | undefined {
+    const row = this.db.prepare('SELECT * FROM claude_messages WHERE id = ?').get(id);
+    return row ? parseClaudeMessage(row) : undefined;
+  }
+
+  claudeMessages(threadId: string): ClaudeMessage[] {
+    return this.db
+      .prepare('SELECT * FROM claude_messages WHERE thread_id = ? ORDER BY rowid')
+      .all(threadId)
+      .map(parseClaudeMessage);
+  }
+
+  updateClaudeMessage(
+    id: string,
+    status: ClaudeMessage['status'],
+    turnId: string | null = null,
+    error: string | null = null,
+  ): ClaudeMessage {
+    this.db
+      .prepare('UPDATE claude_messages SET status = ?, turn_id = ?, error = ? WHERE id = ?')
+      .run(status, turnId, error, id);
+    const message = this.getClaudeMessage(id);
+    if (!message) throw new Error(`Unknown message ${id}`);
+    return message;
+  }
+}
+
+function parseClaudeMessage(row: unknown): ClaudeMessage {
+  const parsed = z
+    .object({
+      id: claudeMessageId,
+      thread_id: z.string(),
+      input: z.string(),
+      status: messageStatus,
+      turn_id: z.string().nullable(),
+      error: z.string().nullable(),
+    })
+    .parse(row);
+  return {
+    id: parsed.id,
+    threadId: parsed.thread_id,
+    input: claudeInputSchema.parse(JSON.parse(parsed.input)),
+    status: parsed.status,
+    turnId: parsed.turn_id,
+    error: parsed.error,
+  };
 }
 
 function parseCodexMessage(row: unknown): CodexMessage {
