@@ -11,6 +11,7 @@ import {
   type ClaudeSession,
   type ClaudeSessionEvent,
 } from './claude-session';
+import { createTurnChanges, type TurnChanges } from './turn-changes';
 
 export type ClaudeEvent =
   | { kind: 'turn.started'; threadId: string; turnId: string; messageId: string }
@@ -21,6 +22,7 @@ export type ClaudeEvent =
       messageIds: string[];
       outcome: 'completed' | 'interrupted' | 'failed';
       error: string | null;
+      changes: TurnChanges;
       result: SDKResultMessage;
     }
   | { kind: 'turn.startFailed'; threadId: string; message: string }
@@ -49,6 +51,7 @@ interface ThreadState {
   turn: TurnState;
   session?: ClaudeSession;
   stale: boolean;
+  changes: ReturnType<typeof createTurnChanges>;
   waiters: Set<{ resolve: () => void; reject: (error: Error) => void }>;
   timer?: NodeJS.Timeout;
 }
@@ -254,6 +257,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
       messageIds: event.messageIds,
       outcome,
       error: event.error,
+      changes: state.changes.take(),
       result: event.result,
     });
     if (turn.pending.size) continueTurn(threadId, state, turn);
@@ -323,6 +327,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
           readOnly: state.settings.readOnly,
           canUseTool: canUseTool(threadId),
           onElicitation: onElicitation(threadId),
+          onToolUse: (use) => (use.kind === 'edit' ? state.changes.edited(use.path) : state.changes.ran()),
         },
         (event) => handleSessionEvent(threadId, state, session, event),
       );
@@ -538,7 +543,13 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
 
   function registerThread(settings: ClaudeThread): ThreadState {
     store.saveClaudeThread(settings);
-    const state: ThreadState = { settings, turn: { kind: 'idle' }, stale: false, waiters: new Set() };
+    const state: ThreadState = {
+      settings,
+      turn: { kind: 'idle' },
+      stale: false,
+      changes: createTurnChanges(),
+      waiters: new Set(),
+    };
     threads.set(settings.id, state);
     return state;
   }

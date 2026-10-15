@@ -7,6 +7,7 @@ import type {
   AccountInfo,
   CanUseTool,
   ElicitationRequest,
+  HookInput,
   ModelInfo,
   OnElicitation,
   Options,
@@ -248,6 +249,21 @@ export async function setup(options: Partial<Omit<ClaudeProviderOptions, 'store'
         answer: onElicitation(request, { signal: controller.signal, requestId: randomUUID() }),
         abort: () => controller.abort(),
       };
+    },
+    useTool: (event: 'PostToolUse' | 'PostToolUseFailure', toolName: string, toolInput: object) => {
+      const hookInput = {
+        hook_event_name: event,
+        session_id: thread,
+        transcript_path: '',
+        cwd: folder,
+        tool_name: toolName,
+        tool_input: toolInput,
+        tool_response: {},
+        error: 'Tool failed',
+        tool_use_id: randomUUID(),
+      } as HookInput;
+      const hooks = (launch().options.hooks?.[event] ?? []).flatMap((matcher) => matcher.hooks);
+      return Promise.all(hooks.map((hook) => hook(hookInput, undefined, { signal: new AbortController().signal })));
     },
     restart: async () => {
       await context.provider.close();

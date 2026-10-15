@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { A, B, C, flush, folder, input, setup } from './claude-fixture';
+import { A, B, C, D, flush, folder, input, setup } from './claude-fixture';
 
 const readOnly = { behavior: 'deny', message: 'This Kratos thread is read-only' };
 
@@ -48,5 +48,42 @@ describe('Claude read-only threads', () => {
     expect(await claude.ask('Write', { file_path: 'a.ts' }).answer).toEqual(readOnly);
     await claude.accept(C);
     await sent;
+  });
+});
+
+describe('Claude turn changes', () => {
+  it('reports the files each turn edited and whether a command ran after the last edit', async () => {
+    const claude = await setup();
+    await claude.start(A);
+    expect(await claude.useTool('PostToolUse', 'Edit', { file_path: 'a.ts' })).toEqual([{ continue: true }]);
+    await claude.useTool('PostToolUse', 'Bash', { command: 'npm test' });
+    await claude.useTool('PostToolUse', 'Write', { file_path: 'b.ts' });
+    await claude.useTool('PostToolUse', 'Edit', { file_path: 'a.ts' });
+    expect(await claude.useTool('PostToolUseFailure', 'Edit', { file_path: 'c.ts' })).toEqual([{ continue: true }]);
+    await claude.useTool('PostToolUse', 'Read', { file_path: 'd.ts' });
+    await claude.finish([A]);
+
+    await claude.start(B);
+    await claude.useTool('PostToolUse', 'NotebookEdit', { notebook_path: 'n.ipynb' });
+    await claude.useTool('PostToolUse', 'MultiEdit', { file_path: 'm.ts' });
+    await claude.useTool('PostToolUseFailure', 'PowerShell', { command: 'npm test' });
+    await claude.finish([B]);
+
+    await claude.start(C);
+    await claude.useTool('PostToolUse', 'Read', { file_path: 'a.ts' });
+    await claude.finish([C]);
+
+    await claude.start(D);
+    await claude.useTool('PostToolUse', 'Edit', { file_path: 'e.ts' });
+    await claude.finish([D]);
+
+    expect(
+      claude.events.flatMap((event) => (event.kind === 'turn.completed' ? [[event.turnId, event.changes]] : [])),
+    ).toEqual([
+      [A, { files: ['a.ts', 'b.ts'], checked: false }],
+      [B, { files: ['n.ipynb', 'm.ts'], checked: true }],
+      [C, { files: [], checked: true }],
+      [D, { files: ['e.ts'], checked: false }],
+    ]);
   });
 });

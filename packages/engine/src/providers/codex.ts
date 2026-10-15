@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { connectCodex, CodexRequestError, CodexTimeoutError, type CodexOptions, type v2 } from '@kratos/codex';
 import { codexInputSchema, type Store, type CodexMessage, type CodexThread } from '../store';
 import { createCodexApprovals, type Approval, type Permission } from './codex-approvals';
+import { createTurnChanges, type TurnChanges } from './turn-changes';
 
 type UserInput = v2.UserInput;
 export type CodexEvent =
@@ -10,7 +11,7 @@ export type CodexEvent =
   | ({ kind: 'item.started' } & v2.ItemStartedNotification)
   | ({ kind: 'item.completed' } & v2.ItemCompletedNotification)
   | ({ kind: 'turn.started' } & v2.TurnStartedNotification)
-  | ({ kind: 'turn.completed' } & v2.TurnCompletedNotification)
+  | ({ kind: 'turn.completed'; changes: TurnChanges } & v2.TurnCompletedNotification)
   | ({ kind: 'error' } & v2.ErrorNotification)
   | ({ kind: 'serverRequest.resolved' } & v2.ServerRequestResolvedNotification)
   | { kind: 'turn.startFailed'; threadId: string; message: string }
@@ -45,6 +46,7 @@ interface ThreadState {
   settings: CodexThread;
   turn: TurnState;
   steering: Map<string, Promise<CodexMessage>>;
+  changes: ReturnType<typeof createTurnChanges>;
   waiters: Set<{ resolve: () => void; reject: (error: Error) => void }>;
   timer?: NodeJS.Timeout;
   lastCompletedTurnId?: string;
@@ -340,7 +342,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       completeTurn(threadId, completed ?? turn);
       if (!completed && state.lastCompletedTurnId !== turn.id) {
         state.lastCompletedTurnId = turn.id;
-        emitEvent({ kind: 'turn.completed', threadId, turn });
+        emitEvent({ kind: 'turn.completed', threadId, turn, changes: state.changes.take() });
       }
       return undefined;
     }
@@ -589,7 +591,13 @@ export async function createCodexProvider(options: CodexProviderOptions) {
 
   function registerThread(settings: CodexThread): ThreadState {
     store.saveCodexThread(settings);
-    const state: ThreadState = { settings, turn: { kind: 'idle' }, steering: new Map(), waiters: new Set() };
+    const state: ThreadState = {
+      settings,
+      turn: { kind: 'idle' },
+      steering: new Map(),
+      changes: createTurnChanges(),
+      waiters: new Set(),
+    };
     threads.set(settings.id, state);
     return state;
   }
@@ -783,14 +791,22 @@ export async function createCodexProvider(options: CodexProviderOptions) {
 
   codex.onNotification('item/agentMessage/delta', (params) => emitEvent({ ...params, kind: 'message.delta' }));
   codex.onNotification('item/started', (params) => emitEvent({ ...params, kind: 'item.started' }));
-  codex.onNotification('item/completed', (params) => emitEvent({ ...params, kind: 'item.completed' }));
+  codex.onNotification('item/completed', (params) => {
+    const changes = threads.get(params.threadId)?.changes;
+    const { item } = params;
+    if (item.type === 'fileChange' && item.status === 'completed')
+      for (const { path } of item.changes) changes?.edited(path);
+    else if (item.type === 'commandExecution' && (item.status === 'completed' || item.status === 'failed'))
+      changes?.ran();
+    emitEvent({ ...params, kind: 'item.completed' });
+  });
   codex.onNotification('turn/started', (params) => emitEvent({ ...params, kind: 'turn.started' }));
   codex.onNotification('turn/completed', (params) => {
     completeTurn(params.threadId, params.turn);
     const state = threads.get(params.threadId);
     if (state?.lastCompletedTurnId === params.turn.id) return;
     if (state) state.lastCompletedTurnId = params.turn.id;
-    emitEvent({ ...params, kind: 'turn.completed' });
+    emitEvent({ ...params, kind: 'turn.completed', changes: state?.changes.take() ?? createTurnChanges().take() });
   });
   codex.onNotification('error', (params) => emitEvent({ ...params, kind: 'error' }));
   codex.onNotification('thread/closed', ({ threadId }) => {
