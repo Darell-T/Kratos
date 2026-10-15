@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { A, B, C, D, E, flush, folder, input, setup } from './claude-fixture';
 
-const interrupted = { subtype: 'error_during_execution', is_error: true, errors: ['Interrupted by user'] };
+const interrupted = {
+  subtype: 'error_during_execution',
+  is_error: true,
+  errors: ['Interrupted by user'],
+  terminal_reason: 'aborted_streaming',
+};
 
 describe('Claude turns through a scripted SDK', () => {
   it('launches Claude lazily and delivers queued messages one turn at a time, in order', async () => {
@@ -47,13 +52,13 @@ describe('Claude turns through a scripted SDK', () => {
     await claude.finish([A]);
     expect(claude.launch().written[1]).toMatchObject({ uuid: B, message: { content: input('Update the docs') } });
     await claude.accept(B);
-    await claude.finish([B]);
+    await claude.finish([B], interrupted);
+    expect(claude.written()).toEqual([A, B, C]);
     await claude.accept(C);
     expect(idle).toBe(false);
     await claude.finish([C]);
     await waiting;
 
-    expect(claude.written()).toEqual([A, B, C]);
     expect(claude.launches).toHaveLength(1);
     expect(claude.store.getClaudeThread(claude.thread)).toMatchObject({ model: 'claude-resolved', runningTurn: null });
     expect(
@@ -68,14 +73,15 @@ describe('Claude turns through a scripted SDK', () => {
       ['started', A],
       ['completed', 'completed', A],
       ['started', B],
-      ['completed', 'completed', B],
+      ['completed', 'interrupted', B],
       ['started', C],
       ['completed', 'completed', C],
     ]);
   });
 
-  it('keeps queued messages until the stopped turn reports its result, and allows another Stop after a failed one', async () => {
-    const claude = await setup();
+  it('keeps queued messages until the stopped turn reports its result, and keeps the deadline after a failed Stop', async () => {
+    const claude = await setup({ turnTimeoutMs: 10000 });
+    vi.useFakeTimers();
     await claude.start(A);
     await claude.sendMessage(claude.thread, input('B'), B);
 
@@ -96,24 +102,28 @@ describe('Claude turns through a scripted SDK', () => {
     claude.failInterrupts(new Error('Interrupt rejected'));
     await expect(claude.stopTurn(claude.thread)).rejects.toThrow('Interrupt rejected');
     claude.failInterrupts();
-    await claude.stopTurn(claude.thread);
+    await vi.advanceTimersByTimeAsync(10000);
+    const message = 'Claude turn timed out after 10000 ms';
+    expect(claude.launch().closed).toBe(false);
+    expect(claude.events).toContainEqual({ kind: 'turn.timedOut', threadId: claude.thread, turnId: B, message });
     expect(claude.launch().interrupts).toBe(3);
     await claude.finish([B], interrupted);
-    await claude.waitUntilIdle(claude.thread);
+    await expect(claude.waitUntilIdle(claude.thread)).rejects.toThrow(message);
     expect(claude.messages(claude.thread)).toMatchObject([
       { id: A, status: 'accepted' },
       { id: B, status: 'accepted' },
     ]);
   });
 
-  it('closes a session that never finishes a stopped turn, then resumes that session for the next message', async () => {
+  it('closes a session that never acknowledges a Stop, then resumes that session for the next message', async () => {
     const claude = await setup();
     vi.useFakeTimers();
     await claude.start(A);
     await claude.sendMessage(claude.thread, input('B'), B);
     const idle = claude.waitUntilIdle(claude.thread).catch((error: unknown) => error);
 
-    await claude.stopTurn(claude.thread);
+    claude.failInterrupts('hang');
+    void claude.stopTurn(claude.thread);
     await vi.advanceTimersByTimeAsync(5000);
     await flush();
     const message = 'Claude did not stop the turn; its process was closed';
@@ -136,21 +146,22 @@ describe('Claude turns through a scripted SDK', () => {
     await resumed;
   });
 
-  it('pauses follow-up messages after a failed result until the queue is resumed', async () => {
+  it('pauses follow-up messages after a failed result, even one that raced a Stop, until the queue is resumed', async () => {
     const claude = await setup();
     await claude.start(A);
     await claude.sendMessage(claude.thread, input('B'), B);
     await claude.sendMessage(claude.thread, input('C'), C);
     const idle = claude.waitUntilIdle(claude.thread).catch((error: unknown) => error);
 
-    await claude.finish([A], { is_error: true, result: 'API Error: 529 overloaded' });
-    expect(await idle).toMatchObject({ message: 'API Error: 529 overloaded' });
+    await claude.stopTurn(claude.thread);
+    await claude.finish([A], { is_error: true, result: 'API Error: 529 overloaded', terminal_reason: 'api_error' });
     expect(claude.events.filter((event) => event.kind === 'turn.completed').at(-1)).toMatchObject({
       messageIds: [A],
       outcome: 'failed',
       error: 'API Error: 529 overloaded',
     });
     expect(claude.written()).toEqual([A]);
+    expect(await idle).toMatchObject({ message: 'API Error: 529 overloaded' });
 
     const resumed = claude.resumeQueue(claude.thread);
     await flush();
