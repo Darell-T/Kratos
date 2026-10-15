@@ -71,6 +71,7 @@ function fakeQuery(
   const output: SDKMessage[] = [];
   let wake: (() => void) | undefined;
   let ended: { error?: Error } | undefined;
+  let unanswered: ((error: Error) => void) | undefined;
   const launch: Launch = {
     options,
     written: [],
@@ -101,11 +102,12 @@ function fakeQuery(
     interrupt() {
       launch.interrupts += 1;
       const outcome = interruptOutcome();
-      if (outcome === 'hang') return new Promise<void>(() => undefined);
+      if (outcome === 'hang') return new Promise<void>((_, reject) => (unanswered = reject));
       return outcome ? Promise.reject(outcome) : Promise.resolve(undefined);
     },
     close() {
       launch.closed = true;
+      unanswered?.(new Error('Query closed before response received'));
       launch.exit();
     },
     initializationResult: () => Promise.resolve({ account: cli.account, models: cli.models, commands: cli.commands }),
