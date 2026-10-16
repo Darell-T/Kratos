@@ -175,12 +175,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
   function retire(threadId: string, state: ThreadState, error: Error) {
     const initialized = state.session?.initialized ?? false;
     // The queue can resume before the transcript is read, so only judge what the lost session was sent.
-    const sent = new Set(
-      store
-        .claudeMessages(threadId)
-        .filter((message) => message.status === 'submitting')
-        .map((message) => message.id),
-    );
+    const sent = new Set(isActive(state.turn) ? state.turn.pending : []);
     closeSession(state);
     clearTimeout(state.timer);
     clearRequests(threadId);
