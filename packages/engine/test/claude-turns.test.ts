@@ -115,7 +115,7 @@ describe('Claude turns through a scripted SDK', () => {
     ]);
   });
 
-  it('closes a session that never acknowledges a Stop, then resumes that session for the next message', async () => {
+  it('closes a session that never acknowledges a Stop, resumes it for the next message, and closes it again when recovery cannot read the store', async () => {
     const claude = await setup();
     vi.useFakeTimers();
     await claude.start(A);
@@ -150,6 +150,17 @@ describe('Claude turns through a scripted SDK', () => {
     expect(claude.written()).toEqual([B]);
     await claude.accept(B);
     await resumed;
+
+    const stoppedB = claude.stopTurn(claude.thread);
+    const idleAfterB = claude.waitUntilIdle(claude.thread).catch((error: unknown) => error);
+    vi.spyOn(claude.store, 'claudeMessages').mockImplementationOnce(() => {
+      throw new Error('Database read failed');
+    });
+    await vi.advanceTimersByTimeAsync(5000);
+    await flush();
+    expect(claude.launch().closed).toBe(true);
+    await expect(stoppedB).resolves.toBeUndefined();
+    expect(await idleAfterB).toMatchObject({ message: 'Database read failed' });
   });
 
   it('pauses follow-up messages after a failed result, even one that raced a Stop, until the queue is resumed', async () => {
