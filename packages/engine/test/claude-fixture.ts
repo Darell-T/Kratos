@@ -30,6 +30,7 @@ export interface Launch {
   options: Options;
   written: SDKUserMessage[];
   interrupts: number;
+  hungInterrupts: ((error: Error) => void)[];
   closed: boolean;
   emit(message: SDKMessage): void;
   exit(error?: Error): void;
@@ -72,11 +73,11 @@ function fakeQuery(
   const output: SDKMessage[] = [];
   let wake: (() => void) | undefined;
   let ended: { error?: Error } | undefined;
-  let unanswered: ((error: Error) => void) | undefined;
   const launch: Launch = {
     options,
     written: [],
     interrupts: 0,
+    hungInterrupts: [],
     closed: false,
     emit(message) {
       output.push(message);
@@ -103,12 +104,12 @@ function fakeQuery(
     interrupt() {
       launch.interrupts += 1;
       const outcome = interruptOutcome();
-      if (outcome === 'hang') return new Promise<void>((_, reject) => (unanswered = reject));
+      if (outcome === 'hang') return new Promise<void>((_, reject) => launch.hungInterrupts.push(reject));
       return outcome ? Promise.reject(outcome) : Promise.resolve(undefined);
     },
     close() {
       launch.closed = true;
-      unanswered?.(new Error('Query closed before response received'));
+      for (const reject of launch.hungInterrupts) reject(new Error('Query closed before response received'));
       launch.exit();
     },
     initializationResult: () => Promise.resolve({ account: cli.account, models: cli.models, commands: cli.commands }),
@@ -121,6 +122,7 @@ function fakeSdk() {
   const launches: Launch[] = [];
   const transcripts = new Map<string, string[]>();
   let interruptOutcome: Error | 'hang' | undefined;
+  let transcriptRead = Promise.resolve();
   const cli: FakeCli = {
     account: { tokenSource: 'none', apiProvider: 'firstParty' },
     models: [],
@@ -137,7 +139,7 @@ function fakeSdk() {
     getSessionInfo: (sessionId: string, { dir }: { dir?: string } = {}) =>
       Promise.resolve(transcripts.has(transcriptKey(sessionId, dir)) ? { sessionId } : undefined),
     getSessionMessages: (sessionId: string, { dir }: { dir?: string } = {}) =>
-      Promise.resolve(
+      transcriptRead.then(() =>
         (transcripts.get(transcriptKey(sessionId, dir)) ?? []).map((uuid) => ({
           type: 'user',
           uuid,
@@ -155,7 +157,12 @@ function fakeSdk() {
   const failInterrupts = (outcome?: Error | 'hang') => {
     interruptOutcome = outcome;
   };
-  return { launches, module, record, failInterrupts, cli };
+  const holdTranscripts = () => {
+    let release = () => {};
+    transcriptRead = new Promise((resolve) => (release = resolve));
+    return release;
+  };
+  return { launches, module, record, failInterrupts, holdTranscripts, cli };
 }
 
 async function loadProvider(store: Store, module: object, options: Partial<Omit<ClaudeProviderOptions, 'store'>>) {
@@ -168,7 +175,7 @@ async function loadProvider(store: Store, module: object, options: Partial<Omit<
 export async function setup(options: Partial<Omit<ClaudeProviderOptions, 'store'>> = {}) {
   const home = mkdtempSync(join(tmpdir(), 'kratos-claude-'));
   const store = new Store(home);
-  const { launches, module, record, failInterrupts, cli } = fakeSdk();
+  const { launches, module, record, failInterrupts, holdTranscripts, cli } = fakeSdk();
   const provider = await loadProvider(store, module, options);
   const context = { provider, store, home };
   contexts.push(context);
@@ -207,6 +214,7 @@ export async function setup(options: Partial<Omit<ClaudeProviderOptions, 'store'
     launch,
     record: (messageId: string) => record(thread, messageId),
     failInterrupts,
+    holdTranscripts,
     cli,
     init,
     accept,

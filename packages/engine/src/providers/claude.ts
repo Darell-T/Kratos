@@ -182,6 +182,13 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
   function retire(threadId: string, state: ThreadState, error: Error) {
     const initialized = state.session?.initialized ?? false;
     const changes = state.changes.take();
+    // The queue can resume before the transcript is read, so only judge what the lost session was sent.
+    const sent = new Set(
+      store
+        .claudeMessages(threadId)
+        .filter((message) => message.status === 'submitting')
+        .map((message) => message.id),
+    );
     closeSession(state);
     clearTimeout(state.timer);
     clearRequests(threadId);
@@ -194,7 +201,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
       });
       const delivered = await deliveredMessageIds(threadId, state.settings.folder).catch(() => new Set<string>());
       for (const message of store.claudeMessages(threadId)) {
-        if (message.status !== 'submitting') continue;
+        if (!sent.has(message.id) || message.status !== 'submitting') continue;
         if (delivered.has(message.id)) updateMessage(message.id, 'accepted', message.turnId);
         else updateMessage(message.id, initialized ? 'unknown' : 'failed', message.turnId, error.message);
       }
@@ -437,15 +444,16 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     if (state.turn !== turn || !session) return;
     turn.kind = 'stopping';
     clearTimeout(state.timer);
-    state.timer = setTimeout(() => {
+    const watchdog = setTimeout(() => {
       if (state.turn === turn)
         retire(threadId, state, new Error('Claude did not stop the turn; its process was closed'));
     }, 5000);
+    state.timer = watchdog;
     try {
       await session.interrupt();
     } catch (error) {
-      // The turn already ended, for example because the watchdog closed the session, so the Stop succeeded.
-      if (state.turn !== turn) return;
+      // The Stop already succeeded if the turn ended, or if the stopped run ended and replaced this watchdog.
+      if (state.turn !== turn || state.timer !== watchdog) return;
       turn.kind = 'running';
       delete turn.stopPromise;
       clearTimeout(state.timer);
