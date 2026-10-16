@@ -238,7 +238,7 @@ describe('Claude turns through a scripted SDK', () => {
     ]);
   });
 
-  it('lets steered input that outlives a stopped run finish, and stops it with a new interrupt', async () => {
+  it('lets steered input that outlives a stopped run finish, and stops it with a new interrupt that a late failure of the first cannot undo', async () => {
     const claude = await setup();
     vi.useFakeTimers();
     await claude.start(A);
@@ -248,22 +248,28 @@ describe('Claude turns through a scripted SDK', () => {
     await claude.accept(B);
     await steered;
 
-    await claude.stopTurn(claude.thread);
+    claude.failInterrupts('hang');
+    const stoppedA = claude.stopTurn(claude.thread);
     await claude.finish([A], interrupted);
     await vi.advanceTimersByTimeAsync(5000);
     await flush();
     expect(claude.launch().closed).toBe(false);
     expect(claude.events.some((event) => event.kind === 'session.exited')).toBe(false);
 
-    await claude.stopTurn(claude.thread);
+    const stoppedB = claude.stopTurn(claude.thread);
+    await flush();
     expect(claude.launch().interrupts).toBe(2);
-    await claude.finish([B], interrupted);
-    await claude.waitUntilIdle(claude.thread);
+    const [failFirstInterrupt] = claude.launch().hungInterrupts;
+    failFirstInterrupt?.(new Error('Interrupt failed after its run ended'));
+    await expect(stoppedA).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(5000);
+    await flush();
+    const message = 'Claude did not stop the turn; its process was closed';
+    expect(claude.launch().closed).toBe(true);
+    await expect(stoppedB).resolves.toBeUndefined();
+    await expect(claude.waitUntilIdle(claude.thread)).rejects.toThrow(message);
     expect(
       claude.events.flatMap((event) => (event.kind === 'turn.completed' ? [[event.outcome, ...event.messageIds]] : [])),
-    ).toEqual([
-      ['interrupted', A],
-      ['interrupted', B],
-    ]);
+    ).toEqual([['interrupted', A]]);
   });
 });

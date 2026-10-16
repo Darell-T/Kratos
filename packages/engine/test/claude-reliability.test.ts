@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import type { ClaudeEvent } from '../src/providers/claude';
-import { A, B, C, D, flush, folder, input, setup } from './claude-fixture';
+import { A, B, C, D, E, flush, folder, input, setup } from './claude-fixture';
 
 describe('Claude delivery when Claude Code exits', () => {
-  it('fails a message the process never started, and judges later losses by the transcript', async () => {
+  it('fails a message the process never started, and judges later losses by the transcript, only for messages the lost process received', async () => {
     const claude = await setup();
     const failed = claude.sendMessage(claude.thread, input('A'), A).catch((error: unknown) => error);
     await flush();
@@ -55,6 +55,20 @@ describe('Claude delivery when Claude Code exits', () => {
     expect(claude.written()).toEqual([D]);
     await claude.accept(D);
     await resumed;
+
+    await claude.sendMessage(claude.thread, input('E'), E);
+    const readTranscript = claude.holdTranscripts();
+    await claude.exit(new Error(crashed));
+    const resumedBeforeRead = claude.resumeQueue(claude.thread);
+    await flush();
+    expect(claude.launches).toHaveLength(4);
+    expect(claude.written()).toEqual([E]);
+    readTranscript();
+    await flush();
+    expect(claude.launch().closed).toBe(false);
+    expect(claude.messages(claude.thread).at(-1)).toMatchObject({ id: E, status: 'submitting' });
+    await claude.accept(E);
+    await resumedBeforeRead;
   });
 });
 
