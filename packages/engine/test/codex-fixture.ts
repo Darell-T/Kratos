@@ -7,6 +7,7 @@ import {
   connectCodex,
   CodexRequestError,
   CodexTimeoutError,
+  type CollaborationMode,
   type NotificationMethod,
   type NotificationParams,
   type ServerRequestMethod,
@@ -24,6 +25,9 @@ interface TurnRequest {
     input?: v2.UserInput[];
     clientUserMessageId?: string;
     sandboxPolicy?: v2.SandboxPolicy;
+    approvalPolicy?: v2.AskForApproval;
+    approvalsReviewer?: v2.ApprovalsReviewer;
+    collaborationMode?: CollaborationMode;
   };
 }
 interface FakeControls {

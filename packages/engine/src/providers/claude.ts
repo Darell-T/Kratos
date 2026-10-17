@@ -11,6 +11,7 @@ import {
   type ClaudeSession,
   type ClaudeSessionEvent,
 } from './claude-session';
+import { createTurnChanges, type TurnChanges } from './turn-changes';
 
 export type ClaudeEvent =
   | { kind: 'turn.started'; threadId: string; turnId: string; messageId: string }
@@ -21,12 +22,13 @@ export type ClaudeEvent =
       messageIds: string[];
       outcome: 'completed' | 'interrupted' | 'failed';
       error: string | null;
+      changes: TurnChanges;
       result: SDKResultMessage;
     }
   | { kind: 'turn.startFailed'; threadId: string; message: string }
   | { kind: 'turn.timedOut'; threadId: string; turnId: string; message: string }
   | { kind: 'output'; threadId: string; turnId: string | null; message: SDKMessage }
-  | { kind: 'session.exited'; threadId: string; message: string }
+  | { kind: 'session.exited'; threadId: string; message: string; changes: TurnChanges }
   | { kind: 'message.updated'; message: ClaudeMessage }
   | ClaudeRequestEvent;
 
@@ -51,6 +53,7 @@ interface ThreadState {
   turn: TurnState;
   session?: ClaudeSession;
   stale: boolean;
+  changes: ReturnType<typeof createTurnChanges>;
   waiters: Set<{ resolve: () => void; reject: (error: Error) => void }>;
   timer?: NodeJS.Timeout;
 }
@@ -73,7 +76,11 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
   const { canUseTool, onElicitation, clearRequests, pendingInput, ...requests } = createClaudeApprovals((threadId) => {
     const state = threads.get(threadId);
     if (closed || !state || state.turn.kind === 'unavailable') return undefined;
-    return { permissions: state.settings.permissions, turnId: isActive(state.turn) ? state.turn.turnId : null };
+    return {
+      permissions: state.settings.permissions,
+      plan: state.settings.plan,
+      turnId: isActive(state.turn) ? state.turn.turnId : null,
+    };
   }, emitEvent);
 
   function emitEvent(event: ClaudeEvent) {
@@ -176,6 +183,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
   // A lost Claude Code process affects only its own thread, which reopens the session on its next turn.
   function retire(threadId: string, state: ThreadState, error: Error) {
     const initialized = state.session?.initialized ?? false;
+    const changes = state.changes.take();
     // The queue can resume before the transcript is read, so only judge what the lost session was sent.
     const sent = new Set(isActive(state.turn) ? state.turn.pending : []);
     closeSession(state);
@@ -195,7 +203,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
         else updateMessage(message.id, initialized ? 'unknown' : 'failed', message.turnId, error.message);
       }
       settleWaiters(state);
-      emitEvent({ kind: 'session.exited', threadId, message: error.message });
+      emitEvent({ kind: 'session.exited', threadId, message: error.message, changes });
     })().catch((reason: unknown) => failProvider(threadId, state, reason));
   }
 
@@ -253,6 +261,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
       messageIds: event.messageIds,
       outcome: event.outcome,
       error: event.error,
+      changes: state.changes.take(),
       result: event.result,
     });
     if (turn.kind === 'stopping') turn.stopped?.();
@@ -273,7 +282,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
       return;
     }
     closeSession(state);
-    emitEvent({ kind: 'session.exited', threadId, message: error.message });
+    emitEvent({ kind: 'session.exited', threadId, message: error.message, changes: state.changes.take() });
   }
 
   function acceptMessage(state: ThreadState, messageId: string) {
@@ -320,8 +329,10 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
           folder: state.settings.folder,
           model: state.settings.model,
           permissions: state.settings.permissions,
+          plan: state.settings.plan,
           canUseTool: canUseTool(threadId),
           onElicitation: onElicitation(threadId),
+          onToolUse: (use) => (use.kind === 'edit' ? state.changes.edited(use.path) : state.changes.ran()),
         },
         (event) => handleSessionEvent(threadId, state, session, event),
       );
@@ -355,6 +366,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
   async function startTurn(threadId: string, state: ThreadState, message: ClaudeMessage): Promise<ClaudeMessage> {
     const turn: ActiveTurn = { kind: 'running', turnId: message.id, pending: new Set([message.id]) };
     state.turn = turn;
+    state.changes.take();
     turn.opening = openSession(threadId, state, turn, message);
     const session = await turn.opening;
     delete turn.opening;
@@ -481,6 +493,13 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     closeSession(state);
   }
 
+  function setThreadPlanMode(threadId: string, plan: boolean) {
+    const state = requireThread(threadId);
+    if (isActive(state.turn)) throw new Error('Stop the turn before changing permissions');
+    saveThreadSettings(state, { ...state.settings, plan });
+    closeSession(state);
+  }
+
   function removeQueuedMessage(threadId: string, messageId: string): boolean {
     const state = requireThread(threadId);
     const message = store.getClaudeMessage(messageId);
@@ -532,19 +551,33 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
 
   function registerThread(settings: ClaudeThread): ThreadState {
     store.saveClaudeThread(settings);
-    const state: ThreadState = { settings, turn: { kind: 'idle' }, stale: false, waiters: new Set() };
+    const state: ThreadState = {
+      settings,
+      turn: { kind: 'idle' },
+      stale: false,
+      changes: createTurnChanges(),
+      waiters: new Set(),
+    };
     threads.set(settings.id, state);
     return state;
   }
 
   async function startThread(
     folder: string,
-    settings: { model?: string; permissions?: Permission } = {},
+    settings: { model?: string; permissions?: Permission; plan?: boolean } = {},
   ): Promise<string> {
     if (closed) throw new Error('Claude provider is closed');
     const permissions = permissionSchema.parse(settings.permissions ?? 'askMe');
     const id = randomUUID();
-    registerThread({ id, folder, model: settings.model || null, permissions, pausedError: null, runningTurn: null });
+    registerThread({
+      id,
+      folder,
+      model: settings.model || null,
+      permissions,
+      plan: settings.plan ?? false,
+      pausedError: null,
+      runningTurn: null,
+    });
     return Promise.resolve(id);
   }
 
@@ -646,6 +679,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     resumeQueue,
     setThreadModel,
     setThreadPermissions,
+    setThreadPlanMode,
     providerModels,
     findSkills,
     findPlugins,

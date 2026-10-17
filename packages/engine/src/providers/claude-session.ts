@@ -4,6 +4,7 @@ import {
   getSessionMessages,
   query,
   type CanUseTool,
+  type HookCallback,
   type OnElicitation,
   type Options,
   type SDKMessage,
@@ -19,8 +20,10 @@ export interface ClaudeSessionOptions {
   folder: string;
   model: string | null;
   permissions: Permission;
+  plan: boolean;
   canUseTool: CanUseTool;
   onElicitation: OnElicitation;
+  onToolUse: (use: { kind: 'edit'; path: string } | { kind: 'command' }) => void;
 }
 export type ClaudeSessionEvent =
   | { kind: 'initialized'; model: string }
@@ -47,7 +50,18 @@ const permissionModes = {
   approveForMe: { permissionMode: 'auto' },
   fullAccess: { permissionMode: 'bypassPermissions', allowDangerouslySkipPermissions: true },
 } satisfies Record<Permission, Options>;
-
+const editPathKeys: Record<string, 'file_path' | 'notebook_path'> = {
+  Edit: 'file_path',
+  Write: 'file_path',
+  MultiEdit: 'file_path',
+  NotebookEdit: 'notebook_path',
+};
+const commandTools = ['Bash', 'PowerShell', 'Monitor'];
+const planMode = { permissionMode: 'plan' } satisfies Options;
+const toolUseSchema = z.object({
+  tool_name: z.string(),
+  tool_input: z.object({ file_path: z.string().optional(), notebook_path: z.string().optional() }),
+});
 const initSchema = z.object({ model: z.string().min(1) });
 const replaySchema = z.object({ uuid: z.string().min(1) });
 const resultSchema = z.object({
@@ -60,6 +74,23 @@ const resultSchema = z.object({
   terminal_reason: z.string().optional(),
 });
 const abortReasons = new Set<string | undefined>(['aborted_streaming', 'aborted_tools']);
+
+function toolHooks(onToolUse: ClaudeSessionOptions['onToolUse']): NonNullable<Options['hooks']> {
+  const hook =
+    (succeeded: boolean): HookCallback =>
+    (input) => {
+      const use = toolUseSchema.safeParse(input);
+      if (use.success) {
+        const { tool_name, tool_input } = use.data;
+        const pathKey = editPathKeys[tool_name];
+        const path = pathKey && tool_input[pathKey];
+        if (commandTools.includes(tool_name)) onToolUse({ kind: 'command' });
+        else if (succeeded && path) onToolUse({ kind: 'edit', path });
+      }
+      return Promise.resolve({ continue: true });
+    };
+  return { PostToolUse: [{ hooks: [hook(true)] }], PostToolUseFailure: [{ hooks: [hook(false)] }] };
+}
 
 function resultEvent(message: SDKResultMessage): ClaudeSessionEvent {
   const result = resultSchema.parse(message);
@@ -120,7 +151,7 @@ export async function openClaudeSession(
     options: {
       cwd: options.folder,
       ...(options.model ? { model: options.model } : {}),
-      ...permissionModes[options.permissions],
+      ...(options.plan ? planMode : permissionModes[options.permissions]),
       ...(resume ? { resume: options.threadId } : { sessionId: options.threadId }),
       settingSources,
       persistSession: true,
@@ -128,6 +159,7 @@ export async function openClaudeSession(
       extraArgs: { 'replay-user-messages': null },
       canUseTool: options.canUseTool,
       onElicitation: options.onElicitation,
+      hooks: toolHooks(options.onToolUse),
     },
   });
   let initialized = false;

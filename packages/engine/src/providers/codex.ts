@@ -1,16 +1,26 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { connectCodex, CodexRequestError, CodexTimeoutError, type CodexOptions, type v2 } from '@kratos/codex';
+import {
+  connectCodex,
+  CodexRequestError,
+  CodexTimeoutError,
+  type CodexOptions,
+  type CollaborationMode,
+  type v2,
+} from '@kratos/codex';
 import { codexInputSchema, type Store, type CodexMessage, type CodexThread } from '../store';
 import { createCodexApprovals, type Approval, type Permission } from './codex-approvals';
+import { createTurnChanges, type TurnChanges } from './turn-changes';
 
 type UserInput = v2.UserInput;
+// The checked-in schema is the stable one, which lacks the field the experimental API accepts on turn/start.
+type TurnStart = v2.TurnStartParams & { collaborationMode: CollaborationMode };
 export type CodexEvent =
   | ({ kind: 'message.delta' } & v2.AgentMessageDeltaNotification)
   | ({ kind: 'item.started' } & v2.ItemStartedNotification)
   | ({ kind: 'item.completed' } & v2.ItemCompletedNotification)
   | ({ kind: 'turn.started' } & v2.TurnStartedNotification)
-  | ({ kind: 'turn.completed' } & v2.TurnCompletedNotification)
+  | ({ kind: 'turn.completed'; changes: TurnChanges } & v2.TurnCompletedNotification)
   | ({ kind: 'error' } & v2.ErrorNotification)
   | ({ kind: 'serverRequest.resolved' } & v2.ServerRequestResolvedNotification)
   | { kind: 'turn.startFailed'; threadId: string; message: string }
@@ -45,6 +55,7 @@ interface ThreadState {
   settings: CodexThread;
   turn: TurnState;
   steering: Map<string, Promise<CodexMessage>>;
+  changes: ReturnType<typeof createTurnChanges>;
   waiters: Set<{ resolve: () => void; reject: (error: Error) => void }>;
   timer?: NodeJS.Timeout;
   lastCompletedTurnId?: string;
@@ -69,9 +80,27 @@ const messageText = (error: unknown) => (error instanceof Error ? error.message 
 const beforeExecution = (error: unknown) =>
   error instanceof CodexRequestError && [-32700, -32600, -32601, -32602].includes(error.code);
 
+function recordItems(changes: ReturnType<typeof createTurnChanges>, items: v2.ThreadItem[]) {
+  for (const item of items)
+    if (item.type === 'fileChange' && item.status === 'completed')
+      for (const { path, kind } of item.changes) {
+        changes.edited(path);
+        if (kind.type === 'update' && kind.move_path) changes.edited(kind.move_path);
+      }
+    else if (item.type === 'commandExecution' && (item.status === 'completed' || item.status === 'failed'))
+      changes.ran();
+}
+
 function permissions(
   permissions: Permission,
+  plan: boolean,
 ): Required<Pick<v2.TurnStartParams, 'sandboxPolicy' | 'approvalPolicy' | 'approvalsReviewer'>> {
+  if (plan)
+    return {
+      sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      approvalPolicy: 'on-request',
+      approvalsReviewer: 'user',
+    };
   if (permissions === 'fullAccess')
     return { sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never', approvalsReviewer: 'user' };
   return {
@@ -87,9 +116,13 @@ function permissions(
   };
 }
 
-function threadPermissions(permission: Permission) {
-  const { approvalPolicy, approvalsReviewer } = permissions(permission);
-  const sandbox: v2.SandboxMode = permission === 'fullAccess' ? 'danger-full-access' : 'workspace-write';
+function threadPermissions(permission: Permission, plan: boolean) {
+  const { approvalPolicy, approvalsReviewer } = permissions(permission, plan);
+  const sandbox: v2.SandboxMode = plan
+    ? 'read-only'
+    : permission === 'fullAccess'
+      ? 'danger-full-access'
+      : 'workspace-write';
   return { sandbox, approvalPolicy, approvalsReviewer };
 }
 
@@ -111,7 +144,8 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     codex,
     (id) => {
       const state = threads.get(id);
-      return closed || state?.turn.kind === 'unavailable' ? undefined : state?.settings.permissions;
+      if (closed || !state || state.turn.kind === 'unavailable') return undefined;
+      return state.settings.plan ? 'askMe' : state.settings.permissions;
     },
     (threadId) => emitEvent({ kind: 'approvals.changed', threadId, approvals: approvals.approvalsWaiting(threadId) }),
   );
@@ -299,7 +333,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     return turn;
   }
 
-  async function requestStart(request: v2.TurnStartParams) {
+  async function requestStart(request: TurnStart) {
     try {
       return await codex.request('turn/start', request);
     } catch (error) {
@@ -326,10 +360,11 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     state.turn = active;
     const completed = starting.completedTurns.get(turn.id);
     if (completed || turn.status !== 'inProgress') {
+      const changes = !completed && state.lastCompletedTurnId !== turn.id ? state.changes.take() : null;
       completeTurn(threadId, completed ?? turn);
-      if (!completed && state.lastCompletedTurnId !== turn.id) {
+      if (changes) {
         state.lastCompletedTurnId = turn.id;
-        emitEvent({ kind: 'turn.completed', threadId, turn });
+        emitEvent({ kind: 'turn.completed', threadId, turn, changes });
       }
       return undefined;
     }
@@ -339,12 +374,16 @@ export async function createCodexProvider(options: CodexProviderOptions) {
 
   function startTurn(threadId: string, message: CodexMessage): Promise<ActiveTurn | undefined> {
     const state = requireThread(threadId);
-    const request: v2.TurnStartParams = {
+    const request: TurnStart = {
       threadId,
       input: message.input,
       clientUserMessageId: message.id,
       model: state.settings.model,
-      ...permissions(state.settings.permissions),
+      ...permissions(state.settings.permissions, state.settings.plan),
+      collaborationMode: {
+        mode: state.settings.plan ? 'plan' : 'default',
+        settings: { model: state.settings.model, reasoning_effort: null, developer_instructions: null },
+      },
     };
     const submitting = store.updateCodexMessage(message.id, 'submitting');
     const starting: StartingTurn = {
@@ -354,6 +393,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       startPromise: Promise.resolve().then(() => submit()),
     };
     state.turn = starting;
+    state.changes.take();
     const submit = async (): Promise<ActiveTurn | undefined> => {
       try {
         if (closed) throw new Error('Codex provider is closed');
@@ -518,6 +558,12 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     saveThreadSettings(state, { ...state.settings, permissions });
   }
 
+  function setThreadPlanMode(threadId: string, plan: boolean) {
+    const state = requireThread(threadId);
+    if (state.turn.kind !== 'idle' || state.steering.size) throw new Error('Stop the turn before changing permissions');
+    saveThreadSettings(state, { ...state.settings, plan });
+  }
+
   function removeQueuedMessage(threadId: string, messageId: string): boolean {
     const state = requireThread(threadId);
     const message = store.getCodexMessage(messageId);
@@ -572,22 +618,29 @@ export async function createCodexProvider(options: CodexProviderOptions) {
 
   function registerThread(settings: CodexThread): ThreadState {
     store.saveCodexThread(settings);
-    const state: ThreadState = { settings, turn: { kind: 'idle' }, steering: new Map(), waiters: new Set() };
+    const state: ThreadState = {
+      settings,
+      turn: { kind: 'idle' },
+      steering: new Map(),
+      changes: createTurnChanges(),
+      waiters: new Set(),
+    };
     threads.set(settings.id, state);
     return state;
   }
 
   async function startThread(
     folder: string,
-    settings: { model?: string; permissions?: Permission } = {},
+    settings: { model?: string; permissions?: Permission; plan?: boolean } = {},
   ): Promise<string> {
     if (closed) throw new Error('Codex provider is closed');
     const permission = z.enum(['askMe', 'approveForMe', 'fullAccess']).parse(settings.permissions ?? 'askMe');
+    const plan = settings.plan ?? false;
     const result = await codex.request('thread/start', {
       cwd: folder,
       ephemeral: false,
       ...(settings.model ? { model: settings.model } : {}),
-      ...threadPermissions(permission),
+      ...threadPermissions(permission, plan),
     });
     z.object({ thread: threadSchema, model: z.string().min(1) }).parse(result);
     if (closed) throw new Error('Codex provider is closed');
@@ -596,6 +649,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       folder: result.thread.cwd,
       model: result.model,
       permissions: permission,
+      plan,
       pausedError: null,
     });
     return result.thread.id;
@@ -624,6 +678,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       }
       const turn: ActiveTurn = { kind: 'running', turnId: active.id };
       state.turn = turn;
+      recordItems(state.changes, active.items);
       startTurnTimeout(threadId, state, turn);
       return;
     }
@@ -651,10 +706,11 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     const resuming = (async () => {
       const saved = store.getCodexThread(threadId);
       const permission = saved?.permissions ?? 'askMe';
+      const plan = saved?.plan ?? false;
       const result = await codex.request('thread/resume', {
         threadId,
         ...(saved ? { cwd: saved.folder, model: saved.model } : {}),
-        ...threadPermissions(permission),
+        ...threadPermissions(permission, plan),
       });
       z.object({
         thread: threadSchema.extend({ id: z.literal(threadId) }),
@@ -666,6 +722,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
         folder: result.thread.cwd,
         model: result.model,
         permissions: permission,
+        plan,
         pausedError: saved?.pausedError ?? null,
       });
       try {
@@ -762,14 +819,21 @@ export async function createCodexProvider(options: CodexProviderOptions) {
 
   codex.onNotification('item/agentMessage/delta', (params) => emitEvent({ ...params, kind: 'message.delta' }));
   codex.onNotification('item/started', (params) => emitEvent({ ...params, kind: 'item.started' }));
-  codex.onNotification('item/completed', (params) => emitEvent({ ...params, kind: 'item.completed' }));
+  codex.onNotification('item/completed', (params) => {
+    const changes = threads.get(params.threadId)?.changes;
+    if (changes) recordItems(changes, [params.item]);
+    emitEvent({ ...params, kind: 'item.completed' });
+  });
   codex.onNotification('turn/started', (params) => emitEvent({ ...params, kind: 'turn.started' }));
   codex.onNotification('turn/completed', (params) => {
-    completeTurn(params.threadId, params.turn);
     const state = threads.get(params.threadId);
-    if (state?.lastCompletedTurnId === params.turn.id) return;
+    const duplicate = state?.lastCompletedTurnId === params.turn.id;
+    // Taken before completeTurn, which starts the next queued turn and resets the record.
+    const changes = duplicate ? null : (state?.changes.take() ?? { files: [], editedSinceCommand: false });
+    completeTurn(params.threadId, params.turn);
+    if (!changes) return;
     if (state) state.lastCompletedTurnId = params.turn.id;
-    emitEvent({ ...params, kind: 'turn.completed' });
+    emitEvent({ ...params, kind: 'turn.completed', changes });
   });
   codex.onNotification('error', (params) => emitEvent({ ...params, kind: 'error' }));
   codex.onNotification('thread/closed', ({ threadId }) => {
@@ -868,6 +932,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     resumeQueue,
     setThreadModel,
     setThreadPermissions,
+    setThreadPlanMode,
     providerModels,
     findSkills,
     findPlugins,
