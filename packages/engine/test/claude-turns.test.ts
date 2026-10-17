@@ -135,7 +135,7 @@ describe('Claude turns through a scripted SDK', () => {
       kind: 'session.exited',
       threadId: claude.thread,
       message,
-      changes: { files: [], editedSinceCommand: false },
+      changes: { files: [], editedSinceCommand: false, ranCommand: false },
     });
     expect(claude.messages(claude.thread)).toMatchObject([
       { id: A, status: 'accepted' },

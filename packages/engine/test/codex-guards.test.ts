@@ -171,11 +171,11 @@ describe('Codex turn changes', () => {
     expect(
       codex.events.flatMap((event) => (event.kind === 'turn.completed' ? [[event.turn.id, event.changes]] : [])),
     ).toEqual([
-      ['turn-A', { files: ['a.ts', 'b.ts'], editedSinceCommand: true }],
-      ['turn-B', { files: ['other.ts'], editedSinceCommand: true }],
-      ['turn-C', { files: [], editedSinceCommand: false }],
-      ['turn-D', { files: ['n.ts', 'old.ts', 'new.ts'], editedSinceCommand: false }],
-      ['turn-E', { files: ['e.ts'], editedSinceCommand: true }],
+      ['turn-A', { files: ['a.ts', 'b.ts'], editedSinceCommand: true, ranCommand: true }],
+      ['turn-B', { files: ['other.ts'], editedSinceCommand: true, ranCommand: false }],
+      ['turn-C', { files: [], editedSinceCommand: false, ranCommand: false }],
+      ['turn-D', { files: ['n.ts', 'old.ts', 'new.ts'], editedSinceCommand: false, ranCommand: true }],
+      ['turn-E', { files: ['e.ts'], editedSinceCommand: true, ranCommand: false }],
     ]);
 
     const next = await codex.restart();
@@ -192,6 +192,6 @@ describe('Codex turn changes', () => {
       method: 'turn/completed',
       params: { threadId: 'thread-A', turn: { ...live, status: 'completed' } },
     });
-    expect(resumed).toEqual([{ files: ['before-restart.ts'], editedSinceCommand: true }]);
+    expect(resumed).toEqual([{ files: ['before-restart.ts'], editedSinceCommand: true, ranCommand: false }]);
   });
 });

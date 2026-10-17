@@ -829,7 +829,9 @@ export async function createCodexProvider(options: CodexProviderOptions) {
     const state = threads.get(params.threadId);
     const duplicate = state?.lastCompletedTurnId === params.turn.id;
     // Taken before completeTurn, which starts the next queued turn and resets the record.
-    const changes = duplicate ? null : (state?.changes.take() ?? { files: [], editedSinceCommand: false });
+    const changes = duplicate
+      ? null
+      : (state?.changes.take() ?? { files: [], editedSinceCommand: false, ranCommand: false });
     completeTurn(params.threadId, params.turn);
     if (!changes) return;
     if (state) state.lastCompletedTurnId = params.turn.id;

@@ -105,7 +105,7 @@ describe('Claude turn changes', () => {
     await claude.exit(new Error('Claude Code process exited with code 3'));
     await flush();
     expect(claude.events.filter((event) => event.kind === 'session.exited')).toMatchObject([
-      { changes: { files: ['f.ts'], editedSinceCommand: true } },
+      { changes: { files: ['f.ts'], editedSinceCommand: true, ranCommand: false } },
     ]);
     await claude.resumeQueue(claude.thread);
     await claude.useTool('PostToolUse', 'Edit', { file_path: 'late.ts' });
@@ -116,11 +116,11 @@ describe('Claude turn changes', () => {
     expect(
       claude.events.flatMap((event) => (event.kind === 'turn.completed' ? [[event.turnId, event.changes]] : [])),
     ).toEqual([
-      [A, { files: ['a.ts', 'b.ts'], editedSinceCommand: true }],
-      [B, { files: ['n.ipynb', 'm.ts'], editedSinceCommand: false }],
-      [C, { files: [], editedSinceCommand: false }],
-      [D, { files: ['e.ts'], editedSinceCommand: true }],
-      [F, { files: [], editedSinceCommand: false }],
+      [A, { files: ['a.ts', 'b.ts'], editedSinceCommand: true, ranCommand: true }],
+      [B, { files: ['n.ipynb', 'm.ts'], editedSinceCommand: false, ranCommand: true }],
+      [C, { files: [], editedSinceCommand: false, ranCommand: false }],
+      [D, { files: ['e.ts'], editedSinceCommand: true, ranCommand: false }],
+      [F, { files: [], editedSinceCommand: false, ranCommand: true }],
     ]);
   });
 });
