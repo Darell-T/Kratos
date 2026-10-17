@@ -44,6 +44,8 @@ interface ActiveTurn {
   pending: Set<string>;
   opening?: Promise<ClaudeSession>;
   stopPromise?: Promise<void>;
+  // Claude may never acknowledge an interrupt, so the stopped run's result also ends the Stop.
+  stopped?: () => void;
 }
 type TurnState = { kind: 'idle' } | ActiveTurn | { kind: 'unavailable'; error: Error };
 interface ThreadState {
@@ -262,6 +264,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
       changes: state.changes.take(),
       result: event.result,
     });
+    if (turn.kind === 'stopping') turn.stopped?.();
     if (turn.pending.size) continueTurn(threadId, state, turn);
     else finishTurn(threadId, state);
   }
@@ -445,7 +448,7 @@ export function createClaudeProvider(options: ClaudeProviderOptions) {
     }, 5000);
     state.timer = watchdog;
     try {
-      await session.interrupt();
+      await Promise.race([session.interrupt(), new Promise<void>((resolve) => (turn.stopped = resolve))]);
     } catch (error) {
       // The Stop already succeeded if the turn ended, or if the stopped run ended and replaced this watchdog.
       if (state.turn !== turn || state.timer !== watchdog) return;
