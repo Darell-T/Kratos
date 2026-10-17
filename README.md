@@ -64,6 +64,60 @@ npm run generate -w @kratos/codex   # refresh the Codex protocol types after a C
 
 The tests run against a small fake Codex, so you do not need Codex installed to run them.
 
+## Codex provider
+
+`packages/engine/src/providers/codex.ts` exports `createCodexProvider`. Importing it does not start Codex or run a
+demo. The engine creates one provider with its existing `Store`, and closes the provider before closing the store.
+Connecting it to the chat API and UI is still in progress.
+
+```ts
+const provider = await createCodexProvider({ store });
+const threadId = await provider.startThread(projectFolder);
+const message = await provider.sendMessage(
+  threadId,
+  [{ type: 'text', text: 'Review this project', text_elements: [] }],
+  userMessageId,
+);
+```
+
+Thread IDs are native Codex IDs. Pass a stable message ID to deduplicate repeated submissions. Reusing an ID with
+different input throws. Messages sent during a turn stay in the database and run individually in their original
+order. `steerTurn(threadId, message.id)` sends that queued message into the current turn instead. It stays queued
+if the turn is still starting or cannot accept steering.
+
+`onEvent` delivers structured replies, tool items, turn outcomes, message states, approvals and user requests.
+`messages(threadId)` returns the saved submissions. Their delivery states are:
+
+| State        | Meaning                                                         |
+| ------------ | --------------------------------------------------------------- |
+| `queued`     | Saved and waiting to send                                       |
+| `submitting` | Waiting for Codex to acknowledge the input                      |
+| `accepted`   | Codex accepted the input; the saved turn ID identifies its turn |
+| `failed`     | Codex confirmed a rejection before execution                    |
+| `unknown`    | Delivery could not be established                               |
+| `cancelled`  | Removed from the delivery queue                                 |
+
+A known pre-execution rejection gets one retry. An uncertain submission is never automatically replayed.
+`resumeThread(threadId)` restores saved settings and checks native history for input whose reply was lost.
+For a confirmed rejection, use `retryMessage` or `removeQueuedMessage`. For an uncertain submission, use
+`discardMessage` after reviewing the native thread. It checks that Codex is idle and checks history again before
+discarding. Discarding cannot undo work that may already have run.
+
+A failed or timed-out turn pauses follow-ups. Call `resumeQueue` when continuing them is appropriate.
+`waitUntilIdle` rejects when the queue is paused or the thread becomes unavailable. `setThreadModel` applies to
+the next turn. `setThreadPermissions` requires an idle thread so the displayed policy matches the running policy.
+If saving delivery or a turn outcome fails, the provider closes and settles its waiters. Saved submissions can be
+reconciled with native history after storage recovers.
+
+Questions, additional permissions and MCP elicitation have pending-request getters and reply methods:
+`answerUserInput`, `decidePermissions` and `answerElicitation`. Command and file approvals use `decideCommand` and
+`decideFile`. Requests disappear when resolved, when their turn ends, or when the provider closes.
+
+Requests and initialization have a 30-second deadline. Turns have a 10-minute deadline, extended while waiting for
+blocking user input or approval. Stop acknowledgement and completion each have a 5-second deadline. If a
+timed-out turn cannot stop, or an acknowledged Stop never completes, the provider closes the shared Codex process
+and retains pending submissions. The factory accepts `requestTimeoutMs`, `turnTimeoutMs` and `closeTimeoutMs`.
+
 ## Packages
 
 | Package             | What it is                                                                                   |

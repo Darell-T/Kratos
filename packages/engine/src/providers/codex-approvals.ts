@@ -15,6 +15,8 @@ export interface PendingCommandApproval extends ApprovalOwner {
   command: string | null;
   reason: string | null;
   cwd: string | null;
+  approvalKind: v2.CommandExecutionRequestApprovalParams['kind'];
+  networkApprovalContext: v2.CommandExecutionRequestApprovalParams['networkApprovalContext'];
 }
 
 export interface PendingFileApproval extends ApprovalOwner {
@@ -25,29 +27,35 @@ export interface PendingFileApproval extends ApprovalOwner {
   changes: v2.FileUpdateChange[] | null;
 }
 
-type Approval = PendingCommandApproval | PendingFileApproval;
-interface Pending<T extends Approval> {
+export type Approval = PendingCommandApproval | PendingFileApproval;
+interface Pending<T extends Approval, Decision = ApprovalDecision> {
   details: T;
-  resolve: (response: { decision: ApprovalDecision }) => void;
+  resolve: (response: { decision: Decision }) => void;
 }
 
-function decide<T extends Approval>(
-  pending: Map<RequestId, Pending<T>>,
+function decide<T extends Approval, Decision>(
+  pending: Map<RequestId, Pending<T, Decision>>,
   requestId: RequestId,
-  decision: ApprovalDecision,
+  decision: Decision,
+  onChange?: (threadId: string) => void,
 ): boolean {
   const request = pending.get(requestId);
   if (!request) return false;
   pending.delete(requestId);
   request.resolve({ decision });
+  onChange?.(request.details.threadId);
   return true;
 }
 
 // The request ID answers an approval; the item ID locates the proposed file changes.
 const itemKey = (threadId: string, turnId: string, itemId: string) => JSON.stringify([threadId, turnId, itemId]);
 
-export function createCodexApprovals(codex: CodexClient, permissionFor: (threadId: string) => Permission | undefined) {
-  const pendingCommands = new Map<RequestId, Pending<PendingCommandApproval>>();
+export function createCodexApprovals(
+  codex: CodexClient,
+  permissionFor: (threadId: string) => Permission | undefined,
+  onChange?: (threadId: string) => void,
+) {
+  const pendingCommands = new Map<RequestId, Pending<PendingCommandApproval, v2.CommandExecutionApprovalDecision>>();
   const pendingFiles = new Map<RequestId, Pending<PendingFileApproval>>();
   const fileItems = new Map<string, { threadId: string; turnId: string; changes: v2.FileUpdateChange[] }>();
 
@@ -56,7 +64,7 @@ export function createCodexApprovals(codex: CodexClient, permissionFor: (threadI
     if (permission === undefined) return { decision: 'cancel' };
     if (permission === 'fullAccess') return { decision: 'accept' };
 
-    return new Promise<{ decision: ApprovalDecision }>((resolve) => {
+    return new Promise<{ decision: v2.CommandExecutionApprovalDecision }>((resolve) => {
       pendingCommands.set(requestId, {
         details: {
           kind: 'command',
@@ -67,9 +75,12 @@ export function createCodexApprovals(codex: CodexClient, permissionFor: (threadI
           command: params.command ?? null,
           reason: params.reason ?? null,
           cwd: params.cwd ?? null,
+          approvalKind: params.kind,
+          networkApprovalContext: params.networkApprovalContext ?? null,
         },
         resolve,
       });
+      onChange?.(params.threadId);
     });
   });
 
@@ -93,6 +104,7 @@ export function createCodexApprovals(codex: CodexClient, permissionFor: (threadI
         },
         resolve,
       });
+      onChange?.(params.threadId);
     });
   });
 
@@ -100,11 +112,14 @@ export function createCodexApprovals(codex: CodexClient, permissionFor: (threadI
     if (item.type !== 'fileChange') return;
     const changes = structuredClone(item.changes);
     fileItems.set(itemKey(threadId, turnId, item.id), { threadId, turnId, changes });
+    let updated = false;
     for (const { details } of pendingFiles.values()) {
       if (details.threadId === threadId && details.turnId === turnId && details.itemId === item.id) {
         details.changes = changes;
+        updated = true;
       }
     }
+    if (updated) onChange?.(threadId);
   }
 
   codex.onNotification('item/started', rememberFileItem);
@@ -114,10 +129,10 @@ export function createCodexApprovals(codex: CodexClient, permissionFor: (threadI
     const matches = (owner: { threadId: string; turnId: string }) =>
       (threadId === undefined || owner.threadId === threadId) && (turnId === undefined || owner.turnId === turnId);
     for (const [requestId, { details }] of pendingCommands) {
-      if (matches(details)) decide(pendingCommands, requestId, 'cancel');
+      if (matches(details)) decide(pendingCommands, requestId, 'cancel', onChange);
     }
     for (const [requestId, { details }] of pendingFiles) {
-      if (matches(details)) decide(pendingFiles, requestId, 'cancel');
+      if (matches(details)) decide(pendingFiles, requestId, 'cancel', onChange);
     }
     for (const [key, item] of fileItems) {
       if (matches(item)) fileItems.delete(key);
@@ -126,8 +141,9 @@ export function createCodexApprovals(codex: CodexClient, permissionFor: (threadI
 
   codex.onNotification('serverRequest/resolved', ({ threadId, requestId }) => {
     // Codex no longer needs an answer. The transport suppresses a late wire response.
-    if (pendingCommands.get(requestId)?.details.threadId === threadId) decide(pendingCommands, requestId, 'cancel');
-    if (pendingFiles.get(requestId)?.details.threadId === threadId) decide(pendingFiles, requestId, 'cancel');
+    if (pendingCommands.get(requestId)?.details.threadId === threadId)
+      decide(pendingCommands, requestId, 'cancel', onChange);
+    if (pendingFiles.get(requestId)?.details.threadId === threadId) decide(pendingFiles, requestId, 'cancel', onChange);
   });
   codex.onNotification('turn/completed', ({ threadId, turn }) => clearOwned(threadId, turn.id));
   codex.onNotification('thread/closed', ({ threadId }) => clearOwned(threadId));
@@ -147,7 +163,10 @@ export function createCodexApprovals(codex: CodexClient, permissionFor: (threadI
           .map(({ details }) => details),
       );
     },
-    decideCommand: (requestId: RequestId, decision: ApprovalDecision) => decide(pendingCommands, requestId, decision),
-    decideFile: (requestId: RequestId, decision: ApprovalDecision) => decide(pendingFiles, requestId, decision),
+    decideCommand: (requestId: RequestId, decision: v2.CommandExecutionApprovalDecision) =>
+      decide(pendingCommands, requestId, decision, onChange),
+    decideFile: (requestId: RequestId, decision: ApprovalDecision) =>
+      decide(pendingFiles, requestId, decision, onChange),
+    clearApprovals: clearOwned,
   };
 }

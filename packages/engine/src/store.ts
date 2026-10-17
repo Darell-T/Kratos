@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { z } from 'zod';
+import type { v2 } from '@kratos/codex';
 import {
   providers,
   threadEventBodySchema,
@@ -13,6 +15,54 @@ import {
   type ThreadEventBody,
   type Workspace,
 } from '@kratos/protocol';
+
+const imageDetail = z.enum(['auto', 'low', 'high', 'original']).optional();
+export const codexInputSchema = z
+  .array(
+    z.union([
+      z.object({
+        type: z.literal('text'),
+        text: z.string(),
+        text_elements: z.array(
+          z.object({
+            byteRange: z.object({ start: z.number().int().nonnegative(), end: z.number().int().nonnegative() }),
+            placeholder: z.string().nullable(),
+          }),
+        ),
+      }),
+      z
+        .object({ type: z.literal('image'), url: z.string(), detail: imageDetail })
+        .transform(({ detail, ...image }) => (detail === undefined ? image : { ...image, detail })),
+      z
+        .object({ type: z.literal('image'), fileId: z.string(), detail: imageDetail })
+        .transform(({ detail, ...image }) => (detail === undefined ? image : { ...image, detail })),
+      z
+        .object({ type: z.literal('localImage'), path: z.string(), detail: imageDetail })
+        .transform(({ detail, ...image }) => (detail === undefined ? image : { ...image, detail })),
+      z.object({ type: z.literal('audio'), url: z.string() }),
+      z.object({ type: z.literal('localAudio'), path: z.string() }),
+      z.object({ type: z.literal('skill'), name: z.string(), path: z.string() }),
+      z.object({ type: z.literal('mention'), name: z.string(), path: z.string() }),
+    ]),
+  )
+  .min(1);
+const messageStatus = z.enum(['queued', 'submitting', 'accepted', 'failed', 'unknown', 'cancelled']);
+const permission = z.enum(['askMe', 'approveForMe', 'fullAccess']);
+export interface CodexMessage {
+  id: string;
+  threadId: string;
+  input: v2.UserInput[];
+  status: z.infer<typeof messageStatus>;
+  turnId: string | null;
+  error: string | null;
+}
+export interface CodexThread {
+  id: string;
+  folder: string;
+  model: string;
+  permissions: z.infer<typeof permission>;
+  pausedError: string | null;
+}
 
 const providerList = providers.map((provider) => `'${provider}'`).join(', ');
 
@@ -50,6 +100,25 @@ const migrations: readonly string[] = [
     event TEXT NOT NULL,
     PRIMARY KEY (thread_id, seq)
   ) WITHOUT ROWID;
+  `,
+  `
+  CREATE TABLE codex_threads (
+    id TEXT PRIMARY KEY,
+    folder TEXT NOT NULL,
+    model TEXT NOT NULL,
+    permissions TEXT NOT NULL CHECK (permissions IN ('askMe', 'approveForMe', 'fullAccess')),
+    paused_error TEXT
+  );
+  CREATE TABLE codex_messages (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES codex_threads (id),
+    input TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('queued', 'submitting', 'accepted', 'failed', 'unknown', 'cancelled')),
+    turn_id TEXT,
+    error TEXT,
+    CHECK (status != 'accepted' OR turn_id IS NOT NULL)
+  );
+  CREATE INDEX codex_messages_by_thread ON codex_messages (thread_id);
   `,
 ];
 
@@ -203,4 +272,90 @@ export class Store {
       .all(threadId, after);
     return (rows as unknown as EventRow[]).map(toThreadEvent);
   }
+
+  saveCodexThread(thread: CodexThread): void {
+    this.db
+      .prepare(
+        `INSERT INTO codex_threads (id, folder, model, permissions, paused_error) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT (id) DO UPDATE SET folder = excluded.folder, model = excluded.model,
+      permissions = excluded.permissions, paused_error = excluded.paused_error`,
+      )
+      .run(thread.id, thread.folder, thread.model, thread.permissions, thread.pausedError);
+  }
+
+  getCodexThread(id: string): CodexThread | undefined {
+    const row = this.db.prepare('SELECT * FROM codex_threads WHERE id = ?').get(id);
+    if (!row) return undefined;
+    return z
+      .object({
+        id: z.string(),
+        folder: z.string(),
+        model: z.string(),
+        permissions: permission,
+        pausedError: z.string().nullable(),
+      })
+      .parse({ ...row, pausedError: row.paused_error });
+  }
+
+  addCodexMessage(id: string, threadId: string, input: v2.UserInput[]): CodexMessage {
+    const parsed = codexInputSchema.parse(input);
+    const existing = this.getCodexMessage(id);
+    if (existing) {
+      if (existing.threadId !== threadId || JSON.stringify(existing.input) !== JSON.stringify(parsed)) {
+        throw new Error('Message ID already belongs to a different submission');
+      }
+      return existing;
+    }
+    this.db
+      .prepare("INSERT INTO codex_messages (id, thread_id, input, status) VALUES (?, ?, ?, 'queued')")
+      .run(id, threadId, JSON.stringify(parsed));
+    return { id, threadId, input: parsed, status: 'queued', turnId: null, error: null };
+  }
+
+  getCodexMessage(id: string): CodexMessage | undefined {
+    const row = this.db.prepare('SELECT * FROM codex_messages WHERE id = ?').get(id);
+    return row ? parseCodexMessage(row) : undefined;
+  }
+
+  codexMessages(threadId: string): CodexMessage[] {
+    return this.db
+      .prepare('SELECT * FROM codex_messages WHERE thread_id = ? ORDER BY rowid')
+      .all(threadId)
+      .map(parseCodexMessage);
+  }
+
+  updateCodexMessage(
+    id: string,
+    status: CodexMessage['status'],
+    turnId: string | null = null,
+    error: string | null = null,
+  ): CodexMessage {
+    this.db
+      .prepare('UPDATE codex_messages SET status = ?, turn_id = ?, error = ? WHERE id = ?')
+      .run(status, turnId, error, id);
+    const message = this.getCodexMessage(id);
+    if (!message) throw new Error(`Unknown message ${id}`);
+    return message;
+  }
+}
+
+function parseCodexMessage(row: unknown): CodexMessage {
+  const parsed = z
+    .object({
+      id: z.string(),
+      thread_id: z.string(),
+      input: z.string(),
+      status: messageStatus,
+      turn_id: z.string().nullable(),
+      error: z.string().nullable(),
+    })
+    .parse(row);
+  return {
+    id: parsed.id,
+    threadId: parsed.thread_id,
+    input: codexInputSchema.parse(JSON.parse(parsed.input)),
+    status: parsed.status,
+    turnId: parsed.turn_id,
+    error: parsed.error,
+  };
 }

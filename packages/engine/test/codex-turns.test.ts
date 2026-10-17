@@ -1,74 +1,5 @@
-import { fileURLToPath } from 'node:url';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { connectCodex, type CodexClient, type v2 } from '@kratos/codex';
-
-interface TurnRequest {
-  method: string;
-  params: { threadId: string; turnId?: string; input?: v2.UserInput[] };
-}
-// These controls belong to the fake process, not the generated Codex protocol.
-interface FakeControls {
-  request(method: 'test/turnRequests', params: object): Promise<TurnRequest[]>;
-  request(method: string, params: unknown): Promise<unknown>;
-}
-
-const clients: CodexClient[] = [];
-afterEach(async () => {
-  await Promise.all(clients.splice(0).map((client) => client.close()));
-  vi.doUnmock('@kratos/codex');
-});
-
-function input(text: string): v2.UserInput[] {
-  return [{ type: 'text', text, text_elements: [] }];
-}
-
-function turn(id: string, status: v2.Turn['status'] = 'inProgress'): v2.Turn {
-  return {
-    id,
-    status,
-    items: [],
-    itemsView: 'full',
-    error: null,
-    startedAt: null,
-    completedAt: null,
-    durationMs: null,
-  };
-}
-
-async function setup() {
-  const client = await connectCodex({
-    command: process.execPath,
-    args: [fileURLToPath(new URL('../../codex/test/fake-codex.mjs', import.meta.url))],
-  });
-  clients.push(client);
-  const controls = client as unknown as FakeControls;
-  // Only replace process creation. Requests and events use the real client transport.
-  vi.resetModules();
-  vi.doMock('@kratos/codex', () => ({ connectCodex: () => Promise.resolve(client) }));
-  const provider = await import('../src/providers/codex');
-  provider.setThreadPermissions('thread-A', 'askMe');
-  provider.setThreadPermissions('thread-B', 'askMe');
-
-  return {
-    ...provider,
-    requests: async (method: string) => {
-      const requests = await controls.request('test/turnRequests', {});
-      return requests.filter((request) => request.method === method).map((request) => request.params);
-    },
-    start: (turnId: string, threadId = 'thread-A', status: v2.Turn['status'] = 'inProgress') =>
-      controls.request('test/settleTurn', { method: 'turn/start', threadId, result: { turn: turn(turnId, status) } }),
-    interrupt: (error?: string, threadId = 'thread-A') =>
-      controls.request('test/settleTurn', { method: 'turn/interrupt', threadId, result: {}, error }),
-    failStart: () =>
-      controls.request('test/settleTurn', { method: 'turn/start', threadId: 'thread-A', error: 'Start rejected' }),
-    complete: (turnId: string, threadId = 'thread-A') =>
-      controls.request('test/emit', {
-        method: 'turn/completed',
-        params: { threadId, turn: turn(turnId, 'interrupted') },
-      }),
-    crash: () => controls.request('test/exit', { code: 3 }).catch(() => undefined),
-  };
-}
+import { describe, expect, it } from 'vitest';
+import { setup, input } from './codex-fixture';
 
 describe('Codex turn stopping through the client transport', () => {
   it('keeps queued messages until completion, even after interruption is acknowledged', async () => {
@@ -88,10 +19,7 @@ describe('Codex turn stopping through the client transport', () => {
     expect(await provider.requests('turn/interrupt')).toEqual([{ threadId: 'thread-A', turnId: 'turn-A' }]);
     expect(await provider.requests('turn/start')).toHaveLength(1);
     await provider.complete('turn-A');
-    expect(await provider.requests('turn/start')).toMatchObject([
-      { input: input('A') },
-      { input: [...input('B'), ...input('C')] },
-    ]);
+    expect(await provider.requests('turn/start')).toMatchObject([{ input: input('A') }, { input: input('B') }]);
     await provider.start('turn-B');
   });
 
@@ -147,10 +75,9 @@ describe('Codex turn stopping through the client transport', () => {
     await Promise.all([sent, stopped]);
     expect(await provider.requests('turn/interrupt')).toEqual([]);
 
-    const next = provider.sendMessage('thread-A', input('B'));
-    await provider.start('turn-B');
-    await next;
-    expect(await provider.requests('turn/start')).toHaveLength(2);
+    const next = await provider.sendMessage('thread-A', input('B'));
+    expect(next.status).toBe('queued');
+    expect(await provider.requests('turn/start')).toHaveLength(1);
   });
 
   it('allows another Stop after interruption fails, without releasing queued work', async () => {
