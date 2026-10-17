@@ -15,7 +15,7 @@ describe('Claude delivery when Claude Code exits', () => {
       kind: 'session.exited',
       threadId: claude.thread,
       message: notLoggedIn,
-      changes: { files: [], editedSinceCommand: false },
+      changes: { files: [], editedSinceCommand: false, ranCommand: false },
     });
 
     const retried = claude.retryMessage(claude.thread, A);
