@@ -97,6 +97,15 @@ function fileChange(id: string, status: v2.PatchApplyStatus, ...paths: string[])
   };
 }
 
+function rename(id: string, from: string, to: string): v2.ThreadItem {
+  return {
+    type: 'fileChange',
+    id,
+    status: 'completed',
+    changes: [{ path: from, kind: { type: 'update', move_path: to }, diff: '+new' }],
+  };
+}
+
 function command(id: string, status: v2.CommandExecutionStatus): v2.ThreadItem {
   return {
     type: 'commandExecution',
@@ -116,7 +125,7 @@ function command(id: string, status: v2.CommandExecutionStatus): v2.ThreadItem {
 }
 
 describe('Codex turn changes', () => {
-  it('reports the files each thread edited per turn and whether one changed after the last command, even with a follow-up queued, ignoring declined work', async () => {
+  it('reports the files each thread edited per turn, including rename destinations and edits made before a restart, and whether one changed after the last command, even with a follow-up queued, ignoring declined work', async () => {
     const codex = await setup();
     const done = (threadId: string, turnId: string, item: v2.ThreadItem) =>
       codex.emit('item/completed', { threadId, turnId, completedAtMs: 102000, item });
@@ -147,6 +156,7 @@ describe('Codex turn changes', () => {
 
     await begin('thread-A', 'turn-D');
     await done('thread-A', 'turn-D', fileChange('f6', 'completed', 'n.ts'));
+    await done('thread-A', 'turn-D', rename('f6b', 'old.ts', 'new.ts'));
     await done('thread-A', 'turn-D', command('c4', 'failed'));
     await end('thread-A', 'turn-D');
     await done('thread-A', 'turn-D', fileChange('late', 'completed', 'late.ts'));
@@ -164,8 +174,24 @@ describe('Codex turn changes', () => {
       ['turn-A', { files: ['a.ts', 'b.ts'], editedSinceCommand: true }],
       ['turn-B', { files: ['other.ts'], editedSinceCommand: true }],
       ['turn-C', { files: [], editedSinceCommand: false }],
-      ['turn-D', { files: ['n.ts'], editedSinceCommand: false }],
+      ['turn-D', { files: ['n.ts', 'old.ts', 'new.ts'], editedSinceCommand: false }],
       ['turn-E', { files: ['e.ts'], editedSinceCommand: true }],
     ]);
+
+    const next = await codex.restart();
+    const resumed: unknown[] = [];
+    next.provider.onEvent((event) => {
+      if (event.kind === 'turn.completed') resumed.push(event.changes);
+    });
+    const live = { ...turn('turn-G'), items: [fileChange('f8', 'completed', 'before-restart.ts')] };
+    await next.control('test/setThread', {
+      thread: { id: 'thread-A', cwd: 'C:\\project', status: { type: 'active' }, turns: [live] },
+    });
+    await next.provider.resumeThread('thread-A');
+    await next.control('test/emit', {
+      method: 'turn/completed',
+      params: { threadId: 'thread-A', turn: { ...live, status: 'completed' } },
+    });
+    expect(resumed).toEqual([{ files: ['before-restart.ts'], editedSinceCommand: true }]);
   });
 });
