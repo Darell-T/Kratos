@@ -80,6 +80,17 @@ const messageText = (error: unknown) => (error instanceof Error ? error.message 
 const beforeExecution = (error: unknown) =>
   error instanceof CodexRequestError && [-32700, -32600, -32601, -32602].includes(error.code);
 
+function recordItems(changes: ReturnType<typeof createTurnChanges>, items: v2.ThreadItem[]) {
+  for (const item of items)
+    if (item.type === 'fileChange' && item.status === 'completed')
+      for (const { path, kind } of item.changes) {
+        changes.edited(path);
+        if (kind.type === 'update' && kind.move_path) changes.edited(kind.move_path);
+      }
+    else if (item.type === 'commandExecution' && (item.status === 'completed' || item.status === 'failed'))
+      changes.ran();
+}
+
 function permissions(
   permissions: Permission,
   plan: boolean,
@@ -667,6 +678,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
       }
       const turn: ActiveTurn = { kind: 'running', turnId: active.id };
       state.turn = turn;
+      recordItems(state.changes, active.items);
       startTurnTimeout(threadId, state, turn);
       return;
     }
@@ -809,11 +821,7 @@ export async function createCodexProvider(options: CodexProviderOptions) {
   codex.onNotification('item/started', (params) => emitEvent({ ...params, kind: 'item.started' }));
   codex.onNotification('item/completed', (params) => {
     const changes = threads.get(params.threadId)?.changes;
-    const { item } = params;
-    if (item.type === 'fileChange' && item.status === 'completed')
-      for (const { path } of item.changes) changes?.edited(path);
-    else if (item.type === 'commandExecution' && (item.status === 'completed' || item.status === 'failed'))
-      changes?.ran();
+    if (changes) recordItems(changes, [params.item]);
     emitEvent({ ...params, kind: 'item.completed' });
   });
   codex.onNotification('turn/started', (params) => emitEvent({ ...params, kind: 'turn.started' }));
