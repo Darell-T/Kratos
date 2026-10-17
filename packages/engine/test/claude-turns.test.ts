@@ -79,20 +79,21 @@ describe('Claude turns through a scripted SDK', () => {
     ]);
   });
 
-  it('keeps queued messages until the stopped turn reports its result, and keeps the deadline after a failed Stop', async () => {
+  it('keeps queued messages until the stopped turn reports its result, settles Stop on that result, and keeps the deadline after a failed Stop', async () => {
     const claude = await setup({ turnTimeoutMs: 10000 });
     vi.useFakeTimers();
     await claude.start(A);
     await claude.sendMessage(claude.thread, input('B'), B);
 
+    claude.failInterrupts('hang');
     const stopped = claude.stopTurn(claude.thread);
     const stoppedAgain = claude.stopTurn(claude.thread);
-    await Promise.all([stopped, stoppedAgain]);
     await flush();
     expect(claude.launch().interrupts).toBe(1);
     expect(claude.written()).toEqual([A]);
 
     await claude.finish([A], interrupted);
+    await Promise.all([stopped, stoppedAgain]);
     expect(claude.events.filter((event) => event.kind === 'turn.completed')).toMatchObject([
       { turnId: A, messageIds: [A], outcome: 'interrupted', error: 'Interrupted by user' },
     ]);
