@@ -1,7 +1,6 @@
 import { defineConfig, globalIgnores } from 'eslint/config';
 import js from '@eslint/js';
 import globals from 'globals';
-import reactHooks from 'eslint-plugin-react-hooks';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig([
@@ -19,13 +18,8 @@ export default defineConfig([
     languageOptions: { globals: globals.node },
   },
   {
-    files: ['packages/engine/**/*.ts', 'packages/desktop/**/*.ts'],
+    files: ['packages/engine/**/*.ts'],
     languageOptions: { globals: globals.node },
-  },
-  {
-    files: ['packages/ui/**/*.{ts,tsx}'],
-    extends: [reactHooks.configs.flat.recommended],
-    languageOptions: { globals: globals.browser },
   },
   {
     rules: {

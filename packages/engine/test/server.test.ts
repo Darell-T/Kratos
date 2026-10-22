@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -13,9 +13,9 @@ let store: Store;
 let server: RunningServer;
 const sockets: WebSocket[] = [];
 
-async function boot(uiDist = join(dir, 'no-ui')) {
+async function boot() {
   store = new Store(join(dir, 'home'));
-  server = await startServer({ store, hub: new Hub(), uiDist, port: 0 });
+  server = await startServer({ store, hub: new Hub(), port: 0 });
 }
 
 const http = (path: string) => `http://127.0.0.1:${server.port}${path}`;
@@ -133,31 +133,6 @@ describe('HTTP API', () => {
     expect((await send('GET', '/api/threads?workspaceId=nope')).status).toBe(404);
     expect((await send('GET', '/api/threads')).status).toBe(400);
     expect((await send('GET', '/api/nothing')).status).toBe(404);
-  });
-});
-
-describe('UI files', () => {
-  it('explains how to build the UI when the dist folder is missing', async () => {
-    await boot();
-    const response = await send('GET', '/');
-    expect(response.status).toBe(503);
-    expect(response.text).toContain('npm run build');
-  });
-
-  it('serves assets, falls back to index.html for app routes and 404s for missing assets', async () => {
-    const uiDist = join(dir, 'ui');
-    mkdirSync(join(uiDist, 'assets'), { recursive: true });
-    writeFileSync(join(uiDist, 'index.html'), '<main>app</main>');
-    writeFileSync(join(uiDist, 'assets', 'app.js'), 'console.log(1)');
-    await boot(uiDist);
-
-    expect((await send('GET', '/')).text).toBe('<main>app</main>');
-    expect((await send('GET', '/threads/abc')).text).toBe('<main>app</main>');
-    const asset = await fetch(http('/assets/app.js'));
-    expect(asset.headers.get('content-type')).toContain('text/javascript');
-    expect(await asset.text()).toBe('console.log(1)');
-    expect((await send('GET', '/assets/missing.js')).status).toBe(404);
-    expect((await send('GET', '/..%2f..%2fetc/passwd')).status).toBe(404);
   });
 });
 

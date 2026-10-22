@@ -1,7 +1,7 @@
-import { readFile, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { extname, isAbsolute, join, relative, resolve } from 'node:path';
+import { isAbsolute } from 'node:path';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { z } from 'zod';
 import {
@@ -22,7 +22,6 @@ const maxSocketMessageBytes = 64 * 1024;
 export interface ServerOptions {
   store: Store;
   hub: Hub;
-  uiDist: string;
   port: number;
 }
 
@@ -169,71 +168,17 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(payload);
 }
 
-function sendText(res: ServerResponse, status: number, text: string): void {
-  res.writeHead(status, { 'content-type': 'text/plain; charset=utf-8' });
-  res.end(text);
-}
-
-const contentTypes: Record<string, string> = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'text/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
-  '.svg': 'image/svg+xml',
-  '.png': 'image/png',
-  '.ico': 'image/x-icon',
-  '.woff2': 'font/woff2',
-  '.map': 'application/json; charset=utf-8',
-};
-
-const missingUiNote =
-  'The engine is running but there is no UI build yet.\n' +
-  'Run `npm run build` and restart, or run `npm run dev` and open http://localhost:5173.\n';
-
-async function isFile(path: string): Promise<boolean> {
-  return (await statOrNull(path))?.isFile() ?? false;
-}
-
-async function serveUi(root: string, pathname: string, res: ServerResponse): Promise<void> {
-  const requested = resolve(root, `.${decodePathPart(pathname)}`);
-  const inside = relative(root, requested);
-  if (inside.startsWith('..') || isAbsolute(inside)) throw new HttpError(404, 'Not found');
-
-  let file = requested;
-  if (!(await isFile(file))) {
-    // A missing asset must not be answered with index.html, or the browser reports a confusing MIME error.
-    if (extname(pathname)) throw new HttpError(404, 'Not found');
-    file = join(root, 'index.html');
-  }
-  if (!(await isFile(file))) {
-    sendText(res, 503, missingUiNote);
-    return;
-  }
-  const data = await readFile(file);
-  res.writeHead(200, {
-    'content-type': contentTypes[extname(file)] ?? 'application/octet-stream',
-    'content-length': data.length,
-  });
-  res.end(data);
-}
-
-async function dispatch(routes: Route[], uiDist: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function dispatch(routes: Route[], req: IncomingMessage, res: ServerResponse): Promise<void> {
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://localhost');
-  if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
-    const matched = matchRoute(routes, method, url.pathname);
-    if (!matched) throw new HttpError(404, 'Not found');
-    const reply = await matched.candidate.handle({
-      params: matched.params,
-      query: url.searchParams,
-      readBody: () => readJson(req),
-    });
-    sendJson(res, reply.status, reply.body);
-  } else if (method === 'GET' || method === 'HEAD') {
-    await serveUi(uiDist, url.pathname, res);
-  } else {
-    throw new HttpError(405, 'Method not allowed');
-  }
+  const matched = matchRoute(routes, method, url.pathname);
+  if (!matched) throw new HttpError(404, 'Not found');
+  const reply = await matched.candidate.handle({
+    params: matched.params,
+    query: url.searchParams,
+    readBody: () => readJson(req),
+  });
+  sendJson(res, reply.status, reply.body);
 }
 
 function sendError(res: ServerResponse, error: unknown): void {
@@ -260,10 +205,10 @@ function fromLocalPage(req: IncomingMessage): boolean {
   return host !== undefined && isLocalUrl(`http://${host}`) && (origin === undefined || isLocalUrl(origin));
 }
 
-async function handleRequest(routes: Route[], uiDist: string, req: IncomingMessage, res: ServerResponse) {
+async function handleRequest(routes: Route[], req: IncomingMessage, res: ServerResponse) {
   try {
     if (!fromLocalPage(req)) throw new HttpError(403, 'Forbidden');
-    await dispatch(routes, uiDist, req, res);
+    await dispatch(routes, req, res);
   } catch (error) {
     sendError(res, error);
   }
@@ -328,9 +273,9 @@ function serveSocket(socket: WebSocket, store: Store, hub: Hub): void {
   socket.on('error', () => socket.terminate());
 }
 
-export async function startServer({ store, hub, uiDist, port }: ServerOptions): Promise<RunningServer> {
+export async function startServer({ store, hub, port }: ServerOptions): Promise<RunningServer> {
   const routes = buildRoutes(store, hub);
-  const http = createServer((req, res) => void handleRequest(routes, uiDist, req, res));
+  const http = createServer((req, res) => void handleRequest(routes, req, res));
   const sockets = new WebSocketServer({ noServer: true, maxPayload: maxSocketMessageBytes });
   sockets.on('connection', (socket) => serveSocket(socket, store, hub));
   http.on('upgrade', (req, socket, head) => {
