@@ -39,6 +39,7 @@ progress.
 
 - Windows (macOS is planned)
 - Node.js 24 and Git
+- Rust, to build the Rust engine. `rust-toolchain.toml` pins 1.99.1, and `rustup` installs it on first use.
 - The Codex CLI, installed and signed in: `npm install -g @openai/codex`, then `codex login`
 
 Kratos finds `codex` on your PATH. To use a different install, set `CODEX_EXE` to its full path.
@@ -55,14 +56,49 @@ npm run dev     # runs the engine and restarts it when its source changes
 The engine logs to the terminal it runs in. It answers `GET /api/health` with `{"ok":true}`.
 `KRATOS_PORT` (default 4200) and `KRATOS_HOME` (default `~/.kratos`, which holds `kratos.db`) configure it.
 
+## Run the Rust engine
+
+The Rust engine serves the same API as the TypeScript engine, on the same port and with the same data folder. The
+TypeScript engine stays until the Rust engine drives Codex and Claude Code.
+
+```sh
+cargo run --release -p kratos-engine   # runs the engine at http://127.0.0.1:4200
+cargo test --workspace                 # each engine test starts the real binary
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+The engine prints `Kratos engine listening on http://127.0.0.1:<port>` when it is ready. `KRATOS_PORT` and
+`KRATOS_HOME` configure it as they do the TypeScript engine, and `KRATOS_PORT=0` picks a free port.
+
+One engine can use a data folder at a time. The Rust engine locks `kratos.lock` in the folder, and a second Rust
+engine on the same folder exits with an error. The TypeScript engine takes no lock, so do not run both on one folder.
+
+When the engine starts on a database with an older schema, it first copies the database to
+`backups/kratos-v<version>-<id>.db` in the data folder and prints where. `kratos-engine restore <backup-id>` makes a
+backup the live database again. It saves the database it replaces as another backup, and it refuses to run while an
+engine uses the folder.
+
+`kratos-client` drives either engine and prints each reply and event as one JSON line:
+
+```sh
+cargo run -p kratos-client -- health
+cargo run -p kratos-client -- create-workspace repo C:\work\repo
+cargo run -p kratos-client -- subscribe <thread-id> --after 0 --count 1
+cargo run -p kratos-client -- bench-post http://127.0.0.1:4200
+```
+
+Run `kratos-client` with no arguments to see the other commands.
+
 ## Develop
 
 ```sh
-npm run check                         # format, lint, typecheck and tests
+npm run check                         # format, lint, typecheck and tests of packages/**
 npm run generate -w @kratos/codex   # refresh the Codex protocol types after a Codex update
 ```
 
-The tests run against a small fake Codex, so you do not need Codex installed to run them.
+The tests run against a small fake Codex, so you do not need Codex installed to run them. The Rust crates have their
+own checks, listed above.
 
 ## Codex provider
 
@@ -120,8 +156,12 @@ and retains pending submissions. The factory accepts `requestTimeoutMs`, `turnTi
 
 ## Packages
 
-| Package             | What it is                                                                                   |
-| ------------------- | -------------------------------------------------------------------------------------------- |
-| `packages/engine`   | The background process: SQLite store, JSON and WebSocket API on `127.0.0.1`, provider logic. |
-| `packages/protocol` | Types and schemas for the engine's API.                                                      |
-| `packages/codex`    | A typed client for `codex app-server`, with types generated from the installed Codex.        |
+| Package                  | What it is                                                                                   |
+| ------------------------ | -------------------------------------------------------------------------------------------- |
+| `packages/engine`        | The background process: SQLite store, JSON and WebSocket API on `127.0.0.1`, provider logic. |
+| `packages/protocol`      | Types and schemas for the engine's API.                                                      |
+| `packages/codex`         | A typed client for `codex app-server`, with types generated from the installed Codex.        |
+| `crates/kratos-protocol` | The Rust engine's wire types: the JSON that clients and the engine exchange.                 |
+| `crates/kratos-store`    | The Rust engine's SQLite store, with migrations, backups, and the data-folder lock.          |
+| `crates/kratos-engine`   | The Rust engine: the same API as `packages/engine`.                                          |
+| `tools/kratos-client`    | A command-line client that drives either engine and prints JSON lines.                       |
