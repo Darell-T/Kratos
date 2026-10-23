@@ -29,6 +29,21 @@ async function send(method: string, path: string, body?: unknown) {
   return { status: response.status, text, json: (): unknown => JSON.parse(text) };
 }
 
+// fetch resolves dot segments before it sends, so only node:http can send /.//api/health as written. The server's
+// URL parser turns that into //api/health, which a router that skips empty segments would match as /api/health.
+function sendAsWritten(method: string, path: string) {
+  return new Promise<{ status: number; text: string }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port: server.port, method, path }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => (text += chunk));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, text }));
+    });
+    req.on('error', reject);
+    req.end(method === 'POST' ? JSON.stringify({ name: 'x', path: dir }) : undefined);
+  });
+}
+
 async function createThread() {
   const workspace = (await send('POST', '/api/workspaces', { name: 'repo', path: dir })).json() as { id: string };
   return (
@@ -133,6 +148,16 @@ describe('HTTP API', () => {
     expect((await send('GET', '/api/threads?workspaceId=nope')).status).toBe(404);
     expect((await send('GET', '/api/threads')).status).toBe(400);
     expect((await send('GET', '/api/nothing')).status).toBe(404);
+  });
+
+  it.each([
+    ['GET', '/'],
+    ['POST', '/'],
+    ['GET', '/.//api/health'],
+    ['POST', '/.//api/workspaces'],
+  ])('answers 404 for %s %s, which is outside /api', async (method, path) => {
+    expect(await sendAsWritten(method, path)).toEqual({ status: 404, text: '{"error":"Not found"}' });
+    expect(store.listWorkspaces()).toEqual([]);
   });
 });
 

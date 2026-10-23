@@ -7,7 +7,7 @@ export default defineConfig([
   globalIgnores(['**/dist', '**/node_modules', 'packages/codex/src/generated']),
   js.configs.recommended,
   {
-    files: ['**/*.{ts,tsx}'],
+    files: ['**/*.ts'],
     extends: [tseslint.configs.recommendedTypeChecked],
     languageOptions: {
       parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },

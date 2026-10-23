@@ -171,7 +171,9 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 async function dispatch(routes: Route[], req: IncomingMessage, res: ServerResponse): Promise<void> {
   const method = req.method ?? 'GET';
   const url = new URL(req.url ?? '/', 'http://localhost');
-  const matched = matchRoute(routes, method, url.pathname);
+  // matchRoute skips empty segments, so without this check the pathname //api/health would match /api/health.
+  const isApiPath = url.pathname === '/api' || url.pathname.startsWith('/api/');
+  const matched = isApiPath ? matchRoute(routes, method, url.pathname) : undefined;
   if (!matched) throw new HttpError(404, 'Not found');
   const reply = await matched.candidate.handle({
     params: matched.params,
