@@ -1,0 +1,19 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.99.1"
+
+# One version of each dependency for the whole workspace. Each crate opts in with `workspace = true`.
+[workspace.dependencies]
+# Formats `2026-10-22T18:45:12.345Z`, the exact shape of JavaScript's Date.toISOString().
+humantime = "2.4.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
