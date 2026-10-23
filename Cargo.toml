@@ -10,10 +10,18 @@ rust-version = "1.99.1"
 
 # One version of each dependency for the whole workspace. Each crate opts in with `workspace = true`.
 [workspace.dependencies]
+kratos-protocol = { path = "crates/kratos-protocol" }
+
 # Formats `2026-10-22T18:45:12.345Z`, the exact shape of JavaScript's Date.toISOString().
 humantime = "2.4.0"
+# SQLite compiled from source, because Windows has no system SQLite. Seqs are u64 in Rust and INTEGER in SQLite.
+rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+# v4 for workspace and thread ids (the TypeScript engine's randomUUID), v7 for time-ordered backup ids.
+uuid = { version = "1.28.0", features = ["v4", "v7"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
