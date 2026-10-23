@@ -1,10 +1,11 @@
 # Kratos
 
-A desktop workspace for coding agents. It runs the Codex and Claude Code CLIs you already have installed and signed
-in, and keeps every conversation in one app that you own instead of in each provider's app.
+An engine for coding agents. It runs the Codex and Claude Code CLIs you already have installed and signed in, and
+keeps every conversation in one place that you own instead of in each provider's app.
 
-Kratos is early and under active development. The app shell, thread storage and the Codex connection work today.
-Running agents from the app's chat is in progress.
+Kratos is early and under active development. It has no app or interface yet. You reach the engine through its JSON
+and WebSocket API. Thread storage and the Codex connection work today. Running agents from chat messages is in
+progress.
 
 ## What it is for
 
@@ -14,7 +15,7 @@ Running agents from the app's chat is in progress.
   tools, sandbox and your existing subscription. You can switch models within the provider, and continue a thread on
   another provider as a new linked thread.
 - **Queue and steer.** Messages sent while the agent is busy wait in a queue, or steer the running turn.
-- **Any machine.** The engine runs in the background and keeps agents working after the window closes. Other
+- **Any machine.** The engine runs in the background and keeps agents working while no client is connected. Other
   machines can open the same threads.
 - **One set of skills and plugins** shared by every provider.
 - **No wasted tokens.** Helper agents run on cheaper models, nothing polls while it waits, and long threads move to a
@@ -24,14 +25,13 @@ Running agents from the app's chat is in progress.
 
 | Area                                                                | State       |
 | ------------------------------------------------------------------- | ----------- |
-| Desktop app that starts the engine and keeps it running             | Working     |
 | Workspaces, threads and an append-only message history              | Working     |
-| Live updates to every open window, with catch-up after a reconnect  | Working     |
+| Live updates to every client, with catch-up after a reconnect       | Working     |
 | Typed Codex connection: start, requests, events, approvals, cleanup | Working     |
 | Codex skills, plugins, models and sign-in status                    | Working     |
 | Sending chat messages to Codex, with queue and streaming replies    | In progress |
 | Context window tracking and per-thread model and window settings    | Planned     |
-| Approvals, diff viewer, file tree and terminal in the app           | Planned     |
+| Approvals, diff viewer, file tree and terminal                      | Planned     |
 | Claude Code provider                                                | Planned     |
 | macOS, and opening threads from another machine                     | Planned     |
 
@@ -47,12 +47,12 @@ Kratos finds `codex` on your PATH. To use a different install, set `CODEX_EXE` t
 
 ```sh
 npm install
-npm start       # builds everything and opens the app, which starts the engine if it is not running
-npm run dev     # the engine, the UI with hot reload, and the app pointed at it
-npm run engine  # the engine on its own, serving the built UI at http://localhost:4200
+npm run build   # bundles the engine into packages/engine/dist
+npm run engine  # runs the engine at http://127.0.0.1:4200
+npm run dev     # runs the engine and restarts it when its source changes
 ```
 
-The engine keeps running after the window closes. Its log is `engine.log` in the app's logs folder.
+The engine logs to the terminal it runs in. It answers `GET /api/health` with `{"ok":true}`.
 `KRATOS_PORT` (default 4200) and `KRATOS_HOME` (default `~/.kratos`, which holds `kratos.db`) configure it.
 
 ## Develop
@@ -68,7 +68,7 @@ The tests run against a small fake Codex, so you do not need Codex installed to 
 
 `packages/engine/src/providers/codex.ts` exports `createCodexProvider`. Importing it does not start Codex or run a
 demo. The engine creates one provider with its existing `Store`, and closes the provider before closing the store.
-Connecting it to the chat API and UI is still in progress.
+Connecting it to the chat API is still in progress.
 
 ```ts
 const provider = await createCodexProvider({ store });
@@ -122,8 +122,6 @@ and retains pending submissions. The factory accepts `requestTimeoutMs`, `turnTi
 
 | Package             | What it is                                                                                   |
 | ------------------- | -------------------------------------------------------------------------------------------- |
-| `packages/desktop`  | The Electron app. Starts the engine when needed and opens a window on it.                    |
 | `packages/engine`   | The background process: SQLite store, JSON and WebSocket API on `127.0.0.1`, provider logic. |
-| `packages/ui`       | The React interface the window shows.                                                        |
-| `packages/protocol` | Types and schemas shared by the engine and the UI.                                           |
+| `packages/protocol` | Types and schemas for the engine's API.                                                      |
 | `packages/codex`    | A typed client for `codex app-server`, with types generated from the installed Codex.        |

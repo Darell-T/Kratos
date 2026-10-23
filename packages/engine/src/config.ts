@@ -1,11 +1,9 @@
 import { homedir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 
 export interface Config {
   port: number;
   home: string;
-  uiDist: string;
 }
 
 const defaultPort = 4200;
@@ -23,7 +21,5 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   return {
     port: parsePort(env.KRATOS_PORT),
     home: resolve(env.KRATOS_HOME || join(homedir(), '.kratos')),
-    // Both src/ (tsx) and dist/ (bundle) sit one level below the engine package, so the same relative path works.
-    uiDist: fileURLToPath(new URL('../../ui/dist', import.meta.url)),
   };
 }
