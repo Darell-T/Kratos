@@ -1,0 +1,5 @@
+# Hub::append rings the thread's doorbell after the commit. An append that skips the hub leaves the thread's
+# followers asleep until some later append, so the engine appends through the hub only.
+disallowed-methods = [
+    { path = "kratos_store::Store::append_event", reason = "append through Hub::append, which wakes the thread's followers" },
+]
