@@ -139,6 +139,7 @@ impl fmt::Display for DecisionKind {
 }
 
 impl Decision {
+    // #lizard forgives: one arm for each of the 16 variants, and the compiler checks that none is missing.
     pub fn kind(&self) -> DecisionKind {
         match self {
             Decision::ApprovePlan { .. } => DecisionKind::ApprovePlan,
@@ -274,6 +275,7 @@ pub fn check_decision(view: &TaskView, decision: &Decision) -> Result<(), Reject
 /// | KeepWaiting    | The scheduler schedules the step without asking again. |
 /// | ApproveHandoff | The engine tries the stopped role on another account, this once. |
 /// | DeclineHandoff | The step waits for the reset. |
+// #lizard forgives: one arm for each of the 16 decisions, each calling the function that applies it.
 pub(crate) fn apply_decision(
     view: Box<TaskView>,
     decision: Decision,

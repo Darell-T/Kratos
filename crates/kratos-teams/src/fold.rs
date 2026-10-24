@@ -205,6 +205,7 @@ impl TaskView {
         }))
     }
 
+    // #lizard forgives: one arm for each of the 15 facts, each calling the reducer that applies it.
     pub(crate) fn apply_fact(
         self: Box<Self>,
         seq: FactSeq,
