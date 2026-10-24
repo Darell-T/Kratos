@@ -27,9 +27,7 @@ fn swap() -> Decision {
 }
 
 fn until_next_is(task: &mut ScriptedTask, wanted: fn(&Step) -> bool) {
-    while !wanted(&task.next()) {
-        task.step().expect("the task has not settled");
-    }
+    task.step_until(|task| wanted(&task.next()));
 }
 
 fn is_review_run(step: &Step) -> bool {
@@ -336,9 +334,9 @@ fn applying_a_change_gives_the_new_holder_fresh_fix_attempts_but_no_extra_rounds
     let mut task = Task::two().script(script);
     // Stop while round 2 is being checked, after one fix attempt on F1. The next new step is the
     // implementer's third, and the change applies right before it.
-    while !(matches!(task.next(), Step::Check { .. }) && task.view().rounds.len() == 2) {
-        task.step().expect("the task has not settled");
-    }
+    task.step_until(|task| {
+        matches!(task.next(), Step::Check { .. }) && task.view().rounds.len() == 2
+    });
     assert!(matches!(
         task.view().findings[0].status,
         FindingStatus::Open { attempts: 1, .. }

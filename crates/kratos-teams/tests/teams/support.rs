@@ -28,6 +28,9 @@ use kratos_teams::security_triggers::{Trigger, TriggerHit};
 use kratos_teams::task_plan::{PlanChangeRequest, ScopePattern, TaskPlan};
 use kratos_teams::view::{Activity, Phase, TaskView};
 
+/// No scenario needs more steps than this from one helper call, so more means the rules loop.
+const MAX_STEPS: usize = 300;
+
 // ---------------------------------------------------------------------------------------------
 // The script says what the agents, git, and the sandbox would do.
 // ---------------------------------------------------------------------------------------------
@@ -234,9 +237,28 @@ impl ScriptedTask {
         let mut ran = Vec::new();
         while let Some(name) = self.step() {
             ran.push(name);
-            assert!(ran.len() < 300, "the task did not settle in 300 steps");
+            assert!(
+                ran.len() < MAX_STEPS,
+                "the task did not settle in {MAX_STEPS} steps"
+            );
         }
         ran
+    }
+
+    /// Runs steps until `reached` holds. A task that stops to wait for the user first fails the test
+    /// at once, naming the step it stopped at, so a broken rule fails a test instead of hanging it.
+    pub fn step_until(&mut self, reached: impl Fn(&ScriptedTask) -> bool) {
+        for _ in 0..MAX_STEPS {
+            if reached(self) {
+                return;
+            }
+            let stopped_at = step_name(&self.next());
+            assert!(
+                self.step().is_some(),
+                "the task stopped at {stopped_at} before reaching the step the test waits for"
+            );
+        }
+        panic!("the step the test waits for did not come within {MAX_STEPS} steps");
     }
 
     /// The scheduled continuation's turn ends with the next scripted result for its role.

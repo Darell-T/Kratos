@@ -194,9 +194,7 @@ fn the_reviewer_sees_everything_the_user_said_including_what_was_sent_to_the_imp
     let mut task = Task::two()
         .constraints(&["Keep the existing route names."])
         .script(script(vec![implements()], vec![approves()]));
-    while !matches!(task.next(), kratos_teams::next_step::Step::Run { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), kratos_teams::next_step::Step::Run { .. }));
     task.record(Fact::UserMessage {
         delivery: delivery("d1"),
         member: coder(),
@@ -420,9 +418,7 @@ fn a_message_the_user_queued_rides_in_the_members_next_message() {
     );
     script_commands(&mut script, "cmd1", vec![fails(), passes()]);
     let mut task = Task::two().script(script);
-    while !matches!(task.next(), kratos_teams::next_step::Step::Run { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), kratos_teams::next_step::Step::Run { .. }));
     task.record(Fact::UserMessage {
         delivery: delivery("d1"),
         member: coder(),

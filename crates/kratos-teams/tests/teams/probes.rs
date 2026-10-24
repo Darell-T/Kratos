@@ -447,9 +447,7 @@ fn a_commit_without_a_run_for_an_added_probe_is_a_damaged_record() {
         .implementer
         .push_back(implements_adding(PROBE, "tests/null_session.rs"));
     let mut task = Task::two().probes(delegated(&["tests/**"])).script(script);
-    while !matches!(task.next(), Step::Commit { commit } if commit.round == 2) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Commit { commit } if commit.round == 2));
 
     let refused = task.view().accepts(&Fact::Committed {
         commit: sha(2),

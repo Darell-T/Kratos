@@ -370,9 +370,7 @@ fn a_new_reviewer_session_opens_after_a_lost_turn_in_the_middle_of_a_round() {
 #[test]
 fn a_failed_evidence_check_resumes_without_asking_the_reviewer_again() {
     let mut task = Task::two().script(script(vec![implements()], vec![approves()]));
-    while !matches!(task.next(), Step::Check { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Check { .. }));
     task.record(Fact::StepFailed {
         step: FailedStep::Check,
         error: "The sandbox crashed.".to_owned(),

@@ -36,9 +36,7 @@ fn before_the_first_turn(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Scrip
         reviewer: reviewer.into(),
         ..Script::default()
     });
-    while !matches!(task.next(), Step::Run { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Run { .. }));
     task
 }
 
@@ -122,9 +120,7 @@ fn a_message_that_missed_the_running_turn_rides_the_members_next_message_once() 
     };
     script_commands(&mut script, "cmd1", vec![fails(), fails(), passes()]);
     let mut task = Task::two().script(script);
-    while !matches!(task.next(), Step::Run { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Run { .. }));
     task.record(message("d1", coder(), "Use tabs."));
     task.record(disposed("d1", Disposition::Queued));
 
@@ -235,9 +231,7 @@ fn a_queued_message_rides_a_correction_too_or_it_would_be_marked_delivered_unrea
         reviewer: vec![approves()].into(),
         ..Script::default()
     });
-    while !matches!(task.next(), Step::Run { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Run { .. }));
     // The message arrives while the first turn runs and missed it, then the turn ends with a bad report.
     task.record(message("d1", coder(), "Use tabs."));
     task.record(disposed("d1", Disposition::Queued));

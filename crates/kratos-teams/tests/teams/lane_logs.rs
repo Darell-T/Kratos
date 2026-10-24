@@ -301,9 +301,7 @@ fn steering() -> ScriptedTask {
     );
     script_commands(&mut script_, "cmd1", vec![fails(), passes()]);
     let mut task = Task::two().script(script_);
-    while !matches!(task.next(), Step::Run { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Run { .. }));
     task.record(Fact::UserMessage {
         delivery: delivery("d1"),
         member: coder(),
@@ -328,9 +326,7 @@ fn steering() -> ScriptedTask {
 
 fn cancel() -> ScriptedTask {
     let mut task = Task::two().script(script(vec![implements()], vec![approves()]));
-    while !matches!(task.next(), Step::Run { run } if run.role == Role::Reviewer) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Run { run } if run.role == Role::Reviewer));
     task.decide(Decision::Cancel);
     task
 }
@@ -345,9 +341,7 @@ fn roles() -> ScriptedTask {
     );
     script_commands(&mut script_, "cmd1", vec![fails(), passes()]);
     let mut task = Task::two().script(script_);
-    while !matches!(task.next(), Step::Run { run } if run.role == Role::Reviewer) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Run { run } if run.role == Role::Reviewer));
     task.decide_while_working(Decision::ReassignRoles {
         to: swapped_members(),
     });

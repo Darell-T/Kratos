@@ -109,9 +109,7 @@ fn the_user_can_cancel_in_every_pause() {
 #[test]
 fn a_result_that_arrives_after_a_cancel_is_stale_and_cannot_restart_anything() {
     let mut task = Task::two().script(script(vec![implements()], vec![approves()]));
-    while !matches!(task.next(), kratos_teams::next_step::Step::Run { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), kratos_teams::next_step::Step::Run { .. }));
     let kratos_teams::next_step::Step::Run { run } = task.next() else {
         panic!("a run");
     };
@@ -175,10 +173,7 @@ fn a_cancel_drops_a_pending_role_change_the_steps_set_aside_and_the_messages_nob
     });
     task.run();
     task.decide_while_working(Decision::ApprovePlan { conditions: None });
-    while !matches!(task.next(), kratos_teams::next_step::Step::Run { run } if run.role == Role::Planner)
-    {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), kratos_teams::next_step::Step::Run { run } if run.role == Role::Planner));
     assert_eq!(
         task.view().suspended.len(),
         1,

@@ -92,9 +92,7 @@ fn the_rules_never_send_the_stopped_message_again_and_start_no_timer_of_their_ow
 #[test]
 fn after_a_restart_the_stopped_step_is_handed_to_the_scheduler_again_without_a_second_run() {
     let mut task = Task::two().script(limited_implementer(vec![implements()]));
-    while !matches!(task.next(), Step::HandToScheduler { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::HandToScheduler { .. }));
 
     let restarted = ScriptedTask::restart_from(task.log(), Script::default());
 
@@ -111,9 +109,7 @@ fn after_a_restart_the_stopped_step_is_handed_to_the_scheduler_again_without_a_s
 #[test]
 fn a_late_result_from_the_stopped_turn_is_stale_and_so_is_a_duplicate_of_the_continuations() {
     let mut task = Task::two().script(limited_implementer(vec![implements()]));
-    while !matches!(task.next(), Step::Wait { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Wait { .. }));
     let view = task.view();
     let stopped = runs(&task, Role::Implementer)[0].message.clone();
     let continuation = view
@@ -342,9 +338,7 @@ fn each_handoff_needs_the_users_approval_so_a_second_limit_asks_again() {
 #[test]
 fn the_stopped_turn_is_held_with_the_scheduler_until_it_answers() {
     let mut task = Task::two().script(limited_implementer(vec![implements()]));
-    while !matches!(task.next(), Step::HandToScheduler { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::HandToScheduler { .. }));
 
     let view = task.view();
 
@@ -359,9 +353,7 @@ fn the_stopped_turn_is_held_with_the_scheduler_until_it_answers() {
 #[test]
 fn a_continuation_that_reuses_the_stopped_message_id_is_refused() {
     let mut task = Task::two().script(limited_implementer(vec![implements()]));
-    while !matches!(task.next(), Step::HandToScheduler { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::HandToScheduler { .. }));
     let Step::HandToScheduler { step, stop } = task.next() else {
         panic!("the step goes to the scheduler");
     };
@@ -379,9 +371,7 @@ fn a_continuation_that_reuses_the_stopped_message_id_is_refused() {
 #[test]
 fn a_decline_is_refused_for_a_step_the_scheduler_has_not_been_handed() {
     let mut task = Task::two().script(limited_implementer(vec![implements()]));
-    while !matches!(task.next(), Step::Run { .. }) {
-        task.step();
-    }
+    task.step_until(|task| matches!(task.next(), Step::Run { .. }));
     let Step::Run { run } = task.next() else {
         panic!("the implementer is about to run");
     };
@@ -391,14 +381,14 @@ fn a_decline_is_refused_for_a_step_the_scheduler_has_not_been_handed() {
     };
 
     let while_running = task.view().accepts(&decline);
-    while !matches!(
-        task.next(),
-        Step::Wait {
-            on: Wait::Engine { .. }
-        }
-    ) {
-        task.step();
-    }
+    task.step_until(|task| {
+        matches!(
+            task.next(),
+            Step::Wait {
+                on: Wait::Engine { .. }
+            }
+        )
+    });
     let once_scheduled = task.view().accepts(&decline);
 
     for refused in [while_running, once_scheduled] {
