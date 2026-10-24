@@ -2,8 +2,8 @@
 //! member's thread or history. The change becomes pending, the running step finishes, and the change
 //! applies right before the next new step. Nothing finished is repeated.
 
-use kratos_teams::decisions::{Decision, check_decision};
-use kratos_teams::facts::Ended;
+use kratos_teams::decisions::{Decision, DecisionKind, allowed_decisions, check_decision};
+use kratos_teams::facts::{Ended, Fact};
 use kratos_teams::fold::Rejection;
 use kratos_teams::members::{Bindings, Role};
 use kratos_teams::next_step::Step;
@@ -252,12 +252,62 @@ fn asking_for_the_current_roles_while_a_change_is_pending_takes_the_request_back
     task.decide_while_working(Decision::ReassignRoles { to: two_members() });
 
     assert_eq!(task.view().pending_roles, None);
+    assert!(matches!(
+        task.view().accepts(&Fact::RolesReassigned),
+        Err(Rejection::Misfit { .. })
+    ));
     task.run();
     assert!(
         task.steps
             .iter()
             .all(|step| !matches!(step, Step::ApplyRoles { .. }))
     );
+    assert_eq!(task.view().bindings, two_members());
+    assert_replayable(&task);
+}
+
+#[test]
+fn withdrawal_is_rejected_once_the_role_change_checkpoint_has_started() {
+    let mut task = Task::two().script(script(vec![implements()], vec![approves()]));
+    until_next_is(&mut task, |step| matches!(step, Step::Run { .. }));
+    task.decide_while_working(swap());
+    until_next_is(&mut task, |step| matches!(step, Step::ApplyRoles { .. }));
+    let checkpoint = task.next();
+    let withdrawal = Decision::ReassignRoles { to: two_members() };
+
+    assert!(!allowed_decisions(&task.view()).contains(&DecisionKind::ReassignRoles));
+    assert!(matches!(
+        check_decision(&task.view(), &withdrawal),
+        Err(Rejection::NotAllowed {
+            decision: DecisionKind::ReassignRoles,
+            ..
+        })
+    ));
+    assert!(matches!(
+        task.append(Fact::UserDecided {
+            decision: withdrawal
+        }),
+        Err(Rejection::NotAllowed {
+            decision: DecisionKind::ReassignRoles,
+            ..
+        })
+    ));
+    assert_eq!(
+        task.next(),
+        checkpoint,
+        "the rejected withdrawal changes no authorization"
+    );
+    assert_eq!(task.view().pending_roles, Some(swapped_members()));
+
+    task.run();
+
+    assert_eq!(task.view().bindings, swapped_members());
+    assert_eq!(runs(&task, Role::Reviewer)[0].member, coder());
+    assert!(matches!(
+        task.view().accepts(&Fact::RolesReassigned),
+        Err(Rejection::Misfit { .. })
+    ));
+    assert_replayable(&task);
 }
 
 #[test]
@@ -281,6 +331,14 @@ fn an_engine_that_cannot_apply_the_change_leaves_the_old_roles_and_pauses_with_t
             "the reviewer is not signed in"
         ))
     );
+    assert!(matches!(
+        check_decision(&view, &Decision::ReassignRoles { to: two_members() }),
+        Err(Rejection::InvalidDecision { .. })
+    ));
+    assert!(matches!(
+        view.accepts(&Fact::RolesReassigned),
+        Err(Rejection::Misfit { .. })
+    ));
     task.decide(Decision::Resume);
     assert_eq!(task.view().phase, approved(1, ApprovedBy::Reviewer));
     assert_eq!(
@@ -288,6 +346,7 @@ fn an_engine_that_cannot_apply_the_change_leaves_the_old_roles_and_pauses_with_t
         checker(),
         "the old reviewer reviewed"
     );
+    assert_replayable(&task);
 }
 
 #[test]

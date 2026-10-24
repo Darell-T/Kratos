@@ -205,12 +205,17 @@ fn user_words(view: &TaskView) -> Option<String> {
         .constraints
         .iter()
         .map(|constraint| format!("- {constraint}"));
+    let requirements = view.requirements.iter().map(|text| format!("- {text}"));
     let directions = view
         .directions
         .iter()
         .map(|d| format!("- To the {}: {}", d.role, d.text.trim()));
-    let lines: Vec<String> = constraints.chain(directions).collect();
-    (!lines.is_empty()).then(|| format!("# What the user said\n\n{}", lines.join("\n")))
+    let lines: Vec<String> = constraints.chain(requirements).chain(directions).collect();
+    let text = sections([
+        (!lines.is_empty()).then(|| format!("# What the user said\n\n{}", lines.join("\n"))),
+        amendments_text(view),
+    ]);
+    (!text.is_empty()).then_some(text)
 }
 
 fn rules_section(heading: &str, files: &[(&str, &Option<String>)]) -> Option<String> {
@@ -234,7 +239,7 @@ fn instructions(view: &TaskView) -> Option<String> {
     )
 }
 
-/// The approved plan with the conditions the user attached and the changes the user allowed.
+/// The approved plan with the conditions the user attached and the amended scope.
 fn plan_section(view: &TaskView) -> Option<String> {
     let PlanState::Approved {
         plan, conditions, ..
@@ -259,7 +264,6 @@ fn plan_section(view: &TaskView) -> Option<String> {
         conditions
             .as_ref()
             .map(|text| format!("The user's conditions for the plan:\n{}", text.trim())),
-        amendments_text(view),
     ]))
 }
 
@@ -274,7 +278,10 @@ fn amendments_text(view: &TaskView) -> Option<String> {
             } else {
                 format!(" Added to the scope: {}.", files.join(", "))
             };
-            format!("- {}{extra}", a.reason.trim())
+            let instructions = a.instructions.as_ref().map_or_else(String::new, |text| {
+                format!("\n  The user's conditions: {}", text.trim())
+            });
+            format!("- {}{extra}{instructions}", a.reason.trim())
         })
         .collect();
     (!lines.is_empty()).then(|| format!("Changes the user allowed:\n{}", lines.join("\n")))
@@ -488,10 +495,15 @@ fn implement_message(view: &TaskView, brief: &Brief, ctx: &PromptContext<'_>) ->
         ]),
         Brief::Planned => sections([
             Some("The user approved the plan. Carry it out.".to_owned()),
+            user_words(view),
             plan_section(view),
             Some(REPORT_REMINDER.to_owned()),
         ]),
-        other => sections([fresh.then(|| takeover(view)), Some(brief_text(view, other))]),
+        other => sections([
+            fresh.then(|| takeover(view)),
+            (!fresh).then(|| user_words(view)).flatten(),
+            Some(brief_text(view, other)),
+        ]),
     }
 }
 

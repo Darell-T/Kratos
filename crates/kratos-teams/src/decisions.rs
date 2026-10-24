@@ -4,8 +4,8 @@
 //! decision arrives, and it is a dry run of the real thing, so what is allowed and what applies cannot
 //! drift apart. `apply_decision` is the real thing, which the fold calls for a `UserDecided` fact.
 //!
-//! A cancel and a role change are available whenever a task is alive. User messages are not
-//! decisions. They are facts that never change the phase.
+//! A cancel is available whenever a task is alive. A role change is available until its application
+//! checkpoint starts. User messages are facts that never change the phase.
 
 use std::fmt;
 
@@ -47,7 +47,7 @@ pub enum Decision {
         instructions: Option<String>,
     },
     /// Give the implementer direction. This is an explicit request to go on, so it starts a new count
-    /// of rounds and of fix attempts.
+    /// of rounds and of fix attempts. The direction remains a requirement for the rest of the task.
     Direct {
         text: String,
     },
@@ -67,7 +67,8 @@ pub enum Decision {
         keep: Vec<String>,
     },
     /// Move roles between the Team's members. It applies before the next new step. Sending the current
-    /// roles while a change is pending withdraws it.
+    /// roles while a change is pending withdraws it, until the application checkpoint starts. During
+    /// that checkpoint all role-change decisions are rejected, because the engine may be applying it.
     ReassignRoles {
         to: Bindings,
     },
@@ -187,9 +188,13 @@ impl Decision {
 /// it is `Direct`, `StepBack`, and `Accept`. When preparation or planning failed, only `Resume` and
 /// `Cancel` make sense, because no work exists to direct or accept.
 ///
-/// `ReassignRoles` comes last on every row while the task is alive.
+/// `ReassignRoles` comes last on every row while the task is alive, except during the role-change
+/// application checkpoint. Changing or withdrawing its authorization then returns `NotAllowed`.
 pub fn allowed_decisions(view: &TaskView) -> Vec<DecisionKind> {
     let mut allowed = match &view.phase {
+        Phase::Active {
+            activity: Activity::Rebinding { .. },
+        } => return vec![DecisionKind::Cancel],
         Phase::Active { .. } => vec![DecisionKind::Cancel],
         Phase::Waiting { waiting } => waiting_decisions(view, waiting),
         Phase::Closing { .. } | Phase::Closed { .. } => return Vec::new(),
@@ -511,6 +516,7 @@ fn direct(
 ) -> Result<Box<TaskView>, Rejection> {
     if let Brief::Direction { text } = &brief {
         not_blank(text, "the direction", invalid)?;
+        view.requirements.push(text.clone());
     }
     view.suspended.clear();
     view.new_leg().begin_step(Work::Implement { brief }, seq)

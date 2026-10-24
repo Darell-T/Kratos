@@ -4,8 +4,11 @@
 //! outcome a member returns. The rules never detect a contradiction on their own.
 
 use kratos_teams::decisions::{Decision, DecisionKind, PlanChangeResponse};
-use kratos_teams::facts::Ended;
+use kratos_teams::facts::{Ended, Fact, StoredFact};
+use kratos_teams::fold::fold;
 use kratos_teams::members::Role;
+use kratos_teams::next_step::{Step, next_step};
+use kratos_teams::prompts::{Platform, PromptContext, Session, message};
 use kratos_teams::view::{ApprovedBy, Brief, PlanState, Resolution, Waiting, Work};
 
 use crate::replay::*;
@@ -99,6 +102,8 @@ fn allowing_a_plan_change_widens_the_scope_and_the_step_goes_on_carrying_the_use
     );
     assert_eq!(view.phase, approved(1, ApprovedBy::Reviewer));
     assert!(view.quote_sources().contains(&"Touch only session.rs."));
+    let reviewing = runs(&task, Role::Reviewer)[0];
+    assert!(text_of(&task, reviewing, Session::Fresh).contains("Touch only session.rs."));
     assert_replayable(&task);
 }
 
@@ -126,6 +131,88 @@ fn an_allowed_change_makes_the_new_files_part_of_the_scope() {
     });
 
     assert_eq!(task.view().outside_scope(), Vec::<String>::new());
+}
+
+#[test]
+fn the_recorded_plan_change_conditions_reach_every_later_prompt() {
+    let log: Vec<StoredFact> = include_str!("../fixtures/lanes/r6-plan-change.jsonl")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a saved fact"))
+        .collect();
+    let approved = log
+        .iter()
+        .position(|stored| {
+            matches!(
+                stored.fact,
+                Fact::UserDecided {
+                    decision: Decision::PlanChange {
+                        response: PlanChangeResponse::Allow,
+                        ..
+                    }
+                }
+            )
+        })
+        .expect("an amendment was approved");
+    let mut roles = Vec::new();
+    for end in approved + 1..=log.len() {
+        let view = fold(&log[..end]).expect("the saved prefix folds");
+        if let Step::Run { run } = next_step(&view) {
+            let text = message(
+                &view,
+                &run,
+                &PromptContext {
+                    session: Session::Fresh,
+                    diff_stat: "",
+                    platform: Platform::Windows,
+                },
+            );
+            assert!(
+                text.contains("Touch only session.rs."),
+                "{} lost the amendment conditions",
+                run.role
+            );
+            roles.push(run.role);
+        }
+    }
+    assert!(roles.contains(&Role::Implementer));
+    assert!(roles.contains(&Role::Reviewer));
+}
+
+#[test]
+fn amendment_conditions_survive_replanning_and_reach_the_new_plan_author() {
+    let mut task = Task::three().script(Script {
+        planner: vec![plan_ready(), plan_with("src/**")].into(),
+        implementer: vec![
+            implementer_wants_plan_change("Needs the shared session.", &["src/shared/**"]),
+            implementer_wants_plan_change("The approach needs a new plan.", &[]),
+            implements(),
+        ]
+        .into(),
+        reviewer: vec![approves()].into(),
+        ..Script::default()
+    });
+    task.run();
+    task.decide(Decision::ApprovePlan { conditions: None });
+    task.decide(Decision::PlanChange {
+        response: PlanChangeResponse::Allow,
+        instructions: Some("Touch only session.rs.".to_owned()),
+    });
+    task.decide(Decision::PlanChange {
+        response: PlanChangeResponse::Replan,
+        instructions: None,
+    });
+
+    let planning = runs(&task, Role::Planner)[1];
+    assert!(text_of(&task, planning, Session::Fresh).contains("Touch only session.rs."));
+    assert!(
+        task.view()
+            .quote_sources()
+            .contains(&"Touch only session.rs.")
+    );
+    task.decide(Decision::ApprovePlan { conditions: None });
+    let reviewing = runs(&task, Role::Reviewer)[0];
+    assert!(text_of(&task, reviewing, Session::Fresh).contains("Touch only session.rs."));
+    assert_replayable(&task);
 }
 
 #[test]
@@ -255,8 +342,15 @@ fn with_no_plan_an_allowed_change_widens_the_scope_the_user_gave() {
 
     task.decide(Decision::PlanChange {
         response: PlanChangeResponse::Allow,
-        instructions: None,
+        instructions: Some("Touch only session.rs.".to_owned()),
     });
 
     assert_eq!(task.view().outside_scope(), Vec::<String>::new());
+    let reviewing = runs(&task, Role::Reviewer)[0];
+    assert!(text_of(&task, reviewing, Session::Fresh).contains("Touch only session.rs."));
+    assert!(
+        task.view()
+            .quote_sources()
+            .contains(&"Touch only session.rs.")
+    );
 }

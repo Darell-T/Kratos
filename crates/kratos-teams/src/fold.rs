@@ -189,6 +189,7 @@ impl TaskView {
             pending_roles: None,
             plan: PlanState::NoPlan,
             amendments: Vec::new(),
+            requirements: Vec::new(),
             rounds: Vec::new(),
             findings: Vec::new(),
             rulings: Vec::new(),

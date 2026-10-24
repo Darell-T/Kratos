@@ -3,7 +3,8 @@
 //! findings Kratos confirmed, and a planner never guesses.
 
 use kratos_protocol::Provider;
-use kratos_teams::decisions::Decision;
+use kratos_teams::decisions::{Decision, PlanChangeResponse};
+use kratos_teams::evidence::{EvidenceCheck, Seen, Start, start_check};
 use kratos_teams::facts::{Disposition, Ended, Fact};
 use kratos_teams::members::Role;
 use kratos_teams::prompts::{STEP_BACK_TEXT, Session, branch_name, commit_subject, task_title};
@@ -211,6 +212,98 @@ fn the_reviewer_sees_everything_the_user_said_including_what_was_sent_to_the_imp
 
     assert!(text.contains("Keep the existing route names."));
     assert!(text.contains("To the implementer: Use tabs."));
+}
+
+#[test]
+fn a_direct_requirement_reaches_the_next_reviewer_and_its_evidence_check() {
+    let mut task = Task::two().script(script(
+        vec![implements(), implements()],
+        vec![
+            approves(),
+            requests_changes(vec![requirement(
+                "logout-audit",
+                "Record logout audit entries.",
+            )]),
+        ],
+    ));
+    task.run();
+    task.decide_while_working(Decision::Direct {
+        text: "Record logout audit entries.".to_owned(),
+    });
+    task.step_until(|task| {
+        matches!(task.next(), kratos_teams::next_step::Step::Run { run } if run.role == Role::Reviewer)
+    });
+    let kratos_teams::next_step::Step::Run { run } = task.next() else {
+        panic!("the reviewer is next");
+    };
+    let text = text_of(&task, &run, Session::Fresh);
+
+    task.step();
+    let kratos_teams::next_step::Step::Check { check } = task.next() else {
+        panic!("the evidence check is next");
+    };
+    let sources: Vec<&str> = check.sources.iter().map(String::as_str).collect();
+    let seen = Seen {
+        file_text: Some("one\ntwo\nthree\n"),
+        sources: &sources,
+        diff: None,
+    };
+    assert_eq!(
+        start_check(&check.candidates[0].report, &seen),
+        Start::Done(EvidenceCheck::Confirmed {
+            inside_new_diff: true,
+            output: None,
+        })
+    );
+    assert!(text.contains("Record logout audit entries."));
+    assert!(
+        task.view().directions.is_empty(),
+        "Direct is not a targeted delivery"
+    );
+    assert_replayable(&task);
+}
+
+#[test]
+fn a_direct_requirement_survives_step_back_and_replanning_for_every_later_role() {
+    let mut task = Task::three().script(Script {
+        planner: vec![plan_ready(), plan_with("src/**")].into(),
+        implementer: vec![
+            implements(),
+            implementer_blocked("The audit hook needs a different approach."),
+            implementer_wants_plan_change("The audit hook needs shared state.", &["src/shared/**"]),
+            implements(),
+        ]
+        .into(),
+        reviewer: vec![approves(), approves()].into(),
+        ..Script::default()
+    });
+    task.run();
+    task.decide(Decision::ApprovePlan { conditions: None });
+    task.decide(Decision::Direct {
+        text: "Record logout audit entries.".to_owned(),
+    });
+    task.decide(Decision::StepBack);
+    let stepping = runs(&task, Role::Implementer)[2];
+    assert!(text_of(&task, stepping, Session::Continuing).contains("Record logout audit entries."));
+
+    task.decide(Decision::PlanChange {
+        response: PlanChangeResponse::Replan,
+        instructions: Some("Use the shared audit helper.".to_owned()),
+    });
+    let planning = runs(&task, Role::Planner)[1];
+    assert!(text_of(&task, planning, Session::Fresh).contains("Record logout audit entries."));
+    assert!(
+        task.view()
+            .quote_sources()
+            .contains(&"Record logout audit entries.")
+    );
+
+    task.decide(Decision::ApprovePlan { conditions: None });
+    let building = runs(&task, Role::Implementer)[3];
+    let reviewing = runs(&task, Role::Reviewer)[1];
+    assert!(text_of(&task, building, Session::Fresh).contains("Record logout audit entries."));
+    assert!(text_of(&task, reviewing, Session::Fresh).contains("Record logout audit entries."));
+    assert_replayable(&task);
 }
 
 #[test]

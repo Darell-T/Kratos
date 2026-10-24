@@ -51,6 +51,9 @@ pub struct TaskView {
     pub plan: PlanState,
     /// Plan changes the user allowed, oldest first.
     pub amendments: Vec<Amendment>,
+    /// Requirements accepted through `Direct`, oldest first. They remain in force across steps,
+    /// step-back requests and replanning, separately from messages addressed to one member.
+    pub requirements: Vec<String>,
 
     // The record.
     pub rounds: Vec<Round>,
@@ -758,8 +761,8 @@ impl TaskView {
     }
 
     /// Every text a requirement or constraint quote may come from (D30): the request, the user's
-    /// constraints and directions, the approved plan with its conditions and amendments, and the three
-    /// rules files.
+    /// constraints, task requirements and member messages, the approved plan with its conditions and
+    /// amendments, and the three rules files.
     pub fn quote_sources(&self) -> Vec<&str> {
         let plan = match &self.plan {
             PlanState::Approved {
@@ -783,6 +786,7 @@ impl TaskView {
         .flat_map(|text| text.as_deref());
         std::iter::once(self.request.as_str())
             .chain(self.constraints.iter().map(String::as_str))
+            .chain(self.requirements.iter().map(String::as_str))
             .chain(self.directions.iter().map(|d| d.text.as_str()))
             .chain(plan)
             .chain(amendments)
