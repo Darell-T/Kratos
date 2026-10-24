@@ -2,10 +2,11 @@
 //! pass and a regressions pass, each once per task and each from a fresh reviewer session. Findings reach
 //! the user ranked by severity.
 
-use kratos_teams::decisions::approval_report;
+use kratos_teams::decisions::{Decision, approval_report};
 use kratos_teams::facts::{ChangeSize, Depth, Ended};
 use kratos_teams::members::Role;
-use kratos_teams::view::{ApprovedBy, FindingsPause, PassKind, Waiting, Work};
+use kratos_teams::security_triggers::TriggerHit;
+use kratos_teams::view::{ApprovedBy, FindingsPause, Pass, PassKind, Waiting, Work};
 
 use crate::replay::*;
 use crate::support::*;
@@ -93,6 +94,156 @@ fn a_large_change_runs_correctness_security_and_regressions_in_that_order_each_f
 }
 
 #[test]
+fn a_small_fix_keeps_the_large_tasks_required_passes() {
+    let mut script = script(
+        vec![implements(), implements_answering(vec![fixed(1)])],
+        vec![
+            requests_changes(vec![bug("null-deref", "cmd1")]),
+            approves(),
+            approves(),
+            approves(),
+        ],
+    );
+    script.sizes.insert(1, size(12, 50));
+    script.sizes.insert(2, size(1, 2));
+    script.scans = vec![vec![], vec![]].into();
+    script_commands(&mut script, "cmd1", vec![fails(), passes()]);
+    let mut task = Task::two()
+        .security_pass()
+        .large_change(10, 400)
+        .script(script);
+
+    task.run();
+
+    assert_eq!(
+        passes_run(&task),
+        [
+            (PassKind::Standard, Depth::Thorough),
+            (PassKind::Standard, Depth::Thorough),
+            (PassKind::Security, Depth::Thorough),
+            (PassKind::Regressions, Depth::Thorough),
+        ]
+    );
+    assert_eq!(task.view().phase, approved(2, ApprovedBy::Reviewer));
+    assert_replayable(&task);
+}
+
+#[test]
+fn a_direction_and_restart_keep_unfinished_large_task_passes() {
+    let mut first = script(
+        vec![implements()],
+        vec![requests_changes(vec![bug("null-deref", "cmd1")])],
+    );
+    first.sizes.insert(1, size(12, 50));
+    script_commands(&mut first, "cmd1", vec![fails()]);
+    let mut task = Task::two()
+        .security_pass()
+        .large_change(10, 400)
+        .round_cap(1)
+        .script(first);
+    task.run();
+    assert_eq!(
+        waiting(&task.view()),
+        Some(&Waiting::Findings {
+            why: FindingsPause::Cap,
+            ids: vec![fid(1)],
+        })
+    );
+
+    let mut resumed = script(
+        vec![implements_answering(vec![fixed(1)])],
+        vec![approves(), approves(), approves()],
+    );
+    resumed.sizes.insert(2, size(1, 2));
+    script_commands(&mut resumed, "cmd1", vec![passes()]);
+    let mut restarted = ScriptedTask::restart_from(task.log(), resumed);
+    restarted.decide(Decision::Direct {
+        text: "Fix the null check in the existing helper.".to_owned(),
+    });
+
+    assert_eq!(
+        passes_run(&restarted),
+        [
+            (PassKind::Standard, Depth::Thorough),
+            (PassKind::Security, Depth::Thorough),
+            (PassKind::Regressions, Depth::Thorough),
+        ]
+    );
+    assert_eq!(restarted.view().phase, approved(2, ApprovedBy::Reviewer));
+    assert_replayable(&restarted);
+}
+
+#[test]
+fn a_small_task_with_a_small_fix_still_gets_only_standard_reviews() {
+    let mut script = script(
+        vec![implements(), implements_answering(vec![fixed(1)])],
+        vec![
+            requests_changes(vec![bug("null-deref", "cmd1")]),
+            approves(),
+        ],
+    );
+    script.sizes.insert(1, size(9, 399));
+    script.sizes.insert(2, size(1, 2));
+    script_commands(&mut script, "cmd1", vec![fails(), passes()]);
+    let mut task = Task::two()
+        .security_pass()
+        .large_change(10, 400)
+        .script(script);
+
+    task.run();
+
+    assert_eq!(
+        passes_run(&task),
+        [
+            (PassKind::Standard, Depth::Single),
+            (PassKind::Standard, Depth::Single),
+        ]
+    );
+    assert_eq!(task.view().phase, approved(2, ApprovedBy::Reviewer));
+    assert_replayable(&task);
+}
+
+#[test]
+fn a_blocking_standard_reviews_trigger_still_requires_security_after_a_quiet_fix() {
+    let hit = TriggerHit::Code {
+        pattern: "spawn".to_owned(),
+        path: "src/run.rs".to_owned(),
+        line: "cmd.spawn()?;".to_owned(),
+    };
+    let mut script = script(
+        vec![implements(), implements_answering(vec![fixed(1)])],
+        vec![
+            requests_changes(vec![bug("null-deref", "cmd1")]),
+            approves(),
+            approves(),
+        ],
+    );
+    script.sizes.insert(1, size(2, 20));
+    script.sizes.insert(2, size(1, 2));
+    script.scans = vec![vec![hit.clone()], vec![]].into();
+    script_commands(&mut script, "cmd1", vec![fails(), passes()]);
+    let mut task = Task::two().security_pass().script(script);
+
+    task.run();
+
+    assert_eq!(
+        passes_run(&task),
+        [
+            (PassKind::Standard, Depth::Single),
+            (PassKind::Standard, Depth::Single),
+            (PassKind::Security, Depth::Single),
+        ]
+    );
+    let reviewer_runs = runs(&task, Role::Reviewer);
+    let Work::Review { job } = &reviewer_runs[2].work else {
+        panic!("the reviewer runs the security pass");
+    };
+    assert_eq!(job.pass, Pass::Security { hits: vec![hit] });
+    assert_eq!(task.view().phase, approved(2, ApprovedBy::Reviewer));
+    assert_replayable(&task);
+}
+
+#[test]
 fn the_security_pass_of_a_large_change_runs_even_when_no_trigger_matched_a_line() {
     let mut script = script(vec![implements()], vec![approves(), approves(), approves()]);
     script.sizes.insert(1, size(12, 50));
@@ -161,7 +312,7 @@ fn each_extra_pass_runs_once_per_task_even_when_a_blocking_finding_costs_a_round
         ],
     );
     script.sizes.insert(1, size(12, 50));
-    script.sizes.insert(2, size(12, 50));
+    script.sizes.insert(2, size(1, 2));
     script.scans = vec![vec![]].into();
     script_commands(&mut script, "cmd1", vec![fails(), passes()]);
     let mut task = Task::two()

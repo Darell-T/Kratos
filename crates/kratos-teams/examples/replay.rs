@@ -9,7 +9,8 @@
 //!
 //! With no argument it runs every two-member log in `tests/fixtures/reference/`. The TypeScript rules
 //! (`teams-core`, commit 6741f16) recorded those logs with their own view after every fact. Each fact
-//! prints the Rust view next to the TypeScript one, and the exit status is 1 if any pair differs.
+//! prints the Rust view next to the TypeScript one. The known pending-security correction is reported
+//! separately, and the exit status is 1 for any unexpected difference.
 //!
 //! With a path it reads one `StoredFact` per line, the format the engine appends, and prints one line
 //! for each fact:
@@ -124,24 +125,31 @@ fn replay_facts(path: &Path, short: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// How many facts of a reference log the Rust fold and the TypeScript fold disagree on.
-fn differing_facts(log: &typescript::Reference) -> Result<usize, String> {
+/// The raw differences from TypeScript, and how many violate Rust's corrected expectations.
+fn differing_facts(log: &typescript::Reference) -> Result<(usize, usize), String> {
     let (folded, _) = typescript::fold_reference(log)?;
-    Ok(folded
+    let differing = folded
         .iter()
         .zip(&log.expected)
         .filter(|(ours, theirs)| &ours.observed != *theirs)
-        .count())
+        .count();
+    let unexpected = folded
+        .iter()
+        .filter(|ours| ours.observed != log.expected_rust(ours.fact))
+        .count();
+    Ok((differing, unexpected))
 }
 
-/// Prints a reference log fact by fact and returns how many facts the two folds disagree on.
+/// Prints both recorded and corrected expectations, returning the unexpected differences.
 fn replay_typescript(path: &Path, short: bool) -> Result<usize, String> {
     let log = typescript::read_reference(path)?;
     let (folded, _) = typescript::fold_reference(&log)?;
     let mut differing = 0;
     for (ours, theirs) in folded.iter().zip(&log.expected) {
         let equal = &ours.observed == theirs;
-        differing += usize::from(!equal);
+        let expected_rust = log.expected_rust(ours.fact);
+        let expected = ours.observed == expected_rust;
+        differing += usize::from(!expected);
         let (step, text) = next_and_message(&ours.view);
         let mut printed = json!({
             "log": log.name,
@@ -150,6 +158,8 @@ fn replay_typescript(path: &Path, short: bool) -> Result<usize, String> {
             "equal": equal,
             "rust": ours.observed,
             "typescript": theirs,
+            "expected_rust": expected_rust,
+            "intentional_difference": !equal && expected,
             "next_step": step,
             "message": text,
         });
@@ -162,7 +172,7 @@ fn replay_typescript(path: &Path, short: bool) -> Result<usize, String> {
     Ok(differing)
 }
 
-/// One line for each reference log, then a total. Exits 1 if any fact differs.
+/// One line for each reference log, then a total. Exits 1 for an unexpected difference.
 fn replay_every_reference() -> Result<bool, String> {
     let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference");
     let mut files: Vec<PathBuf> = fs::read_dir(&folder)
@@ -175,14 +185,19 @@ fn replay_every_reference() -> Result<bool, String> {
         })
         .collect();
     files.sort();
-    let (mut facts, mut differing) = (0, 0);
+    let (mut facts, mut differing, mut unexpected) = (0, 0, 0);
     for file in &files {
         let log = typescript::read_reference(file)?;
-        let diff = differing_facts(&log)?;
-        print(&json!({"log": log.name, "facts": log.facts.len(), "differing": diff}));
+        let (diff, unplanned) = differing_facts(&log)?;
+        print(
+            &json!({"log": log.name, "facts": log.facts.len(), "differing": diff, "unexpected": unplanned}),
+        );
         facts += log.facts.len();
         differing += diff;
+        unexpected += unplanned;
     }
-    print(&json!({"summary": true, "logs": files.len(), "facts": facts, "differing": differing}));
-    Ok(differing == 0)
+    print(
+        &json!({"summary": true, "logs": files.len(), "facts": facts, "differing": differing, "unexpected": unexpected}),
+    );
+    Ok(unexpected == 0)
 }

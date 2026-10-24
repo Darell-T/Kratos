@@ -359,6 +359,75 @@ fn no_more_than_fifty_hits_and_no_more_than_two_hundred_characters_of_a_line_are
 }
 
 #[test]
+fn a_process_call_after_a_long_ascii_literal_selects_review_with_a_bounded_snippet() {
+    let added = format!(
+        "let payload = \"{}\"; std::process::Command::new(\"git\").status()?;",
+        "x".repeat(2_100)
+    );
+
+    let hits = match_triggers(&default_triggers(), &[file("src/run.rs", &[&added])]).unwrap();
+
+    assert_eq!(hits.len(), 1);
+    let TriggerHit::Code {
+        pattern,
+        path,
+        line,
+    } = &hits[0]
+    else {
+        panic!("the process code selects review");
+    };
+    assert_eq!(pattern, DEFAULT_PATTERNS[1]);
+    assert_eq!(path, "src/run.rs");
+    assert_eq!(line.chars().count(), MAX_HIT_LINE);
+    assert!(line.starts_with("let payload = \""));
+    assert!(!line.contains("Command::new"));
+}
+
+#[test]
+fn a_network_call_after_a_long_unicode_literal_selects_review_with_a_bounded_snippet() {
+    let added = format!(
+        "let payload = \"{}\"; reqwest::get(url).await?;",
+        "界🙂".repeat(1_100)
+    );
+
+    let hits = match_triggers(&default_triggers(), &[file("src/net.rs", &[&added])]).unwrap();
+
+    assert_eq!(hits.len(), 1);
+    let TriggerHit::Code {
+        pattern,
+        path,
+        line,
+    } = &hits[0]
+    else {
+        panic!("the network code selects review");
+    };
+    assert_eq!(pattern, DEFAULT_PATTERNS[3]);
+    assert_eq!(path, "src/net.rs");
+    assert_eq!(line.chars().count(), MAX_HIT_LINE);
+    assert!(line.contains("界🙂"));
+    assert!(line.len() > MAX_HIT_LINE);
+    assert!(!line.contains("reqwest::get"));
+}
+
+#[test]
+fn long_benign_lines_and_disabled_triggers_still_select_no_review() {
+    for padding in ["x".repeat(2_100), "界🙂".repeat(1_100)] {
+        let benign =
+            format!("let payload = \"{padding}\"; tokio::spawn(async move {{ work().await }});");
+        let risky = format!("let payload = \"{padding}\"; reqwest::get(url).await?;");
+
+        assert_eq!(
+            match_triggers(&default_triggers(), &[file("src/run.rs", &[&benign])]).unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            match_triggers(&[], &[file("src/net.rs", &[&risky])]).unwrap(),
+            vec![]
+        );
+    }
+}
+
+#[test]
 fn a_pattern_that_runs_out_of_budget_on_a_line_counts_as_a_hit_instead_of_hanging_or_failing() {
     // The look-ahead inside the loop forces the backtracking engine, and the two ways to match `a` make
     // it try every split of the line.

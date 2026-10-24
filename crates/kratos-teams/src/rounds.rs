@@ -13,7 +13,7 @@ use crate::reports::{
     AddedProbe, FindingId, FindingReport, ImplementerDone, Kind, Response, ResponseOutcome,
     ReviewDone, RulingVerdict, RulingsDone, Severity, Verdict,
 };
-use crate::security_triggers::TriggerHit;
+use crate::security_triggers::MAX_HITS;
 use crate::task_plan::{CopyProblem, probe_copy_problem};
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, ClosedHow, FIX_ATTEMPTS, Finding,
@@ -205,18 +205,17 @@ impl TaskView {
         Ok(self.waiting(Waiting::Ruling { disputed, commit }))
     }
 
-    /// The standard review of `commit`. How deep the round goes depends on the size of the change that
-    /// the commit's review reads (D94).
+    /// The standard review of `commit`. Once a handoff requires deeper review, its unfinished passes
+    /// belong to the task even when later fixes are small (D94).
     pub(crate) fn begin_review(
         self: Box<Self>,
         seq: FactSeq,
         commit: Sha,
     ) -> Result<Box<TaskView>, Rejection> {
-        let size = self
+        let thorough = self
             .rounds
-            .last()
-            .map(|round| round.size)
-            .unwrap_or_default();
+            .iter()
+            .any(|round| self.policy.large_change.depth_of(round.size) == Depth::Thorough);
         let job = ReviewJob {
             pass: Pass::Standard,
             commit,
@@ -224,7 +223,11 @@ impl TaskView {
                 .last_reviewed
                 .clone()
                 .unwrap_or_else(|| self.base.clone()),
-            depth: self.policy.large_change.depth_of(size),
+            depth: if thorough {
+                Depth::Thorough
+            } else {
+                Depth::Single
+            },
         };
         self.begin_step(Work::Review { job }, seq)
     }
@@ -455,7 +458,7 @@ impl TaskView {
             view.last_reviewed = Some(job.commit.clone());
         }
         if judged.blocking.is_empty() {
-            view.after_approval(seq, &job, checked.security_hits)
+            view.after_approval(seq, &job)
         } else {
             view.after_blocking(seq, &job, &judged.blocking)
         }
@@ -581,10 +584,9 @@ impl TaskView {
         mut self: Box<Self>,
         seq: FactSeq,
         job: &ReviewJob,
-        hits: Option<Vec<TriggerHit>>,
     ) -> Result<Box<TaskView>, Rejection> {
         self.finish_pass(job);
-        let Some(pass) = self.next_pass(job, hits) else {
+        let Some(pass) = self.next_pass(job) else {
             return Ok(self.enter_approved(job.commit.clone(), ApprovedBy::Reviewer));
         };
         let next = ReviewJob {
@@ -598,12 +600,29 @@ impl TaskView {
 
     /// Security comes after the standard pass, then regressions. A small change runs security only when a
     /// trigger matched. A large change runs it whenever the Team runs the security pass (D94).
-    fn next_pass(&self, job: &ReviewJob, hits: Option<Vec<TriggerHit>>) -> Option<Pass> {
+    fn next_pass(&self, job: &ReviewJob) -> Option<Pass> {
         let thorough = job.depth == Depth::Thorough;
         let security = || {
-            let hits = hits.clone().unwrap_or_default();
-            (self.scans_for_security() && (thorough || !hits.is_empty()))
-                .then_some(Pass::Security { hits })
+            if !self.scans_for_security() {
+                return None;
+            }
+            // A blocking review can defer security, but a later empty scan cannot cancel it.
+            let mut hits = Vec::new();
+            for hit in self
+                .rounds
+                .iter()
+                .flat_map(|round| &round.reviews)
+                .filter(|review| review.pass == PassKind::Standard)
+                .flat_map(|review| review.hits.iter().flatten())
+            {
+                if !hits.contains(hit) {
+                    hits.push(hit.clone());
+                    if hits.len() == MAX_HITS {
+                        break;
+                    }
+                }
+            }
+            (thorough || !hits.is_empty()).then_some(Pass::Security { hits })
         };
         let regressions = || {
             (thorough && !self.passes_done.contains(&PassKind::Regressions))

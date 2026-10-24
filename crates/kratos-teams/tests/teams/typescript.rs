@@ -22,6 +22,21 @@ pub struct Reference {
     pub expected: Vec<Value>,
 }
 
+impl Reference {
+    /// Keep the recorded TypeScript evidence unchanged. Its restart case forgot an earlier security
+    /// trigger at the final checkpoint; Rust must request that outstanding pass before approval.
+    pub fn expected_rust(&self, fact: usize) -> Value {
+        let mut expected = self.expected[fact - 1].clone();
+        if self.name == "a restart at any fact continues the same way" && fact == 12 {
+            expected["phase"] = json!("reviewing");
+            expected["commit"] = Value::Null;
+            expected["next"] = json!("askReviewer");
+            expected["allowed"] = json!(["cancel"]);
+        }
+        expected
+    }
+}
+
 pub fn read_reference(path: &Path) -> Result<Reference, String> {
     let text = fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
     let log: Value =

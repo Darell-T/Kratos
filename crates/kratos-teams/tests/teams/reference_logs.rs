@@ -1,7 +1,7 @@
 //! The Rust fold against the TypeScript fold. `tests/fixtures/reference/` holds 32 two-member fact logs
 //! that the TypeScript Teams rules (`teams-core`, commit 6741f16) recorded, each with the TypeScript's
 //! view and next step after every fact. Each log runs through the Rust `fold` here, and the views and
-//! next steps must match.
+//! next steps must match, except for the explicitly corrected pending-security checkpoint in log 26.
 //!
 //! These logs cover the behavior the Rust rules kept. Behavior that changed on purpose (questions
 //! instead of `needsUser`, a blocked review skipping the evidence check, and a round count that only the
@@ -11,6 +11,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use kratos_teams::fold::fold;
+use kratos_teams::next_step::{Step, next_step};
+use kratos_teams::view::{Pass, Work};
 
 use crate::typescript::{Reference, fold_reference, read_reference};
 
@@ -37,15 +39,15 @@ fn at_least_thirty_two_member_logs_are_on_file() {
 }
 
 #[test]
-fn every_reference_log_folds_to_the_views_and_next_steps_the_typescript_fold_recorded() {
+fn every_reference_log_matches_the_recorded_behavior_and_the_explicit_security_correction() {
     let mut compared = 0;
     for log in reference_logs() {
         let (rust, translated) = fold_reference(&log).unwrap_or_else(|error| panic!("{error}"));
         assert_eq!(rust.len(), log.expected.len(), "{}", log.name);
-        for (ours, theirs) in rust.iter().zip(&log.expected) {
+        for ours in &rust {
             assert_eq!(
-                &ours.observed,
-                theirs,
+                ours.observed,
+                log.expected_rust(ours.fact),
                 "{}: the views differ after fact {} of {}, a {}",
                 log.name,
                 ours.fact,
@@ -63,6 +65,30 @@ fn every_reference_log_folds_to_the_views_and_next_steps_the_typescript_fold_rec
         );
     }
     assert!(compared > 250, "only {compared} views were compared");
+}
+
+#[test]
+fn the_legacy_restart_log_differs_only_where_security_was_previously_skipped() {
+    let log = reference_logs()
+        .into_iter()
+        .find(|log| log.name == "a restart at any fact continues the same way")
+        .expect("the restart reference remains on file");
+    let (rust, _) = fold_reference(&log).expect("the reference folds");
+    let differing: Vec<_> = rust
+        .iter()
+        .zip(&log.expected)
+        .filter(|(ours, theirs)| &ours.observed != *theirs)
+        .map(|(ours, _)| ours.fact)
+        .collect();
+    assert_eq!(differing, [12]);
+    assert_eq!(log.expected[11]["phase"], "approved");
+    let Step::Run { run } = next_step(&rust[11].view) else {
+        panic!("the corrected checkpoint requests the outstanding review");
+    };
+    assert!(matches!(
+        &run.work,
+        Work::Review { job } if matches!(&job.pass, Pass::Security { hits } if !hits.is_empty())
+    ));
 }
 
 #[test]

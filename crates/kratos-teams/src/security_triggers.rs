@@ -45,8 +45,6 @@ pub enum TriggerHit {
 /// The most hits one scan reports. More would only make the security prompt longer.
 pub const MAX_HITS: usize = 50;
 pub const MAX_HIT_LINE: usize = 200;
-/// Only the first characters of a very long added line are matched, such as a minified file.
-pub const MAX_SCANNED_LINE: usize = 2_000;
 /// The regex engine's backtracking budget for one line.
 pub const BACKTRACK_LIMIT: usize = 100_000;
 
@@ -274,9 +272,5 @@ fn hit(trigger: &Compiled, file: &DiffFile) -> Option<TriggerHit> {
 
 /// An error here is the backtracking budget running out, which counts as a match.
 fn matches_line(regex: &fancy_regex::Regex, line: &str) -> bool {
-    let scanned_end = line
-        .char_indices()
-        .nth(MAX_SCANNED_LINE)
-        .map_or(line.len(), |(index, _)| index);
-    regex.is_match(&line[..scanned_end]).unwrap_or(true)
+    regex.is_match(line).unwrap_or(true)
 }
