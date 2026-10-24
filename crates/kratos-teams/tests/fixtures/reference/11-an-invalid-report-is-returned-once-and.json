@@ -1,0 +1,12 @@
+{"name":"an invalid report is returned once and pauses on the second",
+"facts":[
+{"taskId":"0a1b2c3d","seq":1,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"task.started","teamId":"team-1","text":"# Add a login page\n\nUse the existing session helper.","title":"Add a login page","branch":"codex/add-a-login-page","base":"000000000000000000000000000000000000ba5e","rules":{"agentsMd":"Every public function needs a test.","claudeMd":null,"reviewMd":"Check the goal first."},"triggers":[{"kind":"code","pattern":"spawn"}],"policy":{"planFirst":false,"securityPass":false}}},
+{"taskId":"0a1b2c3d","seq":2,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"implementer.opened","thread":{"provider":"codex","threadId":"implementer-1"},"fresh":true}},
+{"taskId":"0a1b2c3d","seq":3,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"implementer.reported","report":{"ok":false,"error":"summary: must not be blank","raw":"{}"},"changes":{"files":["src/a.ts"],"editedSinceCommand":false,"ranCommand":true}}},
+{"taskId":"0a1b2c3d","seq":4,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"implementer.reported","report":{"ok":false,"error":"Bad JSON.","raw":"{}"},"changes":{"files":["src/a.ts"],"editedSinceCommand":false,"ranCommand":true}}}
+],"expected":[
+{"phase":"preparing","pause":null,"commit":null,"rounds":[],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"prepare","allowed":["cancel"]},
+{"phase":"implementing","pause":null,"commit":null,"rounds":[],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"askImplementer","allowed":["cancel"]},
+{"phase":"implementing","pause":null,"commit":null,"rounds":[],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"askImplementer","allowed":["cancel"]},
+{"phase":"paused","pause":"trouble:invalidReport","commit":null,"rounds":[],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"wait","allowed":["resume","direct","stepBack","accept","cancel"]}
+]}
