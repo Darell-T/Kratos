@@ -1,6 +1,6 @@
 use std::num::NonZeroUsize;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use kratos_client::bench_post;
 use kratos_protocol::{Seq, ThreadEventBody};
@@ -74,6 +74,11 @@ fn a_stalled_subscriber_delays_neither_posts_nor_other_subscribers_and_catches_u
     // socket buffers between the engine and a client that has stopped reading.
     const MESSAGES: u64 = 64;
     const FILLER_BYTES: usize = 512 * 1024;
+    // An appender that waited on the stalled socket would hang once the socket buffers fill, and
+    // a post would fail on the client's 30 s timeout. So this limit only has to catch a slow
+    // wait, and it sits far above the time 32 MiB of synced commits takes on a slow disk, which
+    // was over 10 s on GitHub's Windows runner.
+    const POSTING_LIMIT: Duration = Duration::from_secs(60);
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
@@ -87,7 +92,7 @@ fn a_stalled_subscriber_delays_neither_posts_nor_other_subscribers_and_catches_u
         post(&client, &thread, &format!("{number}:{filler}"));
     }
     assert!(
-        started.elapsed() < WAIT,
+        started.elapsed() < POSTING_LIMIT,
         "posting waited on the stalled subscriber"
     );
 
