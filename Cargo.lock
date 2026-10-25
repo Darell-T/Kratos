@@ -688,6 +688,7 @@ version = "0.1.0"
 dependencies = [
  "kratos-protocol",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

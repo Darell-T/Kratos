@@ -1,26 +1,39 @@
 //! The engine's SQLite records.
 //!
 //! [`Store::open`] locks the data directory, backs up a database that has an older schema, and runs
-//! the migrations. The schema and SQL are the TypeScript engine's, so each engine opens what the
-//! other wrote. The store is synchronous and owns one connection.
+//! the migrations. Migrations 1 to 4 are the TypeScript engine's, so the Rust engine opens what that
+//! engine wrote; from migration 5 on the schema is the Rust engine's own. The store is synchronous
+//! and owns one connection. Everything that appends to a thread's log goes through a
+//! [`ThreadWrite`].
 
 mod backups;
+mod continuations;
 mod data_directory;
 mod events;
+mod json;
+mod messages;
 mod migrations;
+mod requests;
 mod threads;
 mod workspaces;
+mod write;
 
 use std::path::{Path, PathBuf};
 
-use kratos_protocol::{Seq, ThreadId, WorkspaceId};
+use kratos_protocol::{
+    ApprovalId, ContinuationId, MessageId, QuestionId, Seq, ThreadId, WorkspaceId,
+};
 use rusqlite::Connection;
 
 pub use backups::{
     Backup, BackupError, BackupId, InvalidBackupId, RestoreError, Restored, restore,
 };
 pub use data_directory::DirectoryError;
+pub use messages::{Enqueued, QueuePlace};
 pub use migrations::SCHEMA_VERSION;
+pub use requests::{Settle, StoredApproval, StoredQuestion};
+pub use threads::ProviderThread;
+pub use write::ThreadWrite;
 
 use backups::back_up;
 use data_directory::DataDirectory;
@@ -107,7 +120,7 @@ pub enum OpenError {
     },
 }
 
-/// The two `Unknown…` cases are expected absences that the API answers with 404; the rest are
+/// The `Unknown…` cases are expected absences that the API answers with 404; the rest are
 /// failures.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -115,6 +128,25 @@ pub enum StoreError {
     UnknownWorkspace(WorkspaceId),
     #[error("Unknown thread {0}")]
     UnknownThread(ThreadId),
+    #[error("Unknown message {message_id} in thread {thread_id}")]
+    UnknownMessage {
+        thread_id: ThreadId,
+        message_id: MessageId,
+    },
+    #[error("Unknown approval {0}")]
+    UnknownApproval(ApprovalId),
+    #[error("Unknown question {0}")]
+    UnknownQuestion(QuestionId),
+    #[error("Unknown continuation {0}")]
+    UnknownContinuation(ContinuationId),
+    /// A caller asked for a status change the queue's rules forbid, such as resending a message
+    /// whose delivery is uncertain (D11). Nothing was written.
+    #[error("message {message_id} cannot go from {from} to {to}")]
+    MessageTransition {
+        message_id: MessageId,
+        from: &'static str,
+        to: &'static str,
+    },
     /// A stored event this build cannot read, such as a kind it does not know. Reading stops there
     /// rather than skipping the event, because a follower must never miss one.
     #[error("event {} of thread {thread_id} is unreadable: {source}", .seq.get())]
