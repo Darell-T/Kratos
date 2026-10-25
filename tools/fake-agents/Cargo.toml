@@ -1,0 +1,15 @@
+[package]
+name = "fake-agents"
+description = "Fake agent CLIs and a scripted model server that the engine's tests drive; the engine never links them"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

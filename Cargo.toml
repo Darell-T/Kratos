@@ -10,7 +10,11 @@ rust-version = "1.99.1"
 
 # One version of each dependency for the whole workspace. Each crate opts in with `workspace = true`.
 [workspace.dependencies]
+fake-agents = { path = "tools/fake-agents" }
 kratos-client = { path = "tools/kratos-client" }
+kratos-codex-client = { path = "crates/kratos-codex-client" }
+kratos-command-safety = { path = "crates/kratos-command-safety" }
+kratos-process = { path = "crates/kratos-process" }
 kratos-protocol = { path = "crates/kratos-protocol" }
 kratos-store = { path = "crates/kratos-store" }
 
