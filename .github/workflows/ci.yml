@@ -38,8 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Fails on any function with cyclomatic complexity 12 or more, the point at which a function
-      # gets rethought rather than split into a tiny helper.
-      - run: pipx run --spec lizard==1.24.2 lizard -l rust -C 11 -w crates tools
+      # gets rethought rather than split into a tiny helper. kratos-command-safety is Codex's code,
+      # copied unchanged so it can be compared with upstream, so its functions keep Codex's shape.
+      - run: pipx run --spec lizard==1.24.2 lizard -l rust -C 11 -w -x "crates/kratos-command-safety/*" crates tools
 
   node:
     name: Node tools

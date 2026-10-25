@@ -74,6 +74,7 @@ impl Fake {
         }
     }
 
+    // #lizard forgives: one arm for each protocol method the fake answers, each a line or two.
     fn request(&mut self, id: Value, method: &str, params: &Value) {
         if method == "initialize" {
             return self.initialize(id, params);

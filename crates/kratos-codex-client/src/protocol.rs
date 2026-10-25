@@ -79,45 +79,60 @@ pub enum Notification {
 
 impl Notification {
     pub fn parse(method: &str, params: Value) -> Notification {
-        fn typed<T: DeserializeOwned>(
-            method: &str,
-            params: Value,
-            wrap: fn(T) -> Notification,
-        ) -> Notification {
-            match serde_json::from_value(params) {
-                Ok(params) => wrap(params),
-                Err(error) => Notification::Malformed {
-                    method: method.to_owned(),
-                    error: error.to_string(),
-                },
-            }
-        }
-        match method {
-            "item/agentMessage/delta" => typed(method, params, Notification::AgentMessageDelta),
-            "item/started" => typed(method, params, Notification::ItemStarted),
-            "item/completed" => typed(method, params, Notification::ItemCompleted),
-            "turn/started" => typed(method, params, Notification::TurnStarted),
-            "turn/completed" => typed(method, params, Notification::TurnCompleted),
-            "error" => typed(method, params, Notification::Error),
-            "serverRequest/resolved" => typed(method, params, Notification::ServerRequestResolved),
-            "thread/closed" => typed(method, params, Notification::ThreadClosed),
-            "thread/tokenUsage/updated" => {
-                typed(method, params, Notification::ThreadTokenUsageUpdated)
-            }
-            "account/updated" => typed(method, params, Notification::AccountUpdated),
-            "account/rateLimits/updated" => {
-                typed(method, params, Notification::AccountRateLimitsUpdated)
-            }
-            "windowsSandbox/setupCompleted" => {
-                typed(method, params, Notification::WindowsSandboxSetupCompleted)
-            }
-            _ => Notification::Other {
+        match NOTIFICATIONS.iter().find(|(name, _)| *name == method) {
+            Some((_, parse)) => parse(params).unwrap_or_else(|error| Notification::Malformed {
+                method: method.to_owned(),
+                error: error.to_string(),
+            }),
+            None => Notification::Other {
                 method: method.to_owned(),
                 params,
             },
         }
     }
 }
+
+type ParseNotification = fn(Value) -> serde_json::Result<Notification>;
+
+/// The notifications Kratos handles, by method name.
+const NOTIFICATIONS: [(&str, ParseNotification); 12] = [
+    ("item/agentMessage/delta", |params| {
+        serde_json::from_value(params).map(Notification::AgentMessageDelta)
+    }),
+    ("item/started", |params| {
+        serde_json::from_value(params).map(Notification::ItemStarted)
+    }),
+    ("item/completed", |params| {
+        serde_json::from_value(params).map(Notification::ItemCompleted)
+    }),
+    ("turn/started", |params| {
+        serde_json::from_value(params).map(Notification::TurnStarted)
+    }),
+    ("turn/completed", |params| {
+        serde_json::from_value(params).map(Notification::TurnCompleted)
+    }),
+    ("error", |params| {
+        serde_json::from_value(params).map(Notification::Error)
+    }),
+    ("serverRequest/resolved", |params| {
+        serde_json::from_value(params).map(Notification::ServerRequestResolved)
+    }),
+    ("thread/closed", |params| {
+        serde_json::from_value(params).map(Notification::ThreadClosed)
+    }),
+    ("thread/tokenUsage/updated", |params| {
+        serde_json::from_value(params).map(Notification::ThreadTokenUsageUpdated)
+    }),
+    ("account/updated", |params| {
+        serde_json::from_value(params).map(Notification::AccountUpdated)
+    }),
+    ("account/rateLimits/updated", |params| {
+        serde_json::from_value(params).map(Notification::AccountRateLimitsUpdated)
+    }),
+    ("windowsSandbox/setupCompleted", |params| {
+        serde_json::from_value(params).map(Notification::WindowsSandboxSetupCompleted)
+    }),
+];
 
 /// A request from the server that waits for Kratos's answer.
 #[derive(Clone, Debug, PartialEq)]
@@ -138,23 +153,31 @@ pub(crate) enum Unhandled {
 
 impl ServerRequest {
     pub(crate) fn parse(method: &str, params: Value) -> Result<ServerRequest, Unhandled> {
-        fn typed<T: DeserializeOwned>(
-            params: Value,
-            wrap: fn(T) -> ServerRequest,
-        ) -> Result<ServerRequest, Unhandled> {
-            serde_json::from_value(params)
-                .map(wrap)
-                .map_err(|error| Unhandled::BadParams(error.to_string()))
-        }
-        match method {
-            "item/commandExecution/requestApproval" => {
-                typed(params, ServerRequest::CommandApproval)
-            }
-            "item/fileChange/requestApproval" => typed(params, ServerRequest::FileChangeApproval),
-            "item/tool/requestUserInput" => typed(params, ServerRequest::UserInput),
-            "item/permissions/requestApproval" => typed(params, ServerRequest::Permissions),
-            "mcpServer/elicitation/request" => typed(params, ServerRequest::McpElicitation),
-            _ => Err(Unhandled::UnknownMethod),
-        }
+        let (_, parse) = SERVER_REQUESTS
+            .iter()
+            .find(|(name, _)| *name == method)
+            .ok_or(Unhandled::UnknownMethod)?;
+        parse(params).map_err(|error| Unhandled::BadParams(error.to_string()))
     }
 }
+
+type ParseServerRequest = fn(Value) -> serde_json::Result<ServerRequest>;
+
+/// The server requests Kratos answers, by method name.
+const SERVER_REQUESTS: [(&str, ParseServerRequest); 5] = [
+    ("item/commandExecution/requestApproval", |params| {
+        serde_json::from_value(params).map(ServerRequest::CommandApproval)
+    }),
+    ("item/fileChange/requestApproval", |params| {
+        serde_json::from_value(params).map(ServerRequest::FileChangeApproval)
+    }),
+    ("item/tool/requestUserInput", |params| {
+        serde_json::from_value(params).map(ServerRequest::UserInput)
+    }),
+    ("item/permissions/requestApproval", |params| {
+        serde_json::from_value(params).map(ServerRequest::Permissions)
+    }),
+    ("mcpServer/elicitation/request", |params| {
+        serde_json::from_value(params).map(ServerRequest::McpElicitation)
+    }),
+];
