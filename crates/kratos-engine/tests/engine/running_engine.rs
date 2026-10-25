@@ -1,4 +1,8 @@
+#[cfg(windows)]
+use std::io::Write;
 use std::io::{BufRead, BufReader, Read};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
@@ -29,7 +33,33 @@ impl RunningEngine {
     }
 
     pub fn start_on(home: &Path, port: u16) -> RunningEngine {
-        let mut child = spawn(home, port);
+        Self::from_child(home, spawn(home, port))
+    }
+
+    /// Gives this engine its own hidden console so Ctrl+C cannot reach the test runner.
+    #[cfg(windows)]
+    pub fn start_for_shutdown(home: &Path) -> RunningEngine {
+        let child = Command::new("powershell.exe")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                include_str!("windows_shutdown.ps1"),
+            ])
+            .env("KRATOS_SHUTDOWN_ENGINE", ENGINE)
+            .env("KRATOS_HOME", home)
+            .env("KRATOS_PORT", "0")
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW for the PowerShell helper.
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        Self::from_child(home, child)
+    }
+
+    fn from_child(home: &Path, mut child: Child) -> RunningEngine {
         let stdout = child.stdout.take().expect("the engine's stdout is piped");
         let (announced, listening_port) = mpsc::channel();
         // The reader keeps draining stdout after the listening line, so the engine never blocks on
@@ -48,7 +78,10 @@ impl RunningEngine {
                 home: home.to_path_buf(),
             },
             Err(error) => {
-                let _ = child.kill();
+                if child.stdin.take().is_none() {
+                    let _ = child.kill();
+                }
+                let _ = child.wait();
                 let mut stderr = String::new();
                 if let Some(mut pipe) = child.stderr.take() {
                     let _ = pipe.read_to_string(&mut stderr);
@@ -90,11 +123,40 @@ impl RunningEngine {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
     }
+
+    #[cfg(windows)]
+    pub fn shutdown(&mut self) {
+        let started = Instant::now();
+        self.child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"shutdown\n")
+            .unwrap();
+        // The helper waits on the real engine process handle for at most eight seconds, kills it
+        // on timeout, and reports failure. Waiting for the helper cannot turn a hung engine green.
+        let status = self.child.wait().unwrap();
+        let mut stderr = String::new();
+        self.child
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut stderr)
+            .unwrap();
+        assert!(
+            status.success(),
+            "the engine did not shut down cleanly: {stderr}"
+        );
+        assert!(started.elapsed() < WAIT, "shutdown exceeded {WAIT:?}");
+    }
 }
 
 impl Drop for RunningEngine {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        // EOF tells a console helper to kill its child as well. Ordinary engines have no stdin.
+        if self.child.stdin.take().is_none() {
+            let _ = self.child.kill();
+        }
         let _ = self.child.wait();
     }
 }
