@@ -481,6 +481,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kratos-process"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tokio",
+ "windows-sys",
+]
+
+[[package]]
 name = "kratos-protocol"
 version = "0.1.0"
 dependencies = [

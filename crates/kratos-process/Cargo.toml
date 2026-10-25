@@ -1,0 +1,30 @@
+[package]
+name = "kratos-process"
+description = "Starts a child process whose whole process tree ends when its owner drops it, or when the engine dies on Windows"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["process"] }
+
+# Only this crate calls the operating system directly, so these are pinned here.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "process", "time"] }
+
+[lints]
+workspace = true
