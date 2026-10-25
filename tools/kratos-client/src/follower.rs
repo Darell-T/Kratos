@@ -79,6 +79,8 @@ impl ThreadFollower {
                 // The contract tells clients to drop events they have already returned.
                 ServerMessage::Event { .. } => {}
                 ServerMessage::Error { message } => return Err(ClientError::Engine(message)),
+                // Progress the log does not keep; this follower returns only logged events.
+                ServerMessage::Live { .. } => {}
             }
         }
     }

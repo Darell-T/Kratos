@@ -227,7 +227,7 @@ pub fn next_event(socket: &mut EventSocket) -> ThreadEvent {
     let text = next_text(socket);
     match serde_json::from_str(&text).unwrap() {
         ServerMessage::Event { event } => event,
-        ServerMessage::Error { message } => panic!("expected an event, got the error {message:?}"),
+        other => panic!("expected an event, got {other:?}"),
     }
 }
 

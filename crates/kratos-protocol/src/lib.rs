@@ -6,16 +6,39 @@
 
 mod agents;
 mod api;
+mod approvals;
 mod events;
+mod messages;
 mod text;
 mod threads;
 mod time;
+mod turns;
+mod usage;
 mod workspaces;
 
-pub use agents::{CommandResult, Permission, Provider, TurnChanges};
+pub use agents::{CommandResult, OutsideWrites, Permission, Provider, ThreadSandbox, TurnChanges};
 pub use api::{ErrorBody, Health};
-pub use events::{ClientMessage, PostMessage, Seq, ServerMessage, ThreadEvent, ThreadEventBody};
+pub use approvals::{
+    AnswerQuestion, Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest,
+    AskReason, DecideApproval, Question, QuestionId, QuestionItem, QuestionOption, QuestionOutcome,
+};
+pub use events::{
+    ClientMessage, LiveUpdate, PauseReason, PostMessage, ReplySoFar, Seq, ServerMessage,
+    ThreadEvent, ThreadEventBody,
+};
+pub use messages::{
+    MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
+    QueueFull, SendMessage,
+};
 pub use text::RequiredText;
-pub use threads::{CreateThread, ListThreads, Thread, ThreadId};
+pub use threads::{CreateThread, ListThreads, Thread, ThreadDetails, ThreadId, ThreadSettings};
 pub use time::Timestamp;
+pub use turns::{
+    AgentItem, CappedText, ContextUsage, FileChange, FileChangeKind, ItemStatus, TurnId,
+    TurnOutcome,
+};
+pub use usage::{
+    AccountUsage, Allowance, Continuation, ContinuationId, ContinuationState, UsageBucket,
+    UsageReport, UsageWait, UsageWindow,
+};
 pub use workspaces::{CreateWorkspace, Workspace, WorkspaceId};

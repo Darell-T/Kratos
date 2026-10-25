@@ -10,8 +10,10 @@ use crate::running_engine::{
 };
 
 fn text_of(body: ThreadEventBody) -> String {
-    let ThreadEventBody::UserMessage { text } = body;
-    text
+    match body {
+        ThreadEventBody::UserMessage { text } => text,
+        other => panic!("expected a user message, got {other:?}"),
+    }
 }
 
 #[test]

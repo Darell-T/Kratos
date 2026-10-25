@@ -1,6 +1,8 @@
 //! Agent types that the engine and the Teams rules both read. The Teams rules depend on this crate,
 //! not on the engine.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// The agent CLI a thread runs.
@@ -68,4 +70,26 @@ pub enum CommandResult {
     Refused {
         error: String,
     },
+}
+
+/// The narrower sandbox a Team gives a member's thread. A thread without one runs by its permission
+/// alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadSandbox {
+    /// Writable besides the thread's own folder.
+    pub extra_writable_roots: Vec<String>,
+    pub outside_writes: OutsideWrites,
+    /// Set for every command the thread runs, for example a package cache inside a writable root.
+    pub env: BTreeMap<String, String>,
+}
+
+/// What happens to a write outside a sandboxed thread's roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutsideWrites {
+    /// The user decides.
+    Ask,
+    /// Refused without asking.
+    Deny,
 }
