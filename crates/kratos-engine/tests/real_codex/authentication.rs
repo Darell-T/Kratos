@@ -12,10 +12,7 @@ use crate::support::{Harness, WAIT};
 async fn a_full_access_agent_and_its_child_cannot_read_the_token_or_decide_an_approval() {
     let mut harness = Harness::start(
         ThreadSettings::default(),
-        vec![Reply::function_call(
-            "shell_command",
-            json!({"command": "Write-Output needs-user", "timeout_ms": 10000}),
-        )],
+        vec![Reply::command("Write-Output needs-user")],
     )
     .await;
     harness.send("approval-owner");
@@ -51,8 +48,8 @@ try {{
     );
     std::fs::write(harness.folder().join("api-probe.ps1"), script).unwrap();
     harness.model.enqueue([
-        Reply::function_call("shell_command", json!({ "command": "Get-Content -LiteralPath '..\\kratos\\client-token' -ErrorAction Stop", "timeout_ms": 10000 })),
-        Reply::function_call("shell_command", json!({ "command": "powershell.exe -NoLogo -NoProfile -NonInteractive -File .\\api-probe.ps1", "timeout_ms": 10000 })),
+        Reply::command("Get-Content -LiteralPath '..\\kratos\\client-token' -ErrorAction Stop"),
+        Reply::command("powershell.exe -NoLogo -NoProfile -NonInteractive -File .\\api-probe.ps1"),
         Reply::Text("API isolation probe completed.".into()),
     ]);
     let mut events = harness.client.connect_events(&[]).unwrap();

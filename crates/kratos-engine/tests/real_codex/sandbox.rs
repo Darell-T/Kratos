@@ -1,6 +1,5 @@
 use fake_agents::responses::Reply;
 use kratos_protocol::{Permission, ThreadSettings};
-use serde_json::json;
 
 use crate::support::Harness;
 
@@ -8,13 +7,18 @@ use crate::support::Harness;
 #[ignore = "requires pinned Codex 0.159.1 and a dedicated provisioned Windows sandbox home; CI runs it"]
 async fn plan_mode_real_codex_sandbox_refuses_a_write_after_a_successful_read() {
     let mut harness = Harness::start(
-        ThreadSettings { permission: Permission::ApproveForMe, plan_mode: true, ..ThreadSettings::default() },
+        ThreadSettings {
+            permission: Permission::ApproveForMe,
+            plan_mode: true,
+            ..ThreadSettings::default()
+        },
         vec![
-            Reply::function_call("shell_command", json!({ "command": "Get-Content -LiteralPath control.txt", "timeout_ms": 10000 })),
-            Reply::function_call("shell_command", json!({ "command": "Set-Content -LiteralPath sandbox-denied.txt -Value forbidden-write", "timeout_ms": 10000 })),
+            Reply::command("Get-Content -LiteralPath control.txt"),
+            Reply::command("Set-Content -LiteralPath sandbox-denied.txt -Value forbidden-write"),
             Reply::Text("Sandbox probe completed.".to_owned()),
         ],
-    ).await;
+    )
+    .await;
     std::fs::write(
         harness.folder().join("control.txt"),
         "KRATOS_READ_CONTROL_4baf2e",

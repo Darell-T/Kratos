@@ -63,7 +63,7 @@ impl Harness {
         std::fs::create_dir_all(&server_folder).unwrap();
         let model = Server::start(replies).await.unwrap();
         let config = [
-            "model=\"gpt-5.4\"".to_owned(),
+            "model=\"gpt-6.1-sol\"".to_owned(),
             "model_provider=\"scripted\"".to_owned(),
             "model_providers.scripted.name=\"Isolated scripted Responses API\"".to_owned(),
             format!(
@@ -73,7 +73,7 @@ impl Harness {
             "model_providers.scripted.wire_api=\"responses\"".to_owned(),
             "model_providers.scripted.requires_openai_auth=false".to_owned(),
             "model_providers.scripted.supports_websockets=false".to_owned(),
-            "features.unified_exec=false".to_owned(),
+            "features.unified_exec=true".to_owned(),
             "features.responses_websockets=false".to_owned(),
             "features.responses_websockets_v2=false".to_owned(),
             "web_search=\"disabled\"".to_owned(),

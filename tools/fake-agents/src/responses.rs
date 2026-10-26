@@ -15,16 +15,13 @@ use serde_json::{Value, json};
 
 /// One response in a deterministic model script.
 pub enum Reply {
-    FunctionCall { name: String, arguments: Value },
+    Command(String),
     Text(String),
 }
 
 impl Reply {
-    pub fn function_call(name: &str, arguments: Value) -> Self {
-        Self::FunctionCall {
-            name: name.to_owned(),
-            arguments,
-        }
+    pub fn command(command: &str) -> Self {
+        Self::Command(command.to_owned())
     }
 }
 
@@ -90,7 +87,7 @@ impl Server {
         let mut outputs = std::collections::BTreeMap::new();
         for request in self.requests() {
             for item in request["input"].as_array().into_iter().flatten() {
-                if item["type"] == "function_call_output" {
+                if item["type"] == "custom_tool_call_output" {
                     outputs.insert(
                         item["call_id"].as_str().unwrap_or_default().to_owned(),
                         item.clone(),
@@ -128,10 +125,15 @@ async fn respond(State(script): State<Arc<Mutex<Script>>>, body: Bytes) -> Respo
     let response_id = format!("resp-{number}");
     let item_id = format!("item-{number}");
     let item = match reply {
-        Reply::FunctionCall { name, arguments } => json!({
-            "type": "function_call", "id": item_id, "call_id": format!("call-{number}"),
-            "name": name, "arguments": arguments.to_string(), "status": "completed",
-        }),
+        Reply::Command(command) => {
+            let arguments =
+                json!({ "cmd": command, "yield_time_ms": 10000, "max_output_tokens": 2000 });
+            json!({
+                "type": "custom_tool_call", "id": item_id, "call_id": format!("call-{number}"),
+                "namespace": "functions", "name": "exec",
+                "input": format!("text(await tools.exec_command({arguments}));"),
+            })
+        }
         Reply::Text(text) => json!({
             "type": "message", "id": item_id, "role": "assistant", "status": "completed",
             "content": [{ "type": "output_text", "text": text, "annotations": [] }],
