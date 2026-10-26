@@ -47,6 +47,8 @@ fn main() {
         if !state["rateLimits"].is_null() {
             fake.rate_limits = Some(state["rateLimits"].clone());
         }
+        fake.sandbox_readiness = state["sandboxReadiness"].as_str().map(str::to_owned);
+        fake.sandbox_setup = state["sandboxSetup"].clone();
     }
     if let Some(path) = flag_or_variable(&arguments, "--control-file", "FAKE_CODEX_CONTROL_FILE") {
         serve_control(fake.clone(), &path);
@@ -127,6 +129,7 @@ enum Out {
 
 #[derive(Default)]
 struct Fake {
+    turn_observer: Option<TcpStream>,
     hang_initialize: bool,
     bad_initialize: bool,
     initialized: bool,
@@ -141,6 +144,9 @@ struct Fake {
     model_pages: Option<Vec<Value>>,
     rate_limits: Option<Value>,
     sandbox_readiness: Option<String>,
+    sandbox_setup: Value,
+    sandbox_log: Vec<Value>,
+    pending_sandbox_mode: Option<Value>,
     /// Every answer the client gave to a request the fake sent, for `test/answers`.
     answers: Vec<Value>,
     /// What handling the current message sends, in order.
@@ -214,6 +220,14 @@ impl Fake {
             return self.fail(&id, -32002, "Not initialized");
         }
         if HELD_METHODS.contains(&method) {
+            if let Some(observer) = &mut self.turn_observer {
+                writeln!(
+                    observer,
+                    "{}",
+                    json!({ "method": method, "params": params })
+                )
+                .expect("the benchmark observer stays connected");
+            }
             self.held_log
                 .push(json!({ "method": method, "params": params }));
             self.held.push(Held {
@@ -261,17 +275,17 @@ impl Fake {
                     "codex account authentication required to read rate limits",
                 ),
             },
-            "windowsSandbox/readiness" => self.reply(
-                &id,
-                json!({ "status": self.sandbox_readiness.as_deref().unwrap_or("ready") }),
-            ),
+            "windowsSandbox/readiness" => {
+                self.sandbox_log.push(json!({ "method": method, "params": params }));
+                self.reply(&id, json!({ "status": self.sandbox_readiness.as_deref().unwrap_or("ready") }));
+            }
             "windowsSandbox/setupStart" => {
-                self.sandbox_readiness = Some("ready".to_owned());
-                self.reply(&id, json!({}));
-                self.send(json!({
-                    "method": "windowsSandbox/setupCompleted",
-                    "params": { "mode": params["mode"], "success": true, "error": null },
-                }));
+                self.sandbox_log.push(json!({ "method": method, "params": params }));
+                self.pending_sandbox_mode = Some(params["mode"].clone());
+                self.reply(&id, json!({ "started": true }));
+                if self.sandbox_setup["hold"] != true {
+                    self.finish_sandbox_setup();
+                }
             }
             method if method.starts_with("test/") => self.control(&id, method, params),
             method => self.fail(&id, -32601, &format!("Method not found: {method}")),
@@ -343,6 +357,14 @@ impl Fake {
 
     fn control(&mut self, id: &Value, method: &str, params: &Value) {
         match method {
+            "test/observeTurns" => {
+                let port =
+                    u16::try_from(params["port"].as_u64().expect("an observer port")).unwrap();
+                let observer = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                observer.set_nodelay(true).unwrap();
+                self.turn_observer = Some(observer);
+                self.reply(id, json!({}));
+            }
             "test/setThread" => {
                 let thread = params["thread"].clone();
                 let thread_id = thread["id"].as_str().unwrap_or_default().to_owned();
@@ -359,6 +381,11 @@ impl Fake {
             }
             "test/sandboxReadiness" => {
                 self.sandbox_readiness = params["status"].as_str().map(str::to_owned);
+                self.reply(id, Value::Null);
+            }
+            "test/sandboxRequests" => self.reply(id, json!(self.sandbox_log)),
+            "test/releaseSandboxSetup" => {
+                self.finish_sandbox_setup();
                 self.reply(id, Value::Null);
             }
             "test/turnRequests" => {
@@ -413,6 +440,25 @@ impl Fake {
             "test/hang" => {}
             method => self.fail(id, -32601, &format!("Method not found: {method}")),
         }
+    }
+
+    fn finish_sandbox_setup(&mut self) {
+        let Some(mode) = self.pending_sandbox_mode.take() else {
+            return;
+        };
+        let success = self.sandbox_setup["success"].as_bool().unwrap_or(true);
+        if success {
+            self.sandbox_readiness = Some(
+                self.sandbox_setup["readinessAfter"]
+                    .as_str()
+                    .unwrap_or("ready")
+                    .to_owned(),
+            );
+        }
+        self.send(json!({
+            "method": "windowsSandbox/setupCompleted",
+            "params": { "mode": mode, "success": success, "error": self.sandbox_setup["error"] },
+        }));
     }
 
     /// Answers the oldest held request with this method and thread, with `result` or with an error.

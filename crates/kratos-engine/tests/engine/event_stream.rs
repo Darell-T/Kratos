@@ -2,12 +2,27 @@ use std::num::NonZeroUsize;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_client::bench_post;
+use kratos_client::{bench_post, bench_turns};
 use kratos_protocol::{Seq, ThreadEventBody};
 
 use crate::running_engine::{
     RunningEngine, WAIT, expect_silence, next_event, next_seqs, post, subscribed,
 };
+
+#[test]
+fn turn_benchmark_observes_200_completed_turns_across_ten_threads() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+
+    let report = bench_turns(&engine.client(), &home.path().join("fake-codex-control")).unwrap();
+
+    assert_eq!(report.threads, 10);
+    assert_eq!(report.warmup_turns, 10);
+    assert_eq!(report.dispatch.messages, 200);
+    assert_eq!(report.completion.messages, 200);
+    assert!(report.dispatch.p95_ms > 0.0);
+    assert!(report.completion.p95_ms > 0.0);
+}
 
 fn text_of(body: ThreadEventBody) -> String {
     match body {

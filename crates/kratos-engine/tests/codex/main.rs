@@ -12,5 +12,7 @@ mod guards;
 mod harness;
 mod queue;
 mod recovery;
+#[cfg(windows)]
+mod sandbox;
 mod settings;
 mod work;

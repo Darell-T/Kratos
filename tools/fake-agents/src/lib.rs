@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 
+pub mod responses;
+
 /// The path of the fake named `name`, such as `fake-codex`, built on first use.
 ///
 /// Cargo hands a test the paths of its own package's binaries only, so tests in other packages ask

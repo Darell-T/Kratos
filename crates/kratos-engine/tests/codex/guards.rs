@@ -69,14 +69,14 @@ async fn the_thread_opens_untrusted_and_the_launch_defines_every_profile() {
         environment["cwd"],
         json!(harness.root.path().join("server"))
     );
-    let kratos_home = harness.root.path().join("kratos").display().to_string();
+    let kratos_home = serde_json::to_string(&harness.root.path().join("kratos")).unwrap();
     for profile in ["kratos-plan", "kratos-ask", "kratos-approve", "kratos-full"] {
         let table = arguments
             .iter()
             .find(|argument| argument.starts_with(&format!("permissions.{profile}.filesystem=")))
             .unwrap_or_else(|| panic!("{profile} is defined: {arguments:?}"));
         assert!(
-            table.contains(&format!("\"{kratos_home}\"=\"deny\"")),
+            table.contains(&format!("{kratos_home}=\"deny\"")),
             "{profile} denies Kratos's data folder: {table}"
         );
     }

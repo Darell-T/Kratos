@@ -74,6 +74,8 @@ impl Restarts {
 fn launch(settings: &CodexSettings) -> Launch {
     let mut args: Vec<OsString> = vec!["app-server".into()];
     args.extend(settings.extra_args.iter().cloned());
+    #[cfg(windows)]
+    args.extend(["-c".into(), "windows.sandbox=\"elevated\"".into()]);
     args.extend(settings.protected.launch_arguments(&std::env::temp_dir()));
     Launch {
         program: settings.program.clone(),
@@ -119,7 +121,7 @@ impl Actor {
                 .expect("the capabilities match the generated type");
             Done::Connected {
                 generation,
-                result: connect(launch, capabilities).await,
+                result: connect_ready(launch, capabilities).await,
             }
         });
         Ok(None)
@@ -444,6 +446,26 @@ impl Actor {
         );
         Ok(())
     }
+}
+
+async fn connect_ready(
+    launch: Launch,
+    capabilities: types::InitializeCapabilities,
+) -> Result<(Codex, mpsc::Receiver<Incoming>), ConnectError> {
+    #[cfg(windows)]
+    let cwd = launch.cwd.clone();
+    let (codex, incoming) = connect(launch, capabilities).await?;
+    #[cfg(windows)]
+    {
+        let mut incoming = incoming;
+        if let Err(error) = super::sandbox::prepare(&codex, &mut incoming, cwd).await {
+            codex.close().await;
+            return Err(ConnectError::Handshake(error));
+        }
+        Ok((codex, incoming))
+    }
+    #[cfg(not(windows))]
+    Ok((codex, incoming))
 }
 
 /// Records each found message as accepted by its turn, then lifts a delivery pause once nothing

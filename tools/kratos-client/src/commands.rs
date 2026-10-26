@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use kratos_client::{
     ApiReply, ApiRequest, Client, ClientError, Followed, Incoming, Normalizer, bench_post,
+    bench_turns,
 };
 use kratos_protocol::{Seq, ServerMessage, ThreadId};
 use serde_json::{Value, json};
@@ -44,6 +45,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   request <METHOD> <path> [--header <name:value>]... [--json <body> | --body-bytes <n>]
   socket-send <bytes> [--header <name:value>]...
   bench-post <url>
+  bench-turns <fake-control-file>
 
 The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
 engine wrote to $KRATOS_HOME/client-token (default ~/.kratos/client-token), when there is one.
@@ -86,7 +88,7 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 24] = [
+const COMMANDS: [Command; 25] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
@@ -119,6 +121,7 @@ const COMMANDS: [Command; 24] = [
     },
     Command { name: "socket-send", positional: 1, options: &["--header"], run: socket_send },
     Command { name: "bench-post", positional: 1, options: &[], run: bench },
+    Command { name: "bench-turns", positional: 1, options: &[], run: turns_bench },
 ];
 
 pub fn run(arguments: &[String]) -> Result<(), Failure> {
@@ -480,6 +483,12 @@ fn bench(_: &mut Session, args: &Args) -> Result<(), Failure> {
         "{}",
         serde_json::to_string(&report).expect("a bench report serializes")
     );
+    Ok(())
+}
+
+fn turns_bench(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let report = bench_turns(&session.client, std::path::Path::new(&args.positional[0]))?;
+    session.print(serde_json::to_value(report).expect("a bench report serializes"));
     Ok(())
 }
 

@@ -18,6 +18,8 @@ pub mod policy;
 pub mod profiles;
 mod recovery;
 mod requests;
+#[cfg(windows)]
+mod sandbox;
 mod threads;
 mod turns;
 pub mod wire;

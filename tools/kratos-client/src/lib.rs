@@ -4,6 +4,7 @@
 //! foreign Host or an oversized body must reach it as written.
 
 mod bench;
+mod bench_turns;
 mod follower;
 mod http;
 mod normalize;
@@ -18,6 +19,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use bench::{BenchReport, bench_post};
+pub use bench_turns::{TurnBenchReport, bench_turns};
 pub use follower::{Followed, ThreadFollower};
 pub use http::{ApiReply, ApiRequest};
 pub use normalize::Normalizer;

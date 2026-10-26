@@ -77,11 +77,17 @@ impl Hub {
         // The commit and the ring run in one job, so a request dropped after the commit cannot skip
         // the ring and leave followers asleep.
         let doorbells = self.doorbells.clone();
+        let live = self.live.clone();
         self.store
             .call(move |store| {
                 let mut write = store.write_thread(&thread_id)?;
                 let value = job(&mut write)?;
                 let events = write.commit()?;
+                for event in &events {
+                    if let ThreadEventBody::TurnCompleted { turn_id, .. } = &event.event {
+                        live.end_turn(&thread_id, turn_id);
+                    }
+                }
                 if !events.is_empty() {
                     doorbells.ring(&thread_id);
                 }
@@ -113,11 +119,6 @@ impl Hub {
     /// extends the turn's reply so far, which a client that subscribes later gets as a snapshot.
     pub fn publish(&self, thread_id: &ThreadId, update: LiveUpdate) {
         self.live.publish(thread_id, update);
-    }
-
-    /// Forgets the thread's replies so far, once its turn ended and the log holds the replies.
-    pub fn end_live_turn(&self, thread_id: &ThreadId) {
-        self.live.end_turn(thread_id);
     }
 
     /// The thread's replies so far and a receiver for every later update, taken together so no
@@ -209,9 +210,12 @@ impl LiveThreads {
         let _ = thread.sender.send(update);
     }
 
-    fn end_turn(&self, thread_id: &ThreadId) {
+    fn end_turn(&self, thread_id: &ThreadId, turn_id: &TurnId) {
         let mut threads = self.threads();
         let unwatched = threads.get_mut(thread_id).is_some_and(|thread| {
+            if thread.turn_id.as_ref() != Some(turn_id) {
+                return false;
+            }
             thread.turn_id = None;
             thread.replies.clear();
             thread.sender.receiver_count() == 0
@@ -368,6 +372,42 @@ mod tests {
         let (store_thread, store_jobs) = store_thread::channel();
         std::thread::spawn(move || store_jobs.run(store));
         (Hub::new(store_thread), thread.id)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_committed_completion_clears_its_live_reply_even_if_the_writer_is_cancelled() {
+        let home = tempfile::tempdir().unwrap();
+        let (hub, thread_id) = hub_with_a_thread(home.path());
+        hub.publish(
+            &thread_id,
+            LiveUpdate::ReplyDelta {
+                turn_id: TurnId::new("finished".into()),
+                item_id: "reply".into(),
+                delta: "hello".into(),
+            },
+        );
+        let mut append = Box::pin(hub.append(
+            thread_id.clone(),
+            ThreadEventBody::TurnCompleted {
+                turn_id: TurnId::new("finished".into()),
+                outcome: kratos_protocol::TurnOutcome::Completed,
+                changes: kratos_protocol::TurnChanges {
+                    files: vec![],
+                    edited_since_command: false,
+                    ran_command: false,
+                },
+                context: None,
+            },
+        ));
+        assert!(poll_once(&mut append).await.is_pending());
+        drop(append);
+
+        let live = hub.clone();
+        let snapshot = hub.store.call(move |_| live.watch_live(&thread_id).0).await;
+        assert!(
+            snapshot.is_none(),
+            "completion must be visible after live state is cleared"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

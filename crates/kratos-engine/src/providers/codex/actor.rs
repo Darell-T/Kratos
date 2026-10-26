@@ -385,7 +385,6 @@ impl Actor {
             Ok(())
         })
         .await?;
-        self.hub.end_live_turn(thread_id);
         if let Some(thread) = self.threads.get_mut(thread_id) {
             thread.file_items.clear();
         }

@@ -236,10 +236,13 @@ impl Harness {
         control.writer.write_all(line.as_bytes()).await.unwrap();
         let mut rest = String::new();
         let closed = tokio::time::timeout(WAIT, control.reader.read_line(&mut rest)).await;
-        assert!(
-            matches!(closed, Ok(Ok(0))),
-            "the fake exits without answering"
-        );
+        let disconnected = match &closed {
+            Ok(Ok(0)) => true,
+            Ok(Err(error)) => error.kind() == std::io::ErrorKind::ConnectionReset,
+            _ => false,
+        };
+        assert!(disconnected, "the fake exits without answering: {closed:?}");
+        assert!(rest.is_empty(), "the fake unexpectedly answered: {rest}");
         self.control = None;
     }
 

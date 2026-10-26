@@ -173,7 +173,11 @@ impl RunningEngine {
             if answers.len() >= count {
                 return answers.clone();
             }
-            assert!(Instant::now() < deadline, "{} answers, not {count}", answers.len());
+            assert!(
+                Instant::now() < deadline,
+                "{} answers, not {count}",
+                answers.len()
+            );
             thread::sleep(Duration::from_millis(20));
         }
     }
