@@ -62,10 +62,12 @@ impl CappedText {
     }
 }
 
-/// What a finished command or file change came to.
+/// Where a command or file change stands. A stored item is finished; `InProgress` appears only in
+/// live updates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ItemStatus {
+    InProgress,
     Completed,
     Failed,
     /// The user or Kratos said no, so it never ran.

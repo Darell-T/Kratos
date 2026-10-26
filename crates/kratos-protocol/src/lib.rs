@@ -9,6 +9,7 @@ mod api;
 mod approvals;
 mod events;
 mod messages;
+mod skills;
 mod text;
 mod threads;
 mod time;
@@ -30,6 +31,7 @@ pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
     QueueFull, SendMessage,
 };
+pub use skills::{Skill, ThreadSkills};
 pub use text::RequiredText;
 pub use threads::{CreateThread, ListThreads, Thread, ThreadDetails, ThreadId, ThreadSettings};
 pub use time::Timestamp;

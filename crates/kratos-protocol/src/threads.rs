@@ -10,7 +10,7 @@ use crate::{
 
 /// A thread's id. The engine issues UUIDs. Any string parses, because a thread that does not exist
 /// answers 404.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ThreadId(String);
 
