@@ -1,13 +1,11 @@
 use std::path::Path as FilePath;
 
 use axum::body::Body;
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use kratos_protocol::{
-    CreateThread, CreateWorkspace, Health, ListThreads, PostMessage, ThreadEventBody, ThreadId,
-};
+use kratos_protocol::{CreateThread, CreateWorkspace, Health, ListThreads};
 
 use super::json::read_json;
 use super::{ApiError, ServerState, json_reply};
@@ -70,29 +68,6 @@ pub(super) async fn create_thread(
         .call(move |store| store.create_thread(&request))
         .await?;
     Ok(json_reply(StatusCode::CREATED, &thread))
-}
-
-/// `POST /api/threads/{id}/messages`: 201 with the appended event.
-///
-/// The thread is checked before the body is read: a post to an unknown thread answers 404 without
-/// reading or size-checking its body.
-pub(super) async fn post_message(
-    State(state): State<ServerState>,
-    id: Result<Path<ThreadId>, PathRejection>,
-    body: Body,
-) -> Result<Response, ApiError> {
-    let Path(thread_id) = id.map_err(|_| ApiError::bad_request("Malformed URL path"))?;
-    let lookup = thread_id.clone();
-    state
-        .store
-        .call(move |store| store.last_seq(&lookup))
-        .await?;
-    let PostMessage { text } = read_json(body).await?;
-    let body = ThreadEventBody::UserMessage {
-        text: text.into_string(),
-    };
-    let event = state.hub.append(thread_id, body).await?;
-    Ok(json_reply(StatusCode::CREATED, &event))
 }
 
 /// On Windows `Path::is_absolute` refuses `\folder` and `/folder`, which Node accepts as absolute

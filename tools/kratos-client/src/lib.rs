@@ -10,6 +10,7 @@ mod normalize;
 mod socket;
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kratos_protocol::{Seq, ThreadId};
@@ -17,7 +18,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 pub use bench::{BenchReport, bench_post};
-pub use follower::ThreadFollower;
+pub use follower::{Followed, ThreadFollower};
 pub use http::{ApiReply, ApiRequest};
 pub use normalize::Normalizer;
 pub use socket::{EventSocket, Incoming};
@@ -30,7 +31,13 @@ pub use socket::{EventSocket, Incoming};
 pub struct Client {
     /// `host:port`: the TCP address, and the Host header unless a request names another.
     authority: String,
+    /// The file holding the engine's client token, sent as `Authorization: Bearer` unless a
+    /// request names its own.
+    token_file: Option<PathBuf>,
 }
+
+/// The file in the engine's data directory that holds its client token.
+const TOKEN_FILE: &str = "client-token";
 
 impl Client {
     /// `base_url` is `http://host:port`, for example `http://127.0.0.1:4200`.
@@ -41,9 +48,19 @@ impl Client {
         {
             Some(authority) if !authority.is_empty() && !authority.contains('/') => Ok(Client {
                 authority: authority.to_owned(),
+                token_file: None,
             }),
             _ => Err(ClientError::Address(base_url.to_owned())),
         }
+    }
+
+    /// Sends the client token of the engine on data directory `home` with every request and
+    /// socket. The file is read again for each, because every engine start issues a new token, so
+    /// a client follows the engine through restarts. Without the file no token goes, as the
+    /// TypeScript engine expects.
+    pub fn with_token_from(mut self, home: &Path) -> Client {
+        self.token_file = Some(home.join(TOKEN_FILE));
+        self
     }
 
     pub fn get(&self, path: &str) -> Result<ApiReply, ClientError> {
@@ -60,11 +77,38 @@ impl Client {
         self.send(&request)
     }
 
+    pub fn delete(&self, path: &str) -> Result<ApiReply, ClientError> {
+        self.send(&ApiRequest::new("DELETE", path))
+    }
+
+    /// PUTs `body` as JSON.
+    pub fn put<T: Serialize>(&self, path: &str, body: &T) -> Result<ApiReply, ClientError> {
+        let body = serde_json::to_vec(body).expect("a request body serializes");
+        let request = ApiRequest::new("PUT", path)
+            .header("Content-Type", "application/json")
+            .body(body);
+        self.send(&request)
+    }
+
     /// Sends `request` over a new HTTP/1.1 connection and reads the whole reply. The request goes
-    /// out as given, with only a missing Host, Content-Length, and `Connection: close` added. An
-    /// answer that arrives before the body is fully sent, such as a 413, is still returned.
+    /// out as given, with only a missing Host, Content-Length, Authorization, and `Connection:
+    /// close` added. An answer that arrives before the body is fully sent, such as a 413, is still
+    /// returned.
     pub fn send(&self, request: &ApiRequest) -> Result<ApiReply, ClientError> {
+        let bearer = self.bearer();
+        let request = match &bearer {
+            Some(bearer) if !request.names_header("Authorization") => {
+                request.clone().header("Authorization", bearer)
+            }
+            _ => request.clone(),
+        };
         self.send_raw(&request.encode(&self.authority))
+    }
+
+    fn bearer(&self) -> Option<String> {
+        let token = std::fs::read_to_string(self.token_file.as_ref()?).ok()?;
+        let token = token.trim();
+        (!token.is_empty()).then(|| format!("Bearer {token}"))
     }
 
     /// Writes `bytes` to a new connection as they are and reads the reply. For a request that
@@ -80,7 +124,16 @@ impl Client {
     /// Opens `/api/events`, adding `headers` (for example an Origin) to the handshake. A refused
     /// handshake is `Err(ClientError::Handshake)` with the engine's status.
     pub fn connect_events(&self, headers: &[(&str, &str)]) -> Result<EventSocket, ClientError> {
-        EventSocket::connect(&self.authority, headers)
+        let bearer = self.bearer();
+        let mut headers = headers.to_vec();
+        if let Some(bearer) = &bearer
+            && !headers
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
+        {
+            headers.push(("Authorization", bearer.as_str()));
+        }
+        EventSocket::connect(&self.authority, &headers)
     }
 
     pub fn follow(&self, thread_id: ThreadId, after: Seq) -> ThreadFollower {

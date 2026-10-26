@@ -651,8 +651,12 @@ name = "kratos-engine"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "fake-agents",
  "futures-util",
+ "getrandom 0.4.3",
  "kratos-client",
+ "kratos-codex-client",
+ "kratos-command-safety",
  "kratos-protocol",
  "kratos-store",
  "serde",
@@ -662,6 +666,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-stream",
+ "uuid",
 ]
 
 [[package]]
@@ -1355,6 +1360,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1367,6 +1373,19 @@ dependencies = [
  "log",
  "tokio",
  "tungstenite",
+]
+
+[[package]]
+name = "tokio-util"
+version = "0.7.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]

@@ -30,16 +30,19 @@ fn message_body(size: usize) -> Vec<u8> {
 
 /// Posts a body of `size` bytes the way a client does that gives up when a write fails: it writes
 /// the whole body, and only then reads the reply. The body is not JSON, because the engine must
-/// refuse an oversized one before it parses anything.
-fn post_whole_body_then_read(port: u16, path: &str, size: usize) -> String {
+/// refuse an oversized one before it parses anything. `token` goes as the client token.
+pub(crate) fn post_whole_body_then_read(
+    port: u16,
+    path: &str,
+    size: usize,
+    token: Option<&str>,
+) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let authorization = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "POST {path} HTTP/1.1
-Host: 127.0.0.1:{port}
-Content-Length: {size}
-Connection: close
-
-"
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{authorization}Content-Length: {size}\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(head.as_bytes()).unwrap();
     stream
@@ -97,7 +100,7 @@ fn matches_http_api_routes_with_empty_segments_and_preserves_query_and_parameter
     let created = client
         .post(
             "/api//threads/",
-            &json!({ "workspaceId": workspace.id, "title": "normalized", "provider": "codex" }),
+            &json!({ "workspaceId": workspace.id, "title": "normalized", "provider": "claude" }),
         )
         .unwrap();
     assert_eq!(created.status, 201);
@@ -240,7 +243,8 @@ fn creates_a_workspace_a_thread_and_messages() {
         json!([created.body])
     );
 
-    let body = json!({ "workspaceId": workspace.id, "title": "first chat", "provider": "codex" });
+    // A Claude thread keeps R2's plain message log until R4 drives Claude.
+    let body = json!({ "workspaceId": workspace.id, "title": "first chat", "provider": "claude" });
     let created = client.post("/api/threads", &body).unwrap();
     assert_eq!(created.status, 201);
     let thread: Thread = created.parse().unwrap();
@@ -470,7 +474,7 @@ fn caps_request_bodies_at_1_mib_and_keeps_serving() {
         );
     }
 
-    let reply = post_whole_body_then_read(engine.port(), &path, 8 * MIB);
+    let reply = post_whole_body_then_read(engine.port(), &path, 8 * MIB, Some(&engine.token()));
     assert!(reply.starts_with("HTTP/1.1 413 "), "{reply}");
     assert_eq!(
         post(&client, &thread, "after the refusals").seq,

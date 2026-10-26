@@ -18,6 +18,8 @@ kratos-process = { path = "crates/kratos-process" }
 kratos-protocol = { path = "crates/kratos-protocol" }
 kratos-store = { path = "crates/kratos-store" }
 
+# The client token's 256 random bits (D19). The version uuid already uses.
+getrandom = "0.4.3"
 # The HTTP and WebSocket server. Only the features the engine serves: HTTP/1.1, query strings, sockets.
 axum = { version = "0.8.9", default-features = false, features = ["http1", "query", "tokio", "ws"] }
 # stream::unfold turns a follower into the stream a socket task waits on.

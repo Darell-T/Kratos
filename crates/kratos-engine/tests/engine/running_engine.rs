@@ -27,6 +27,9 @@ pub struct RunningEngine {
     home: PathBuf,
 }
 
+/// Where the fake Codex an engine starts writes its control port.
+const FAKE_CODEX_CONTROL: &str = "fake-codex-control";
+
 impl RunningEngine {
     pub fn start(home: &Path) -> RunningEngine {
         RunningEngine::start_on(home, 0)
@@ -34,6 +37,13 @@ impl RunningEngine {
 
     pub fn start_on(home: &Path, port: u16) -> RunningEngine {
         Self::from_child(home, spawn(home, port))
+    }
+
+    /// Starts with `CODEX_EXE` set to `codex_exe` instead of the fake.
+    pub fn start_with_codex(home: &Path, codex_exe: &Path) -> RunningEngine {
+        let mut command = command(home, "0");
+        command.env("CODEX_EXE", codex_exe);
+        Self::from_child(home, command.spawn().unwrap())
     }
 
     /// Gives this engine its own hidden console so Ctrl+C cannot reach the test runner.
@@ -50,6 +60,8 @@ impl RunningEngine {
             .env("KRATOS_SHUTDOWN_ENGINE", ENGINE)
             .env("KRATOS_HOME", home)
             .env("KRATOS_PORT", "0")
+            .env("CODEX_EXE", fake_agents::executable("fake-codex"))
+            .env("FAKE_CODEX_CONTROL_FILE", home.join(FAKE_CODEX_CONTROL))
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW for the PowerShell helper.
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -95,13 +107,79 @@ impl RunningEngine {
         self.port
     }
 
-    pub fn client(&self) -> Client {
-        Client::new(&format!("http://127.0.0.1:{}", self.port)).unwrap()
+    /// The client token this engine issued at its start.
+    pub fn token(&self) -> String {
+        std::fs::read_to_string(self.home.join("client-token")).unwrap()
     }
 
-    /// Creates a workspace on the engine's home, which is an existing absolute folder, and a thread
-    /// in it.
-    pub fn create_thread(&self) -> Thread {
+    /// A `test/*` request to the fake Codex this engine started, waiting for it to start. Panics
+    /// on an error answer.
+    pub fn fake_codex(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let control = self.home.join(FAKE_CODEX_CONTROL);
+        let deadline = Instant::now() + WAIT;
+        let port = loop {
+            if let Ok(port) = std::fs::read_to_string(&control) {
+                break port;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the engine never started fake-codex"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        let mut stream =
+            std::net::TcpStream::connect(("127.0.0.1", port.trim().parse().unwrap())).unwrap();
+        stream.set_read_timeout(Some(WAIT)).unwrap();
+        let request = json!({ "id": 1, "method": method, "params": params });
+        std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
+        let mut answer = String::new();
+        BufReader::new(stream).read_line(&mut answer).unwrap();
+        let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        assert!(answer.get("error").is_none(), "{method} failed: {answer}");
+        answer["result"].clone()
+    }
+
+    /// Waits until the fake Codex holds `count` requests of `method`, and returns them.
+    pub fn fake_codex_held(&self, method: &str, count: usize) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let held: Vec<serde_json::Value> = self
+                .fake_codex("test/turnRequests", json!({}))
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|request| request["method"] == method)
+                .cloned()
+                .collect();
+            if held.len() >= count {
+                return held;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fake-codex holds {} {method}, not {count}",
+                held.len()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Waits until the engine answered `count` of the requests the fake Codex sent it, and returns
+    /// the answers. An answer travels to Codex after the API's reply, so a test waits for it.
+    pub fn fake_codex_answers(&self, count: usize) -> Vec<serde_json::Value> {
+        let deadline = Instant::now() + WAIT;
+        loop {
+            let answers = self.fake_codex("test/answers", json!({}));
+            let answers = answers.as_array().unwrap();
+            if answers.len() >= count {
+                return answers.clone();
+            }
+            assert!(Instant::now() < deadline, "{} answers, not {count}", answers.len());
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Creates a workspace on the engine's home and a thread of `provider` in it.
+    pub fn create_thread_of(&self, provider: &str) -> Thread {
         let client = self.client();
         let workspace_body = json!({ "name": "repo", "path": self.home });
         let workspace: Workspace = client
@@ -110,7 +188,7 @@ impl RunningEngine {
             .parse()
             .unwrap();
         let thread_body =
-            json!({ "workspaceId": workspace.id, "title": "chat", "provider": "claude" });
+            json!({ "workspaceId": workspace.id, "title": "chat", "provider": provider });
         client
             .post("/api/threads", &thread_body)
             .unwrap()
@@ -118,10 +196,43 @@ impl RunningEngine {
             .unwrap()
     }
 
+    pub fn client(&self) -> Client {
+        Client::new(&format!("http://127.0.0.1:{}", self.port))
+            .unwrap()
+            .with_token_from(&self.home)
+    }
+
+    /// Creates a workspace on the engine's home, which is an existing absolute folder, and a
+    /// Claude thread in it, which keeps R2's plain message log.
+    pub fn create_thread(&self) -> Thread {
+        self.create_thread_of("claude")
+    }
+
     /// Ends the process abruptly, as a crash would, and waits for it to exit.
     pub fn kill(mut self) {
         self.child.kill().unwrap();
         self.child.wait().unwrap();
+    }
+
+    /// Sends Ctrl+C's signal and waits for the engine to exit on its own.
+    #[cfg(unix)]
+    pub fn interrupt(mut self) -> ExitStatus {
+        let sent = Command::new("kill")
+            .args(["-INT", &self.child.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let deadline = Instant::now() + WAIT;
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the engine did not stop within {WAIT:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[cfg(windows)]
@@ -187,13 +298,21 @@ fn spawn(home: &Path, port: u16) -> Child {
 }
 
 fn spawn_with_port(home: &Path, port: &str) -> Child {
-    Command::new(ENGINE)
+    command(home, port).spawn().unwrap()
+}
+
+/// Codex is the fake unless a test says otherwise, so no test reaches a Codex installed on the
+/// machine. The fake takes its control file from the variable, which the engine passes on.
+fn command(home: &Path, port: &str) -> Command {
+    let mut command = Command::new(ENGINE);
+    command
         .env("KRATOS_HOME", home)
         .env("KRATOS_PORT", port)
+        .env("CODEX_EXE", fake_agents::executable("fake-codex"))
+        .env("FAKE_CODEX_CONTROL_FILE", home.join(FAKE_CODEX_CONTROL))
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap()
+        .stderr(Stdio::piped());
+    command
 }
 
 fn listening_port_of(line: &str) -> Option<u16> {

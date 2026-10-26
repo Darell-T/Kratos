@@ -1,3 +1,5 @@
+mod agents;
+pub mod auth;
 mod json;
 mod local_only;
 mod paths;
@@ -13,7 +15,7 @@ use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use kratos_protocol::ErrorBody;
 use kratos_store::StoreError;
 use serde::Serialize;
@@ -21,7 +23,12 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::hub::Hub;
+use crate::providers::codex::CodexProvider;
 use crate::store_thread::StoreThread;
+use crate::usage::UsageTracker;
+use crate::usage::scheduler::SchedulerHandle;
+
+pub use auth::ClientToken;
 
 /// The largest request body a route reads. One byte more answers 413.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -35,6 +42,12 @@ const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ServerState {
     pub store: StoreThread,
     pub hub: Hub,
+    /// The Codex provider, or why Codex cannot run, such as no Codex installed.
+    pub codex: Result<CodexProvider, String>,
+    /// The usage scheduler, which runs only beside the Codex provider.
+    pub scheduler: Option<SchedulerHandle>,
+    pub usage: UsageTracker,
+    pub token: ClientToken,
 }
 
 /// Serves the API on `listener` until `shutdown` completes, then stops accepting and lets the HTTP
@@ -65,6 +78,7 @@ pub async fn serve(
 /// Anything but these routes, including a known path with another method, answers 404
 /// `{"error":"Not found"}`.
 fn router(state: ServerState) -> Router {
+    let token = state.token.clone();
     let routes = Router::new()
         .route("/api/health", get(routes::health))
         .route(
@@ -75,7 +89,32 @@ fn router(state: ServerState) -> Router {
             "/api/threads",
             get(routes::list_threads).post(routes::create_thread),
         )
-        .route("/api/threads/{id}/messages", post(routes::post_message))
+        .route("/api/threads/{id}", get(agents::thread_details))
+        .route("/api/threads/{id}/messages", post(agents::post_message))
+        .route(
+            "/api/threads/{id}/messages/{message_id}",
+            delete(agents::remove_message),
+        )
+        .route(
+            "/api/threads/{id}/messages/{message_id}/steer",
+            post(agents::steer),
+        )
+        .route(
+            "/api/threads/{id}/messages/{message_id}/retry",
+            post(agents::retry_message),
+        )
+        .route(
+            "/api/threads/{id}/messages/{message_id}/discard",
+            post(agents::discard_message),
+        )
+        .route("/api/threads/{id}/stop", post(agents::stop))
+        .route("/api/threads/{id}/resume", post(agents::resume))
+        .route("/api/threads/{id}/settings", put(agents::put_settings))
+        .route("/api/threads/{id}/skills", get(agents::skills))
+        .route("/api/approvals/{id}", post(agents::decide))
+        .route("/api/questions/{id}", post(agents::answer))
+        .route("/api/continuations/{id}/schedule", post(agents::schedule))
+        .route("/api/usage", get(agents::usage))
         .route("/api/events", get(socket::events))
         .fallback(routes::not_found)
         .method_not_allowed_fallback(routes::not_found)
@@ -84,6 +123,10 @@ fn router(state: ServerState) -> Router {
     // on the inner router would run only after that selection.
     Router::new()
         .fallback_service(routes)
+        .layer(middleware::from_fn_with_state(
+            token,
+            auth::require_client_token,
+        ))
         .layer(middleware::from_fn(paths::normalize_http_api_path))
         // Added last, so the Host and Origin checks run before normalization and every route.
         .layer(middleware::from_fn(local_only::refuse_other_hosts))
@@ -96,6 +139,13 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    fn new(status: StatusCode, message: impl ToString) -> ApiError {
+        ApiError {
+            status,
+            message: message.to_string(),
+        }
+    }
+
     pub fn bad_request(message: impl Into<String>) -> ApiError {
         ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -107,6 +157,21 @@ impl ApiError {
         ApiError {
             status: StatusCode::NOT_FOUND,
             message: "Not found".into(),
+        }
+    }
+
+    pub fn unauthorized() -> ApiError {
+        ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Unauthorized".into(),
+        }
+    }
+
+    /// The agent cannot serve the request now, for example because Codex is not installed.
+    pub fn unavailable(message: String) -> ApiError {
+        ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message,
         }
     }
 
