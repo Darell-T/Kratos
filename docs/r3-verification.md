@@ -43,6 +43,10 @@ npm run check
 python -m lizard -l rust -C 11 -w -x "crates/kratos-command-safety/*" crates tools
 ```
 
+CI limits concurrent test processes to avoid starving Windows startup probes. Node's outer test budget is 15 seconds,
+since the client itself can spend five seconds waiting for a child to close. Request, turn, stop, and shutdown deadlines
+remain checked by their existing behavioral tests.
+
 The real-Codex tests use the pinned native 0.159.1 executable and a scripted local Responses API. Only the model is
 fake. Commands run through the production provider, approval handling, and actual Windows sandbox. The tests require
 a successful read or command as a positive control before accepting a denied write or request as evidence.

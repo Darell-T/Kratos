@@ -213,6 +213,9 @@ impl Fake {
 
     // #lizard forgives: one arm for each protocol method the fake answers, each a line or two.
     fn request(&mut self, id: Value, method: &str, params: &Value) {
+        if method.starts_with("test/") {
+            return self.control(&id, method, params);
+        }
         if method == "initialize" {
             return self.initialize(id, params);
         }
@@ -287,7 +290,6 @@ impl Fake {
                     self.finish_sandbox_setup();
                 }
             }
-            method if method.starts_with("test/") => self.control(&id, method, params),
             method => self.fail(&id, -32601, &format!("Method not found: {method}")),
         }
     }
@@ -646,4 +648,21 @@ fn write_line(line: &str) {
     // A closed stdout means the client is gone, and the fake exits when its stdin closes.
     let _ = writeln!(stdout, "{line}");
     let _ = stdout.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn controls_can_observe_a_client_that_has_not_initialized() {
+        let mut fake = Fake::default();
+        let observed =
+            fake.receive(json!({ "id": 1, "method": "test/turnRequests", "params": {} }));
+        assert!(
+            matches!(&observed[..], [Out::Caller(reply)] if reply == &json!({"id": 1, "result": []}))
+        );
+        let refused = fake.receive(json!({ "id": 2, "method": "turn/start", "params": {} }));
+        assert!(matches!(&refused[..], [Out::Caller(reply)] if reply["error"]["code"] == -32002));
+    }
 }
