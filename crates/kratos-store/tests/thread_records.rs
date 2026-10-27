@@ -343,12 +343,20 @@ fn a_thread_has_one_open_continuation_and_sending_it_queues_its_message_once() {
     enqueue(&mut store, &thread, "later", QueuePlace::Back);
     let mut write = store.write_thread(&thread).unwrap();
     write
+        .pause(PauseReason::UsageLimit {
+            turn_id: TurnId::new("turn-1".into()),
+            resets_at: None,
+        })
+        .unwrap();
+    write
         .add_continuation(continuation("c-1", ContinuationState::Scheduled))
         .unwrap();
     write.commit().unwrap();
 
     let mut write = store.write_thread(&thread).unwrap();
-    let second = write.add_continuation(continuation("c-2", ContinuationState::Scheduled));
+    let mut another = continuation("c-2", ContinuationState::Scheduled);
+    another.turn_id = TurnId::new("turn-2".into());
+    let second = write.add_continuation(another);
     drop(write);
     let send = |store: &mut Store| {
         let mut write = store.write_thread(&thread).unwrap();
@@ -378,6 +386,97 @@ fn a_thread_has_one_open_continuation_and_sending_it_queues_its_message_once() {
         }
     );
     assert!(store.open_continuations().unwrap().is_empty());
+}
+
+#[test]
+fn a_sent_or_cancelled_source_turn_cannot_get_another_continuation() {
+    for terminal in [
+        ContinuationState::Sent {
+            message_id: id("already-sent"),
+        },
+        ContinuationState::Cancelled {
+            reason: "user resumed".into(),
+        },
+    ] {
+        let home = home();
+        let (mut store, thread) = store_with_thread(home.path());
+        let mut write = store.write_thread(&thread).unwrap();
+        write
+            .pause(PauseReason::UsageLimit {
+                turn_id: TurnId::new("turn-1".into()),
+                resets_at: None,
+            })
+            .unwrap();
+        assert!(
+            write
+                .add_continuation(continuation("old", terminal.clone()))
+                .unwrap()
+        );
+        write.commit().unwrap();
+        drop(store);
+
+        let mut store = Store::open(home.path()).unwrap();
+        assert!(
+            store
+                .unplanned_usage_stops(Provider::Codex)
+                .unwrap()
+                .is_empty()
+        );
+        let mut write = store.write_thread(&thread).unwrap();
+        assert!(
+            !write
+                .add_continuation(continuation("late-duplicate", ContinuationState::Scheduled))
+                .unwrap(),
+            "{terminal:?}"
+        );
+        assert!(write.commit().unwrap().is_empty());
+        assert!(
+            store
+                .continuation(&ContinuationId::new("late-duplicate".into()))
+                .unwrap()
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn a_continuation_cannot_send_after_its_source_pause_changes() {
+    for pause in [
+        None,
+        Some(PauseReason::Interrupted),
+        Some(PauseReason::UsageLimit {
+            turn_id: TurnId::new("another-turn".into()),
+            resets_at: None,
+        }),
+    ] {
+        let home = home();
+        let (mut store, thread) = store_with_thread(home.path());
+        let mut write = store.write_thread(&thread).unwrap();
+        write
+            .add_continuation(continuation("c-1", ContinuationState::Scheduled))
+            .unwrap();
+        if let Some(pause) = pause {
+            write.pause(pause.clone()).unwrap();
+        }
+        write.commit().unwrap();
+        let before = store.provider_thread(&thread).unwrap().paused;
+
+        let mut write = store.write_thread(&thread).unwrap();
+        assert_eq!(
+            write
+                .send_continuation(
+                    &ContinuationId::new("c-1".into()),
+                    &id("stale"),
+                    text("continue"),
+                    MAX_PENDING
+                )
+                .unwrap(),
+            None
+        );
+        assert!(write.commit().unwrap().is_empty());
+        assert!(queue(&store, &thread).is_empty());
+        assert_eq!(store.provider_thread(&thread).unwrap().paused, before);
+    }
 }
 
 #[test]

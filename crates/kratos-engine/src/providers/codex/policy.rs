@@ -69,14 +69,16 @@ pub fn decide_patch(
     let Some(changes) = changes else {
         return Verdict::Ask(AskReason::Unchecked);
     };
-    let protected_folder = changes
-        .iter()
-        .flat_map(changed_paths)
-        .find_map(|path| protected.containing(&folder.join(path)));
-    if let Some(protected_folder) = protected_folder {
-        return Verdict::Ask(AskReason::ProtectedFolder {
-            path: protected_folder.display().to_string(),
-        });
+    for path in changes.iter().flat_map(changed_paths) {
+        match protected.containing(&folder.join(path)) {
+            Ok(Some(protected_folder)) => {
+                return Verdict::Ask(AskReason::ProtectedFolder {
+                    path: protected_folder.display().to_string(),
+                });
+            }
+            Err(_) => return Verdict::Ask(AskReason::Unchecked),
+            Ok(None) => {}
+        }
     }
     if settings.permission == Permission::AskMe || settings.plan_mode {
         return Verdict::Ask(AskReason::AskEveryAction);

@@ -63,6 +63,11 @@ impl Harness {
         std::fs::create_dir_all(&server_folder).unwrap();
         let model = Server::start(replies).await.unwrap();
         let config = [
+            "features.memories=false".to_owned(),
+            "memories.generate_memories=false".to_owned(),
+            "memories.use_memories=false".to_owned(),
+            "features.plugins=false".to_owned(),
+            "features.apps=false".to_owned(),
             "model=\"gpt-6.1-sol\"".to_owned(),
             "model_provider=\"scripted\"".to_owned(),
             "model_providers.scripted.name=\"Isolated scripted Responses API\"".to_owned(),

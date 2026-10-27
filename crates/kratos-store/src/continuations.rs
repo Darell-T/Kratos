@@ -6,18 +6,21 @@
 
 use kratos_protocol::{
     Continuation, ContinuationId, ContinuationState, MessageId, MessageInput, MessageOrigin,
-    ThreadEventBody, ThreadId, Timestamp, TurnId,
+    PauseReason, Provider, ThreadEventBody, ThreadId, Timestamp, TurnId,
 };
 use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::json::{required_column, to_column};
+use crate::json::{from_column, required_column, to_column};
 use crate::{Enqueued, QueuePlace, Store, StoreError, ThreadWrite};
 
 impl ThreadWrite<'_> {
-    /// Records a new continuation. `Err(Sqlite)` with a constraint error when the thread already
-    /// has an open one.
-    pub fn add_continuation(&mut self, continuation: Continuation) -> Result<(), StoreError> {
+    /// Records a new continuation. A previously planned source turn returns false, including one
+    /// already sent or cancelled. `Err(Sqlite)` when another source turn still has an open plan.
+    pub fn add_continuation(&mut self, continuation: Continuation) -> Result<bool, StoreError> {
+        if has_continuation(&self.transaction, self.thread_id(), &continuation.turn_id)? {
+            return Ok(false);
+        }
         let (state, detail, message_id) = state_columns(&continuation.state);
         self.transaction.execute(
             "INSERT INTO continuations (id, thread_id, turn_id, waits_on, resets_at, state, detail,
@@ -36,7 +39,7 @@ impl ThreadWrite<'_> {
             ],
         )?;
         self.append(ThreadEventBody::ContinuationChanged { continuation })?;
-        Ok(())
+        Ok(true)
     }
 
     /// Replaces an open continuation's reset time and state and records the change. Returns
@@ -90,6 +93,11 @@ impl ThreadWrite<'_> {
         if !is_open(&open.state) {
             return Ok(None);
         }
+        let thread = self.provider_thread()?;
+        let is_source_pause = matches!(thread.paused, Some(PauseReason::UsageLimit { turn_id, .. }) if turn_id == open.turn_id);
+        if thread.running_turn.is_some() || !is_source_pause {
+            return Ok(None);
+        }
         let origin = MessageOrigin::Continuation {
             continuation_id: id.clone(),
         };
@@ -111,6 +119,36 @@ impl ThreadWrite<'_> {
 }
 
 impl Store {
+    /// Durable quota stops whose report was lost before the scheduler recorded a plan. Terminal
+    /// plans also count, so recovery cannot recreate a sent or cancelled continuation.
+    pub fn unplanned_usage_stops(
+        &self,
+        provider: Provider,
+    ) -> Result<Vec<(ThreadId, TurnId)>, StoreError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT id, paused FROM threads
+             WHERE provider = ?1 AND paused IS NOT NULL AND running_turn IS NULL ORDER BY rowid",
+        )?;
+        let rows = statement.query_map([provider.as_str()], |row| {
+            let pause: Option<PauseReason> = from_column(row, 1)?;
+            Ok(match pause {
+                Some(PauseReason::UsageLimit { turn_id, .. }) => {
+                    Some((ThreadId::new(row.get(0)?), turn_id))
+                }
+                _ => None,
+            })
+        })?;
+        let mut stops = Vec::new();
+        for row in rows {
+            if let Some((thread_id, turn_id)) = row?
+                && !has_continuation(&self.connection, &thread_id, &turn_id)?
+            {
+                stops.push((thread_id, turn_id));
+            }
+        }
+        Ok(stops)
+    }
+
     pub fn continuation(
         &self,
         id: &ContinuationId,
@@ -137,6 +175,18 @@ impl Store {
 }
 
 const COLUMNS: &str = "thread_id, id, turn_id, waits_on, resets_at, state, detail, message_id";
+
+fn has_continuation(
+    connection: &Connection,
+    thread_id: &ThreadId,
+    turn_id: &TurnId,
+) -> Result<bool, StoreError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM continuations WHERE thread_id = ?1 AND turn_id = ?2)",
+        params![thread_id.as_str(), turn_id.as_str()],
+        |row| row.get(0),
+    )?)
+}
 
 fn continuation(
     connection: &Connection,

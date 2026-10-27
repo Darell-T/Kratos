@@ -6,12 +6,14 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use kratos_engine::usage::scheduler::Clock;
+use kratos_engine::providers::codex::ProviderError;
+use kratos_engine::usage::scheduler::{self, Clock, LimitStop, SchedulerHandle};
 use kratos_protocol::{
-    Continuation, ContinuationState, MessageInput, MessageOrigin, ThreadEventBody,
+    Continuation, ContinuationId, ContinuationState, MessageInput, MessageOrigin, MessageStatus,
+    Provider, ThreadEventBody, TurnId,
 };
 use serde_json::{Value, json};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::harness::{Harness, Options, WAIT};
 
@@ -382,6 +384,237 @@ async fn a_scheduled_continuation_survives_a_restart() {
     let started = harness.held("turn/start", 1).await;
     let text = started[0]["params"]["input"][0]["text"].as_str().unwrap();
     assert!(text.starts_with("Continue the task"), "{text}");
+}
+
+#[tokio::test]
+async fn a_durable_limit_pause_recovers_when_the_stop_report_was_lost() {
+    let mut harness = Harness::start(Options::default()).await;
+    stop_at_the_limit(&mut harness, spent()).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
+        .await;
+    assert!(
+        harness
+            .store
+            .call(|store| store.open_continuations())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(matches!(
+        harness.message("a").await.status,
+        MessageStatus::Accepted { .. }
+    ));
+    // The durable completion survives; the unconsumed in-memory report does not.
+    let (root, thread_id) = harness.stop().await;
+    let state = root.path().join("codex-state.json");
+    std::fs::write(&state, json!({ "rateLimits": spent() }).to_string()).unwrap();
+    let mut harness = Harness::start_in(
+        root,
+        Options {
+            fake_args: vec!["--state-file".into(), state.into()],
+            ..Options::default()
+        },
+        Some(thread_id),
+    )
+    .await;
+    let clock = ManualClock::starting_at(at(RESET - HOUR));
+    harness.start_scheduler(clock.clone()).await;
+
+    let recovered = next_continuation(&mut harness).await;
+    assert_eq!(recovered.state, ContinuationState::Scheduled);
+    clock.wait_for_wake_up_at(at(RESET)).await;
+    assert!(harness.turn_requests().await.is_empty());
+    harness
+        .control(
+            "test/rateLimits",
+            json!({
+                "accountId": "account-1", "ordinaryUsageAllowed": null,
+                "rateLimits": five_hour_window(0, RESET + 5 * HOUR),
+            }),
+        )
+        .await;
+    clock.advance_to(at(RESET));
+    clock.wait_for_wake_up_at(at(RESET + 300)).await;
+    assert!(
+        harness.turn_requests().await.is_empty(),
+        "a reset without authoritative permission cannot send"
+    );
+
+    harness.control("test/rateLimits", free()).await;
+    clock.advance_to(at(RESET + 300));
+    let started = harness.held("turn/start", 1).await;
+    assert_ne!(started[0]["params"]["clientUserMessageId"], "a");
+    assert!(
+        started[0]["params"]["input"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Continue the task")
+    );
+    let sent = next_continuation(&mut harness).await;
+    assert_eq!(sent.id, recovered.id);
+    assert!(matches!(sent.state, ContinuationState::Sent { .. }));
+    assert!(matches!(
+        harness.message("a").await.status,
+        MessageStatus::Accepted { .. }
+    ));
+    assert_eq!(
+        harness.details().await.queue.len(),
+        1,
+        "only the new continuation is queued"
+    );
+    harness.stop().await;
+}
+
+async fn start_with_reports(
+    harness: &mut Harness,
+    clock: Arc<ManualClock>,
+) -> (SchedulerHandle, mpsc::UnboundedSender<LimitStop>) {
+    drop(harness.stops.take());
+    let (reports, stops) = mpsc::unbounded_channel();
+    let scheduler = scheduler::start(
+        harness.hub.clone(),
+        harness.store.clone(),
+        harness.usage.clone(),
+        harness.provider.clone(),
+        clock,
+        stops,
+    )
+    .await
+    .unwrap();
+    harness.scheduler = Some(scheduler.clone());
+    (scheduler, reports)
+}
+
+fn stop_report(harness: &Harness) -> LimitStop {
+    LimitStop {
+        thread_id: harness.thread_id.clone(),
+        turn_id: TurnId::new("turn-1".into()),
+        provider: Provider::Codex,
+    }
+}
+
+/// A distinct read proves the stop handler is running; the following scheduler request waits
+/// behind that handler's transaction, so assertions cannot race its write.
+async fn settle_late_report(
+    harness: &mut Harness,
+    scheduler: &SchedulerHandle,
+    reports: &mpsc::UnboundedSender<LimitStop>,
+) {
+    harness
+        .control(
+            "test/rateLimits",
+            read("late-report-account", false, five_hour_window(100, RESET)),
+        )
+        .await;
+    reports.send(stop_report(harness)).unwrap();
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if harness
+                .usage
+                .account(Provider::Codex)
+                .and_then(|account| account.account)
+                .as_deref()
+                == Some("late-report-account")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the late stop refreshes usage");
+    assert!(matches!(
+        scheduler
+            .schedule(ContinuationId::new("no-such-continuation".into()))
+            .await,
+        Err(ProviderError::UnknownContinuation(_))
+    ));
+}
+
+#[tokio::test]
+async fn late_stop_reports_cannot_recreate_sent_or_cancelled_continuations() {
+    for cancel in [false, true] {
+        let clock = ManualClock::starting_at(at(RESET - HOUR));
+        let mut harness = Harness::start(Options::default()).await;
+        let (scheduler, reports) = start_with_reports(&mut harness, clock.clone()).await;
+        stop_at_the_limit(&mut harness, spent()).await;
+        harness
+            .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
+            .await;
+        reports.send(stop_report(&harness)).unwrap();
+        let planned = next_continuation(&mut harness).await;
+        if cancel {
+            harness
+                .provider
+                .resume(harness.thread_id.clone())
+                .await
+                .unwrap();
+        } else {
+            clock.wait_for_wake_up_at(at(RESET)).await;
+            harness.control("test/rateLimits", free()).await;
+            clock.advance_to(at(RESET));
+        }
+        let terminal = next_continuation(&mut harness).await;
+        assert_eq!(terminal.id, planned.id);
+        assert!(matches!(
+            terminal.state,
+            ContinuationState::Sent { .. } | ContinuationState::Cancelled { .. }
+        ));
+
+        settle_late_report(&mut harness, &scheduler, &reports).await;
+        assert!(
+            harness
+                .store
+                .call(|store| store.open_continuations())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let id = planned.id.clone();
+        let saved = harness
+            .store
+            .call(move |store| store.continuation(&id))
+            .await
+            .unwrap()
+            .unwrap()
+            .1;
+        assert_eq!(saved.state, terminal.state);
+        assert_eq!(harness.details().await.queue.len(), usize::from(!cancel));
+        drop((scheduler, reports));
+        harness.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_stop_report_cannot_plan_after_the_user_changes_the_pause() {
+    let clock = ManualClock::starting_at(at(RESET - HOUR));
+    let mut harness = Harness::start(Options::default()).await;
+    let (scheduler, reports) = start_with_reports(&mut harness, clock).await;
+    stop_at_the_limit(&mut harness, spent()).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
+        .await;
+    harness
+        .provider
+        .resume(harness.thread_id.clone())
+        .await
+        .unwrap();
+
+    settle_late_report(&mut harness, &scheduler, &reports).await;
+
+    assert!(harness.details().await.paused.is_none());
+    assert!(
+        harness
+            .store
+            .call(|store| store.open_continuations())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(harness.details().await.queue.is_empty());
+    drop((scheduler, reports));
+    harness.stop().await;
 }
 
 #[tokio::test]

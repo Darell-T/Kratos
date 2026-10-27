@@ -62,24 +62,30 @@ try {{
         )
         .unwrap();
     assert_eq!(sent.status, 201, "{:?}", sent.body);
-    loop {
-        let Some(Incoming::Text(text)) = events.next_incoming(WAIT).unwrap() else {
-            panic!("no attacker event");
-        };
-        if let ServerMessage::Event { event } = serde_json::from_str(&text).unwrap() {
-            match event.event {
-                ThreadEventBody::TurnCompleted { outcome, .. } => {
-                    assert_eq!(outcome, TurnOutcome::Completed);
-                    break;
+    tokio::task::spawn_blocking(move || {
+        loop {
+            let Some(Incoming::Text(text)) = events.next_incoming(WAIT).unwrap() else {
+                panic!("no attacker event");
+            };
+            if let ServerMessage::Event { event } = serde_json::from_str(&text).unwrap() {
+                match event.event {
+                    ThreadEventBody::TurnCompleted { outcome, .. } => {
+                        assert_eq!(outcome, TurnOutcome::Completed);
+                        break;
+                    }
+                    ThreadEventBody::ThreadPaused { reason } => {
+                        panic!("attacker paused: {reason:?}")
+                    }
+                    ThreadEventBody::ApprovalRequested { approval } => {
+                        panic!("probe unexpectedly needs approval: {approval:?}")
+                    }
+                    _ => {}
                 }
-                ThreadEventBody::ThreadPaused { reason } => panic!("attacker paused: {reason:?}"),
-                ThreadEventBody::ApprovalRequested { approval } => {
-                    panic!("probe unexpectedly needs approval: {approval:?}")
-                }
-                _ => {}
             }
         }
-    }
+    })
+    .await
+    .unwrap();
     let outputs = harness.model.tool_outputs();
     assert_eq!(outputs.len(), 2, "both attacker tool calls must execute");
     let token = std::fs::read_to_string(harness.home().join("client-token")).unwrap();

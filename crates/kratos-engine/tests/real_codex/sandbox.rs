@@ -4,6 +4,32 @@ use kratos_protocol::{Permission, ThreadSettings};
 use crate::support::Harness;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
+async fn a_full_access_thread_runs_a_harmless_command() {
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::FullAccess,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::command("Write-Output KRATOS_FULL_CONTROL"),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    harness.send("full-access-control");
+    harness.completed().await;
+    assert!(
+        harness
+            .model
+            .tool_outputs()
+            .iter()
+            .any(|output| output.to_string().contains("KRATOS_FULL_CONTROL"))
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires pinned Codex 0.159.1 and a dedicated provisioned Windows sandbox home; CI runs it"]
 async fn plan_mode_real_codex_sandbox_refuses_a_write_after_a_successful_read() {
     let mut harness = Harness::start(

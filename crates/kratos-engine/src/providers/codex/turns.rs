@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use kratos_codex_client::{Codex, RequestError, methods, rejected_before_execution, types};
 use kratos_protocol::{
-    Message, MessageId, MessageStatus, PauseReason, ThreadId, TurnId, TurnOutcome,
+    Message, MessageId, MessageStatus, PauseReason, Permission, ThreadId, TurnId, TurnOutcome,
 };
 use serde_json::json;
 
@@ -98,6 +98,16 @@ impl Actor {
         let Some(codex) = self.connection().ok().flatten() else {
             return;
         };
+        let roots = match self.runtime_workspace_roots(thread_id).await {
+            Ok(roots) => roots,
+            Err(error) => {
+                self.stop_server(&format!(
+                    "Kratos could not read permitted workspaces: {error}"
+                ))
+                .await;
+                return;
+            }
+        };
         let message_id = message.id.clone();
         let recorded = self
             .write(thread_id, {
@@ -124,7 +134,8 @@ impl Actor {
         thread.context = None;
         thread.file_items.clear();
         thread.turn_settings = thread.settings.clone();
-        let params = turn_start_params(native_id, &message, thread.model(), &thread.settings);
+        let mut params = turn_start_params(native_id, &message, thread.model(), &thread.settings);
+        params.runtime_workspace_roots = Some(roots);
         let thread_id = thread_id.clone();
         self.spawn(async move {
             let result = match codex.request::<methods::TurnStart>(&params).await {
@@ -140,6 +151,29 @@ impl Actor {
                 result: result.map(|started| Box::new(started.turn)),
             }
         });
+    }
+
+    async fn runtime_workspace_roots(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<types::AbsolutePathBuf>, kratos_store::StoreError> {
+        let thread = self
+            .threads
+            .get(thread_id)
+            .expect("dispatch loaded the thread");
+        if thread.settings.plan_mode || thread.settings.permission == Permission::AskMe {
+            return Ok(vec![types::AbsolutePathBuf(thread.folder.clone())]);
+        }
+        self.store
+            .call(|store| {
+                store.list_workspaces().map(|workspaces| {
+                    workspaces
+                        .into_iter()
+                        .map(|workspace| types::AbsolutePathBuf(workspace.path))
+                        .collect()
+                })
+            })
+            .await
     }
 
     pub(super) async fn on_start_answered(

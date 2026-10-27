@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use kratos_protocol::{
-    AccountUsage, Allowance, Continuation, ContinuationId, ContinuationState, Provider, ThreadId,
-    Timestamp, TurnId, UsageBucket, UsageWait, UsageWindow,
+    AccountUsage, Allowance, Continuation, ContinuationId, ContinuationState, PauseReason,
+    Provider, ThreadId, Timestamp, TurnId, UsageBucket, UsageWait, UsageWindow,
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -214,8 +214,8 @@ struct Scheduler {
     due: mpsc::UnboundedSender<ContinuationId>,
 }
 
-/// Starts the scheduler: re-arms every open continuation from the store (L6), then plans each
-/// stop its provider reports. It runs until every [`SchedulerHandle`] is dropped.
+/// Re-arms open continuations and recovers durable quota pauses missing their plans (L6), then
+/// plans each stop its provider reports. Runs until every [`SchedulerHandle`] is dropped.
 pub async fn start(
     hub: Hub,
     store: StoreThread,
@@ -239,11 +239,31 @@ pub async fn start(
             scheduler.arm(&continuation.id, continuation.resets_at.as_ref());
         }
     }
+    let unplanned_stops = store
+        .call(|store| store.unplanned_usage_stops(Provider::Codex))
+        .await?;
     let (requests, mut incoming) = mpsc::channel(16);
     tokio::spawn(async move {
+        // Provider refreshes must not delay the HTTP listener becoming usable.
+        for (thread_id, turn_id) in unplanned_stops {
+            if let Err(error) = scheduler
+                .on_stop(LimitStop {
+                    thread_id,
+                    turn_id,
+                    provider: Provider::Codex,
+                })
+                .await
+            {
+                eprintln!("cannot recover a usage continuation: {error}");
+            }
+        }
         loop {
             tokio::select! {
-                Some(stop) = stops.recv() => scheduler.on_stop(stop).await,
+                Some(stop) = stops.recv() => {
+                    if let Err(error) = scheduler.on_stop(stop).await {
+                        eprintln!("cannot plan a usage continuation: {error}");
+                    }
+                },
                 Some(id) = due_ids.recv() => scheduler.on_due(id).await,
                 request = incoming.recv() => match request {
                     Some(request) => scheduler.on_request(request).await,
@@ -269,14 +289,14 @@ impl Scheduler {
         });
     }
 
-    async fn on_stop(&self, stop: LimitStop) {
+    async fn on_stop(&self, stop: LimitStop) -> Result<(), kratos_store::StoreError> {
         // A fresh read, so the plan rests on what the provider says now. A failed read leaves the
         // last known usage, which the plan treats as no evidence where it lacks any.
         let _ = self.provider.refresh_usage().await;
         let planned = plan(stop.provider, self.usage.account(stop.provider).as_ref());
         let continuation = Continuation {
             id: ContinuationId::new(Uuid::new_v4().to_string()),
-            turn_id: stop.turn_id,
+            turn_id: stop.turn_id.clone(),
             waits_on: planned.waits_on,
             resets_at: planned.resets_at,
             state: planned.state,
@@ -289,17 +309,23 @@ impl Scheduler {
         let added = self
             .hub
             .write(stop.thread_id, move |write| {
-                if write.open_continuation()?.is_some() {
-                    // One stop, one continuation: a repeated report adds nothing.
+                let thread = write.provider_thread()?;
+                let is_source_pause = matches!(thread.paused, Some(PauseReason::UsageLimit { turn_id, .. }) if turn_id == stop.turn_id);
+                if thread.thread.provider != stop.provider
+                    || thread.running_turn.is_some()
+                    || !is_source_pause
+                    || write.open_continuation()?.is_some()
+                {
+                    // The refresh may finish after the user changed the pause or turn.
                     return Ok(false);
                 }
-                write.add_continuation(continuation)?;
-                Ok(true)
+                write.add_continuation(continuation)
             })
-            .await;
-        if matches!(added, Ok(written) if written.value) && is_scheduled {
+            .await?;
+        if added.value && is_scheduled {
             self.arm(&id, resets_at.as_ref());
         }
+        Ok(())
     }
 
     /// A scheduled continuation's time came: ask the provider, then send, wait again, or hand the

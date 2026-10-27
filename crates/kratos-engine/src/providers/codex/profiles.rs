@@ -9,6 +9,7 @@
 //! against [`ProtectedFolders`] before accepting one.
 
 use std::ffi::OsString;
+use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use kratos_protocol::{Permission, ThreadSettings};
@@ -20,7 +21,8 @@ pub enum Profile {
     Plan,
     /// Writes the thread's folder and the temp folder.
     AskMe,
-    /// Writes everywhere but the protected folders.
+    /// Writes user folders and registered workspaces on Windows, everywhere on Unix, except
+    /// protected folders. See docs/r3-verification.md for the Windows limitation.
     ApproveForMe,
     /// As [`Profile::ApproveForMe`], with the network open.
     FullAccess,
@@ -59,6 +61,7 @@ impl Profile {
 pub struct ProtectedFolders {
     kratos_home: PathBuf,
     read_only: Vec<PathBuf>,
+    user_home: Option<PathBuf>,
 }
 
 /// Credential folders under the user's home folder, besides Codex's and Claude's own.
@@ -68,13 +71,14 @@ impl ProtectedFolders {
     /// `codex_home` is Codex's data folder, `CODEX_HOME` or `~/.codex`. Every path is absolute.
     pub fn new(kratos_home: PathBuf, codex_home: Option<PathBuf>, home: Option<PathBuf>) -> Self {
         let mut read_only: Vec<PathBuf> = codex_home.into_iter().collect();
-        if let Some(home) = home {
+        if let Some(home) = &home {
             read_only.push(home.join(".claude"));
             read_only.extend(CREDENTIAL_FOLDERS.iter().map(|folder| home.join(folder)));
         }
         ProtectedFolders {
             kratos_home,
             read_only,
+            user_home: home,
         }
     }
 
@@ -82,15 +86,16 @@ impl ProtectedFolders {
         &self.kratos_home
     }
 
-    /// The protected folder that `path` is inside or is, if any. `path` is absolute; `..` parts
-    /// are resolved by name first, so a path that climbs out of a folder and back in still
-    /// counts. Windows compares without case, as its file system does.
-    pub fn containing(&self, path: &Path) -> Option<&Path> {
-        let path = normalize(path);
-        std::iter::once(&self.kratos_home)
-            .chain(&self.read_only)
-            .map(PathBuf::as_path)
-            .find(|folder| is_within(&path, &normalize(folder)))
+    /// Resolves existing links before checking a patch's destination, including new files below
+    /// a linked directory. An unreadable or dangling link cannot establish a safe destination.
+    pub fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
+        let path = resolve_destination(path)?;
+        for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
+            if is_within(&path, &resolve_destination(folder)?) {
+                return Ok(Some(folder));
+            }
+        }
+        Ok(None)
     }
 
     /// The `-c` arguments that define the four profiles, for the app-server's command line. `temp`
@@ -102,12 +107,7 @@ impl ProtectedFolders {
             .iter()
             .map(|folder| format!("{}=\"read\"", toml_key(folder)))
             .collect();
-        let write_everywhere = [
-            vec![r#"":root"="write""#.to_owned()],
-            read_only,
-            vec![deny.clone()],
-        ]
-        .concat();
+        let write_everywhere = [self.write_roots(temp), read_only, vec![deny.clone()]].concat();
         let tables = [
             (
                 Profile::Plan,
@@ -117,7 +117,7 @@ impl ProtectedFolders {
                 Profile::AskMe,
                 vec![
                     r#"":root"="read""#.to_owned(),
-                    r#"":project_roots"="write""#.to_owned(),
+                    r#"":workspace_roots"="write""#.to_owned(),
                     format!("{}=\"write\"", toml_key(temp)),
                     deny,
                 ],
@@ -150,6 +150,22 @@ impl ProtectedFolders {
         );
         arguments
     }
+
+    fn write_roots(&self, temp: &Path) -> Vec<String> {
+        if !cfg!(windows) {
+            return vec![r#"":root"="write""#.to_owned()];
+        }
+        // shortcut: Windows root-write needs system-drive ACL changes; restore it when Codex can enforce carveouts without that grant.
+        let mut roots = vec![
+            r#"":root"="read""#.to_owned(),
+            r#"":workspace_roots"="write""#.to_owned(),
+            format!("{}=\"write\"", toml_key(temp)),
+        ];
+        if let Some(home) = &self.user_home {
+            roots.push(format!("{}=\"write\"", toml_key(home)));
+        }
+        roots
+    }
 }
 
 /// A TOML basic string, quoted and escaped, for a path used as a table key.
@@ -169,8 +185,51 @@ fn toml_key(path: &Path) -> String {
     key
 }
 
-/// Resolves `.` and `..` by name. Symbolic links are left alone: the sandbox, not this check,
-/// stops a command, and a patch path is checked as Codex will write it.
+fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    if let Some(Component::Prefix(prefix)) = path.components().next()
+        && matches!(
+            prefix.kind(),
+            std::path::Prefix::UNC(..)
+                | std::path::Prefix::VerbatimUNC(..)
+                | std::path::Prefix::DeviceNS(..)
+                | std::path::Prefix::Verbatim(..)
+        )
+    {
+        // Even a metadata lookup on a network path can disclose ambient Windows credentials.
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a remote or device patch path needs user review",
+        ));
+    }
+    let mut ancestor = path.to_path_buf();
+    let mut suffix = Vec::new();
+    loop {
+        match std::fs::canonicalize(&ancestor) {
+            Ok(mut resolved) => {
+                for part in suffix.iter().rev() {
+                    resolved.push(part);
+                }
+                return Ok(normalize(&resolved));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if std::fs::symlink_metadata(&ancestor).is_ok() {
+                    return Err(error);
+                }
+                let Some(part) = ancestor.components().next_back() else {
+                    return Err(error);
+                };
+                suffix.push(part.as_os_str().to_os_string());
+                if !ancestor.pop() {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Only the not-yet-created suffix needs lexical normalization; existing links are resolved first.
 fn normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -200,6 +259,13 @@ fn is_within(path: &Path, folder: &Path) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    fn network_patch_paths_are_refused_before_filesystem_resolution() {
+        let error = resolve_destination(Path::new(r"\\untrusted.invalid\share\file")).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    }
+
     fn folders() -> ProtectedFolders {
         let root = if cfg!(windows) {
             "C:\\Users\\u"
@@ -220,12 +286,14 @@ mod tests {
         let lookalike = home.join(".sshkeys").join("config");
 
         assert_eq!(
-            folders.containing(&climbing),
+            folders.containing(&climbing).unwrap(),
             Some(home.join(".ssh").as_path())
         );
-        assert_eq!(folders.containing(&lookalike), None);
+        assert_eq!(folders.containing(&lookalike).unwrap(), None);
         assert_eq!(
-            folders.containing(&home.join(".kratos").join("client-token")),
+            folders
+                .containing(&home.join(".kratos").join("client-token"))
+                .unwrap(),
             Some(home.join(".kratos").as_path())
         );
     }
