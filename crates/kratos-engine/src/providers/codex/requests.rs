@@ -16,7 +16,6 @@ pub(super) struct Waiting {
     pub answer: Answer,
 }
 
-/// The shape of Codex's answer.
 pub(super) enum Answer {
     /// `{"decision": ...}`, for a command or a patch.
     Decision,
@@ -38,7 +37,6 @@ pub(super) struct Closed {
 }
 
 impl Requests {
-    /// Removes the thread's requests that `matches` selects.
     pub fn close(&mut self, thread_id: &ThreadId, matches: impl Fn(&Waiting) -> bool) -> Closed {
         let selected = |waiting: &Waiting| &waiting.thread_id == thread_id && matches(waiting);
         Closed {

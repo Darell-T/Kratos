@@ -71,7 +71,6 @@ impl ThreadWrite<'_> {
         &self.at
     }
 
-    /// Appends `body` as the thread's next event.
     pub fn append(&mut self, body: ThreadEventBody) -> Result<&ThreadEvent, StoreError> {
         let seq = self.last_seq + 1;
         let stored = serde_json::to_string(&body).expect("a thread event body serializes");

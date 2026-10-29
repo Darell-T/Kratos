@@ -9,7 +9,6 @@ use super::actor::Reply;
 use super::wire::ChangesRecorder;
 
 pub(super) struct ThreadState {
-    /// The folder the agent works in.
     pub folder: String,
     pub settings: ThreadSettings,
     /// The settings the current or last turn started with. Codex's requests during a turn are

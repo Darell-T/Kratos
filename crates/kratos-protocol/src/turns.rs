@@ -23,7 +23,6 @@ impl fmt::Display for TurnId {
     }
 }
 
-/// How a turn ended.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "outcome",
@@ -134,7 +133,6 @@ pub struct ContextUsage {
     pub cached_input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_output_tokens: i64,
-    /// Every token the turn counted.
     pub total_tokens: i64,
     /// The model's context window the provider works with, when it said.
     pub context_window: Option<i64>,
