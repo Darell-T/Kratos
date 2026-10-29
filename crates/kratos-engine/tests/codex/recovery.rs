@@ -1,10 +1,11 @@
 //! What an engine that starts again finds of the work the last one left (L1): no Codex process
 //! outlives the engine that started it.
 
+use kratos_engine::providers::codex::ProviderError;
 use kratos_protocol::{ApprovalOutcome, MessageStatus, PauseReason, ThreadEventBody, TurnOutcome};
 use serde_json::json;
 
-use crate::harness::{Harness, Options};
+use crate::harness::{Harness, Options, WAIT, message_id};
 
 const THREAD: &str = "thread-A";
 
@@ -156,6 +157,60 @@ async fn a_message_codex_s_history_lacks_after_a_restart_waits_for_the_user() {
     assert_eq!(discarded.status, MessageStatus::Cancelled);
     let started = harness.held("turn/start", 1).await;
     assert_eq!(started[0]["params"]["clientUserMessageId"], "b");
+}
+
+#[tokio::test]
+async fn a_discard_sent_while_codex_loads_the_thread_settles_once_it_has() {
+    // Catches a discard that waits for the thread to load and is never woken, because it waits in
+    // the list that only Codex's start drains, and that start already happened.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    let (root, thread_id) = harness.stop().await;
+
+    let harness = Harness::start_in(root, Options::default(), Some(thread_id)).await;
+    let discarded = tokio::time::timeout(
+        WAIT,
+        harness
+            .provider
+            .discard(harness.thread_id.clone(), message_id("a")),
+    )
+    .await;
+
+    let discarded = discarded.expect("the discard settles").unwrap();
+    assert_eq!(discarded.status, MessageStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn a_discard_sent_while_codex_loads_the_thread_fails_when_the_load_fails() {
+    // Catches a discard left waiting for good when Codex cannot load the thread.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    let (root, thread_id) = harness.stop().await;
+    let options = Options {
+        fake_args: vec!["--fail-resume".into()],
+        ..Options::default()
+    };
+
+    let harness = Harness::start_in(root, options, Some(thread_id)).await;
+    let discarded = tokio::time::timeout(
+        WAIT,
+        harness
+            .provider
+            .discard(harness.thread_id.clone(), message_id("a")),
+    )
+    .await;
+
+    let error = discarded.expect("the discard settles").unwrap_err();
+    assert!(
+        matches!(error, ProviderError::Unavailable(ref message) if message.contains("could not load the thread")),
+        "{error:?}"
+    );
+    assert!(matches!(
+        harness.message("a").await.status,
+        MessageStatus::Unknown { .. }
+    ));
 }
 
 #[tokio::test]

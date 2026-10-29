@@ -6,7 +6,7 @@
 //! reported back as `test/answered` and `test/answeredWithId` notifications.
 //!
 //! Flags: `--hang-initialize` never answers `initialize`; `--bad-initialize` answers it with `{}`;
-//! `--sleep` makes the process sleep for an hour, for `test/spawnChild`; `--control-file <path>`
+//! `--fail-resume` answers every `thread/resume` with an error; `--sleep` makes the process sleep for an hour, for `test/spawnChild`; `--control-file <path>`
 //! also takes `test/*` requests on a localhost TCP port, written to `<path>`, for a test whose
 //! client under test owns stdio; `--state-file <path>` starts with the `threads` and `rateLimits`
 //! of the JSON object in `<path>`, as a Codex restarted on an existing history does. The variables
@@ -34,6 +34,7 @@ fn main() {
         bad_initialize: arguments
             .iter()
             .any(|argument| argument == "--bad-initialize"),
+        fail_resume: arguments.iter().any(|argument| argument == "--fail-resume"),
         ..Fake::default()
     }));
     if let Some(path) = flag_or_variable(&arguments, "--state-file", "FAKE_CODEX_STATE_FILE") {
@@ -132,6 +133,7 @@ struct Fake {
     turn_observer: Option<TcpStream>,
     hang_initialize: bool,
     bad_initialize: bool,
+    fail_resume: bool,
     initialized: bool,
     /// Every held request, in arrival order, for `test/turnRequests`.
     held_log: Vec<Value>,
@@ -329,6 +331,9 @@ impl Fake {
     fn resume_thread(&mut self, id: &Value, params: &Value) {
         self.thread_log
             .push(json!({ "method": "thread/resume", "params": params }));
+        if self.fail_resume {
+            return self.fail(id, -32600, "no rollout found for the thread");
+        }
         let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
         let mut thread = self.thread(&thread_id, params["cwd"].as_str());
         if let Some(model) = params["model"].as_str() {
