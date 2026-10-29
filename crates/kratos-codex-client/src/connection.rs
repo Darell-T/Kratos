@@ -4,7 +4,8 @@
 //! whole and in order. The reader parses stdout: it settles answered requests, answers server
 //! requests no one can handle, and forwards the rest as [`Incoming`]. The keeper owns the process:
 //! when the process exits it ends the process tree, so a tool the agent started cannot keep the
-//! output pipe open, and reports the exit to the reader.
+//! output pipe open, and reports the exit to the reader and to [`Codex::close`]. The reader may be
+//! waiting for the consumer to make room in the queue, so close never waits on the reader.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
@@ -181,7 +182,8 @@ struct Shared {
     request_timeout: Duration,
     close_timeout: Duration,
     close: Mutex<Option<oneshot::Sender<Duration>>>,
-    exit: watch::Receiver<Option<Exit>>,
+    /// True once no process of the server's tree runs.
+    tree_ended: watch::Receiver<bool>,
     info: Mutex<Option<types::InitializeResponse>>,
 }
 
@@ -258,7 +260,7 @@ pub async fn connect(
     let stderr = child.child().stderr.take().expect("stderr is piped");
 
     let (writer, writes) = mpsc::unbounded_channel();
-    let (exit_sender, exit) = watch::channel(None);
+    let (tree_ended_sender, tree_ended) = watch::channel(false);
     let (close_sender, close_requested) = oneshot::channel();
     let (incoming_sender, incoming) = mpsc::channel(INCOMING_CAPACITY);
     let shared = Arc::new(Shared {
@@ -268,7 +270,7 @@ pub async fn connect(
         request_timeout: launch.request_timeout,
         close_timeout: launch.close_timeout,
         close: Mutex::new(Some(close_sender)),
-        exit,
+        tree_ended,
         info: Mutex::new(None),
     });
     let stderr_lines = Arc::new(Mutex::new(VecDeque::new()));
@@ -276,12 +278,16 @@ pub async fn connect(
     tokio::spawn(write_lines(stdin, writes));
     tokio::spawn(keep_stderr(stderr, stderr_lines.clone()));
     let (exited_sender, exited) = oneshot::channel();
-    tokio::spawn(keep(child, close_requested, exited_sender));
+    tokio::spawn(keep(
+        child,
+        close_requested,
+        tree_ended_sender,
+        exited_sender,
+    ));
     tokio::spawn(read(
         Reader {
             shared: shared.clone(),
             incoming: incoming_sender,
-            exit_sender,
             stderr_lines,
         },
         stdout,
@@ -413,7 +419,8 @@ impl Codex {
     }
 
     /// Asks the server to exit by closing its input, waits up to the close timeout, then ends the
-    /// whole process tree. Returns once the server has exited; calling it again only waits.
+    /// whole process tree. Returns once no process of the tree runs, even while the consumer has
+    /// not read the server's last messages; calling it again only waits.
     pub async fn close(&self) {
         let close = self
             .shared
@@ -425,13 +432,8 @@ impl Codex {
             let _ = self.shared.writer.send(Write::Close);
             let _ = close.send(self.shared.close_timeout);
         }
-        let mut exit = self.shared.exit.clone();
-        let _ = exit.wait_for(Option::is_some).await;
-    }
-
-    /// The exit, once the server has ended.
-    pub fn exit(&self) -> Option<Exit> {
-        self.shared.exit.borrow().clone()
+        let mut tree_ended = self.shared.tree_ended.clone();
+        let _ = tree_ended.wait_for(|ended| *ended).await;
     }
 }
 
@@ -463,6 +465,7 @@ async fn keep_stderr(stderr: ChildStderr, kept: Arc<Mutex<VecDeque<String>>>) {
 async fn keep(
     mut child: OwnedChild,
     close_requested: oneshot::Receiver<Duration>,
+    tree_ended: watch::Sender<bool>,
     exited: oneshot::Sender<Option<i32>>,
 ) {
     let status = tokio::select! {
@@ -487,13 +490,13 @@ async fn keep(
     // Before the exit is reported, so a caller that waits on close knows no process of the tree
     // still runs, for example before it deletes the folder those processes worked in.
     let _ = child.end_tree();
+    tree_ended.send_replace(true);
     let _ = exited.send(status.ok().and_then(|status| status.code()));
 }
 
 struct Reader {
     shared: Arc<Shared>,
     incoming: mpsc::Sender<Incoming>,
-    exit_sender: watch::Sender<Option<Exit>>,
     stderr_lines: Arc<Mutex<VecDeque<String>>>,
 }
 
@@ -619,7 +622,6 @@ impl Reader {
             let _ = settle.send(Err(RequestError::Exited(exit.clone())));
         }
         let _ = self.shared.writer.send(Write::Close);
-        self.exit_sender.send_replace(Some(exit.clone()));
         let _ = self.incoming.send(Incoming::Exited(exit)).await;
     }
 }
