@@ -6,12 +6,13 @@
 //! reported back as `test/answered` and `test/answeredWithId` notifications.
 //!
 //! Flags: `--hang-initialize` never answers `initialize`; `--bad-initialize` answers it with `{}`;
-//! `--fail-resume` answers every `thread/resume` with an error; `--sleep` makes the process sleep for an hour, for `test/spawnChild`; `--control-file <path>`
-//! also takes `test/*` requests on a localhost TCP port, written to `<path>`, for a test whose
-//! client under test owns stdio; `--state-file <path>` starts with the `threads` and `rateLimits`
-//! of the JSON object in `<path>`, as a Codex restarted on an existing history does. The variables
-//! `FAKE_CODEX_CONTROL_FILE` and `FAKE_CODEX_STATE_FILE` stand in for the two flags when the fake
-//! is started by an engine, which passes its own variables on but not its own flags.
+//! `--fail-resume` answers every `thread/resume` with an error; `--sleep` makes the process sleep
+//! for an hour, for `test/spawnChild`; `--control-file <path>` also takes `test/*` requests on a
+//! localhost TCP port, written to `<path>`, for a test whose client under test owns stdio;
+//! `--state-file <path>` starts with the `threads` and `rateLimits` of the JSON object in `<path>`,
+//! as a Codex restarted on an existing history does. The variables `FAKE_CODEX_CONTROL_FILE` and
+//! `FAKE_CODEX_STATE_FILE` stand in for the two flags when the fake is started by an engine, which
+//! passes its own variables on but not its own flags.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};

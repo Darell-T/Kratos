@@ -182,7 +182,6 @@ struct Shared {
     request_timeout: Duration,
     close_timeout: Duration,
     close: Mutex<Option<oneshot::Sender<Duration>>>,
-    /// True once no process of the server's tree runs.
     tree_ended: watch::Receiver<bool>,
     info: Mutex<Option<types::InitializeResponse>>,
 }

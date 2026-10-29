@@ -61,8 +61,8 @@ impl From<ProviderError> for ApiError {
 
 /// `POST /api/threads/{id}/messages`. To a Codex thread: 201 with the queued message, 200 with the
 /// message the client sent before under the same `messageId` (D85), 409 when that id holds another
-/// message, or 429 when the queue is full, which a client may retry with the same `messageId`. To any other thread: 201 with the appended
-/// event, as R2 answers.
+/// message, or 429 when the queue is full, which a client may retry with the same `messageId`. To
+/// any other thread: 201 with the appended event, as R2 answers.
 ///
 /// The thread is checked before the body is read: a post to an unknown thread answers 404 without
 /// reading or size-checking its body.
