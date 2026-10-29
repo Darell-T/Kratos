@@ -385,3 +385,33 @@ async fn close_ends_the_process_tree_and_later_requests_fail() {
         .await;
     assert!(matches!(later, Err(RequestError::Exited(_))), "{later:?}");
 }
+
+#[tokio::test]
+async fn close_returns_while_a_full_queue_waits_for_a_consumer_that_stopped_reading() {
+    // Catches close waiting on the reader, which waits for room in the queue and so never
+    // reports the exit.
+    let mut quick_close = launch(&[]);
+    quick_close.close_timeout = Duration::from_millis(100);
+    let (codex, unread) = connect(quick_close, capabilities()).await.unwrap();
+    let server = control(&codex, "test/pid", json!({}))
+        .await
+        .as_u64()
+        .unwrap() as u32;
+    let mut is_reader_blocked = false;
+    for _ in 0..1_000 {
+        let notify = codex
+            .request_value("test/notify", json!({}), Duration::from_secs(2))
+            .await;
+        if notify.is_err() {
+            is_reader_blocked = true;
+            break;
+        }
+    }
+    assert!(is_reader_blocked, "the queue never filled");
+
+    let closed = tokio::time::timeout(Duration::from_secs(10), codex.close()).await;
+
+    assert!(closed.is_ok(), "close waited for the queue to drain");
+    assert!(!fake_agents::process_is_running(server));
+    drop(unread);
+}
