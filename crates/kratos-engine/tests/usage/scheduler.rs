@@ -306,6 +306,34 @@ async fn three_checks_without_an_answer_hand_the_decision_to_the_user() {
 }
 
 #[tokio::test]
+async fn a_spent_read_whose_reset_already_passed_backs_off_then_goes_to_the_user() {
+    // Catches a reset time that has passed armed again: the timer fires at once, so the scheduler
+    // reads Codex and records the same plan in a tight loop.
+    let clock = ManualClock::starting_at(at(RESET - HOUR));
+    let mut harness = Harness::start(Options::default()).await;
+    harness.start_scheduler(clock.clone()).await;
+    stop_at_the_limit(&mut harness, spent()).await;
+    next_continuation(&mut harness).await;
+    clock.wait_for_wake_up_at(at(RESET)).await;
+    let stale = read("account-1", false, five_hour_window(100, RESET - HOUR));
+    harness.control("test/rateLimits", stale).await;
+
+    clock.advance_to(at(RESET));
+    for check in 1..=2 {
+        let next = RESET + 300 * check;
+        clock.wait_for_wake_up_at(at(next)).await;
+        clock.advance_to(at(next));
+    }
+
+    let handed = next_continuation(&mut harness).await;
+    assert!(
+        matches!(handed.state, ContinuationState::AwaitingUser { ref why } if why.contains("after its reset")),
+        "{handed:?}"
+    );
+    assert_eq!(harness.turn_requests().await.len(), 1);
+}
+
+#[tokio::test]
 async fn a_different_account_at_the_reset_hands_the_decision_to_the_user() {
     // Catches a continuation sent on another account's quota after the user signed in as someone
     // else.
