@@ -1,12 +1,15 @@
-//! The sandbox every Codex turn runs in, as named permission profiles Kratos defines when it starts
-//! the app-server and selects per turn.
+//! The sandbox every Codex turn runs in. Plan, Ask me, and Approve for me select named permission
+//! profiles Kratos defines when it starts the app-server. Full access selects Codex's built-in
+//! `:danger-full-access`, which runs commands without a sandbox, as Zeron does. No profile writes
+//! outside the thread's workspaces and the temp folder: on Windows, Codex sets permissions on every
+//! file below a write root before the thread starts, and for a home folder that never finished.
 //!
 //! Measured on Codex 0.159.1: a profile's `deny` entry hides a folder from reads and writes, a
 //! `read` entry makes it read-only, and Codex keeps a command inside the sandbox even after the
-//! user approves running it outside whenever the profile denies any read. Every profile denies
-//! Kratos's data folder, so no agent command can read the client token (D19). An approved patch is
-//! the exception: Codex writes it wherever it points, so [`super::policy`] checks patch paths
-//! against [`ProtectedFolders`] before accepting one.
+//! user approves running it outside whenever the profile denies any read. Every Kratos profile
+//! denies Kratos's data folder, so no sandboxed command can read the client token (D19). A Full
+//! access command runs as the user and can. An approved patch writes wherever it points, so
+//! [`super::policy`] checks patch paths against [`ProtectedFolders`] before accepting one.
 
 use std::ffi::OsString;
 use std::io;
@@ -19,12 +22,11 @@ use kratos_protocol::{Permission, ThreadSettings};
 pub enum Profile {
     /// Reads everything but Kratos's data and writes nothing.
     Plan,
-    /// Writes the thread's folder and the temp folder.
+    /// Writes the thread's workspaces and the temp folder.
     AskMe,
-    /// Writes user folders and registered workspaces on Windows, everywhere on Unix, except
-    /// protected folders. See docs/r3-verification.md for the Windows limitation.
+    /// As [`Profile::AskMe`], with the network open.
     ApproveForMe,
-    /// As [`Profile::ApproveForMe`], with the network open.
+    /// No sandbox. [`super::policy`] still asks before dangerous commands.
     FullAccess,
 }
 
@@ -32,7 +34,7 @@ const PROFILES: [(Profile, &str); 4] = [
     (Profile::Plan, "kratos-plan"),
     (Profile::AskMe, "kratos-ask"),
     (Profile::ApproveForMe, "kratos-approve"),
-    (Profile::FullAccess, "kratos-full"),
+    (Profile::FullAccess, ":danger-full-access"),
 ];
 
 impl Profile {
@@ -61,7 +63,6 @@ impl Profile {
 pub struct ProtectedFolders {
     kratos_home: PathBuf,
     read_only: Vec<PathBuf>,
-    user_home: Option<PathBuf>,
 }
 
 /// Credential folders under the user's home folder, besides Codex's and Claude's own.
@@ -78,7 +79,6 @@ impl ProtectedFolders {
         ProtectedFolders {
             kratos_home,
             read_only,
-            user_home: home,
         }
     }
 
@@ -98,32 +98,20 @@ impl ProtectedFolders {
         Ok(None)
     }
 
-    /// The `-c` arguments that define the four profiles, for the app-server's command line. `temp`
-    /// is the folder Ask me lets commands write besides the thread's own.
+    /// The `-c` arguments that define Kratos's three profiles, for the app-server's command line.
+    /// `temp` is the folder Ask me and Approve for me let commands write besides the workspaces.
     pub fn launch_arguments(&self, temp: &Path) -> Vec<OsString> {
         let deny = format!("{}=\"deny\"", toml_key(&self.kratos_home));
-        let read_only: Vec<String> = self
-            .read_only
-            .iter()
-            .map(|folder| format!("{}=\"read\"", toml_key(folder)))
-            .collect();
-        let write_everywhere = [self.write_roots(temp), read_only, vec![deny.clone()]].concat();
+        let workspaces = vec![
+            r#"":root"="read""#.to_owned(),
+            r#"":workspace_roots"="write""#.to_owned(),
+            format!("{}=\"write\"", toml_key(temp)),
+            deny.clone(),
+        ];
         let tables = [
-            (
-                Profile::Plan,
-                vec![r#"":root"="read""#.to_owned(), deny.clone()],
-            ),
-            (
-                Profile::AskMe,
-                vec![
-                    r#"":root"="read""#.to_owned(),
-                    r#"":workspace_roots"="write""#.to_owned(),
-                    format!("{}=\"write\"", toml_key(temp)),
-                    deny,
-                ],
-            ),
-            (Profile::ApproveForMe, write_everywhere.clone()),
-            (Profile::FullAccess, write_everywhere),
+            (Profile::Plan, vec![r#"":root"="read""#.to_owned(), deny]),
+            (Profile::AskMe, workspaces.clone()),
+            (Profile::ApproveForMe, workspaces),
         ];
         let mut arguments = vec![
             "-c".into(),
@@ -144,27 +132,11 @@ impl ProtectedFolders {
         arguments.push(
             format!(
                 "permissions.{}.network.enabled=true",
-                Profile::FullAccess.id()
+                Profile::ApproveForMe.id()
             )
             .into(),
         );
         arguments
-    }
-
-    fn write_roots(&self, temp: &Path) -> Vec<String> {
-        if !cfg!(windows) {
-            return vec![r#"":root"="write""#.to_owned()];
-        }
-        // shortcut: Windows root-write needs system-drive ACL changes; restore it when Codex can enforce carveouts without that grant.
-        let mut roots = vec![
-            r#"":root"="read""#.to_owned(),
-            r#"":workspace_roots"="write""#.to_owned(),
-            format!("{}=\"write\"", toml_key(temp)),
-        ];
-        if let Some(home) = &self.user_home {
-            roots.push(format!("{}=\"write\"", toml_key(home)));
-        }
-        roots
     }
 }
 
