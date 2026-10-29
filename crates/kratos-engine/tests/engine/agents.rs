@@ -288,6 +288,84 @@ fn without_codex_a_codex_thread_answers_503_and_other_threads_still_work() {
 }
 
 #[test]
+fn a_new_codex_thread_s_settings_meet_the_checks_a_settings_change_meets() {
+    // Catches creation storing settings the settings route refuses, such as a one-token context
+    // limit that Codex would then load the thread with.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let workspace = client
+        .post(
+            "/api/workspaces",
+            &json!({ "name": "repo", "path": home.path() }),
+        )
+        .unwrap()
+        .body["id"]
+        .clone();
+    let create = |settings: Value| {
+        client
+            .post(
+                "/api/threads",
+                &json!({ "workspaceId": workspace, "title": "chat", "provider": "codex",
+                         "settings": settings }),
+            )
+            .unwrap()
+    };
+    let settings = |model: Value, limit: Value| {
+        json!({ "model": model, "permission": "askMe", "planMode": false,
+                "contextLimitTokens": limit })
+    };
+
+    let tiny_limit = create(settings(Value::Null, json!(1)));
+    let blank_model = create(settings(json!(" "), Value::Null));
+    let plain = create(settings(json!("gpt-5"), Value::Null));
+
+    assert_eq!(tiny_limit.status, 400, "{}", tiny_limit.body);
+    assert_eq!(blank_model.status, 400, "{}", blank_model.body);
+    assert_eq!(plain.status, 201, "{}", plain.body);
+    let threads = client
+        .get(&format!(
+            "/api/threads?workspaceId={}",
+            workspace.as_str().unwrap()
+        ))
+        .unwrap();
+    assert_eq!(
+        threads.body.as_array().unwrap().len(),
+        1,
+        "only the valid thread is stored"
+    );
+}
+
+#[test]
+fn a_message_id_sent_again_with_another_message_answers_409() {
+    // Catches a client that reuses an id for new text or files getting success for the earlier
+    // message, while the new instruction is dropped.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let thread = engine.create_thread_of("codex");
+    let send = |body: Value| client.post(&messages_path(&thread), &body).unwrap();
+
+    let first = send(json!({ "messageId": "same", "text": "first instruction" }));
+    let retried = send(json!({ "messageId": "same", "text": "first instruction" }));
+    let changed_text = send(json!({ "messageId": "same", "text": "different instruction" }));
+    let added_file = send(json!({ "messageId": "same", "input": [
+        { "type": "text", "text": "first instruction" },
+        { "type": "file", "path": "notes.md" },
+    ] }));
+
+    assert_eq!(first.status, 201);
+    assert_eq!(
+        (retried.status, &retried.body["input"]),
+        (200, &first.body["input"])
+    );
+    assert_eq!(changed_text.status, 409, "{}", changed_text.body);
+    assert_eq!(added_file.status, 409, "{}", added_file.body);
+    let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
+    assert_eq!(details.body["queue"][0]["input"], first.body["input"]);
+}
+
+#[test]
 fn a_full_queue_answers_429_and_stores_nothing() {
     // Catches an eleventh message stored and then refused, which a retry would duplicate (D85).
     let home = tempfile::tempdir().unwrap();
