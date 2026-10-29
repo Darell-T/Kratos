@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::requests::Requests;
 use super::threads::ThreadState;
-use super::turns::After;
+use super::turns::{After, Stopper};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
@@ -142,7 +142,7 @@ pub(super) enum Done {
         thread_id: ThreadId,
         turn_id: kratos_protocol::TurnId,
         result: Result<(), RequestError>,
-        waiters: Vec<Reply<()>>,
+        stopper: Stopper,
     },
     StopExpired {
         thread_id: ThreadId,
@@ -291,9 +291,9 @@ impl Actor {
                 thread_id,
                 turn_id,
                 result,
-                waiters,
+                stopper,
             } => {
-                self.on_interrupted(thread_id, turn_id, result, waiters)
+                self.on_interrupted(thread_id, turn_id, result, stopper)
                     .await
             }
             Done::StopExpired { thread_id, turn_id } => {

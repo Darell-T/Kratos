@@ -17,7 +17,7 @@ use super::actor::{Actor, Command, Done, Reply};
 use super::profiles::Profile;
 use super::requests::Answer;
 use super::threads::Turn;
-use super::turns::read_history;
+use super::turns::{Stopper, read_history};
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
 
 /// The text of the message Kratos sends to carry on a turn that stopped at a usage limit (D39).
@@ -444,7 +444,7 @@ impl Actor {
             Turn::Idle => drop(reply.send(Ok(()))),
             // Stopped as soon as its id is known.
             Turn::Starting { stop_waiters, .. } => stop_waiters.push(reply),
-            Turn::Running { .. } => self.interrupt(thread_id, vec![reply]),
+            Turn::Running { .. } => self.interrupt(thread_id, Stopper::Users(vec![reply])),
         }
     }
 
