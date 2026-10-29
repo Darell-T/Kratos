@@ -335,6 +335,41 @@ async fn a_turn_that_runs_out_of_time_is_stopped_and_the_queue_behind_it_pauses(
 }
 
 #[tokio::test]
+async fn a_turn_whose_deadline_stop_codex_never_answers_ends_with_codex() {
+    // Catches a timed-out turn left running when Codex does not answer the stop: nothing else
+    // would stop it, so it would run and hold the queue for good.
+    let mut harness = Harness::start(Options {
+        turn_timeout: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    harness.send("a", "first").await;
+    harness.send("b", "second").await;
+    harness.held("turn/start", 1).await;
+    harness.settle_start("turn-1", "inProgress").await;
+    harness.held("turn/interrupt", 1).await;
+
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+
+    assert!(
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            }
+        ),
+        "{ended:?}"
+    );
+    let details = harness.details().await;
+    assert_eq!(details.running_turn, None);
+    assert!(details.paused.is_some(), "b waits for the user");
+    assert_eq!(harness.message("b").await.status, MessageStatus::Queued);
+}
+
+#[tokio::test]
 async fn a_turn_that_stops_on_request_but_never_ends_closes_codex() {
     // Catches a turn stuck after an accepted stop, which would hold the queue forever.
     let mut harness = Harness::start(Options {
