@@ -357,6 +357,65 @@ async fn a_request_for_more_permissions_grants_what_was_asked_once_accepted() {
 }
 
 #[tokio::test]
+async fn a_permissions_approval_shows_the_access_that_accepting_it_grants() {
+    // Catches an approval that shows only the agent's reason, so the user grants paths and
+    // network they never saw, and two requests with one reason look the same.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.running_turn("a", "turn-1").await;
+    let folder = harness.folder().to_string_lossy().into_owned();
+    let wanted = json!({ "fileSystem": { "write": [folder] }, "network": { "enabled": true } });
+    harness
+        .ask(
+            "ask-1",
+            "item/permissions/requestApproval",
+            json!({ "threadId": THREAD, "turnId": "turn-1", "itemId": "item-1", "startedAtMs": 0,
+                    "cwd": "/work", "permissions": wanted, "reason": "run project checks" }),
+        )
+        .await;
+    let approval = requested(&mut harness).await;
+
+    assert_eq!(
+        serde_json::to_value(&approval.request).unwrap()["access"],
+        json!({ "paths": [{ "path": folder, "access": "write" }], "network": { "kind": "any" } })
+    );
+    harness
+        .provider
+        .decide(approval.id, ApprovalDecision::Accept)
+        .await
+        .unwrap();
+    let answers = harness.answered(1).await;
+    assert_eq!(answers[0]["result"]["permissions"], wanted);
+}
+
+#[tokio::test]
+async fn a_command_approval_shows_the_extra_access_the_command_asks_for() {
+    // Catches a command approval that hides the extra paths and the network host that accepting
+    // it lets the command use.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.running_turn("a", "turn-1").await;
+    let mut params = command("item-1", "cargo fetch");
+    params["additionalPermissions"] = json!({ "fileSystem": { "entries": [
+        { "access": "read", "path": { "type": "special", "value": { "kind": "root" } } },
+        { "access": "deny", "path": { "type": "glob_pattern", "pattern": "**/.env" } },
+    ] } });
+    params["networkApprovalContext"] = json!({ "host": "crates.io", "protocol": "https" });
+
+    harness.ask("ask-1", COMMAND, params).await;
+
+    let approval = requested(&mut harness).await;
+    assert_eq!(
+        serde_json::to_value(&approval.request).unwrap()["access"],
+        json!({
+            "paths": [
+                { "path": ":root", "access": "read" },
+                { "path": "**/.env", "access": "deny" },
+            ],
+            "network": { "kind": "host", "host": "crates.io", "protocol": "https" },
+        })
+    );
+}
+
+#[tokio::test]
 async fn a_question_takes_the_first_answer_only() {
     // Catches a second device's answer reaching Codex after the first.
     let mut harness = Harness::start(Options::default()).await;
