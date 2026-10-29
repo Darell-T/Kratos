@@ -7,9 +7,10 @@
 //! says the account may run and no bucket it waited on is still spent. A reset time is when to
 //! ask, never permission to send.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use kratos_protocol::{
@@ -210,7 +211,7 @@ struct Scheduler {
     provider: CodexProvider,
     clock: Arc<dyn Clock>,
     /// Checks in a row without a usable answer, by continuation.
-    unanswered: Mutex<std::collections::HashMap<ContinuationId, u32>>,
+    unanswered: HashMap<ContinuationId, u32>,
     due: mpsc::UnboundedSender<ContinuationId>,
 }
 
@@ -225,15 +226,15 @@ pub async fn start(
     mut stops: mpsc::UnboundedReceiver<LimitStop>,
 ) -> Result<SchedulerHandle, kratos_store::StoreError> {
     let (due, mut due_ids) = mpsc::unbounded_channel();
-    let scheduler = Arc::new(Scheduler {
+    let mut scheduler = Scheduler {
         hub,
         store: store.clone(),
         usage,
         provider,
         clock,
-        unanswered: Mutex::default(),
+        unanswered: HashMap::new(),
         due,
-    });
+    };
     for (_, continuation) in store.call(|store| store.open_continuations()).await? {
         if continuation.state == ContinuationState::Scheduled {
             scheduler.arm(&continuation.id, continuation.resets_at.as_ref());
@@ -330,7 +331,7 @@ impl Scheduler {
 
     /// A scheduled continuation's time came: ask the provider, then send, wait again, or hand the
     /// decision to the user.
-    async fn on_due(&self, id: ContinuationId) {
+    async fn on_due(&mut self, id: ContinuationId) {
         let lookup = id.clone();
         let Ok(Some((thread_id, continuation))) = self
             .store
@@ -370,7 +371,7 @@ impl Scheduler {
         }
     }
 
-    async fn send(&self, thread_id: &ThreadId, continuation: &Continuation) {
+    async fn send(&mut self, thread_id: &ThreadId, continuation: &Continuation) {
         self.forget(&continuation.id);
         let sent = self
             .provider
@@ -387,7 +388,7 @@ impl Scheduler {
     }
 
     async fn wait_again(
-        &self,
+        &mut self,
         thread_id: &ThreadId,
         continuation: &Continuation,
         account: Option<&AccountUsage>,
@@ -421,17 +422,10 @@ impl Scheduler {
         }
     }
 
-    async fn unanswered(&self, thread_id: &ThreadId, continuation: &Continuation, why: &str) {
-        let checks = {
-            let mut unanswered = self
-                .unanswered
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            let checks = unanswered.entry(continuation.id.clone()).or_default();
-            *checks += 1;
-            *checks
-        };
-        if checks < MAX_UNANSWERED_CHECKS {
+    async fn unanswered(&mut self, thread_id: &ThreadId, continuation: &Continuation, why: &str) {
+        let checks = self.unanswered.entry(continuation.id.clone()).or_default();
+        *checks += 1;
+        if *checks < MAX_UNANSWERED_CHECKS {
             self.arm(&continuation.id, None);
             return;
         }
@@ -470,11 +464,8 @@ impl Scheduler {
         matches!(updated, Ok(written) if written.value.is_some())
     }
 
-    fn forget(&self, id: &ContinuationId) {
-        self.unanswered
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(id);
+    fn forget(&mut self, id: &ContinuationId) {
+        self.unanswered.remove(id);
     }
 
     async fn on_request(&self, request: Request) {
