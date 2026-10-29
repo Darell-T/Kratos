@@ -141,6 +141,14 @@ fn unfinished_codex_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfinis
         let work = unfinished.entry(thread_id.clone()).or_default();
         add_waiting_requests(store, &thread_id, work)?;
     }
+    codex_threads_only(store, unfinished)
+}
+
+/// The work of Codex threads. Another provider's threads are not this actor's to settle.
+fn codex_threads_only(
+    store: &Store,
+    unfinished: BTreeMap<ThreadId, Unfinished>,
+) -> Result<BTreeMap<ThreadId, Unfinished>, StoreError> {
     let mut codex = BTreeMap::new();
     for (thread_id, work) in unfinished {
         if store.provider_thread(&thread_id)?.thread.provider == Provider::Codex {

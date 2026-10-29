@@ -585,30 +585,26 @@ impl Actor {
             .and_then(|thread| thread.turn.running_id())
             == Some(&turn_id);
         match result {
-            Ok(()) if still_running => {
-                let timeout = self.settings.stop_timeout;
-                let (thread_id, turn_id) = (thread_id.clone(), turn_id.clone());
-                self.spawn(async move {
-                    tokio::time::sleep(timeout).await;
-                    Done::StopExpired { thread_id, turn_id }
-                });
+            Ok(()) => {
+                if still_running {
+                    let timeout = self.settings.stop_timeout;
+                    self.spawn(async move {
+                        tokio::time::sleep(timeout).await;
+                        Done::StopExpired { thread_id, turn_id }
+                    });
+                }
                 stopper.tell(|| Ok(()));
             }
-            Ok(()) => stopper.tell(|| Ok(())),
             Err(error) if still_running && matches!(stopper, Stopper::Deadline) => {
                 self.stop_server(&format!("a timed-out turn did not stop: {error}"))
                     .await;
             }
             Err(error) => {
-                if let Some(Turn::Running {
-                    stopping,
-                    turn_id: running,
-                    ..
-                }) = self
-                    .threads
-                    .get_mut(&thread_id)
-                    .map(|thread| &mut thread.turn)
-                    && *running == turn_id
+                if still_running
+                    && let Some(Turn::Running { stopping, .. }) = self
+                        .threads
+                        .get_mut(&thread_id)
+                        .map(|thread| &mut thread.turn)
                 {
                     // Another stop may try again; the queue stays where it is.
                     *stopping = false;
