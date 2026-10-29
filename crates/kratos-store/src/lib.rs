@@ -147,6 +147,9 @@ pub enum StoreError {
         from: &'static str,
         to: &'static str,
     },
+    /// A client sent an id the thread already holds with another message. Nothing was written.
+    #[error("Message {0} was already sent with different content; send it under a new id")]
+    MessageIdTaken(MessageId),
     /// A stored event this build cannot read, such as a kind it does not know. Reading stops there
     /// rather than skipping the event, because a follower must never miss one.
     #[error("event {} of thread {thread_id} is unreadable: {source}", .seq.get())]

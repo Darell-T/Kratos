@@ -48,7 +48,8 @@ const PENDING: &str = "'queued', 'submitting', 'failed', 'unknown'";
 impl ThreadWrite<'_> {
     /// Adds a message to the thread's queue, unless the id is already in the thread or the queue
     /// already holds `max_pending` undelivered messages (D85). Both checks run inside this write,
-    /// so two sends of one id store one message.
+    /// so two sends of one id store one message. `Err(MessageIdTaken)` when the thread holds the id
+    /// with another message.
     pub fn enqueue_message(
         &mut self,
         id: &MessageId,
@@ -58,6 +59,9 @@ impl ThreadWrite<'_> {
         max_pending: usize,
     ) -> Result<Enqueued, StoreError> {
         if let Some(existing) = message(&self.transaction, self.thread_id(), id)? {
+            if existing.input != input || existing.origin != origin {
+                return Err(StoreError::MessageIdTaken(id.clone()));
+            }
             return Ok(Enqueued::Existing(existing));
         }
         let (pending, position) = self.queue_slot(place)?;

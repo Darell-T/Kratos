@@ -344,7 +344,8 @@ impl Actor {
                 | StoreError::UnknownApproval(_)
                 | StoreError::UnknownQuestion(_)
                 | StoreError::UnknownContinuation(_)
-                | StoreError::MessageTransition { .. }),
+                | StoreError::MessageTransition { .. }
+                | StoreError::MessageIdTaken(_)),
             ) => Err(ProviderError::Store(error)),
             Err(error) => {
                 eprintln!("cannot record Codex work, so Codex stops: {error}");

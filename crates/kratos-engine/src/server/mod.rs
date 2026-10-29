@@ -211,6 +211,10 @@ impl From<StoreError> for ApiError {
                 status: StatusCode::NOT_FOUND,
                 message: error.to_string(),
             },
+            StoreError::MessageIdTaken(_) => ApiError {
+                status: StatusCode::CONFLICT,
+                message: error.to_string(),
+            },
             other => ApiError::internal(&other),
         }
     }
