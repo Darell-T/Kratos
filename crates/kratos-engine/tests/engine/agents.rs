@@ -363,6 +363,9 @@ fn a_message_id_sent_again_with_another_message_answers_409() {
     assert_eq!(added_file.status, 409, "{}", added_file.body);
     let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
     assert_eq!(details.body["queue"][0]["input"], first.body["input"]);
+    // FIXME: an engine killed while it starts Codex leaves Codex suspended outside its job, so the
+    // test lets the start finish before the engine is dropped.
+    engine.fake_codex_held("turn/start", 1);
 }
 
 #[test]
