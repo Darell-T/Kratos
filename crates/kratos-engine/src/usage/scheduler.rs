@@ -355,7 +355,14 @@ impl Scheduler {
                 self.wait_again(&thread_id, &continuation, account.as_ref())
                     .await
             }
-            Readiness::Unanswered => self.unanswered(&thread_id, &continuation).await,
+            Readiness::Unanswered => {
+                self.unanswered(
+                    &thread_id,
+                    &continuation,
+                    "Codex did not say whether the account may run",
+                )
+                .await;
+            }
             Readiness::AccountChanged => {
                 self.hand_to_user(&thread_id, &continuation, "The signed-in account changed")
                     .await;
@@ -385,8 +392,24 @@ impl Scheduler {
         continuation: &Continuation,
         account: Option<&AccountUsage>,
     ) {
-        self.forget(&continuation.id);
         let planned = plan(continuation.waits_on.provider, account);
+        let has_reset_passed = planned
+            .resets_at
+            .as_ref()
+            .and_then(Timestamp::instant)
+            .is_some_and(|reset| reset <= self.clock.now());
+        if has_reset_passed {
+            // A timer armed at this reset would fire at once, so the read says nothing about when
+            // to ask again.
+            self.unanswered(
+                thread_id,
+                continuation,
+                "Codex still reports the limit spent after its reset time",
+            )
+            .await;
+            return;
+        }
+        self.forget(&continuation.id);
         let is_scheduled = planned.state == ContinuationState::Scheduled;
         let resets_at = planned.resets_at.clone();
         if self
@@ -398,7 +421,7 @@ impl Scheduler {
         }
     }
 
-    async fn unanswered(&self, thread_id: &ThreadId, continuation: &Continuation) {
+    async fn unanswered(&self, thread_id: &ThreadId, continuation: &Continuation, why: &str) {
         let checks = {
             let mut unanswered = self
                 .unanswered
@@ -413,12 +436,7 @@ impl Scheduler {
             return;
         }
         self.forget(&continuation.id);
-        self.hand_to_user(
-            thread_id,
-            continuation,
-            "Codex did not say whether the account may run",
-        )
-        .await;
+        self.hand_to_user(thread_id, continuation, why).await;
     }
 
     async fn hand_to_user(&self, thread_id: &ThreadId, continuation: &Continuation, why: &str) {

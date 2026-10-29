@@ -676,10 +676,16 @@ async fn one_bucket_still_spent_holds_the_continuation_though_the_account_may_ru
         .await;
     clock.advance_to(at(RESET));
 
-    let waiting = next_continuation(&mut harness).await;
-    assert_eq!(waiting.state, ContinuationState::Scheduled);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    clock.wait_for_wake_up_at(at(RESET + 300)).await;
     assert_eq!(harness.turn_requests().await.len(), 1);
+    let id = scheduled.id.clone();
+    let (_, waiting) = harness
+        .store
+        .call(move |store| store.continuation(&id))
+        .await
+        .unwrap()
+        .expect("the continuation is stored");
+    assert_eq!(waiting.state, ContinuationState::Scheduled);
 }
 
 #[tokio::test]
