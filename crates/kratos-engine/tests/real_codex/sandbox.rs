@@ -1,5 +1,6 @@
 use fake_agents::responses::Reply;
-use kratos_protocol::{Permission, ThreadSettings};
+use kratos_protocol::{AskReason, Permission, ThreadEventBody, ThreadSettings};
+use serde_json::json;
 
 use crate::support::Harness;
 
@@ -25,6 +26,51 @@ async fn a_full_access_thread_runs_a_harmless_command() {
             .tool_outputs()
             .iter()
             .any(|output| output.to_string().contains("KRATOS_FULL_CONTROL"))
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
+async fn a_full_access_thread_asks_before_a_dangerous_command() {
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::FullAccess,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::command("Remove-Item -LiteralPath delete-fixture -Recurse -Force"),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    let fixture = harness.folder().join("delete-fixture");
+    std::fs::create_dir(&fixture).unwrap();
+    std::fs::write(fixture.join("keep.txt"), "keep me").unwrap();
+    harness.send("dangerous-delete");
+    let approval = loop {
+        match harness.next_event().await {
+            ThreadEventBody::ApprovalRequested { approval } => break approval,
+            ThreadEventBody::ThreadPaused { reason } => panic!("real Codex paused: {reason:?}"),
+            ThreadEventBody::TurnCompleted { outcome, .. } => {
+                panic!("the delete ran without asking: {outcome:?}")
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(approval.why, AskReason::Dangerous);
+    let declined = harness
+        .client
+        .post(
+            &format!("/api/approvals/{}", approval.id),
+            &json!({ "decision": "decline" }),
+        )
+        .unwrap();
+    assert_eq!(declined.status, 200, "{:?}", declined.body);
+    harness.completed().await;
+    assert!(
+        fixture.join("keep.txt").exists(),
+        "the declined delete still ran"
     );
     harness.stop().await;
 }

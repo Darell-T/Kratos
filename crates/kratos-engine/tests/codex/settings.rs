@@ -204,7 +204,7 @@ async fn a_permission_changed_mid_turn_applies_from_the_next_turn() {
     harness.complete(THREAD, "turn-1", "completed").await;
     harness.send("b", "second").await;
     let started = harness.held("turn/start", 2).await;
-    assert_eq!(started[1]["params"]["permissions"], "kratos-full");
+    assert_eq!(started[1]["params"]["permissions"], ":danger-full-access");
     tokio::time::sleep(Duration::from_millis(50)).await;
 }
 

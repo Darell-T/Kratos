@@ -70,7 +70,7 @@ async fn the_thread_opens_untrusted_and_the_launch_defines_every_profile() {
         json!(harness.root.path().join("server"))
     );
     let kratos_home = serde_json::to_string(&harness.root.path().join("kratos")).unwrap();
-    for profile in ["kratos-plan", "kratos-ask", "kratos-approve", "kratos-full"] {
+    for profile in ["kratos-plan", "kratos-ask", "kratos-approve"] {
         let table = arguments
             .iter()
             .find(|argument| argument.starts_with(&format!("permissions.{profile}.filesystem=")))

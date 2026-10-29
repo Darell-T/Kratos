@@ -299,9 +299,11 @@ mod tests {
     }
 
     #[test]
-    fn every_profile_denies_kratos_data_and_only_full_access_opens_the_network() {
-        // Catches a profile that forgets the deny entry, which would let an agent command read the
-        // client token, and a network switch on the wrong profile.
+    fn sandboxed_profiles_write_only_workspaces_and_temp_and_full_access_has_no_sandbox() {
+        // Catches a profile that writes the home folder, which on Windows makes Codex change the
+        // permissions of every file in it before a thread starts, a sandboxed profile that forgets
+        // the deny entry, which would let an agent command read the client token, and a network
+        // switch on the wrong profile.
         let folders = folders();
         let arguments: Vec<String> = folders
             .launch_arguments(Path::new("/tmp"))
@@ -309,19 +311,33 @@ mod tests {
             .map(|argument| argument.into_string().unwrap())
             .collect();
         let deny = format!("{}=\"deny\"", toml_key(folders.kratos_home()));
-
-        for (profile, id) in PROFILES {
-            let table = arguments
+        let workspaces =
+            format!(r#"":root"="read", ":workspace_roots"="write", "/tmp"="write", {deny}"#);
+        let table = |id: &str| {
+            arguments
                 .iter()
                 .find(|argument| argument.starts_with(&format!("permissions.{id}.filesystem=")))
-                .unwrap_or_else(|| panic!("{profile:?} is defined"));
-            assert!(table.contains(&deny), "{table}");
+                .cloned()
+        };
+
+        assert_eq!(
+            table("kratos-plan"),
+            Some(format!(
+                r#"permissions.kratos-plan.filesystem={{":root"="read", {deny}}}"#
+            ))
+        );
+        for id in ["kratos-ask", "kratos-approve"] {
+            assert_eq!(
+                table(id),
+                Some(format!("permissions.{id}.filesystem={{{workspaces}}}"))
+            );
         }
+        assert_eq!(Profile::FullAccess.id(), ":danger-full-access");
         let network: Vec<&String> = arguments
             .iter()
             .filter(|argument| argument.contains("network"))
             .collect();
-        assert_eq!(network, ["permissions.kratos-full.network.enabled=true"]);
+        assert_eq!(network, ["permissions.kratos-approve.network.enabled=true"]);
     }
 
     #[test]

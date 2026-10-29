@@ -9,7 +9,7 @@ use crate::support::{Harness, WAIT};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
-async fn a_full_access_agent_and_its_child_cannot_read_the_token_or_decide_an_approval() {
+async fn an_approve_for_me_agent_and_its_child_cannot_read_the_token_or_decide_an_approval() {
     let mut harness = Harness::start(
         ThreadSettings::default(),
         vec![Reply::command("Write-Output needs-user")],
@@ -29,7 +29,7 @@ async fn a_full_access_agent_and_its_child_cannot_read_the_token_or_decide_an_ap
     let attacker: Thread = harness.client.post("/api/threads", &json!({
         "workspaceId": harness.thread.workspace_id,
         "title": "API isolation probe", "provider": "codex",
-        "settings": ThreadSettings { permission: Permission::FullAccess, ..ThreadSettings::default() }
+        "settings": ThreadSettings { permission: Permission::ApproveForMe, ..ThreadSettings::default() }
     })).unwrap().parse().unwrap();
     let script = format!(
         r#"
