@@ -34,7 +34,7 @@ fn path<T>(path: Result<Path<T>, PathRejection>) -> Result<T, ApiError> {
 }
 
 impl ServerState {
-    fn codex(&self) -> Result<&CodexProvider, ApiError> {
+    pub(super) fn codex(&self) -> Result<&CodexProvider, ApiError> {
         self.codex
             .as_ref()
             .map_err(|missing| ApiError::unavailable(missing.clone()))

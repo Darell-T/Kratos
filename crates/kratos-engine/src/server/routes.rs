@@ -5,7 +5,7 @@ use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use kratos_protocol::{CreateThread, CreateWorkspace, Health, ListThreads};
+use kratos_protocol::{CreateThread, CreateWorkspace, Health, ListThreads, Provider};
 
 use super::json::read_json;
 use super::{ApiError, ServerState, json_reply};
@@ -56,13 +56,16 @@ pub(super) async fn list_threads(
     Ok(json_reply(StatusCode::OK, &threads))
 }
 
-/// `POST /api/threads`: 201 with the thread. Body (413 or 400), then the workspace (404), then the
-/// insert.
+/// `POST /api/threads`: 201 with the thread. Body (413 or 400), then a Codex thread's settings
+/// (400), then the workspace (404), then the insert.
 pub(super) async fn create_thread(
     State(state): State<ServerState>,
     body: Body,
 ) -> Result<Response, ApiError> {
     let request: CreateThread = read_json(body).await?;
+    if let (Provider::Codex, Some(settings)) = (request.provider, &request.settings) {
+        state.codex()?.check_settings(settings.clone()).await?;
+    }
     let thread = state
         .store
         .call(move |store| store.create_thread(&request))

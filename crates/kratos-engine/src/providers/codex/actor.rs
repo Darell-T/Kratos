@@ -70,6 +70,10 @@ pub(super) enum Command {
         settings: ThreadSettings,
         reply: Reply<()>,
     },
+    CheckSettings {
+        settings: ThreadSettings,
+        reply: Reply<()>,
+    },
     Decide {
         approval_id: ApprovalId,
         decision: ApprovalDecision,

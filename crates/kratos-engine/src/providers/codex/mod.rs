@@ -264,6 +264,13 @@ impl CodexProvider {
         .await
     }
 
+    /// Refuses settings a new thread could not run with, by the checks [`Self::set_settings`]
+    /// applies.
+    pub async fn check_settings(&self, settings: ThreadSettings) -> Result<(), ProviderError> {
+        self.ask(|reply| actor::Command::CheckSettings { settings, reply })
+            .await
+    }
+
     /// Records the first decision on an approval and sends it to Codex. A later decision gets the
     /// recorded outcome (D83).
     pub async fn decide(
