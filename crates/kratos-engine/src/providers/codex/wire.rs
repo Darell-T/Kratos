@@ -446,16 +446,16 @@ pub struct ChangesRecorder {
 }
 
 impl ChangesRecorder {
-    pub fn record(&mut self, item: &types::ThreadItem) {
+    pub fn record(&mut self, item: &AgentItem) {
         match item {
-            types::ThreadItem::FileChange {
-                status: types::PatchApplyStatus::Completed,
+            AgentItem::FileChanges {
+                status: ItemStatus::Completed,
                 changes,
                 ..
             } => {
                 for change in changes {
                     self.edited(&change.path);
-                    if let types::PatchChangeKind::Update {
+                    if let FileChangeKind::Update {
                         move_path: Some(path),
                     } = &change.kind
                     {
@@ -463,9 +463,8 @@ impl ChangesRecorder {
                     }
                 }
             }
-            types::ThreadItem::CommandExecution {
-                status:
-                    types::CommandExecutionStatus::Completed | types::CommandExecutionStatus::Failed,
+            AgentItem::Command {
+                status: ItemStatus::Completed | ItemStatus::Failed,
                 ..
             } => {
                 self.ran_command = true;
@@ -506,8 +505,9 @@ mod tests {
         // Catches a recorder that misses a rename's destination, repeats a file edited twice, or
         // keeps reporting an edit as unchecked after a later command ran.
         let mut changes = ChangesRecorder::default();
+        let recorded = |value: Value| agent_item(&item(value)).unwrap();
         let patch = |path: &str, kind: Value| {
-            item(
+            recorded(
                 json!({ "type": "fileChange", "id": "p", "status": "completed",
                 "changes": [{ "path": path, "kind": kind, "diff": "" }] }),
             )
@@ -517,7 +517,7 @@ mod tests {
             json!({ "type": "update", "move_path": "b.rs" }),
         ));
         changes.record(&patch("a.rs", json!({ "type": "update" })));
-        changes.record(&item(
+        changes.record(&recorded(
             json!({ "type": "commandExecution", "id": "c", "command": "cargo test",
             "commandActions": [], "cwd": "/w", "status": "failed" }),
         ));

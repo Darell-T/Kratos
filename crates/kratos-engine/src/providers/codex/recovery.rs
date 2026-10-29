@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use kratos_protocol::{
-    ApprovalId, MessageId, MessageStatus, PauseReason, Provider, QuestionId, ThreadId, TurnChanges,
-    TurnId, TurnOutcome,
+    ApprovalId, MessageId, MessageStatus, PauseReason, Provider, QuestionId, Seq, ThreadEventBody,
+    ThreadId, TurnChanges, TurnId, TurnOutcome,
 };
 use kratos_store::{Settle, Store, StoreError, ThreadWrite};
 use tokio::sync::mpsc;
@@ -16,7 +16,8 @@ use tokio::sync::mpsc;
 use super::CodexSettings;
 use super::actor::{Actor, Server};
 use super::requests::Requests;
-use crate::hub::Hub;
+use super::wire::ChangesRecorder;
+use crate::hub::{Hub, PAGE_BYTES};
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
 use crate::usage::scheduler::LimitStop;
@@ -41,7 +42,8 @@ const RESTARTED: &str = "Kratos restarted, and the Codex process that asked is g
 /// One thread's unfinished work.
 #[derive(Default)]
 struct Unfinished {
-    running_turn: Option<TurnId>,
+    /// The turn the log shows running, and what its recorded items changed.
+    running_turn: Option<(TurnId, TurnChanges)>,
     sending: Vec<MessageId>,
     approvals: Vec<ApprovalId>,
     questions: Vec<QuestionId>,
@@ -95,12 +97,7 @@ impl Actor {
 /// message being sent as uncertain, in one write.
 fn settle(write: &mut ThreadWrite<'_>, work: Unfinished) -> Result<(), StoreError> {
     close_requests(write, &work)?;
-    if let Some(turn_id) = work.running_turn {
-        let changes = TurnChanges {
-            files: Vec::new(),
-            edited_since_command: false,
-            ran_command: false,
-        };
+    if let Some((turn_id, changes)) = work.running_turn {
         write.complete_turn(turn_id, TurnOutcome::Interrupted, changes, None)?;
         if !write.pending_messages()?.is_empty() {
             write.pause(PauseReason::Interrupted)?;
@@ -130,7 +127,8 @@ fn close_requests(write: &mut ThreadWrite<'_>, work: &Unfinished) -> Result<(), 
 fn unfinished_codex_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfinished>, StoreError> {
     let mut unfinished: BTreeMap<ThreadId, Unfinished> = BTreeMap::new();
     for (thread_id, turn_id) in store.threads_with_running_turns()? {
-        unfinished.entry(thread_id).or_default().running_turn = Some(turn_id);
+        let changes = recorded_changes(store, &thread_id, &turn_id)?;
+        unfinished.entry(thread_id).or_default().running_turn = Some((turn_id, changes));
     }
     for (thread_id, message_id) in store.submitting_messages()? {
         unfinished
@@ -150,4 +148,32 @@ fn unfinished_codex_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfinis
         }
     }
     Ok(codex)
+}
+
+/// What the turn changed, counted from the items the log recorded for it the way the live turn
+/// counts them.
+fn recorded_changes(
+    store: &Store,
+    thread_id: &ThreadId,
+    turn_id: &TurnId,
+) -> Result<TurnChanges, StoreError> {
+    let mut changes = ChangesRecorder::default();
+    let mut after = Seq::BEFORE_FIRST;
+    loop {
+        let page = store.events_after(thread_id, after, PAGE_BYTES)?;
+        let Some(last) = page.last() else {
+            return Ok(changes.take());
+        };
+        after = last.seq;
+        for event in &page {
+            if let ThreadEventBody::ItemCompleted {
+                turn_id: item_turn,
+                item,
+            } = &event.event
+                && item_turn == turn_id
+            {
+                changes.record(item);
+            }
+        }
+    }
 }

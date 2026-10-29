@@ -107,11 +107,11 @@ impl Actor {
         let Some(thread_id) = self.thread_of(&completed.thread_id) else {
             return;
         };
-        let thread = self.threads.get_mut(&thread_id).expect("found above");
-        thread.changes.record(&completed.item);
         let Some(item) = wire::agent_item(&completed.item) else {
             return;
         };
+        let thread = self.threads.get_mut(&thread_id).expect("found above");
+        thread.changes.record(&item);
         let turn_id = TurnId::new(completed.turn_id);
         let _ = self
             .write(&thread_id, move |write| {
