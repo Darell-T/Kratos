@@ -12,46 +12,43 @@ use crate::harness::{Harness, Options};
 const THREAD: &str = "thread-A";
 
 #[tokio::test]
-async fn workspace_permissions_refresh_each_turn_and_shrink_when_switching_to_ask_me() {
-    let full = ThreadSettings {
-        permission: Permission::FullAccess,
+async fn every_permission_writes_only_the_thread_s_own_workspace() {
+    // Catches a turn that lets Codex write another registered workspace, which on Windows makes
+    // Codex change the permissions of every file in that project too.
+    let approve = ThreadSettings {
+        permission: Permission::ApproveForMe,
         ..ThreadSettings::default()
     };
     let mut harness = Harness::start(Options {
-        settings: full,
+        settings: approve,
         ..Options::default()
     })
     .await;
-    harness.running_turn("a", "turn-1").await;
     harness.another_thread("registered-later").await;
+    harness.running_turn("a", "turn-1").await;
     harness.complete(THREAD, "turn-1", "completed").await;
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
         .await;
-
-    harness.running_turn("b", "turn-2").await;
-    let requests = harness.turn_requests().await;
-    let roots = requests[1]["params"]["runtimeWorkspaceRoots"]
-        .as_array()
-        .unwrap();
-    assert_eq!(roots.len(), 2);
-    assert!(roots.contains(&json!(harness.root.path().join("registered-later"))));
-
+    let full = ThreadSettings {
+        permission: Permission::FullAccess,
+        ..ThreadSettings::default()
+    };
     harness
         .provider
-        .set_settings(harness.thread_id.clone(), ThreadSettings::default())
+        .set_settings(harness.thread_id.clone(), full)
         .await
         .unwrap();
-    harness.complete(THREAD, "turn-2", "completed").await;
-    harness
-        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
-        .await;
-    harness.running_turn("c", "turn-3").await;
+    harness.running_turn("b", "turn-2").await;
+
     let requests = harness.turn_requests().await;
-    assert_eq!(
-        requests[2]["params"]["runtimeWorkspaceRoots"],
-        json!([harness.folder()])
-    );
+    for request in &requests {
+        assert_eq!(
+            request["params"]["runtimeWorkspaceRoots"],
+            json!([harness.folder()])
+        );
+    }
+    assert_eq!(requests.len(), 2);
     harness.stop().await;
 }
 
