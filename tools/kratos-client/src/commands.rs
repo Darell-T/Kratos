@@ -6,11 +6,15 @@
 //! relative values.
 
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
-use kratos_client::{ApiReply, ApiRequest, Client, ClientError, Incoming, Normalizer, bench_post};
+use kratos_client::{
+    ApiReply, ApiRequest, Client, ClientError, Followed, Incoming, Normalizer, bench_post,
+    bench_turns,
+};
 use kratos_protocol::{Seq, ServerMessage, ThreadId};
 use serde_json::{Value, json};
 
@@ -23,14 +27,31 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   threads <workspace-id>
   create-thread <workspace-id> <title> <provider>
   post <thread-id> <text>
+  send <thread-id> <text> [--message-id <id>] [--image <path>]... [--file <path>]...
+  thread <thread-id>
+  steer <thread-id> <message-id>
+  remove <thread-id> <message-id>
+  retry <thread-id> <message-id>
+  discard <thread-id> <message-id>
+  stop <thread-id>
+  resume <thread-id>
+  settings <thread-id> <settings-json>
+  skills <thread-id>
+  approve <approval-id> <accept|acceptForSession|decline|cancel>
+  answer <question-id> <answers-json>
+  schedule <continuation-id>
+  usage
   subscribe <thread-id> [--after <seq>] [--count <n>] [--read-delay-ms <ms>]
   request <METHOD> <path> [--header <name:value>]... [--json <body> | --body-bytes <n>]
   socket-send <bytes> [--header <name:value>]...
   bench-post <url>
+  bench-turns <fake-control-file>
 
-The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200.
+The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
+engine wrote to $KRATOS_HOME/client-token (default ~/.kratos/client-token), when there is one.
 --normalize replaces ids and times, so two engines' output compares with a plain diff.
-subscribe follows a thread through disconnects and engine restarts and prints each event once.
+subscribe follows a thread through disconnects and engine restarts and prints each event once,
+and live updates, such as a reply as it is written, as they come; --count counts events only.
 --read-delay-ms makes it a stalled reader: it subscribes, waits, then reads.
 request sends exactly what it is told, for the Host, Origin, and size-cap checks.
 socket-send sends one message of exactly <bytes> bytes and reports whether the engine closed
@@ -67,13 +88,29 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 10] = [
+const COMMANDS: [Command; 25] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
     Command { name: "threads", positional: 1, options: &[], run: threads },
     Command { name: "create-thread", positional: 3, options: &[], run: create_thread },
     Command { name: "post", positional: 2, options: &[], run: post },
+    Command {
+        name: "send", positional: 2, options: &["--message-id", "--image", "--file"], run: send,
+    },
+    Command { name: "thread", positional: 1, options: &[], run: thread_details },
+    Command { name: "steer", positional: 2, options: &[], run: steer },
+    Command { name: "remove", positional: 2, options: &[], run: remove },
+    Command { name: "retry", positional: 2, options: &[], run: retry },
+    Command { name: "discard", positional: 2, options: &[], run: discard },
+    Command { name: "stop", positional: 1, options: &[], run: stop },
+    Command { name: "resume", positional: 1, options: &[], run: resume },
+    Command { name: "settings", positional: 2, options: &[], run: settings },
+    Command { name: "skills", positional: 1, options: &[], run: skills },
+    Command { name: "approve", positional: 2, options: &[], run: approve },
+    Command { name: "answer", positional: 2, options: &[], run: answer },
+    Command { name: "schedule", positional: 1, options: &[], run: schedule },
+    Command { name: "usage", positional: 0, options: &[], run: usage_report },
     Command {
         name: "subscribe", positional: 1,
         options: &["--after", "--count", "--read-delay-ms"], run: subscribe,
@@ -84,6 +121,7 @@ const COMMANDS: [Command; 10] = [
     },
     Command { name: "socket-send", positional: 1, options: &["--header"], run: socket_send },
     Command { name: "bench-post", positional: 1, options: &[], run: bench },
+    Command { name: "bench-turns", positional: 1, options: &[], run: turns_bench },
 ];
 
 pub fn run(arguments: &[String]) -> Result<(), Failure> {
@@ -101,7 +139,7 @@ pub fn run(arguments: &[String]) -> Result<(), Failure> {
         .or_else(|| std::env::var("KRATOS_URL").ok())
         .unwrap_or_else(|| DEFAULT_URL.to_owned());
     let mut session = Session {
-        client: Client::new(&url)?,
+        client: with_token(Client::new(&url)?),
         normalizer: args.normalize.then(Normalizer::default),
     };
     (command.run)(&mut session, &args)
@@ -245,18 +283,142 @@ fn post(session: &mut Session, args: &Args) -> Result<(), Failure> {
     session.post(&path, &json!({ "text": args.positional[1] }))
 }
 
+/// Text alone goes as `text`; with attachments, as `input` parts, the text first (D86).
+fn send(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let path = format!("/api/threads/{}/messages", encode(&args.positional[0]));
+    let text = &args.positional[1];
+    let attachments: Vec<Value> = args
+        .options_named("--image")
+        .map(|path| json!({ "type": "image", "path": path }))
+        .chain(
+            args.options_named("--file")
+                .map(|path| json!({ "type": "file", "path": path })),
+        )
+        .collect();
+    let mut body = if attachments.is_empty() {
+        json!({ "text": text })
+    } else {
+        let parts = std::iter::once(json!({ "type": "text", "text": text })).chain(attachments);
+        json!({ "input": parts.collect::<Vec<_>>() })
+    };
+    if let Some(message_id) = args.option("--message-id") {
+        body["messageId"] = json!(message_id);
+    }
+    session.post(&path, &body)
+}
+
+fn thread_details(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    session.get(&format!("/api/threads/{}", encode(&args.positional[0])))
+}
+
+fn message_path(args: &Args, action: &str) -> String {
+    let [thread_id, message_id] = [0, 1].map(|index| encode(&args.positional[index]));
+    format!("/api/threads/{thread_id}/messages/{message_id}{action}")
+}
+
+fn steer(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    session.post(&message_path(args, "/steer"), &json!({}))
+}
+
+fn remove(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let reply = session.client.delete(&message_path(args, ""))?;
+    session.print_reply(reply);
+    Ok(())
+}
+
+fn retry(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    session.post(&message_path(args, "/retry"), &json!({}))
+}
+
+fn discard(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    session.post(&message_path(args, "/discard"), &json!({}))
+}
+
+fn stop(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let path = format!("/api/threads/{}/stop", encode(&args.positional[0]));
+    session.post(&path, &json!({}))
+}
+
+fn resume(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let path = format!("/api/threads/{}/resume", encode(&args.positional[0]));
+    session.post(&path, &json!({}))
+}
+
+fn settings(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let path = format!("/api/threads/{}/settings", encode(&args.positional[0]));
+    let body = json_argument(&args.positional[1], "settings-json")?;
+    let reply = session.client.put(&path, &body)?;
+    session.print_reply(reply);
+    Ok(())
+}
+
+fn skills(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    session.get(&format!(
+        "/api/threads/{}/skills",
+        encode(&args.positional[0])
+    ))
+}
+
+fn approve(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let path = format!("/api/approvals/{}", encode(&args.positional[0]));
+    session.post(&path, &json!({ "decision": args.positional[1] }))
+}
+
+fn answer(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let path = format!("/api/questions/{}", encode(&args.positional[0]));
+    let answers = json_argument(&args.positional[1], "answers-json")?;
+    session.post(&path, &json!({ "answers": answers }))
+}
+
+fn schedule(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let path = format!(
+        "/api/continuations/{}/schedule",
+        encode(&args.positional[0])
+    );
+    session.post(&path, &json!({}))
+}
+
+fn usage_report(session: &mut Session, _: &Args) -> Result<(), Failure> {
+    session.get("/api/usage")
+}
+
+fn json_argument(text: &str, name: &str) -> Result<Value, Failure> {
+    serde_json::from_str(text).or_else(|_| usage(format!("{name} must be JSON, got {text:?}")))
+}
+
+/// `client` with the token of the engine on `$KRATOS_HOME`, else on `.kratos` in the user's home
+/// folder.
+fn with_token(client: Client) -> Client {
+    let home = std::env::var_os("KRATOS_HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".kratos")));
+    match home {
+        Some(home) => client.with_token_from(&home),
+        None => client,
+    }
+}
+
 fn subscribe(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let thread_id = ThreadId::new(args.positional[0].clone());
     let after = Seq::new(args.number("--after")?.unwrap_or(0));
     let count: usize = args.number("--count")?.unwrap_or(usize::MAX);
-    let mut follower = session.client.follow(thread_id, after);
+    let mut follower = session.client.follow(thread_id.clone(), after);
     follower.connect()?;
     if let Some(milliseconds) = args.number("--read-delay-ms")? {
         thread::sleep(Duration::from_millis(milliseconds));
     }
-    for _ in 0..count {
-        match follower.next_event(SUBSCRIBE_WAIT) {
-            Ok(event) => session.print(message_line(&ServerMessage::Event { event })),
+    let mut printed = 0;
+    while printed < count {
+        match follower.next(SUBSCRIBE_WAIT) {
+            Ok(Followed::Event(event)) => {
+                printed += 1;
+                session.print(message_line(&ServerMessage::Event { event }));
+            }
+            Ok(Followed::Live(update)) => {
+                let thread_id = thread_id.clone();
+                session.print(message_line(&ServerMessage::Live { thread_id, update }));
+            }
             Err(ClientError::Engine(message)) => {
                 session.print(message_line(&ServerMessage::Error {
                     message: message.clone(),
@@ -315,12 +477,18 @@ fn socket_send(session: &mut Session, args: &Args) -> Result<(), Failure> {
 }
 
 fn bench(_: &mut Session, args: &Args) -> Result<(), Failure> {
-    let client = Client::new(&args.positional[0])?;
+    let client = with_token(Client::new(&args.positional[0])?);
     let report = bench_post(&client, BENCH_MESSAGES)?;
     println!(
         "{}",
         serde_json::to_string(&report).expect("a bench report serializes")
     );
+    Ok(())
+}
+
+fn turns_bench(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let report = bench_turns(&session.client, std::path::Path::new(&args.positional[0]))?;
+    session.print(serde_json::to_value(report).expect("a bench report serializes"));
     Ok(())
 }
 

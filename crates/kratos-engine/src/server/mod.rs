@@ -1,52 +1,85 @@
+mod agents;
+pub mod auth;
 mod json;
 mod local_only;
+mod paths;
 mod routes;
 mod socket;
 
-use std::future::Future;
+use std::future::{Future, IntoFuture};
 use std::io;
+use std::time::Duration;
 
 use axum::Router;
 use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use kratos_protocol::ErrorBody;
 use kratos_store::StoreError;
 use serde::Serialize;
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 
 use crate::hub::Hub;
+use crate::providers::codex::CodexProvider;
 use crate::store_thread::StoreThread;
+use crate::usage::UsageTracker;
+use crate::usage::scheduler::SchedulerHandle;
+
+pub use auth::ClientToken;
 
 /// The largest request body a route reads. One byte more answers 413.
 pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// The largest message a client may send on the socket. One byte more closes that socket.
 pub const MAX_SOCKET_MESSAGE_BYTES: usize = 64 * 1024;
+/// Time for in-flight HTTP requests to finish after shutdown. A stalled upload cannot hold the
+/// process open beyond this drain period.
+const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct ServerState {
     pub store: StoreThread,
     pub hub: Hub,
+    /// The Codex provider, or why Codex cannot run, such as no Codex installed.
+    pub codex: Result<CodexProvider, String>,
+    /// The usage scheduler, which runs only beside the Codex provider.
+    pub scheduler: Option<SchedulerHandle>,
+    pub usage: UsageTracker,
+    pub token: ClientToken,
 }
 
 /// Serves the API on `listener` until `shutdown` completes, then stops accepting and lets the HTTP
-/// requests in flight finish. Sockets end when the runtime that runs them is dropped.
+/// requests in flight finish for at most [`HTTP_DRAIN_TIMEOUT`]. The caller drops the runtime
+/// after this returns, cancelling remaining requests and sockets before the store closes.
 pub async fn serve(
     listener: TcpListener,
     state: ServerState,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown)
-        .await
+    let (draining, drain_started) = oneshot::channel();
+    let serving = axum::serve(listener, router(state))
+        .with_graceful_shutdown(async move {
+            shutdown.await;
+            let _ = draining.send(());
+        })
+        .into_future();
+    tokio::pin!(serving);
+    tokio::select! {
+        result = &mut serving => result,
+        _ = drain_started => match tokio::time::timeout(HTTP_DRAIN_TIMEOUT, serving).await {
+            Ok(result) => result,
+            Err(_) => Ok(()),
+        },
+    }
 }
 
 /// Anything but these routes, including a known path with another method, answers 404
 /// `{"error":"Not found"}`.
 fn router(state: ServerState) -> Router {
-    Router::new()
+    let token = state.token.clone();
+    let routes = Router::new()
         .route("/api/health", get(routes::health))
         .route(
             "/api/workspaces",
@@ -56,13 +89,47 @@ fn router(state: ServerState) -> Router {
             "/api/threads",
             get(routes::list_threads).post(routes::create_thread),
         )
-        .route("/api/threads/{id}/messages", post(routes::post_message))
+        .route("/api/threads/{id}", get(agents::thread_details))
+        .route("/api/threads/{id}/messages", post(agents::post_message))
+        .route(
+            "/api/threads/{id}/messages/{message_id}",
+            delete(agents::remove_message),
+        )
+        .route(
+            "/api/threads/{id}/messages/{message_id}/steer",
+            post(agents::steer),
+        )
+        .route(
+            "/api/threads/{id}/messages/{message_id}/retry",
+            post(agents::retry_message),
+        )
+        .route(
+            "/api/threads/{id}/messages/{message_id}/discard",
+            post(agents::discard_message),
+        )
+        .route("/api/threads/{id}/stop", post(agents::stop))
+        .route("/api/threads/{id}/resume", post(agents::resume))
+        .route("/api/threads/{id}/settings", put(agents::put_settings))
+        .route("/api/threads/{id}/skills", get(agents::skills))
+        .route("/api/approvals/{id}", post(agents::decide))
+        .route("/api/questions/{id}", post(agents::answer))
+        .route("/api/continuations/{id}/schedule", post(agents::schedule))
+        .route("/api/usage", get(agents::usage))
         .route("/api/events", get(socket::events))
         .fallback(routes::not_found)
         .method_not_allowed_fallback(routes::not_found)
-        // Added last, so it wraps every route and both fallbacks.
+        .with_state(state);
+    // An outer service rewrites the URI before the inner router selects a route. Router::layer
+    // on the inner router would run only after that selection.
+    Router::new()
+        .fallback_service(routes)
+        .layer(middleware::from_fn_with_state(
+            token,
+            auth::require_client_token,
+        ))
+        .layer(middleware::from_fn(paths::normalize_http_api_path))
+        // Added last, so the Host and Origin checks run before normalization and every route.
         .layer(middleware::from_fn(local_only::refuse_other_hosts))
-        .with_state(state)
 }
 
 #[derive(Debug)]
@@ -72,6 +139,13 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    fn new(status: StatusCode, message: impl ToString) -> ApiError {
+        ApiError {
+            status,
+            message: message.to_string(),
+        }
+    }
+
     pub fn bad_request(message: impl Into<String>) -> ApiError {
         ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -83,6 +157,21 @@ impl ApiError {
         ApiError {
             status: StatusCode::NOT_FOUND,
             message: "Not found".into(),
+        }
+    }
+
+    pub fn unauthorized() -> ApiError {
+        ApiError {
+            status: StatusCode::UNAUTHORIZED,
+            message: "Unauthorized".into(),
+        }
+    }
+
+    /// The agent cannot serve the request now, for example because Codex is not installed.
+    pub fn unavailable(message: String) -> ApiError {
+        ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message,
         }
     }
 
@@ -120,6 +209,10 @@ impl From<StoreError> for ApiError {
         match error {
             StoreError::UnknownThread(_) | StoreError::UnknownWorkspace(_) => ApiError {
                 status: StatusCode::NOT_FOUND,
+                message: error.to_string(),
+            },
+            StoreError::MessageIdTaken(_) => ApiError {
+                status: StatusCode::CONFLICT,
                 message: error.to_string(),
             },
             other => ApiError::internal(&other),

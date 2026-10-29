@@ -15,12 +15,16 @@ use rusqlite::types::Value;
 use serde_json::json;
 use tempfile::TempDir;
 
-const STEPS: [&str; 4] = [
+const STEPS: [&str; 5] = [
     include_str!("../migrations/0001_workspaces_and_threads.sql"),
     include_str!("../migrations/0002_codex_threads.sql"),
     include_str!("../migrations/0003_claude_threads.sql"),
     include_str!("../migrations/0004_plan_mode.sql"),
+    include_str!("../migrations/0005_thread_sandbox_and_usage.sql"),
 ];
+
+/// The last schema version the TypeScript engine wrote.
+const TYPESCRIPT_VERSION: u32 = 4;
 
 fn home() -> TempDir {
     tempfile::tempdir().unwrap()
@@ -157,6 +161,24 @@ fn rows_of(contents: &[String], table: &str) -> Vec<String> {
         .filter(|line| line.starts_with(&prefix))
         .cloned()
         .collect()
+}
+
+/// The rows of `table`, each as its column values in order.
+fn rows(database: &Path, table: &str) -> Vec<Vec<Value>> {
+    let connection = Connection::open(database).unwrap();
+    let mut statement = connection
+        .prepare(&format!("SELECT * FROM {table} ORDER BY rowid"))
+        .or_else(|_| connection.prepare(&format!("SELECT * FROM {table}")))
+        .unwrap();
+    let width = statement.column_count();
+    let rows = statement
+        .query_map([], |row| {
+            (0..width)
+                .map(|index| row.get::<_, Value>(index))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .unwrap();
+    rows.map(|row| row.unwrap()).collect()
 }
 
 fn schema(database: &Path) -> Vec<(String, String, String, Option<String>)> {
@@ -385,9 +407,10 @@ fn opens_a_database_the_typescript_engine_wrote() {
 
     let mut store = Store::open(home.path()).unwrap();
 
-    assert!(
-        store.backup_taken().is_none(),
-        "the fixture is already at the current version"
+    assert_eq!(
+        store.backup_taken().map(|backup| backup.source_version),
+        Some(TYPESCRIPT_VERSION),
+        "the TypeScript database is backed up before migration 5"
     );
     let workspaces = store.list_workspaces().unwrap();
     assert_eq!(
@@ -425,12 +448,12 @@ fn opens_a_database_the_typescript_engine_wrote() {
 }
 
 #[test]
-fn creates_the_schema_text_the_typescript_engine_created() {
+fn migrations_one_to_four_create_the_schema_text_the_typescript_engine_created() {
     // Catches a migration file that drifted from the TypeScript statements, or a checkout that
     // rewrote its line endings. SQLite stores each CREATE statement's text, so either would make
     // the two engines' files differ even though both open.
     let rust_home = home();
-    drop(Store::open(rust_home.path()).unwrap());
+    database_at_version(rust_home.path(), TYPESCRIPT_VERSION);
     let typescript_home = home();
     fs::copy(
         typescript_fixture().0,
@@ -473,15 +496,36 @@ fn backs_up_each_older_version_before_migrating_it() {
             before,
             "the backup is the database before the migration"
         );
-        let after = contents(&live);
         assert_eq!(user_version(&live), SCHEMA_VERSION);
         for table in ["workspaces", "threads", "thread_events"] {
+            let (old, new) = (rows(&backup.path, table), rows(&live, table));
             assert_eq!(
-                rows_of(&after, table),
-                rows_of(&before, table),
+                new.len(),
+                old.len(),
                 "{table} after migrating from {version}"
             );
+            for (old, new) in old.iter().zip(&new) {
+                assert_eq!(
+                    &new[..old.len()],
+                    &old[..],
+                    "{table} keeps its values after migrating from {version}"
+                );
+            }
         }
+        let added = &rows(&live, "threads")[0][6..];
+        assert_eq!(
+            added,
+            [
+                Value::Null,
+                Value::Text("askMe".into()),
+                Value::Integer(0),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ],
+            "a thread from before migration 5 gets the default settings, unpaused and idle"
+        );
     }
 }
 
@@ -623,6 +667,54 @@ fn restore_discards_the_log_a_crash_left_behind_and_saves_what_it_held() {
 }
 
 #[test]
+fn refuses_orphaned_sidecars_without_installing_a_backup_or_losing_bytes() {
+    // A missing main file does not prove that an external SQLite writer has closed its sidecars.
+    for sidecars in [vec!["wal", "shm"], vec!["wal"], vec!["shm"]] {
+        let home = home();
+        database_at_version(home.path(), 2);
+        let backup = Store::open(home.path())
+            .unwrap()
+            .backup_taken()
+            .unwrap()
+            .clone();
+        crash_while_writing(home.path());
+        fs::remove_file(live_database(home.path())).unwrap();
+        for sidecar in ["wal", "shm"] {
+            if !sidecars.contains(&sidecar) {
+                fs::remove_file(home.path().join(format!("kratos.db-{sidecar}"))).unwrap();
+            }
+        }
+        let before: Vec<_> = sidecars
+            .iter()
+            .map(|sidecar| {
+                let path = home.path().join(format!("kratos.db-{sidecar}"));
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let backup_before = fs::read(&backup.path).unwrap();
+        let files_before = backup_files(home.path());
+
+        let result = restore(home.path(), &backup.id);
+
+        assert!(result.is_err(), "orphaned {sidecars:?} must refuse restore");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("orphaned SQLite sidecar"),
+            "the refusal must identify the recovery problem"
+        );
+        assert!(!live_database(home.path()).exists());
+        assert_eq!(backup_files(home.path()), files_before);
+        assert_eq!(fs::read(&backup.path).unwrap(), backup_before);
+        for (path, bytes) in before {
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{}", path.display());
+        }
+    }
+}
+
+#[test]
 fn refuses_a_damaged_backup_and_changes_nothing() {
     // Catches a restore that installs a cut-short or mislabeled backup over a working database.
     let home = home();
@@ -680,16 +772,17 @@ fn refuses_a_database_newer_than_this_build_and_leaves_it_untouched() {
     assert!(
         matches!(
             error,
-            OpenError::NewerSchema {
-                found: 5,
-                supported: 4
-            }
+            OpenError::NewerSchema { found, supported }
+                if found == SCHEMA_VERSION + 1 && supported == SCHEMA_VERSION
         ),
         "{error}"
     );
     assert_eq!(
         error.to_string(),
-        "Database schema version 5 is newer than this build supports (4)"
+        format!(
+            "Database schema version {} is newer than this build supports ({SCHEMA_VERSION})",
+            SCHEMA_VERSION + 1
+        )
     );
     assert_eq!(fs::read(live_database(home.path())).unwrap(), before);
     assert!(backup_files(home.path()).is_empty());

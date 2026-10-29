@@ -22,6 +22,9 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    env:
+      # Integration tests spawn process trees; avoid starving Windows startup and shutdown probes.
+      RUST_TEST_THREADS: 2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install the toolchain rust-toolchain.toml pins
@@ -31,6 +34,36 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
 
+  real-codex:
+    name: Real Codex sandbox (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - name: Install pinned native Codex without package scripts
+        shell: pwsh
+        run: |
+          $install = Join-Path $env:USERPROFILE 'kratos-real-codex-cli'
+          npm install --prefix $install --ignore-scripts --no-audit --no-fund '@openai/codex@0.159.1'
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Codex installation failed' }
+          $exe = Join-Path $install 'node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe'
+          "KRATOS_REAL_CODEX_EXE=$exe" >> $env:GITHUB_ENV
+          "KRATOS_REAL_CODEX_HOME=$(Join-Path $env:USERPROFILE 'kratos-real-codex-home')" >> $env:GITHUB_ENV
+      - name: Provision the isolated elevated sandbox
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path $env:KRATOS_REAL_CODEX_HOME -Force | Out-Null
+          & $env:KRATOS_REAL_CODEX_EXE sandbox setup --elevated --current-user --codex-home $env:KRATOS_REAL_CODEX_HOME
+          if ($LASTEXITCODE -ne 0) { throw 'Windows sandbox provisioning failed' }
+      - name: Prove real sandbox denial and engine API isolation without a paid model
+        run: cargo test -p kratos-engine --test real_codex --locked -- --ignored --test-threads=1 --nocapture
+
   complexity:
     name: Complexity
     runs-on: ubuntu-latest
@@ -38,8 +71,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Fails on any function with cyclomatic complexity 12 or more, the point at which a function
-      # gets rethought rather than split into a tiny helper.
-      - run: pipx run --spec lizard==1.24.2 lizard -l rust -C 11 -w crates tools
+      # gets rethought rather than split into a tiny helper. kratos-command-safety is Codex's code,
+      # copied unchanged so it can be compared with upstream, so its functions keep Codex's shape.
+      - run: pipx run --spec lizard==1.24.2 lizard -l rust -C 11 -w -x "crates/kratos-command-safety/*" crates tools
 
   node:
     name: Node tools

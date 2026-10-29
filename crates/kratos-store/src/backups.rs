@@ -170,23 +170,27 @@ fn verify(backup: &Backup) -> Result<(), RestoreError> {
 
 /// Closing the last connection checkpoints the write-ahead log into the main file and deletes
 /// `kratos.db-wal` and `kratos.db-shm`, so nothing of the old database can be replayed into the
-/// restored one. A log that survives the close means another program, such as a `sqlite3` shell,
-/// still has the database open.
+/// restored one. Surviving sidecars may still belong to another SQLite program. When the main
+/// file is missing, their ownership cannot be established, so leave them intact and refuse.
 fn save_live_database(directory: &DataDirectory) -> Result<Option<Backup>, RestoreError> {
     let database = directory.database_path();
-    if !database.try_exists().map_err(restore_io_error(&database))? {
-        return Ok(None);
+    let saved = if database.try_exists().map_err(restore_io_error(&database))? {
+        let live = Connection::open(&database)?;
+        let saved = back_up(&live, &directory.backups_path(), schema_version(&live)?)?;
+        live.close().map_err(|(_, source)| source)?;
+        Some(saved)
+    } else {
+        None
+    };
+    for sidecar in sqlite_sidecars(&database) {
+        if sidecar.try_exists().map_err(restore_io_error(&sidecar))? {
+            return Err(match saved {
+                Some(_) => RestoreError::DatabaseInUse(database),
+                None => RestoreError::OrphanedSidecar { database, sidecar },
+            });
+        }
     }
-    let live = Connection::open(&database)?;
-    let saved = back_up(&live, &directory.backups_path(), schema_version(&live)?)?;
-    live.close().map_err(|(_, source)| source)?;
-    if wal_path(&database)
-        .try_exists()
-        .map_err(restore_io_error(&database))?
-    {
-        return Err(RestoreError::DatabaseInUse(database));
-    }
-    Ok(Some(saved))
+    Ok(saved)
 }
 
 fn install(directory: &DataDirectory, backup: &Backup) -> Result<(), RestoreError> {
@@ -201,10 +205,12 @@ fn install(directory: &DataDirectory, backup: &Backup) -> Result<(), RestoreErro
     fs::rename(&staged, &database).map_err(restore_io_error(&database))
 }
 
-fn wal_path(database: &Path) -> PathBuf {
-    let mut name = database.as_os_str().to_owned();
-    name.push("-wal");
-    PathBuf::from(name)
+fn sqlite_sidecars(database: &Path) -> [PathBuf; 2] {
+    ["-wal", "-shm"].map(|suffix| {
+        let mut name = database.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    })
 }
 
 fn backup_io_error(path: &Path) -> impl FnOnce(io::Error) -> BackupError {
@@ -245,6 +251,8 @@ pub enum RestoreError {
     SaveLive(#[from] BackupError),
     #[error("another program has {} open; close it and restore again", .0.display())]
     DatabaseInUse(PathBuf),
+    #[error("{} is missing but orphaned SQLite sidecar {} remains; confirm no SQLite program uses this folder and move the remaining sidecars aside before restoring", database.display(), sidecar.display())]
+    OrphanedSidecar { database: PathBuf, sidecar: PathBuf },
     #[error("restore failed at {}: {source}", path.display())]
     Io {
         path: PathBuf,

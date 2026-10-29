@@ -1,10 +1,11 @@
-use serde::Deserialize;
 use serde::de::{Deserializer, Error};
+use serde::{Deserialize, Serialize};
 
 /// Text a client must supply: surrounding whitespace removed, and something left afterwards.
 ///
 /// The engine stores the trimmed form: posting `"  hello  "` records `"hello"`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
 pub struct RequiredText(String);
 
 impl RequiredText {

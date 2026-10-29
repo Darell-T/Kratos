@@ -1,13 +1,11 @@
 use std::path::Path as FilePath;
 
 use axum::body::Body;
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
+use axum::extract::rejection::QueryRejection;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Response;
-use kratos_protocol::{
-    CreateThread, CreateWorkspace, Health, ListThreads, PostMessage, ThreadEventBody, ThreadId,
-};
+use kratos_protocol::{CreateThread, CreateWorkspace, Health, ListThreads, Provider};
 
 use super::json::read_json;
 use super::{ApiError, ServerState, json_reply};
@@ -58,41 +56,21 @@ pub(super) async fn list_threads(
     Ok(json_reply(StatusCode::OK, &threads))
 }
 
-/// `POST /api/threads`: 201 with the thread. Body (413 or 400), then the workspace (404), then the
-/// insert.
+/// `POST /api/threads`: 201 with the thread. Body (413 or 400), then a Codex thread's settings
+/// (400), then the workspace (404), then the insert.
 pub(super) async fn create_thread(
     State(state): State<ServerState>,
     body: Body,
 ) -> Result<Response, ApiError> {
     let request: CreateThread = read_json(body).await?;
+    if let (Provider::Codex, Some(settings)) = (request.provider, &request.settings) {
+        state.codex()?.check_settings(settings.clone()).await?;
+    }
     let thread = state
         .store
         .call(move |store| store.create_thread(&request))
         .await?;
     Ok(json_reply(StatusCode::CREATED, &thread))
-}
-
-/// `POST /api/threads/{id}/messages`: 201 with the appended event.
-///
-/// The thread is checked before the body is read: a post to an unknown thread answers 404 without
-/// reading or size-checking its body.
-pub(super) async fn post_message(
-    State(state): State<ServerState>,
-    id: Result<Path<ThreadId>, PathRejection>,
-    body: Body,
-) -> Result<Response, ApiError> {
-    let Path(thread_id) = id.map_err(|_| ApiError::bad_request("Malformed URL path"))?;
-    let lookup = thread_id.clone();
-    state
-        .store
-        .call(move |store| store.last_seq(&lookup))
-        .await?;
-    let PostMessage { text } = read_json(body).await?;
-    let body = ThreadEventBody::UserMessage {
-        text: text.into_string(),
-    };
-    let event = state.hub.append(thread_id, body).await?;
-    Ok(json_reply(StatusCode::CREATED, &event))
 }
 
 /// On Windows `Path::is_absolute` refuses `\folder` and `/folder`, which Node accepts as absolute

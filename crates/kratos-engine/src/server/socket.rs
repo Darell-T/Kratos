@@ -4,8 +4,10 @@ use axum::extract::State;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::response::{IntoResponse, Response};
-use kratos_protocol::{ClientMessage, Seq, ServerMessage, ThreadEvent, ThreadId};
+use kratos_protocol::{ClientMessage, LiveUpdate, Seq, ServerMessage, ThreadEvent, ThreadId};
 use kratos_store::StoreError;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::{StreamExt, StreamMap};
 
 use super::json::{JsonError, parse_json};
@@ -36,6 +38,8 @@ struct Connection {
     socket: WebSocket,
     hub: Hub,
     follows: StreamMap<ThreadId, EventPages>,
+    /// Each followed thread's live updates, which the log does not keep (D88).
+    live: StreamMap<ThreadId, BroadcastStream<LiveUpdate>>,
 }
 
 impl Connection {
@@ -44,6 +48,7 @@ impl Connection {
             socket,
             hub,
             follows: StreamMap::new(),
+            live: StreamMap::new(),
         }
     }
 
@@ -55,6 +60,9 @@ impl Connection {
                 frame = self.socket.recv() => self.on_frame(frame).await,
                 Some((thread_id, page)) = self.follows.next(), if !self.follows.is_empty() => {
                     self.on_page(thread_id, page).await
+                }
+                Some((thread_id, update)) = self.live.next(), if !self.live.is_empty() => {
+                    self.on_live(thread_id, update).await
                 }
             };
             if flow.is_break() {
@@ -89,6 +97,7 @@ impl Connection {
             }
             Ok(ClientMessage::Unsubscribe { thread_id }) => {
                 self.follows.remove(&thread_id);
+                self.live.remove(&thread_id);
                 ControlFlow::Continue(())
             }
         }
@@ -97,10 +106,34 @@ impl Connection {
     async fn subscribe(&mut self, thread_id: ThreadId, after: Seq) -> ControlFlow<()> {
         match self.hub.follow(thread_id.clone(), after).await {
             Ok(pages) => {
-                self.follows.insert(thread_id, pages);
-                ControlFlow::Continue(())
+                self.follows.insert(thread_id.clone(), pages);
+                self.watch_live(thread_id).await
             }
             Err(error) => self.send_error(follow_error_message(error)).await,
+        }
+    }
+
+    /// Starts the thread's live updates with the running turn's replies so far. The snapshot and
+    /// the receiver come together, so no update falls between them or arrives twice.
+    async fn watch_live(&mut self, thread_id: ThreadId) -> ControlFlow<()> {
+        let (snapshot, updates) = self.hub.watch_live(&thread_id);
+        self.live
+            .insert(thread_id.clone(), BroadcastStream::new(updates));
+        match snapshot {
+            Some(update) => self.send(&ServerMessage::Live { thread_id, update }).await,
+            None => ControlFlow::Continue(()),
+        }
+    }
+
+    /// A client that fell behind loses the updates it missed and gets the replies so far instead.
+    async fn on_live(
+        &mut self,
+        thread_id: ThreadId,
+        update: Result<LiveUpdate, BroadcastStreamRecvError>,
+    ) -> ControlFlow<()> {
+        match update {
+            Ok(update) => self.send(&ServerMessage::Live { thread_id, update }).await,
+            Err(BroadcastStreamRecvError::Lagged(_)) => self.watch_live(thread_id).await,
         }
     }
 

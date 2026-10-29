@@ -3,11 +3,14 @@ use std::fmt;
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
-use crate::{Provider, RequiredText, Timestamp, WorkspaceId};
+use crate::{
+    Approval, Message, PauseReason, Permission, Provider, Question, RequiredText, Timestamp,
+    TurnId, WorkspaceId,
+};
 
 /// A thread's id. The engine issues UUIDs. Any string parses, because a thread that does not exist
 /// answers 404.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ThreadId(String);
 
@@ -47,6 +50,35 @@ pub struct CreateThread {
     pub workspace_id: WorkspaceId,
     pub title: RequiredText,
     pub provider: Provider,
+    /// The defaults when absent.
+    #[serde(default)]
+    pub settings: Option<ThreadSettings>,
+}
+
+/// What a thread's next turn runs with. A change applies from the next turn, never to the turn
+/// running now (D87).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadSettings {
+    /// `None` runs the provider's default model.
+    pub model: Option<String>,
+    pub permission: Permission,
+    /// The agent plans and changes nothing until the plan is approved.
+    pub plan_mode: bool,
+    /// How many tokens of context the agent may fill before the provider compacts it (D76).
+    /// `None` keeps the provider's own limit. Never above the window the provider reported.
+    pub context_limit_tokens: Option<u64>,
+}
+
+impl Default for ThreadSettings {
+    fn default() -> ThreadSettings {
+        ThreadSettings {
+            model: None,
+            permission: Permission::AskMe,
+            plan_mode: false,
+            context_limit_tokens: None,
+        }
+    }
 }
 
 fn trimmed_workspace_id<'de, D: Deserializer<'de>>(
@@ -59,4 +91,19 @@ fn trimmed_workspace_id<'de, D: Deserializer<'de>>(
 #[serde(rename_all = "camelCase")]
 pub struct ListThreads {
     pub workspace_id: WorkspaceId,
+}
+
+/// The body of `GET /api/threads/{id}`: the thread and what its next turn waits on.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadDetails {
+    #[serde(flatten)]
+    pub thread: Thread,
+    pub settings: ThreadSettings,
+    pub paused: Option<PauseReason>,
+    pub running_turn: Option<TurnId>,
+    /// Messages not yet accepted or cancelled, oldest first.
+    pub queue: Vec<Message>,
+    pub approvals: Vec<Approval>,
+    pub questions: Vec<Question>,
 }

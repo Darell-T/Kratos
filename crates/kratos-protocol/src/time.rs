@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// JavaScript's `Date.toISOString()`.
 ///
 /// Stored and sent as text. Text of this one shape sorts in time order, which the `ORDER BY
-/// created_at` listings rely on, so [`Timestamp::now`] is the only place Rust formats a time.
+/// created_at` listings rely on, so [`Timestamp::at`] is the only place Rust formats a time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Timestamp(String);
@@ -17,7 +17,17 @@ impl Timestamp {
     /// Wall-clock time can step backwards, so a timestamp orders listings for display only. Event
     /// order comes from [`crate::Seq`].
     pub fn now() -> Timestamp {
-        Timestamp(humantime::format_rfc3339_millis(SystemTime::now()).to_string())
+        Timestamp::at(SystemTime::now())
+    }
+
+    /// `time`, truncated to milliseconds.
+    pub fn at(time: SystemTime) -> Timestamp {
+        Timestamp(humantime::format_rfc3339_millis(time).to_string())
+    }
+
+    /// The instant the text names. `None` for text that is not a timestamp, such as a damaged row.
+    pub fn instant(&self) -> Option<SystemTime> {
+        humantime::parse_rfc3339(&self.0).ok()
     }
 
     pub fn from_stored(text: String) -> Timestamp {

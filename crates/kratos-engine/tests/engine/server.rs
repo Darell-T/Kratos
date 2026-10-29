@@ -30,16 +30,19 @@ fn message_body(size: usize) -> Vec<u8> {
 
 /// Posts a body of `size` bytes the way a client does that gives up when a write fails: it writes
 /// the whole body, and only then reads the reply. The body is not JSON, because the engine must
-/// refuse an oversized one before it parses anything.
-fn post_whole_body_then_read(port: u16, path: &str, size: usize) -> String {
+/// refuse an oversized one before it parses anything. `token` goes as the client token.
+pub(crate) fn post_whole_body_then_read(
+    port: u16,
+    path: &str,
+    size: usize,
+    token: Option<&str>,
+) -> String {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let authorization = token
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "POST {path} HTTP/1.1
-Host: 127.0.0.1:{port}
-Content-Length: {size}
-Connection: close
-
-"
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n{authorization}Content-Length: {size}\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(head.as_bytes()).unwrap();
     stream
@@ -69,6 +72,152 @@ fn answers_the_health_check() {
 }
 
 #[test]
+fn matches_http_api_routes_with_empty_segments_and_preserves_query_and_parameters() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+
+    for path in [
+        "/api/health/",
+        "/api//health",
+        "/api///health///?ignored=%2F%3F",
+    ] {
+        let reply = client.get(path).unwrap();
+        assert_eq!(
+            (reply.status, reply.body),
+            (200, json!({ "ok": true })),
+            "{path}"
+        );
+    }
+    let created = client
+        .post(
+            "/api///workspaces//",
+            &json!({ "name": "normalized", "path": home.path() }),
+        )
+        .unwrap();
+    assert_eq!(created.status, 201);
+    let workspace: Workspace = created.parse().unwrap();
+    let created = client
+        .post(
+            "/api//threads/",
+            &json!({ "workspaceId": workspace.id, "title": "normalized", "provider": "claude" }),
+        )
+        .unwrap();
+    assert_eq!(created.status, 201);
+    let thread: Thread = created.parse().unwrap();
+    let encoded_workspace: String = workspace
+        .id
+        .as_str()
+        .bytes()
+        .map(|byte| format!("%{byte:02X}"))
+        .collect();
+    let listed = client
+        .get(&format!(
+            "/api//threads///?workspaceId={encoded_workspace}&ignored=%2F%3F"
+        ))
+        .unwrap();
+    assert_eq!((listed.status, listed.body), (200, json!([created.body])));
+    let reply = client
+        .post(
+            &format!("/api///threads//{}///messages//?ignored=%2F", thread.id),
+            &json!({ "text": "normalized message" }),
+        )
+        .unwrap();
+    assert_eq!(reply.status, 201);
+    assert_eq!(reply.body["threadId"], json!(thread.id));
+    assert_eq!(reply.body["seq"], 1);
+    assert_eq!(
+        reply.body["event"],
+        json!({ "kind": "user.message", "text": "normalized message" })
+    );
+
+    let malformed = client
+        .post("/api//threads/%ff//messages/", &json!({ "text": "bad" }))
+        .unwrap();
+    assert_eq!(
+        (malformed.status, error_text(&malformed)),
+        (400, "Malformed URL path")
+    );
+    let encoded_slash = client
+        .post("/api//threads/a%2Fb//messages/", &json!({ "text": "bad" }))
+        .unwrap();
+    assert_eq!(
+        (encoded_slash.status, error_text(&encoded_slash)),
+        (404, "Unknown thread a/b")
+    );
+}
+
+#[test]
+fn normalized_routes_keep_the_origin_guards_and_the_exact_socket_upgrade_path() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let body = serde_json::to_vec(&json!({ "name": "forbidden", "path": home.path() })).unwrap();
+    for (header, value) in [("Host", "evil.example"), ("Origin", "https://evil.example")] {
+        let reply = client
+            .send(
+                &ApiRequest::new("POST", "/api//workspaces/")
+                    .header(header, value)
+                    .body(body.clone()),
+            )
+            .unwrap();
+        assert_eq!(
+            (reply.status, reply.body),
+            (403, json!({ "error": "Forbidden" })),
+            "{header}"
+        );
+    }
+    assert_eq!(client.get("/api/workspaces").unwrap().body, json!([]));
+    for path in ["/api/events/", "/api//events", "/api///events///"] {
+        let reply = client
+            .send(
+                &ApiRequest::new("GET", path)
+                    .header("Connection", "upgrade, close")
+                    .header("Upgrade", "websocket")
+                    .header("Sec-WebSocket-Version", "13")
+                    .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            )
+            .unwrap();
+        assert_eq!(
+            (reply.status, error_text(&reply)),
+            (404, "Not found"),
+            "{path}"
+        );
+    }
+}
+
+#[test]
+#[cfg(windows)]
+fn shuts_down_with_an_incomplete_upload_still_connected() {
+    use std::io::{BufRead, BufReader};
+
+    let home = tempfile::tempdir().unwrap();
+    let mut engine = RunningEngine::start_for_shutdown(home.path());
+    let port = engine.port();
+    let mut stalled = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stalled.set_read_timeout(Some(WAIT)).unwrap();
+    write!(stalled, "POST /api/workspaces HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Length: 1024\r\nExpect: 100-continue\r\n\r\n").unwrap();
+    let mut stalled = BufReader::new(stalled);
+    let mut interim = String::new();
+    stalled.read_line(&mut interim).unwrap();
+    assert_eq!(interim, "HTTP/1.1 100 Continue\r\n");
+    interim.clear();
+    stalled.read_line(&mut interim).unwrap();
+    assert_eq!(interim, "\r\n");
+    // 100 Continue proves the server is reading this body before shutdown is requested.
+    stalled.get_mut().write_all(b"{").unwrap();
+
+    engine.shutdown();
+
+    drop(stalled);
+    let restarted = RunningEngine::start(home.path());
+    assert_eq!(
+        restarted.client().get("/api/workspaces").unwrap().body,
+        json!([])
+    );
+}
+
+#[test]
 fn creates_a_workspace_a_thread_and_messages() {
     // Catches lost trimming, a wrong status, a list that does not show what was created, or
     // numbering that does not start at 1.
@@ -94,7 +243,8 @@ fn creates_a_workspace_a_thread_and_messages() {
         json!([created.body])
     );
 
-    let body = json!({ "workspaceId": workspace.id, "title": "first chat", "provider": "codex" });
+    // A Claude thread keeps R2's plain message log until R4 drives Claude.
+    let body = json!({ "workspaceId": workspace.id, "title": "first chat", "provider": "claude" });
     let created = client.post("/api/threads", &body).unwrap();
     assert_eq!(created.status, 201);
     let thread: Thread = created.parse().unwrap();
@@ -324,7 +474,7 @@ fn caps_request_bodies_at_1_mib_and_keeps_serving() {
         );
     }
 
-    let reply = post_whole_body_then_read(engine.port(), &path, 8 * MIB);
+    let reply = post_whole_body_then_read(engine.port(), &path, 8 * MIB, Some(&engine.token()));
     assert!(reply.starts_with("HTTP/1.1 413 "), "{reply}");
     assert_eq!(
         post(&client, &thread, "after the refusals").seq,
