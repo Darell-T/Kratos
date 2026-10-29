@@ -5,29 +5,25 @@ questions, context settings, usage tracking, continuation scheduling, migration 
 and the corresponding `kratos-client` commands. Claude, worktree ownership, Teams integration, and deleting the
 TypeScript engine remain separate migration steps.
 
-## Windows permission limitation to fix later
+## Permission scopes
 
-The user approved this temporary scope on 2026-10-26:
+The user chose Zeron's access modes on 2026-10-29:
 
-- **Ask me** writes only in the current workspace and temporary folders, after approval.
-- **Approve for me** and **Full access** can write in the user's home, temporary folders, and registered workspaces.
-- Plan mode remains read-only. Credential folders remain protected, and Kratos's data directory is denied for both
-  reads and writes. Full access enables network access; destructive commands still require a decision.
+- Plan mode reads everything except Kratos's data folder and writes nothing.
+- **Ask me** writes the thread's workspace and temporary folders, and asks before every action.
+- **Approve for me** writes the same folders with the network open. It asks before commands that leave the sandbox,
+  commands the dangerous-command check flags, and shells or interpreters that read commands from their input.
+- **Full access** runs commands without a sandbox, through Codex's built-in `:danger-full-access` profile. It asks
+  before the same commands as Approve for me.
 
-Registered workspace roots refresh at each turn. Switching to Ask me removes the other workspace roots from the next
-turn. These settings do not alter a turn already running.
+Every sandboxed mode denies Kratos's data folder, so its commands cannot read the client token. A Full access command
+runs as the user, so it can read the token and could use it to decide its own approvals. In every mode, an approved
+patch into a credential folder or Kratos's data folder asks first.
 
-**TODO: restore the intended drive-wide write scope on Windows.** A named Codex profile with `:root = "write"` and
-protected-folder exceptions attempts to grant an inheritable write ACE on the system drive. A normal Windows user
-cannot make that ACL change. Codex 0.159.1 and 0.164.0 both failed the real harmless-command test with this profile.
-The failure appears during sandboxed AGENTS.md discovery as a thread-start timeout, or during execution as
-`helper_unknown_error: setup refresh had errors`. The sandbox setup log identifies `SetNamedSecurityInfoW` error 5
-on `C:\`.
-
-Until this is fixed, a folder outside the user's home and temporary folders must be registered as a workspace to be
-writable in these modes. Do not restore drive-wide writes by removing the data-directory denial, running the engine
-as administrator, or weakening the test. A future solution must preserve protected folders and pass the real Windows
-command tests as a normal user. The implementation is marked `shortcut:` in `providers/codex/profiles.rs`.
+The earlier Windows scope made the user's home folder writable. Codex sets permissions on every file below a write
+root before a thread starts, and it never removes them. On a home folder with hundreds of thousands of files, that
+setup never finished in 10 minutes, so Full access threads never started. No mode now writes the home folder or other
+registered workspaces.
 
 ## Reproducible checks
 
@@ -59,8 +55,9 @@ $env:KRATOS_REAL_CODEX_HOME = '<dedicated test home>'
 cargo test -p kratos-engine --test real_codex --locked -- --ignored --test-threads=1
 ```
 
-CI runs these tests in its own provisioned home. They cover read-only plan mode, ordinary Full access execution, and
-an agent plus its child failing to read the API token or decide a waiting approval. The approval remains pending.
+CI runs these tests in its own provisioned home. They cover read-only plan mode, ordinary Full access execution, a
+Full access recursive delete that asks and is declined, and an Approve for me agent plus its child failing to read the
+API token or decide a waiting approval. The approval remains pending.
 
 The restore check creates a version-4 database with the TypeScript store, starts the Rust engine to migrate it to 5,
 restores the automatic backup, compares all original tables and rows, then starts the TypeScript engine and reads

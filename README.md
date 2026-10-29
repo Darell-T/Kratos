@@ -97,9 +97,8 @@ data folder.
 
 Codex 0.159.1 is the tested protocol release. On Windows, the engine checks elevated sandbox readiness before
 opening a Codex thread and requests setup when necessary. Setup failure leaves queued work unsent and reports why.
-Approve for me and Full access currently permit writes in the user's home, temporary folders, and registered
-workspaces, with credential folders protected. The drive-wide permission limitation and its follow-up are recorded
-in [R3 verification](docs/r3-verification.md).
+Ask me and Approve for me write only the thread's workspace and temporary folders. Full access runs commands without
+a sandbox and still asks before dangerous ones. [R3 verification](docs/r3-verification.md) lists each mode's scope.
 
 ```sh
 cargo run -p kratos-client -- send <thread-id> "Explain this repository"
