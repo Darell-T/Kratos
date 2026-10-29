@@ -202,6 +202,7 @@ impl Actor {
                     command: params.command.clone().unwrap_or_default(),
                     cwd: params.cwd.as_ref().map(|cwd| cwd.0.clone()),
                     reason: params.reason.clone(),
+                    access: wire::command_access(params),
                 };
                 let turn_id = TurnId::new(params.turn_id.clone());
                 self.settle_or_ask(
@@ -242,6 +243,7 @@ impl Actor {
             ServerRequest::Permissions(params) => {
                 let shown = ApprovalRequest::Permissions {
                     reason: params.reason.clone(),
+                    access: wire::permissions_access(&params.permissions),
                 };
                 let (turn_id, requested) = (
                     TurnId::new(params.turn_id.clone()),

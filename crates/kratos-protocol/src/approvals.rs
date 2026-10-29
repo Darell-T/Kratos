@@ -50,13 +50,55 @@ pub enum ApprovalRequest {
         cwd: Option<String>,
         /// The agent's own reason, such as why it needs to run outside the sandbox.
         reason: Option<String>,
+        access: ExtraAccess,
     },
     FileChanges {
         changes: Vec<FileChange>,
         reason: Option<String>,
     },
     /// Extra permissions for the rest of the turn.
-    Permissions { reason: Option<String> },
+    Permissions {
+        reason: Option<String>,
+        access: ExtraAccess,
+    },
+}
+
+/// Access beyond the thread's sandbox that accepting an approval grants. Empty when it grants
+/// none.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtraAccess {
+    pub paths: Vec<PathAccess>,
+    pub network: Option<NetworkAccess>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PathAccess {
+    /// A path, a glob pattern, or a location the provider names, such as Codex's `:root` for
+    /// every file or `:tmpdir` for the temporary folder.
+    pub path: String,
+    pub access: PathAccessMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PathAccessMode {
+    Read,
+    Write,
+    /// Kept closed, even inside a path the grant opens.
+    Deny,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum NetworkAccess {
+    Any,
+    Host { host: String, protocol: String },
 }
 
 /// Why a request reached the user.

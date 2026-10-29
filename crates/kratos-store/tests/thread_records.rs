@@ -6,10 +6,10 @@ use std::path::Path;
 
 use kratos_protocol::{
     Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest, AskReason,
-    Continuation, ContinuationId, ContinuationState, CreateThread, CreateWorkspace, MessageId,
-    MessageInput, MessageOrigin, MessageStatus, PauseReason, Permission, Provider, Question,
-    QuestionId, QuestionOutcome, RequiredText, Seq, ThreadEventBody, ThreadId, ThreadSettings,
-    TurnChanges, TurnId, TurnOutcome, UsageWait,
+    Continuation, ContinuationId, ContinuationState, CreateThread, CreateWorkspace, ExtraAccess,
+    MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason, Permission, Provider,
+    Question, QuestionId, QuestionOutcome, RequiredText, Seq, ThreadEventBody, ThreadId,
+    ThreadSettings, TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
 use kratos_store::{Enqueued, QueuePlace, Settle, Store, StoreError, restore};
 use rusqlite::Connection;
@@ -103,6 +103,7 @@ fn approval(name: &str) -> Approval {
             command: "rm -rf build".into(),
             cwd: None,
             reason: None,
+            access: ExtraAccess::default(),
         },
         why: AskReason::Dangerous,
     }

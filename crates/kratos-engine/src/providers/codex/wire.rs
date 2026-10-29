@@ -8,9 +8,9 @@ use std::time::{Duration, SystemTime};
 use kratos_codex_client::types;
 use kratos_protocol::{
     AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult, ContextUsage,
-    FileChange, FileChangeKind, ItemStatus, MessageInput, Provider, Question, QuestionId,
-    QuestionItem, QuestionOption, Timestamp, TurnChanges, TurnId, TurnOutcome, UsageBucket,
-    UsageWindow,
+    ExtraAccess, FileChange, FileChangeKind, ItemStatus, MessageInput, NetworkAccess, PathAccess,
+    PathAccessMode, Provider, Question, QuestionId, QuestionItem, QuestionOption, Timestamp,
+    TurnChanges, TurnId, TurnOutcome, UsageBucket, UsageWindow,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -233,6 +233,90 @@ pub fn permissions_decision(
         ApprovalDecision::Decline | ApprovalDecision::Cancel => {
             json!({ "permissions": {}, "scope": "turn" })
         }
+    }
+}
+
+/// What accepting a request for extra permissions grants. Accepting answers Codex with
+/// `requested` itself, so the user sees what Codex gets.
+pub fn permissions_access(requested: &types::RequestPermissionProfile) -> ExtraAccess {
+    extra_access(requested.file_system.as_ref(), requested.network.as_ref())
+}
+
+/// What accepting a command's approval lets the command use beyond the sandbox: the extra
+/// permissions it asks for, and the network host it wants to reach.
+pub fn command_access(params: &types::CommandExecutionRequestApprovalParams) -> ExtraAccess {
+    let mut access = params
+        .additional_permissions
+        .as_ref()
+        .map_or_else(ExtraAccess::default, |extra| {
+            extra_access(extra.file_system.as_ref(), extra.network.as_ref())
+        });
+    if access.network.is_none()
+        && let Some(context) = &params.network_approval_context
+    {
+        access.network = Some(NetworkAccess::Host {
+            host: context.host.clone(),
+            protocol: context.protocol.to_string(),
+        });
+    }
+    access
+}
+
+fn extra_access(
+    file_system: Option<&types::AdditionalFileSystemPermissions>,
+    network: Option<&types::AdditionalNetworkPermissions>,
+) -> ExtraAccess {
+    let mut paths = Vec::new();
+    if let Some(file_system) = file_system {
+        for entry in file_system.entries.iter().flatten() {
+            let access = match entry.access {
+                types::FileSystemAccessMode::Read => PathAccessMode::Read,
+                types::FileSystemAccessMode::Write => PathAccessMode::Write,
+                types::FileSystemAccessMode::Deny => PathAccessMode::Deny,
+            };
+            paths.push(PathAccess {
+                path: path_name(&entry.path),
+                access,
+            });
+        }
+        let listed = [
+            (&file_system.read, PathAccessMode::Read),
+            (&file_system.write, PathAccessMode::Write),
+        ];
+        for (list, access) in listed {
+            for path in list.iter().flatten() {
+                paths.push(PathAccess {
+                    path: path.0.clone(),
+                    access,
+                });
+            }
+        }
+    }
+    let is_network_on = network.is_some_and(|network| network.enabled == Some(true));
+    ExtraAccess {
+        paths,
+        network: is_network_on.then_some(NetworkAccess::Any),
+    }
+}
+
+/// The path, the glob pattern, or Codex's name for a special location, such as `:root`.
+fn path_name(path: &types::FileSystemPath) -> String {
+    use types::FileSystemSpecialPath as Special;
+    let (name, subpath) = match path {
+        types::FileSystemPath::Path { path } => return path.0.clone(),
+        types::FileSystemPath::GlobPattern { pattern } => return pattern.clone(),
+        types::FileSystemPath::Special { value } => match value {
+            Special::Root => (":root", None),
+            Special::Minimal => (":minimal", None),
+            Special::ProjectRoots { subpath } => (":project_roots", subpath.as_ref()),
+            Special::Tmpdir => (":tmpdir", None),
+            Special::SlashTmp => (":slash_tmp", None),
+            Special::Unknown { path, subpath } => (path.as_str(), subpath.as_ref()),
+        },
+    };
+    match subpath {
+        Some(subpath) => format!("{name}/{}", subpath.0),
+        None => name.to_owned(),
     }
 }
 

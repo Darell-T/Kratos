@@ -21,7 +21,8 @@ pub use agents::{CommandResult, OutsideWrites, Permission, Provider, ThreadSandb
 pub use api::{ErrorBody, Health};
 pub use approvals::{
     AnswerQuestion, Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest,
-    AskReason, DecideApproval, Question, QuestionId, QuestionItem, QuestionOption, QuestionOutcome,
+    AskReason, DecideApproval, ExtraAccess, NetworkAccess, PathAccess, PathAccessMode, Question,
+    QuestionId, QuestionItem, QuestionOption, QuestionOutcome,
 };
 pub use events::{
     ClientMessage, LiveUpdate, PauseReason, PostMessage, ReplySoFar, Seq, ServerMessage,

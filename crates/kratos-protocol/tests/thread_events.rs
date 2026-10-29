@@ -5,11 +5,12 @@
 
 use kratos_protocol::{
     AgentItem, Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason, CappedText,
-    ContextUsage, Continuation, ContinuationId, ContinuationState, FileChange, FileChangeKind,
-    ItemStatus, LiveUpdate, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
-    PauseReason, Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption,
-    ReplySoFar, RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId,
-    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOutcome, UsageWait,
+    ContextUsage, Continuation, ContinuationId, ContinuationState, ExtraAccess, FileChange,
+    FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId, MessageInput, MessageOrigin,
+    MessageStatus, NetworkAccess, PathAccess, PathAccessMode, PauseReason, Permission, Provider,
+    Question, QuestionId, QuestionItem, QuestionOption, ReplySoFar, RequiredText, SendMessage,
+    ServerMessage, ThreadEventBody, ThreadId, ThreadSettings, Timestamp, TurnChanges, TurnId,
+    TurnOutcome, UsageWait,
 };
 use std::fmt::Debug;
 
@@ -224,12 +225,40 @@ fn approval_and_question_events_keep_their_stored_shape() {
             command: "rm -rf target".into(),
             cwd: Some("/repo".into()),
             reason: None,
+            access: ExtraAccess {
+                paths: Vec::new(),
+                network: Some(NetworkAccess::Host {
+                    host: "crates.io".into(),
+                    protocol: "https".into(),
+                }),
+            },
         },
         why: AskReason::Dangerous,
     };
     assert_wire(
         ThreadEventBody::ApprovalRequested { approval },
-        r#"{"kind":"approval.requested","approval":{"id":"a-1","turnId":"turn-1","request":{"type":"command","command":"rm -rf target","cwd":"/repo","reason":null},"why":{"reason":"dangerous"}}}"#,
+        r#"{"kind":"approval.requested","approval":{"id":"a-1","turnId":"turn-1","request":{"type":"command","command":"rm -rf target","cwd":"/repo","reason":null,"access":{"paths":[],"network":{"kind":"host","host":"crates.io","protocol":"https"}}},"why":{"reason":"dangerous"}}}"#,
+    );
+    let permissions = Approval {
+        id: ApprovalId::new("a-3".into()),
+        turn_id: turn(),
+        request: ApprovalRequest::Permissions {
+            reason: Some("run checks".into()),
+            access: ExtraAccess {
+                paths: vec![PathAccess {
+                    path: ":tmpdir".into(),
+                    access: PathAccessMode::Write,
+                }],
+                network: Some(NetworkAccess::Any),
+            },
+        },
+        why: AskReason::Escalation,
+    };
+    assert_wire(
+        ThreadEventBody::ApprovalRequested {
+            approval: permissions,
+        },
+        r#"{"kind":"approval.requested","approval":{"id":"a-3","turnId":"turn-1","request":{"type":"permissions","reason":"run checks","access":{"paths":[{"path":":tmpdir","access":"write"}],"network":{"kind":"any"}}},"why":{"reason":"escalation"}}}"#,
     );
     let protected = Approval {
         id: ApprovalId::new("a-2".into()),
