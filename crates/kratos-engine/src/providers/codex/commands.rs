@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::actor::{Actor, Command, Done, Reply};
 use super::profiles::Profile;
 use super::requests::Answer;
-use super::threads::Turn;
+use super::threads::{Link, Turn};
 use super::turns::{Stopper, read_history};
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
 
@@ -339,17 +339,27 @@ impl Actor {
 
     /// Settles an uncertain message from Codex's history. Needs the thread loaded and idle, so the
     /// history is complete.
-    async fn discard(&mut self, thread_id: ThreadId, message_id: MessageId, reply: Reply<Message>) {
+    pub(super) async fn discard(
+        &mut self,
+        thread_id: ThreadId,
+        message_id: MessageId,
+        reply: Reply<Message>,
+    ) {
         let ready = self.discard_ready(&thread_id, &message_id).await;
         let native_id = match ready {
             Ok(Some(native_id)) => native_id,
             Ok(None) => {
-                // Codex or the thread is loading; this runs again once it has.
-                self.deferred.push(Command::Discard {
-                    thread_id,
-                    message_id,
-                    reply,
-                });
+                // This runs again once Codex has loaded the thread, or once Codex has started.
+                let thread = self.threads.get_mut(&thread_id).expect("loaded above");
+                if matches!(thread.link, Link::Attaching) {
+                    thread.discards.push((message_id, reply));
+                } else {
+                    self.deferred.push(Command::Discard {
+                        thread_id,
+                        message_id,
+                        reply,
+                    });
+                }
                 return;
             }
             Err(error) => {

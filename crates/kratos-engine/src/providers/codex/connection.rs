@@ -299,6 +299,14 @@ impl Actor {
                 } else {
                     self.reconcile_history(&thread_id, &opened.turns).await
                 };
+                let discards = self
+                    .threads
+                    .get_mut(&thread_id)
+                    .map(|thread| std::mem::take(&mut thread.discards))
+                    .unwrap_or_default();
+                for (message_id, reply) in discards {
+                    self.discard(thread_id.clone(), message_id, reply).await;
+                }
                 if recorded.is_ok() {
                     self.dispatch(&thread_id).await;
                 }
@@ -306,6 +314,7 @@ impl Actor {
             Err(error) => {
                 let message = format!("Codex could not load the thread: {error}");
                 thread.link = Link::Failed;
+                fail_discards(thread, &message);
                 self.pause_if_waiting(&thread_id, PauseReason::Unavailable { error: message })
                     .await;
             }
@@ -364,6 +373,7 @@ impl Actor {
         for thread_id in &thread_ids {
             let thread = self.threads.get_mut(thread_id).expect("listed above");
             thread.link = Link::Detached;
+            fail_discards(thread, &format!("Codex could not load the thread: {error}"));
             let Turn::Running { turn_id, .. } = &thread.turn else {
                 continue;
             };
@@ -466,6 +476,12 @@ async fn connect_ready(
     }
     #[cfg(not(windows))]
     Ok((codex, incoming))
+}
+
+fn fail_discards(thread: &mut ThreadState, error: &str) {
+    for (_, reply) in std::mem::take(&mut thread.discards) {
+        let _ = reply.send(Err(ProviderError::Unavailable(error.to_owned())));
+    }
 }
 
 /// Records each found message as accepted by its turn, then lifts a delivery pause once nothing

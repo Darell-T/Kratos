@@ -3,8 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use kratos_codex_client::types;
-use kratos_protocol::{ContextUsage, FileChange, MessageId, ThreadSettings, TurnId};
+use kratos_protocol::{ContextUsage, FileChange, Message, MessageId, ThreadSettings, TurnId};
 
+use super::actor::Reply;
 use super::wire::ChangesRecorder;
 
 pub(super) struct ThreadState {
@@ -24,6 +25,8 @@ pub(super) struct ThreadState {
     pub file_items: HashMap<String, Vec<FileChange>>,
     /// The latest context report of the running turn (D76).
     pub context: Option<ContextUsage>,
+    /// Discards that wait for Codex to load the thread, run again once it has.
+    pub discards: Vec<(MessageId, Reply<Message>)>,
 }
 
 impl ThreadState {
@@ -38,6 +41,7 @@ impl ThreadState {
             changes: ChangesRecorder::default(),
             file_items: HashMap::new(),
             context: None,
+            discards: Vec::new(),
         }
     }
 
