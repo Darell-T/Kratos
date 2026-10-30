@@ -68,12 +68,15 @@ pub fn list() -> Vec<Value> {
         .collect()
 }
 
-pub fn call(call: &Call, params: &Value) -> Value {
-    let name = params["name"].as_str().unwrap_or_default();
-    let arguments = match params.get("arguments") {
-        None | Some(Value::Null) => json!({}),
-        Some(arguments) => arguments.clone(),
-    };
+/// The params of a `tools/call` request.
+#[derive(Deserialize)]
+pub struct ToolCall {
+    name: String,
+    arguments: Option<Value>,
+}
+
+pub fn call(call: &Call, ToolCall { name, arguments }: ToolCall) -> Value {
+    let arguments = arguments.unwrap_or_else(|| json!({}));
     let answer = match TOOLS.iter().find(|tool| tool.name == name) {
         Some(tool) => (tool.run)(call, arguments),
         None => Err(format!("Kratos has no tool named {name}")),
