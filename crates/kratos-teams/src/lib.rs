@@ -20,6 +20,7 @@
 //! | `reports`           | what agents hand back: wire shapes, schemas, and typed reports |
 //! | `evidence`          | location, quote, and command checks |
 //! | `diff`              | `git diff` output, parsed into changed files, changed lines, and added lines |
+//! | `paths`             | paths relative to the repository root, and the globs that match them |
 //! | `prompts`           | every message an agent receives, and the task title, commit subject, and branch name |
 //! | `security_triggers` | which diffs get a security review |
 //! | `permissions`       | what each role may do without asking |
@@ -34,6 +35,7 @@ pub mod facts;
 pub mod fold;
 pub mod members;
 pub mod next_step;
+pub mod paths;
 pub mod permissions;
 pub mod prompts;
 pub mod reports;

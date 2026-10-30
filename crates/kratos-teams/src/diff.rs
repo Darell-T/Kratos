@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::evidence::repo_path;
+use crate::paths::repo_path;
 use crate::reports::Location;
 
 /// The git arguments every diff the rules parse must come from, followed by the revision range.

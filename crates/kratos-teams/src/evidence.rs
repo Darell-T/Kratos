@@ -16,6 +16,7 @@ use kratos_protocol::CommandResult;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::Diff;
+use crate::paths::{PathProblem, RepoPath};
 use crate::reports::{FindingReport, Kind, Location};
 
 /// How long the engine lets an evidence command run. A timeout proves nothing.
@@ -26,63 +27,6 @@ pub const MIN_QUOTE_LEN: usize = 12;
 
 /// The tail of a command's output that the record keeps.
 const OUTPUT_TAIL_CHARS: usize = 4000;
-
-/// Reviewers write `src\a.rs` or `./src/a.rs`. Git names the same file `src/a.rs`.
-pub fn repo_path(raw: &str) -> String {
-    let mut path = raw.replace('\\', "/");
-    while let Some(rest) = path.strip_prefix("./") {
-        path = rest.to_owned();
-    }
-    path
-}
-
-/// A path relative to the repository root that stays inside it, spelled the way git spells it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RepoPath(String);
-
-/// Why a path cannot name a file in the repository.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PathProblem {
-    /// It is empty, or it starts at the root or at a drive.
-    Rooted,
-    /// It climbs out of its folder with a `..`.
-    Climbs,
-}
-
-impl RepoPath {
-    pub(crate) fn parse(raw: &str) -> Result<RepoPath, PathProblem> {
-        let path = repo_path(raw);
-        if is_rooted(&path) {
-            return Err(PathProblem::Rooted);
-        }
-        if climbs(&path) {
-            return Err(PathProblem::Climbs);
-        }
-        Ok(RepoPath(path))
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub(crate) fn into_string(self) -> String {
-        self.0
-    }
-}
-
-/// Whether a path that went through `repo_path` has no place to start from. That means it is empty,
-/// begins at the root, or begins at a drive.
-fn is_rooted(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    let has_drive =
-        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
-    path.is_empty() || path.starts_with('/') || has_drive
-}
-
-/// Whether a path that went through `repo_path` climbs out of its folder with a `..`.
-fn climbs(path: &str) -> bool {
-    path.split('/').any(|part| part == "..")
-}
 
 // ---------------------------------------------------------------------------------------------
 // Location, quote, and command rules.

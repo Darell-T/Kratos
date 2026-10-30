@@ -10,10 +10,10 @@
 
 use std::fmt;
 
-use globset::{Glob, GlobBuilder, GlobMatcher};
+use globset::GlobMatcher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::evidence::{RepoPath, repo_path};
+use crate::paths::{PatternError, RepoPath, compile, repo_path};
 
 /// A glob relative to the repository root that names files a task may change: `src/auth/**`,
 /// `docs/*.md`, `Cargo.toml`. A folder needs an explicit `/**`, because Kratos cannot tell a file from a
@@ -25,14 +25,6 @@ use crate::evidence::{RepoPath, repo_path};
 pub struct ScopePattern {
     text: String,
     matcher: GlobMatcher,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum PatternError {
-    #[error("`{pattern}` is not a valid glob: {reason}")]
-    NotAGlob { pattern: String, reason: String },
-    #[error("`{pattern}` must be relative to the repository root and stay inside it")]
-    OutsideRepository { pattern: String },
 }
 
 impl ScopePattern {
@@ -54,17 +46,6 @@ impl ScopePattern {
     pub fn covers(&self, path: &str) -> bool {
         self.matcher.is_match(repo_path(path))
     }
-}
-
-/// Compiles a glob with `*` kept inside one path component, as in `.gitignore`.
-pub(crate) fn compile(glob: &str) -> Result<Glob, PatternError> {
-    GlobBuilder::new(glob)
-        .literal_separator(true)
-        .build()
-        .map_err(|error| PatternError::NotAGlob {
-            pattern: glob.to_owned(),
-            reason: error.kind().to_string(),
-        })
 }
 
 impl fmt::Debug for ScopePattern {
