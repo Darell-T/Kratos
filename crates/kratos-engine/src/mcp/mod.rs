@@ -7,6 +7,7 @@
 
 mod tools;
 mod transcript;
+mod wait;
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};

@@ -4,19 +4,18 @@
 //! reaches only the routes the engine opens to agents, in `server::agent_routes`.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kratos_client::{ApiReply, ApiRequest, ClientError};
 use kratos_protocol::{
-    ApprovalDecision, Permission, RequiredText, Seq, ThreadDetails, ThreadEvent, ThreadEventBody,
-    ThreadId, ThreadSettings,
+    ApprovalDecision, Permission, RequiredText, Seq, ThreadDetails, ThreadEvent, ThreadId,
+    ThreadSettings,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::{Call, MAX_WAIT_SECONDS, transcript};
+use super::{Call, MAX_WAIT_SECONDS, transcript, wait};
 use crate::server::ACTING_THREAD_HEADER;
 
 type Answer = Result<Value, String>;
@@ -29,8 +28,6 @@ struct Tool {
 }
 
 const DEFAULT_WAIT_SECONDS: u64 = 300;
-/// How often a wait checks whether Codex cancelled the call.
-const CANCEL_CHECK: Duration = Duration::from_secs(1);
 
 #[rustfmt::skip]
 const TOOLS: [Tool; 11] = [
@@ -233,81 +230,8 @@ fn wait_for_turn(call: &Call, arguments: Value) -> Answer {
         ));
     }
     let details: ThreadDetails = parse(call.get(&thread_path(&thread_id))?)?;
-    if let Some(state) = settled(&details) {
-        return Ok(state);
-    }
-    let deadline = Instant::now() + Duration::from_secs(seconds);
-    follow(call, thread_id, details.last_seq, deadline)
-}
-
-/// Follows the thread's events after `after` until one ends the wait, Codex cancels the call, or
-/// `deadline` passes.
-fn follow(call: &Call, thread_id: ThreadId, after: Seq, deadline: Instant) -> Answer {
-    let mut follower = call.caller.client.follow(thread_id, after);
-    let mut last = after;
-    let mut reply = None;
-    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-        if call.cancelled.load(Ordering::Relaxed) {
-            return Err("Cancelled".to_owned());
-        }
-        let event = match follower.next_event(left.min(CANCEL_CHECK)) {
-            Ok(event) => event,
-            Err(ClientError::TimedOut(_)) => continue,
-            Err(error) => return Err(format!("Kratos is unreachable: {error}")),
-        };
-        last = event.seq;
-        if let Some(text) = transcript::reply(&event.event) {
-            reply = Some(text.to_owned());
-        }
-        if let Some(state) = ended(&event.event, reply.as_deref()) {
-            return Ok(state);
-        }
-    }
-    Ok(json!({ "state": "timedOut", "lastSeq": last }))
-}
-
-fn settled(details: &ThreadDetails) -> Option<Value> {
-    if !details.approvals.is_empty() || !details.questions.is_empty() {
-        return Some(
-            json!({ "state": "waitingForInput", "approvals": details.approvals,
-                            "questions": details.questions }),
-        );
-    }
-    if let Some(reason) = &details.paused {
-        return Some(json!({ "state": "paused", "reason": reason }));
-    }
-    (details.running_turn.is_none() && details.queue.is_empty()).then(|| json!({ "state": "idle" }))
-}
-
-fn ended(event: &ThreadEventBody, reply: Option<&str>) -> Option<Value> {
-    match event {
-        ThreadEventBody::TurnCompleted { outcome, .. } => {
-            Some(json!({ "state": "turnEnded", "outcome": outcome, "reply": reply }))
-        }
-        ThreadEventBody::ApprovalRequested { approval } => {
-            Some(json!({ "state": "waitingForInput", "approvals": [approval] }))
-        }
-        ThreadEventBody::QuestionAsked { question } => {
-            Some(json!({ "state": "waitingForInput", "questions": [question] }))
-        }
-        ThreadEventBody::ThreadPaused { reason } => {
-            Some(json!({ "state": "paused", "reason": reason }))
-        }
-        ThreadEventBody::UserMessage { .. }
-        | ThreadEventBody::MessageQueued { .. }
-        | ThreadEventBody::MessageStatusChanged { .. }
-        | ThreadEventBody::TurnStarted { .. }
-        | ThreadEventBody::ItemCompleted { .. }
-        | ThreadEventBody::ApprovalDecided { .. }
-        | ThreadEventBody::ApprovalClosed { .. }
-        | ThreadEventBody::QuestionAnswered { .. }
-        | ThreadEventBody::QuestionClosed { .. }
-        | ThreadEventBody::ThreadResumed
-        | ThreadEventBody::SettingsChanged { .. }
-        | ThreadEventBody::ProviderError { .. }
-        | ThreadEventBody::ContinuationChanged { .. }
-        | ThreadEventBody::ProviderSession { .. } => None,
-    }
+    let outcome = wait::wait(call, thread_id, details, Duration::from_secs(seconds))?;
+    Ok(serde_json::to_value(outcome).expect("a wait outcome serializes"))
 }
 
 fn stop_thread(call: &Call, arguments: Value) -> Answer {
