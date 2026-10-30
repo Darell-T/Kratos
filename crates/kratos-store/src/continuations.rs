@@ -156,13 +156,6 @@ impl Store {
         continuation(&self.connection, id)
     }
 
-    pub fn open_continuation(
-        &self,
-        thread_id: &ThreadId,
-    ) -> Result<Option<Continuation>, StoreError> {
-        open_continuation(&self.connection, thread_id)
-    }
-
     /// Every open continuation, for re-arming the scheduler's timers after a restart (L6).
     pub fn open_continuations(&self) -> Result<Vec<(ThreadId, Continuation)>, StoreError> {
         let mut statement = self.connection.prepare_cached(&format!(

@@ -123,24 +123,6 @@ impl Store {
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
-
-    /// The thread a provider's own id belongs to.
-    pub fn thread_for_native_id(
-        &self,
-        provider: Provider,
-        native_id: &str,
-    ) -> Result<Option<ThreadId>, StoreError> {
-        let thread_id: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT thread_id FROM provider_sessions WHERE provider = ?1 AND native_id = ?2
-                 ORDER BY started_at DESC LIMIT 1",
-                params![provider.as_str(), native_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(thread_id.map(ThreadId::new))
-    }
 }
 
 impl ThreadWrite<'_> {
