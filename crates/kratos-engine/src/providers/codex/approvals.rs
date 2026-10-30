@@ -23,7 +23,6 @@ use super::{ProviderError, wire};
 pub(super) struct Waiting<A = ()> {
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
-    pub codex_id: RequestId,
     pub request: IncomingRequest,
     pub answer: A,
 }
@@ -160,7 +159,7 @@ fn take_where<K: Clone + Eq + std::hash::Hash, A>(
 
 fn find_id<K: Clone, A>(map: &HashMap<K, Waiting<A>>, codex_id: &RequestId) -> Option<K> {
     map.iter()
-        .find(|(_, waiting)| &waiting.codex_id == codex_id)
+        .find(|(_, waiting)| &waiting.request.id == codex_id)
         .map(|(id, _)| id.clone())
 }
 
@@ -301,7 +300,6 @@ impl Actor {
             Waiting {
                 thread_id,
                 turn_id,
-                codex_id: request.id.clone(),
                 request,
                 answer,
             },
@@ -328,7 +326,6 @@ impl Actor {
             Waiting {
                 thread_id,
                 turn_id,
-                codex_id: request.id.clone(),
                 request,
                 answer: (),
             },
