@@ -104,9 +104,10 @@ impl ThreadSettings {
 
     /// These settings with no more access than `limit`.
     pub fn limited_to(&self, limit: AccessLimit) -> ThreadSettings {
+        let access = self.access().intersect(limit);
         ThreadSettings {
-            permission: self.permission.min(limit.permission),
-            plan_mode: self.plan_mode || limit.plan_mode,
+            permission: access.permission,
+            plan_mode: access.plan_mode,
             ..self.clone()
         }
     }
@@ -129,7 +130,16 @@ impl AccessLimit {
 
     /// Whether `other` is no more than this: no higher permission, and planning if this plans.
     pub fn covers(self, other: AccessLimit) -> bool {
-        other.permission <= self.permission && (other.plan_mode || !self.plan_mode)
+        self.intersect(other) == other
+    }
+
+    /// The most access both allow: the lower permission, and planning if either plans. Narrowing
+    /// and the `covers` check both use this one order, so they cannot disagree.
+    fn intersect(self, other: AccessLimit) -> AccessLimit {
+        AccessLimit {
+            permission: self.permission.min(other.permission),
+            plan_mode: self.plan_mode || other.plan_mode,
+        }
     }
 }
 

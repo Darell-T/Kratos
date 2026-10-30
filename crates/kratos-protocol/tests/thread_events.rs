@@ -4,13 +4,13 @@
 //! unreadable. Round-trips between two builds of the same types would not notice; literal text does.
 
 use kratos_protocol::{
-    AgentItem, Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason, CappedText,
-    ContextUsage, Continuation, ContinuationId, ContinuationState, ExtraAccess, FileChange,
-    FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId, MessageInput, MessageOrigin,
-    MessageStatus, NetworkAccess, PathAccess, PathAccessMode, PauseReason, Permission, Provider,
-    Question, QuestionId, QuestionItem, QuestionOption, ReplySoFar, RequiredText, SendMessage,
-    ServerMessage, ThreadEventBody, ThreadId, ThreadSettings, Timestamp, TurnChanges, TurnId,
-    TurnOutcome, UsageWait,
+    AccessLimit, AgentItem, Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason,
+    CappedText, ContextUsage, Continuation, ContinuationId, ContinuationState, ExtraAccess,
+    FileChange, FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId, MessageInput,
+    MessageOrigin, MessageStatus, NetworkAccess, PathAccess, PathAccessMode, PauseReason,
+    Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption, ReplySoFar,
+    RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId, ThreadSettings, Timestamp,
+    TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
 use std::fmt::Debug;
 
@@ -514,4 +514,49 @@ fn thread_settings_refuse_unknown_fields() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn narrowing_settings_keeps_what_both_sides_allow_and_nothing_more() {
+    // Catches narrowing and the covers check drifting apart, which would run a message from
+    // another thread with access its sender lacked, or let the access check refuse what narrowing
+    // allowed. The first four checks catch an order that runs the wrong way or ignores plan mode.
+    let access = |permission, plan_mode| AccessLimit {
+        permission,
+        plan_mode,
+    };
+    let (ask, approve, full) = (
+        Permission::AskMe,
+        Permission::ApproveForMe,
+        Permission::FullAccess,
+    );
+    assert!(!access(ask, false).covers(access(approve, false)));
+    assert!(!access(approve, false).covers(access(full, false)));
+    assert!(!access(full, true).covers(access(full, false)));
+    assert!(AccessLimit::FULL.covers(access(ask, true)));
+
+    let every_limit: Vec<AccessLimit> = [ask, approve, full]
+        .into_iter()
+        .flat_map(|permission| [access(permission, false), access(permission, true)])
+        .collect();
+    for own in &every_limit {
+        let settings = ThreadSettings {
+            permission: own.permission,
+            plan_mode: own.plan_mode,
+            ..ThreadSettings::default()
+        };
+        for limit in &every_limit {
+            let lowered = settings.limited_to(*limit).access();
+            assert!(limit.covers(lowered), "{limit:?} covers {lowered:?}");
+            assert!(own.covers(lowered), "{own:?} covers {lowered:?}");
+            for other in &every_limit {
+                assert_eq!(
+                    lowered.covers(*other),
+                    own.covers(*other) && limit.covers(*other),
+                    "{own:?} limited to {limit:?} is {lowered:?}, which must cover {other:?} \
+                     exactly when both sides do"
+                );
+            }
+        }
+    }
 }
