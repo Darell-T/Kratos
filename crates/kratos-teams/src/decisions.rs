@@ -548,12 +548,7 @@ fn keep_probes(
     seq: FactSeq,
     invalid: Invalid<'_>,
 ) -> Result<Box<TaskView>, Rejection> {
-    let is_offered = |path: &String, probes: &[Probe]| {
-        probes
-            .iter()
-            .any(|probe| probe.path == *path && probe.status == ProbeStatus::Offered)
-    };
-    if let Some(stranger) = keep.iter().find(|path| !is_offered(path, &view.probes)) {
+    if let Some(stranger) = keep.iter().find(|path| !view.offers_probe(path)) {
         return Err(invalid(&format!("{stranger} is not an offered probe")));
     }
     for probe in &mut view.probes {

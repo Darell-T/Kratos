@@ -112,7 +112,8 @@ impl TaskView {
         })
     }
 
-    fn offers_probe(&self, path: &str) -> bool {
+    /// Whether `path` is a probe the reviewer left that still waits for a choice.
+    pub(crate) fn offers_probe(&self, path: &str) -> bool {
         self.probes
             .iter()
             .any(|probe| probe.path == path && probe.status == ProbeStatus::Offered)
