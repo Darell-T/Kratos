@@ -33,9 +33,9 @@ use tokio::sync::oneshot;
 
 use crate::hub::Hub;
 use crate::providers::codex::{CodexProvider, ProviderError};
+use crate::scheduler::{SchedulerError, SchedulerHandle};
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
-use crate::usage::scheduler::SchedulerHandle;
 
 pub use auth::ClientToken;
 
@@ -266,14 +266,24 @@ impl From<ProviderError> for ApiError {
             ProviderError::UnknownThread(_)
             | ProviderError::UnknownMessage(_)
             | ProviderError::UnknownApproval(_)
-            | ProviderError::UnknownQuestion(_)
-            | ProviderError::UnknownContinuation(_) => ApiError::new(StatusCode::NOT_FOUND, error),
+            | ProviderError::UnknownQuestion(_) => ApiError::new(StatusCode::NOT_FOUND, error),
             ProviderError::Conflict(_) => ApiError::new(StatusCode::CONFLICT, error),
             ProviderError::Unsupported(_) => ApiError::bad_request(error.to_string()),
             ProviderError::Unavailable(_) | ProviderError::Stopped => {
                 ApiError::unavailable(error.to_string())
             }
             ProviderError::Store(error) => error.into(),
+        }
+    }
+}
+
+impl From<SchedulerError> for ApiError {
+    fn from(error: SchedulerError) -> ApiError {
+        match error {
+            SchedulerError::UnknownContinuation(_) => ApiError::new(StatusCode::NOT_FOUND, error),
+            SchedulerError::Conflict(_) => ApiError::new(StatusCode::CONFLICT, error),
+            SchedulerError::Stopped => ApiError::unavailable(error.to_string()),
+            SchedulerError::Store(error) => error.into(),
         }
     }
 }

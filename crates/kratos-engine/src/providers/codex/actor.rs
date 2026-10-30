@@ -216,7 +216,7 @@ pub(crate) struct Actor {
     pub(super) done: mpsc::UnboundedSender<Done>,
     pub(super) completions: mpsc::UnboundedReceiver<Done>,
     /// Where usage-limit stops go: the scheduler owns continuation (D39).
-    pub(super) limit_stops: Option<mpsc::UnboundedSender<crate::usage::scheduler::LimitStop>>,
+    pub(super) limit_stops: Option<mpsc::UnboundedSender<crate::usage::LimitStop>>,
 }
 
 impl Actor {
@@ -400,7 +400,7 @@ impl Actor {
     /// Reports a usage-limit stop to the scheduler, which plans the continuation (D39).
     pub(super) fn report_limit_stop(&self, thread_id: &ThreadId, turn_id: kratos_protocol::TurnId) {
         if let Some(stops) = &self.limit_stops {
-            let _ = stops.send(crate::usage::scheduler::LimitStop {
+            let _ = stops.send(crate::usage::LimitStop {
                 thread_id: thread_id.clone(),
                 turn_id,
                 provider: Provider::Codex,

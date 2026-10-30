@@ -19,8 +19,8 @@ use super::requests::Requests;
 use super::wire::ChangesRecorder;
 use crate::hub::{Hub, PAGE_BYTES};
 use crate::store_thread::StoreThread;
+use crate::usage::LimitStop;
 use crate::usage::UsageTracker;
-use crate::usage::scheduler::LimitStop;
 
 fn add_waiting_requests(
     store: &Store,

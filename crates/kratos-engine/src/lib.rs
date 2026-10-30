@@ -5,6 +5,7 @@ pub mod config;
 pub mod hub;
 pub mod mcp;
 pub mod providers;
+pub mod scheduler;
 pub mod server;
 pub mod store_thread;
 pub mod usage;

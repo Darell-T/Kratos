@@ -6,8 +6,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use kratos_engine::providers::codex::ProviderError;
-use kratos_engine::usage::scheduler::{self, Clock, LimitStop, SchedulerHandle};
+use kratos_engine::scheduler::{self, Clock, SchedulerError, SchedulerHandle};
+use kratos_engine::usage::LimitStop;
 use kratos_protocol::{
     AccessLimit, Continuation, ContinuationId, ContinuationState, MessageInput, MessageOrigin,
     MessageStatus, Permission, Provider, ThreadEventBody, ThreadSettings, TurnId,
@@ -597,7 +597,7 @@ async fn settle_late_report(
         scheduler
             .schedule(ContinuationId::new("no-such-continuation".into()))
             .await,
-        Err(ProviderError::UnknownContinuation(_))
+        Err(SchedulerError::UnknownContinuation(_))
     ));
 }
 

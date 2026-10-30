@@ -1,6 +1,6 @@
 //! What Codex says about the account's usage, and a turn that stops at its limit (D38, D39).
 
-use kratos_engine::usage::scheduler::LimitStop;
+use kratos_engine::usage::LimitStop;
 use kratos_protocol::{Allowance, PauseReason, Provider, ThreadEventBody};
 use serde_json::json;
 

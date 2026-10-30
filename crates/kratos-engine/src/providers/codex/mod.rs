@@ -40,8 +40,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::hub::Hub;
 use crate::mcp::McpServer;
 use crate::store_thread::StoreThread;
-use crate::usage::UsageTracker;
-use crate::usage::scheduler::LimitStop;
+use crate::usage::{LimitStop, UsageTracker};
 
 pub use profiles::ProtectedFolders;
 
@@ -103,8 +102,6 @@ pub enum ProviderError {
     UnknownApproval(ApprovalId),
     #[error("Unknown question {0}")]
     UnknownQuestion(QuestionId),
-    #[error("Unknown continuation {0}")]
-    UnknownContinuation(ContinuationId),
     /// The request does not fit the thread's state, for example a retry of a message that did not
     /// fail. The text says what would.
     #[error("{0}")]
