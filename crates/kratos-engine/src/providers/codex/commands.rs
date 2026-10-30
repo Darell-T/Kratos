@@ -70,7 +70,10 @@ impl Actor {
                 thread_id,
                 message_id,
                 reply,
-            } => self.steer(&thread_id, message_id, reply).await,
+            } => {
+                let steered = self.steer(&thread_id, message_id).await;
+                let _ = reply.send(steered);
+            }
             Command::Remove {
                 thread_id,
                 message_id,
@@ -180,12 +183,7 @@ impl Actor {
 
     /// Adds a queued message to the running turn. Answers once Codex has the request; the outcome
     /// arrives as the message's status.
-    async fn steer(&mut self, thread_id: &ThreadId, message_id: MessageId, reply: Reply<Message>) {
-        let result = self.start_steer(thread_id, message_id).await;
-        let _ = reply.send(result);
-    }
-
-    async fn start_steer(
+    async fn steer(
         &mut self,
         thread_id: &ThreadId,
         message_id: MessageId,
