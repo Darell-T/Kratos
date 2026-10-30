@@ -18,7 +18,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::requests::Requests;
 use super::threads::ThreadState;
-use super::turns::{After, Stopper};
+use super::turns::{After, Delivery, Stopper};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
@@ -134,7 +134,7 @@ pub(super) enum Done {
     DeliveryChecked {
         thread_id: ThreadId,
         message_id: MessageId,
-        attempt: Option<u64>,
+        delivery: Delivery,
         error: String,
         found: Option<Box<types::Turn>>,
     },
@@ -280,11 +280,11 @@ impl Actor {
             Done::DeliveryChecked {
                 thread_id,
                 message_id,
-                attempt,
+                delivery,
                 error,
                 found,
             } => {
-                self.on_delivery_checked(thread_id, message_id, attempt, error, found)
+                self.on_delivery_checked(thread_id, message_id, delivery, error, found)
                     .await;
             }
             Done::Steered {

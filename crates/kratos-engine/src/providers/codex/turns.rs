@@ -26,6 +26,12 @@ pub(super) enum After {
     Pause(PauseReason),
 }
 
+/// The request whose answer was lost: a start, by its attempt, or a steer.
+pub(super) enum Delivery {
+    Start { attempt: u64 },
+    Steer,
+}
+
 /// Who asked Codex to stop a turn, which decides what follows when Codex does not stop it.
 pub(super) enum Stopper {
     /// The turn ran out of time. Nothing would ask again, so Codex is closed instead.
@@ -192,7 +198,12 @@ impl Actor {
                 self.refuse_start(&thread_id, &message_id, message).await;
             }
             Err(error) => {
-                self.check_delivery(&thread_id, &message_id, Some(attempt), error.to_string());
+                self.check_delivery(
+                    &thread_id,
+                    &message_id,
+                    Delivery::Start { attempt },
+                    error.to_string(),
+                );
             }
         }
         self.start_ready().await;
@@ -227,7 +238,7 @@ impl Actor {
         &self,
         thread_id: &ThreadId,
         message_id: &MessageId,
-        attempt: Option<u64>,
+        delivery: Delivery,
         error: String,
     ) {
         let (thread_id, message_id) = (thread_id.clone(), message_id.clone());
@@ -254,7 +265,7 @@ impl Actor {
             Done::DeliveryChecked {
                 thread_id,
                 message_id,
-                attempt,
+                delivery,
                 error,
                 found,
             }
@@ -265,12 +276,12 @@ impl Actor {
         &mut self,
         thread_id: ThreadId,
         message_id: MessageId,
-        attempt: Option<u64>,
+        delivery: Delivery,
         error: String,
         found: Option<Box<types::Turn>>,
     ) {
-        match attempt {
-            Some(attempt) => {
+        match delivery {
+            Delivery::Start { attempt } => {
                 let is_current = matches!(
                     self.threads.get(&thread_id).map(|thread| &thread.turn),
                     Some(Turn::Starting { attempt: current, .. }) if *current == attempt
@@ -286,7 +297,7 @@ impl Actor {
                     }
                 }
             }
-            None => {
+            Delivery::Steer => {
                 if let Some(thread) = self.threads.get_mut(&thread_id) {
                     thread.steering.remove(&message_id);
                 }

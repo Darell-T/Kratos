@@ -17,7 +17,7 @@ use super::actor::{Actor, Command, Done, Reply};
 use super::profiles::Profile;
 use super::requests::Answer;
 use super::threads::{Link, Turn};
-use super::turns::{Stopper, read_history};
+use super::turns::{Delivery, Stopper, read_history};
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
 
 /// The text of the message Kratos sends to carry on a turn that stopped at a usage limit (D39).
@@ -293,7 +293,7 @@ impl Actor {
                     |error| error.to_string(),
                 );
                 // The message stays in `steering` until the history check settles it.
-                self.check_delivery(&thread_id, &message_id, None, error);
+                self.check_delivery(&thread_id, &message_id, Delivery::Steer, error);
                 return;
             }
         }
