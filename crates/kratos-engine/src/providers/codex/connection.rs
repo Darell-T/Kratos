@@ -209,28 +209,6 @@ impl Actor {
         }
     }
 
-    /// Reads the plan that pays for the account (D24) and the account's usage (D38).
-    fn read_account(&self, generation: u64, codex: Codex) {
-        let reader = codex.clone();
-        self.spawn(async move {
-            let plan = match reader
-                .request::<methods::AccountRead>(&types::GetAccountParams::default())
-                .await
-            {
-                Ok(read) => wire::plan(&read),
-                Err(_) => None,
-            };
-            Done::Account { generation, plan }
-        });
-        self.read_usage(codex, None);
-    }
-
-    pub(super) fn on_account(&mut self, generation: u64, plan: Option<String>) {
-        if generation == self.generation {
-            self.plan = plan;
-        }
-    }
-
     /// Loads the thread into the running app-server, resuming its Codex thread or starting one for
     /// a thread that has none. Returns its Codex id once loaded; `None` while that is under way.
     pub(super) async fn attached(

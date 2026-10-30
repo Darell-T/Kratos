@@ -10,7 +10,7 @@ use std::time::Duration;
 use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
-    MessageId, MessageInput, MessageOrigin, Provider, QuestionId, QuestionOutcome, Skill, ThreadId,
+    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, Skill, ThreadId,
     ThreadSettings, TurnOutcome,
 };
 use kratos_store::{StoreError, ThreadWrite};
@@ -457,15 +457,6 @@ impl Actor {
             thread.file_items.clear();
         }
         Ok(())
-    }
-
-    /// Reports a usage-limit stop to the scheduler, which plans the continuation (D39).
-    pub(super) fn report_limit_stop(&self, thread_id: &ThreadId, turn_id: kratos_protocol::TurnId) {
-        let _ = self.limit_stops.send(crate::usage::LimitStop {
-            thread_id: thread_id.clone(),
-            turn_id,
-            provider: Provider::Codex,
-        });
     }
 
     async fn shutdown(&mut self) {

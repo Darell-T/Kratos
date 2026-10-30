@@ -1,0 +1,81 @@
+//! The account Codex runs under: the plan that pays for it (D24), its usage (D38), and the turns
+//! that stop at its usage limit (D39).
+
+use kratos_codex_client::{Codex, RequestError, methods, types};
+use kratos_protocol::{Provider, ThreadId};
+
+use super::actor::{Actor, Done, Reply};
+use super::{ProviderError, wire};
+
+impl Actor {
+    /// Reads the plan that pays for the account (D24) and the account's usage (D38).
+    pub(super) fn read_account(&self, generation: u64, codex: Codex) {
+        let reader = codex.clone();
+        self.spawn(async move {
+            let plan = match reader
+                .request::<methods::AccountRead>(&types::GetAccountParams::default())
+                .await
+            {
+                Ok(read) => wire::plan(&read),
+                Err(_) => None,
+            };
+            Done::Account { generation, plan }
+        });
+        self.read_usage(codex, None);
+    }
+
+    pub(super) fn on_account(&mut self, generation: u64, plan: Option<String>) {
+        if generation == self.generation {
+            self.plan = plan;
+        }
+    }
+
+    /// Reads the account's usage; a read finished after the account changed is dropped (D38).
+    pub(super) fn read_usage(&self, codex: Codex, reply: Option<Reply<()>>) {
+        let tracker_generation = self.usage.generation(Provider::Codex);
+        self.spawn(async move {
+            let result = codex
+                .request::<methods::RateLimitsRead>(&None)
+                .await
+                .map(Box::new);
+            Done::UsageRead {
+                tracker_generation,
+                result,
+                reply,
+            }
+        });
+    }
+
+    pub(super) fn on_usage_read(
+        &mut self,
+        tracker_generation: u64,
+        result: Result<Box<types::GetAccountRateLimitsResponse>, RequestError>,
+        reply: Option<Reply<()>>,
+    ) {
+        let answer = match result {
+            Ok(read) => {
+                let usage = wire::account_usage(&read, self.plan.clone());
+                self.usage.record_read(tracker_generation, usage);
+                Ok(())
+            }
+            Err(error) => {
+                let reason = format!("Codex did not report the account's usage: {error}");
+                self.usage
+                    .record_unavailable(Provider::Codex, reason.clone());
+                Err(ProviderError::Unavailable(reason))
+            }
+        };
+        if let Some(reply) = reply {
+            let _ = reply.send(answer);
+        }
+    }
+
+    /// Reports a usage-limit stop to the scheduler, which plans the continuation (D39).
+    pub(super) fn report_limit_stop(&self, thread_id: &ThreadId, turn_id: kratos_protocol::TurnId) {
+        let _ = self.limit_stops.send(crate::usage::LimitStop {
+            thread_id: thread_id.clone(),
+            turn_id,
+            provider: Provider::Codex,
+        });
+    }
+}

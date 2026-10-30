@@ -10,6 +10,7 @@
 //! once the turn before it is confirmed finished, and a message whose delivery is uncertain is
 //! never sent again: only the provider's history or the user settles it.
 
+mod account;
 mod actor;
 mod approvals;
 mod commands;

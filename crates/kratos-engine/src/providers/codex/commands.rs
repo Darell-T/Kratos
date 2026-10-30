@@ -5,7 +5,7 @@ use std::time::Duration;
 use kratos_codex_client::{Codex, RequestError, methods, types};
 use kratos_protocol::{
     CommandResult, ContinuationId, ContinuationState, Message, MessageId, MessageInput,
-    MessageOrigin, MessageStatus, PauseReason, Provider, RequiredText, Skill, ThreadId,
+    MessageOrigin, MessageStatus, PauseReason, RequiredText, Skill, ThreadId,
 };
 use kratos_store::{Enqueued, QueuePlace, StoreError, ThreadWrite};
 use serde_json::json;
@@ -563,46 +563,6 @@ impl Actor {
             })
         })
         .await
-    }
-
-    /// Reads the account's usage; a read finished after the account changed is dropped (D38).
-    pub(super) fn read_usage(&self, codex: Codex, reply: Option<Reply<()>>) {
-        let tracker_generation = self.usage.generation(Provider::Codex);
-        self.spawn(async move {
-            let result = codex
-                .request::<methods::RateLimitsRead>(&None)
-                .await
-                .map(Box::new);
-            Done::UsageRead {
-                tracker_generation,
-                result,
-                reply,
-            }
-        });
-    }
-
-    pub(super) fn on_usage_read(
-        &mut self,
-        tracker_generation: u64,
-        result: Result<Box<types::GetAccountRateLimitsResponse>, RequestError>,
-        reply: Option<Reply<()>>,
-    ) {
-        let answer = match result {
-            Ok(read) => {
-                let usage = wire::account_usage(&read, self.plan.clone());
-                self.usage.record_read(tracker_generation, usage);
-                Ok(())
-            }
-            Err(error) => {
-                let reason = format!("Codex did not report the account's usage: {error}");
-                self.usage
-                    .record_unavailable(Provider::Codex, reason.clone());
-                Err(ProviderError::Unavailable(reason))
-            }
-        };
-        if let Some(reply) = reply {
-            let _ = reply.send(answer);
-        }
     }
 
     async fn message(
