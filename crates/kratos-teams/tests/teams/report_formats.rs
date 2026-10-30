@@ -11,13 +11,17 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-const KINDS: [ReportKind; 5] = [
-    ReportKind::Plan,
-    ReportKind::Implementer,
-    ReportKind::Review,
-    ReportKind::Answer,
-    ReportKind::Rulings,
-];
+/// Every `ReportKind`, read from its derived schema, so a new kind cannot be left out.
+fn every_kind() -> Vec<ReportKind> {
+    let schema = serde_json::to_value(schemars::schema_for!(ReportKind)).expect("a schema");
+    let names = schema["enum"]
+        .as_array()
+        .expect("a unit enum lists its values");
+    names
+        .iter()
+        .map(|name| serde_json::from_value(name.clone()).expect("each value names a kind"))
+        .collect()
+}
 
 fn changes() -> TurnChanges {
     TurnChanges {
@@ -44,7 +48,7 @@ fn objects(node: &Value) -> Vec<&serde_json::Map<String, Value>> {
 
 #[test]
 fn every_report_schema_requires_every_property_and_allows_no_extras() {
-    for kind in KINDS {
+    for kind in every_kind() {
         let schema = report_json_schema(kind);
         let all = objects(schema);
         assert!(!all.is_empty(), "{kind:?} has no object");

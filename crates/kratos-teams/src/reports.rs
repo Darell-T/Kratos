@@ -315,8 +315,11 @@ pub enum Reported {
     },
 }
 
-/// Which report a piece of work must end with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// Which report a piece of work must end with. Its derived schema lists every kind, which lets a test
+/// cover each one without a hand-written list.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportKind {
     Plan,
