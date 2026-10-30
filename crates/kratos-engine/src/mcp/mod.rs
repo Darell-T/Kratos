@@ -11,17 +11,22 @@ mod wait;
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
 use kratos_client::Client;
 use kratos_codex_client::RequestId;
-use kratos_protocol::ThreadId;
+use kratos_protocol::{HOME_VAR, ThreadId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::config::PORT_VAR;
+
 pub const MAX_WAIT_SECONDS: u64 = 1800;
+/// The `kratos-engine` subcommand that runs this server.
+pub const SUBCOMMAND: &str = "mcp";
 /// The variable that names the thread whose agent the server serves.
 pub const THREAD_ID_VAR: &str = "KRATOS_THREAD_ID";
 
@@ -35,6 +40,27 @@ const INSTRUCTIONS: &str = "Tools for working with the other threads in Kratos: 
 threads, start new ones, send them messages, wait for their turns, and answer what they ask. The \
 receiver of a message answers in its own thread, so read the answer with wait_for_turn or \
 read_thread.";
+
+/// How Codex starts this server: the engine's own binary, told the engine's data folder and port.
+#[derive(Clone, Debug)]
+pub struct McpServer {
+    pub program: PathBuf,
+    pub home: PathBuf,
+    pub port: u16,
+}
+
+impl McpServer {
+    /// The command, arguments, and environment that start the server for `thread_id`, as Codex's
+    /// `mcp_servers` entry spells them.
+    pub fn launch(&self, thread_id: &ThreadId) -> Value {
+        json!({
+            "command": self.program,
+            "args": [SUBCOMMAND],
+            "env": { (HOME_VAR): self.home, (PORT_VAR): self.port.to_string(),
+                     (THREAD_ID_VAR): thread_id.as_str() },
+        })
+    }
+}
 
 pub struct Caller {
     client: Client,

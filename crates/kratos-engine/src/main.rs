@@ -25,8 +25,8 @@ use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, St
 
 use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
-use kratos_engine::mcp;
-use kratos_engine::providers::codex::{self, CodexSettings, McpServer, ProtectedFolders};
+use kratos_engine::mcp::{self, McpServer};
+use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::UsageTracker;
@@ -57,7 +57,7 @@ fn run() -> Result<(), StartError> {
         .collect();
     match &arguments[..] {
         [] => serve(&config),
-        [command] if command == "mcp" => mcp(&config),
+        [command] if command == mcp::SUBCOMMAND => mcp(&config),
         [command, id] if command == "restore" => restore(&config, &id.parse()?),
         _ => Err(StartError::Usage),
     }

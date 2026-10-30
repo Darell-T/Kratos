@@ -21,8 +21,8 @@ use super::actor::{Actor, Done, Opened, Server, settle_closed};
 use super::profiles::Profile;
 use super::threads::{Link, ThreadState, Turn};
 use super::wire;
-use super::{CodexSettings, McpServer, ProviderError};
-use crate::mcp;
+use super::{CodexSettings, ProviderError};
+use crate::mcp::{self, McpServer};
 
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(1);
 const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);
@@ -85,14 +85,9 @@ fn thread_config(
         config.insert("model_context_window".to_owned(), json!(tokens));
     }
     if let Some(mcp) = mcp {
-        let kratos = json!({
-            "command": mcp.program,
-            "args": ["mcp"],
-            "env": { "KRATOS_HOME": mcp.home, "KRATOS_PORT": mcp.port.to_string(),
-                     (mcp::THREAD_ID_VAR): thread_id.as_str() },
-            "default_tools_approval_mode": "approve",
-            "tool_timeout_sec": MCP_TOOL_TIMEOUT_SECONDS,
-        });
+        let mut kratos = mcp.launch(thread_id);
+        kratos["default_tools_approval_mode"] = json!("approve");
+        kratos["tool_timeout_sec"] = json!(MCP_TOOL_TIMEOUT_SECONDS);
         config.insert("mcp_servers".to_owned(), json!({ "kratos": kratos }));
     }
     (!config.is_empty()).then_some(serde_json::Value::Object(config))

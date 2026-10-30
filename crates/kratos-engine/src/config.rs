@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use kratos_protocol::{DEFAULT_HOME_FOLDER, DEFAULT_PORT, HOME_VAR};
 
+/// The variable naming the port the engine listens on. Empty counts as unset.
+pub const PORT_VAR: &str = "KRATOS_PORT";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
     /// Absolute.
@@ -37,7 +40,7 @@ fn home_from_env() -> Result<PathBuf, ConfigError> {
 }
 
 fn port_from_env() -> Result<u16, ConfigError> {
-    let Some(raw) = non_empty_var("KRATOS_PORT") else {
+    let Some(raw) = non_empty_var(PORT_VAR) else {
         return Ok(DEFAULT_PORT);
     };
     let text = raw.to_string_lossy().into_owned();

@@ -10,9 +10,8 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
-use kratos_engine::providers::codex::{
-    self, CodexProvider, CodexSettings, McpServer, ProtectedFolders, Sent,
-};
+use kratos_engine::mcp::McpServer;
+use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders, Sent};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::UsageTracker;
 use kratos_engine::usage::scheduler::{self, Clock, LimitStop, SchedulerHandle};
