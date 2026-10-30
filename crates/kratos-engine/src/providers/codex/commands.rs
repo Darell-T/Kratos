@@ -809,21 +809,8 @@ async fn exec(
     params.timeout_ms = Some(i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX));
     // The runner's own deadline answers first; this one only bounds a Codex that never answers.
     let deadline = timeout + Duration::from_secs(10);
-    match codex
+    let result = codex
         .request_within::<methods::CommandExec>(&params, deadline)
-        .await
-    {
-        Ok(done) => wire::command_result(done),
-        // On Windows a command that runs out of time fails the request with this text.
-        Err(kratos_codex_client::RequestError::Rpc { message, .. })
-            if message.contains("timed out") =>
-        {
-            CommandResult::TimedOut {
-                output: String::new(),
-            }
-        }
-        Err(error) => CommandResult::Refused {
-            error: error.to_string(),
-        },
-    }
+        .await;
+    wire::command_outcome(result)
 }

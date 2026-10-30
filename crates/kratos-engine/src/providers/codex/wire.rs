@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use std::time::{Duration, SystemTime};
 
-use kratos_codex_client::{ServerRequest, ServerResponse, types};
+use kratos_codex_client::{RequestError, ServerRequest, ServerResponse, types};
 use kratos_protocol::{
     AccessLimit, AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult,
     ContextUsage, ExtraAccess, FileChange, FileChangeKind, ItemStatus, Message, MessageInput,
@@ -484,18 +484,27 @@ fn usage_window(window: &types::RateLimitWindow) -> UsageWindow {
     }
 }
 
-/// A finished `command/exec`. Measured on Codex 0.159.1: a command that runs out of time ends with
-/// exit code 124 on Linux, as `timeout` reports it.
-pub fn command_result(done: types::CommandExecResponse) -> CommandResult {
-    if cfg!(unix) && done.exit_code == 124 {
-        return CommandResult::TimedOut {
+/// How a `command/exec` ended. Measured on Codex 0.159.1: a command that runs out of time ends with
+/// exit code 124 on Linux, as `timeout` reports it, and on Windows fails the request with a
+/// message that says it timed out.
+pub fn command_outcome(result: Result<types::CommandExecResponse, RequestError>) -> CommandResult {
+    match result {
+        Ok(done) if cfg!(unix) && done.exit_code == 124 => CommandResult::TimedOut {
             output: format!("{}{}", done.stdout, done.stderr),
-        };
-    }
-    CommandResult::Exited {
-        exit_code: done.exit_code,
-        stdout: done.stdout,
-        stderr: done.stderr,
+        },
+        Ok(done) => CommandResult::Exited {
+            exit_code: done.exit_code,
+            stdout: done.stdout,
+            stderr: done.stderr,
+        },
+        Err(RequestError::Rpc { message, .. }) if message.contains("timed out") => {
+            CommandResult::TimedOut {
+                output: String::new(),
+            }
+        }
+        Err(error) => CommandResult::Refused {
+            error: error.to_string(),
+        },
     }
 }
 
@@ -611,6 +620,39 @@ mod tests {
             let refused = serde_json::to_value(refusal(&request)).unwrap();
             assert_eq!(refused, expected, "{}", request.method());
         }
+    }
+
+    #[test]
+    fn a_command_that_ran_out_of_time_is_told_apart_from_one_codex_refused() {
+        // Catches the Windows timeout, which Codex reports as a failed request, being shown as a
+        // refusal, and any other failed request being shown as a timeout.
+        let rpc = |message: &str| RequestError::Rpc {
+            code: -32000,
+            message: message.to_owned(),
+        };
+        let exited: types::CommandExecResponse =
+            required(json!({ "exitCode": 0, "stdout": "ok", "stderr": "" }));
+
+        assert_eq!(
+            command_outcome(Err(rpc("command timed out after 5000 ms"))),
+            CommandResult::TimedOut {
+                output: String::new()
+            }
+        );
+        assert_eq!(
+            command_outcome(Err(rpc("sandbox denied"))),
+            CommandResult::Refused {
+                error: "sandbox denied".to_owned()
+            }
+        );
+        assert_eq!(
+            command_outcome(Ok(exited)),
+            CommandResult::Exited {
+                exit_code: 0,
+                stdout: "ok".to_owned(),
+                stderr: String::new()
+            }
+        );
     }
 
     #[test]
