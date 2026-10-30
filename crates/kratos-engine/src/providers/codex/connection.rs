@@ -96,7 +96,7 @@ fn launch(settings: &CodexSettings) -> Launch {
     let mut args: Vec<OsString> = vec!["app-server".into()];
     args.extend(settings.extra_args.iter().cloned());
     #[cfg(windows)]
-    args.extend(["-c".into(), "windows.sandbox=\"elevated\"".into()]);
+    args.extend(super::sandbox::launch_arguments());
     args.extend(settings.protected.launch_arguments(&std::env::temp_dir()));
     Launch {
         program: settings.program.clone(),

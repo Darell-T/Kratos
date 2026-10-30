@@ -1,12 +1,19 @@
 //! No thread is exposed to Codex until its Windows sandbox is ready. The elevated implementation
 //! supports the denied read paths that protect Kratos's client credential; unelevated does not.
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use kratos_codex_client::{Codex, Incoming, Notification, RequestError, methods, types};
 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
+const MODE: types::WindowsSandboxSetupMode = types::WindowsSandboxSetupMode::Elevated;
+
+/// The `-c` arguments that make the app-server run commands in [`MODE`].
+pub(super) fn launch_arguments() -> [OsString; 2] {
+    ["-c".into(), format!("windows.sandbox=\"{MODE}\"").into()]
+}
 
 pub(super) async fn prepare(
     codex: &Codex,
@@ -20,7 +27,7 @@ pub(super) async fn prepare(
         return Ok(());
     }
     let params = types::WindowsSandboxSetupStartParams {
-        mode: types::WindowsSandboxSetupMode::Elevated,
+        mode: MODE,
         cwd: Some(types::AbsolutePathBuf(cwd.to_string_lossy().into_owned())),
     };
     let setup = codex
@@ -50,7 +57,7 @@ async fn wait_for_setup(
     while let Some(message) = incoming.recv().await {
         match message {
             Incoming::Notification(Notification::WindowsSandboxSetupCompleted(completed)) => {
-                if completed.mode != types::WindowsSandboxSetupMode::Elevated {
+                if completed.mode != MODE {
                     return Err(setup_error(
                         "Codex completed a different sandbox implementation",
                     ));
@@ -83,5 +90,23 @@ fn setup_error(error: &str) -> RequestError {
     RequestError::Rpc {
         code: kratos_codex_client::INTERNAL_ERROR,
         message: format!("Windows sandbox is unavailable: {error}. No agent commands were started"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_app_server_starts_with_the_sandbox_that_setup_prepares() {
+        // Catches a launch argument that names another implementation, or spells the elevated
+        // one differently from the text Codex's config reads.
+        assert_eq!(
+            launch_arguments(),
+            [
+                OsString::from("-c"),
+                OsString::from("windows.sandbox=\"elevated\"")
+            ]
+        );
     }
 }
