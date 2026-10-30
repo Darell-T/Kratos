@@ -98,11 +98,7 @@ impl Actor {
                 timeout,
                 reply,
             } => self.run_command(thread_id, command, timeout, reply).await,
-            Command::RefreshUsage { reply } => match self.connection() {
-                Ok(Some(codex)) => self.read_usage(codex, Some(reply)),
-                Ok(None) => self.deferred.push(Deferred::RefreshUsage { reply }),
-                Err(error) => drop(reply.send(Err(error))),
-            },
+            Command::RefreshUsage { reply } => self.refresh_usage(reply),
             Command::Continue {
                 thread_id,
                 continuation_id,
