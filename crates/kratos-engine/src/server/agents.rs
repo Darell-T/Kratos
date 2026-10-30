@@ -18,49 +18,15 @@ use uuid::Uuid;
 
 use super::acting::Acting;
 use super::json::read_json;
-use super::{ApiError, ServerState, json_reply};
-use crate::providers::codex::{CodexProvider, MAX_PENDING_MESSAGES, ProviderError, Sent};
+use super::threads::details;
+use super::{ApiError, MessagePath, ServerState, ThreadPath, json_reply, path};
+use crate::providers::codex::{MAX_PENDING_MESSAGES, Sent};
 
 /// How long `GET /api/usage` waits for Codex's fresh read before it answers with what it knows.
 const USAGE_REFRESH_WAIT: Duration = Duration::from_secs(10);
 
 const NO_SLASH_COMMANDS: &str =
     "Codex's app-server protocol does not list its slash commands, so Kratos cannot offer them";
-
-type ThreadPath = Result<Path<ThreadId>, PathRejection>;
-type MessagePath = Result<Path<(ThreadId, MessageId)>, PathRejection>;
-
-fn path<T>(path: Result<Path<T>, PathRejection>) -> Result<T, ApiError> {
-    path.map(|Path(value)| value)
-        .map_err(|_| ApiError::bad_request("Malformed URL path"))
-}
-
-impl ServerState {
-    pub(super) fn codex(&self) -> Result<&CodexProvider, ApiError> {
-        self.codex
-            .as_ref()
-            .map(|codex| &codex.provider)
-            .map_err(|missing| ApiError::unavailable(missing.clone()))
-    }
-}
-
-impl From<ProviderError> for ApiError {
-    fn from(error: ProviderError) -> ApiError {
-        match error {
-            ProviderError::UnknownThread(_)
-            | ProviderError::UnknownMessage(_)
-            | ProviderError::UnknownApproval(_)
-            | ProviderError::UnknownQuestion(_)
-            | ProviderError::UnknownContinuation(_) => ApiError::new(StatusCode::NOT_FOUND, error),
-            ProviderError::Conflict(_) => ApiError::new(StatusCode::CONFLICT, error),
-            ProviderError::Unsupported(_) => ApiError::bad_request(error.to_string()),
-            ProviderError::Unavailable(_) | ProviderError::Stopped => {
-                ApiError::unavailable(error.to_string())
-            }
-            ProviderError::Store(error) => error.into(),
-        }
-    }
-}
 
 /// `POST /api/threads/{id}/messages`. To a Codex thread: 201 with the queued message, 200 with the
 /// message the client sent before under the same `messageId` (D85), 409 when that id holds another
@@ -144,24 +110,6 @@ fn sent_reply(sent: Sent) -> Response {
             },
         ),
     }
-}
-
-/// `GET /api/threads/{id}`: 200 with the thread, its settings, its queue, and what waits on the
-/// user.
-pub(super) async fn thread_details(
-    State(state): State<ServerState>,
-    id: ThreadPath,
-) -> Result<Response, ApiError> {
-    let thread_id = path(id)?;
-    details(&state, thread_id).await
-}
-
-async fn details(state: &ServerState, thread_id: ThreadId) -> Result<Response, ApiError> {
-    let details = state
-        .store
-        .call(move |store| store.thread_details(&thread_id))
-        .await?;
-    Ok(json_reply(StatusCode::OK, &details))
 }
 
 /// `POST /api/threads/{id}/messages/{messageId}/steer`: 200 with the message, now being added to

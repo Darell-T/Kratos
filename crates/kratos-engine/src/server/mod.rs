@@ -4,27 +4,30 @@ pub mod auth;
 mod json;
 mod local_only;
 mod paths;
-mod routes;
 mod socket;
+mod threads;
+mod workspaces;
 
 use std::future::{Future, IntoFuture};
 use std::io;
 use std::time::Duration;
 
 use axum::Router;
+use axum::extract::Path;
+use axum::extract::rejection::PathRejection;
 use axum::http::StatusCode;
 use axum::http::header::CONTENT_TYPE;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
-use kratos_protocol::ErrorBody;
+use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
 use kratos_store::StoreError;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::hub::Hub;
-use crate::providers::codex::CodexProvider;
+use crate::providers::codex::{CodexProvider, ProviderError};
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
 use crate::usage::scheduler::SchedulerHandle;
@@ -62,6 +65,23 @@ pub struct Codex {
     pub scheduler: Option<SchedulerHandle>,
 }
 
+impl ServerState {
+    fn codex(&self) -> Result<&CodexProvider, ApiError> {
+        self.codex
+            .as_ref()
+            .map(|codex| &codex.provider)
+            .map_err(|missing| ApiError::unavailable(missing.clone()))
+    }
+}
+
+type ThreadPath = Result<Path<ThreadId>, PathRejection>;
+type MessagePath = Result<Path<(ThreadId, MessageId)>, PathRejection>;
+
+fn path<T>(path: Result<Path<T>, PathRejection>) -> Result<T, ApiError> {
+    path.map(|Path(value)| value)
+        .map_err(|_| ApiError::bad_request("Malformed URL path"))
+}
+
 /// Serves the API on `listener` until `shutdown` completes, then stops accepting and lets the HTTP
 /// requests in flight finish for at most [`HTTP_DRAIN_TIMEOUT`]. The caller drops the runtime
 /// after this returns, cancelling remaining requests and sockets before the store closes.
@@ -93,8 +113,8 @@ fn router(state: ServerState) -> Router {
     let token = state.token.clone();
     let routes = agent_routes()
         .merge(user_routes().route_layer(middleware::from_fn(acting::refuse_agents)))
-        .fallback(routes::not_found)
-        .method_not_allowed_fallback(routes::not_found)
+        .fallback(not_found)
+        .method_not_allowed_fallback(not_found)
         .with_state(state);
     // An outer service rewrites the URI before the inner router selects a route. Router::layer
     // on the inner router would run only after that selection.
@@ -114,13 +134,13 @@ fn router(state: ServerState) -> Router {
 /// `Acting`'s rules. The reads need none, since an agent may read every thread.
 fn agent_routes() -> Router<ServerState> {
     Router::new()
-        .route("/api/workspaces", get(routes::list_workspaces))
+        .route("/api/workspaces", get(workspaces::list_workspaces))
         .route(
             "/api/threads",
-            get(routes::list_threads).post(routes::create_thread),
+            get(threads::list_threads).post(threads::create_thread),
         )
-        .route("/api/threads/{id}", get(agents::thread_details))
-        .route("/api/threads/{id}/events", get(routes::thread_events))
+        .route("/api/threads/{id}", get(threads::thread_details))
+        .route("/api/threads/{id}/events", get(threads::thread_events))
         .route("/api/threads/{id}/messages", post(agents::post_message))
         .route("/api/threads/{id}/stop", post(agents::stop))
         .route("/api/approvals/{id}", post(agents::decide))
@@ -131,8 +151,8 @@ fn agent_routes() -> Router<ServerState> {
 /// stays closed to agents until it moves to [`agent_routes`].
 fn user_routes() -> Router<ServerState> {
     Router::new()
-        .route(HEALTH_PATH, get(routes::health))
-        .route("/api/workspaces", post(routes::create_workspace))
+        .route(HEALTH_PATH, get(health))
+        .route("/api/workspaces", post(workspaces::create_workspace))
         .route(
             "/api/threads/{id}/messages/{message_id}",
             delete(agents::remove_message),
@@ -155,6 +175,14 @@ fn user_routes() -> Router<ServerState> {
         .route("/api/continuations/{id}/schedule", post(agents::schedule))
         .route("/api/usage", get(agents::usage))
         .route(EVENTS_PATH, get(socket::events))
+}
+
+async fn health() -> Response {
+    json_reply(StatusCode::OK, &Health { ok: true })
+}
+
+async fn not_found() -> ApiError {
+    ApiError::not_found()
 }
 
 #[derive(Debug)]
@@ -241,6 +269,24 @@ impl From<StoreError> for ApiError {
                 message: error.to_string(),
             },
             other => ApiError::internal(&other),
+        }
+    }
+}
+
+impl From<ProviderError> for ApiError {
+    fn from(error: ProviderError) -> ApiError {
+        match error {
+            ProviderError::UnknownThread(_)
+            | ProviderError::UnknownMessage(_)
+            | ProviderError::UnknownApproval(_)
+            | ProviderError::UnknownQuestion(_)
+            | ProviderError::UnknownContinuation(_) => ApiError::new(StatusCode::NOT_FOUND, error),
+            ProviderError::Conflict(_) => ApiError::new(StatusCode::CONFLICT, error),
+            ProviderError::Unsupported(_) => ApiError::bad_request(error.to_string()),
+            ProviderError::Unavailable(_) | ProviderError::Stopped => {
+                ApiError::unavailable(error.to_string())
+            }
+            ProviderError::Store(error) => error.into(),
         }
     }
 }
