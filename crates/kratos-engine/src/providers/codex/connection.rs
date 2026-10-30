@@ -413,16 +413,6 @@ impl Actor {
         }
     }
 
-    /// Pauses the thread for `reason` when messages wait in its queue, so the user sees why
-    /// nothing starts (L7).
-    pub(super) async fn pause_if_waiting(&mut self, thread_id: &ThreadId, reason: PauseReason) {
-        let _ = self
-            .write(thread_id, move |write| {
-                queue::pause_if_waiting(write, reason)
-            })
-            .await;
-    }
-
     /// The thread's state, read from the store the first time the actor sees the thread.
     pub(super) async fn load(&mut self, thread_id: &ThreadId) -> Result<(), ProviderError> {
         if self.threads.contains_key(thread_id) {
