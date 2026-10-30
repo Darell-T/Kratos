@@ -17,12 +17,9 @@ use crate::reports::{AnswerDone, ImplementerDone, Report, Reported, ReviewDone};
 use crate::task_plan::{PlanChangeRequest, TaskPlan};
 use crate::view::{
     Activity, AfterCommit, Answerer, Hold, MAX_QUESTIONS_PER_STEP, Note, Pending, Phase, PlanState,
-    Question, Resolution, Retry, Stop, Suspended, TaskView, Trouble, Turn, UsageLimitAsk, Waiting,
-    Work,
+    Question, Resolution, Retry, ReviewJob, Stop, Suspended, TaskView, Trouble, Turn,
+    UsageLimitAsk, Waiting, Work,
 };
-
-/// What a kind of work does with its own finished report.
-type Finish<T> = fn(Box<TaskView>, FactSeq, Turn, T) -> Result<Box<TaskView>, Rejection>;
 
 impl TaskView {
     /// Takes the turn a result is for out of the view, or refuses the result as stale. A turn held for
@@ -87,14 +84,23 @@ impl TaskView {
                 self.dirty = fold_dirty(self.dirty, &changes);
                 self.settle(seq, turn, report, TaskView::on_implementer_done)
             }
-            (Work::Review { .. }, Reported::Review { report }) => {
-                self.settle(seq, turn, report, TaskView::on_review_done)
+            (Work::Review { job }, Reported::Review { report }) => {
+                let job = job.clone();
+                self.settle(seq, turn, report, |view, _, turn, done| {
+                    Ok(view.on_review_done(turn, job, done))
+                })
             }
-            (Work::Answer { .. }, Reported::Answer { report }) => {
-                self.settle(seq, turn, report, TaskView::on_answer_done)
+            (Work::Answer { question }, Reported::Answer { report }) => {
+                let question = question.clone();
+                self.settle(seq, turn, report, |view, seq, _, done| {
+                    view.on_answer_done(seq, question, done)
+                })
             }
-            (Work::Rule { .. }, Reported::Rulings { report }) => {
-                self.settle(seq, turn, report, TaskView::on_rulings_done)
+            (Work::Rule { disputed, commit }, Reported::Rulings { report }) => {
+                let (disputed, commit) = (disputed.clone(), commit.clone());
+                self.settle(seq, turn, report, |view, seq, turn, done| {
+                    view.on_rulings_done(seq, turn, &disputed, commit, done)
+                })
             }
             (work, reported) => Err(Rejection::WrongReport {
                 work: work.name(),
@@ -103,13 +109,14 @@ impl TaskView {
         }
     }
 
-    /// The outcomes every kind of work shares. Only a finished report is the work's own business.
+    /// The outcomes every kind of work shares. Only a finished report is the work's own business, and
+    /// `finished` is what that kind of work does with it.
     fn settle<T>(
         self: Box<Self>,
         seq: FactSeq,
         mut turn: Turn,
         report: Report<T>,
-        finished: Finish<T>,
+        finished: impl FnOnce(Box<TaskView>, FactSeq, Turn, T) -> Result<Box<TaskView>, Rejection>,
     ) -> Result<Box<TaskView>, Rejection> {
         match report {
             Report::Invalid { error, .. } => {
@@ -339,12 +346,9 @@ impl TaskView {
     fn on_answer_done(
         self: Box<Self>,
         seq: FactSeq,
-        turn: Turn,
+        question: Question,
         answer: AnswerDone,
     ) -> Result<Box<TaskView>, Rejection> {
-        let Work::Answer { question } = turn.work else {
-            return Err(self.misfit("an answer"));
-        };
         let resolution = Resolution::Answered {
             question: question.text,
             answer: answer.answer,
@@ -404,19 +408,16 @@ impl TaskView {
     /// The reviewer finished. Evidence is checked before anything is believed.
     fn on_review_done(
         self: Box<Self>,
-        _seq: FactSeq,
         turn: Turn,
+        job: ReviewJob,
         report: ReviewDone,
-    ) -> Result<Box<TaskView>, Rejection> {
-        let Work::Review { job } = turn.work.clone() else {
-            return Err(self.misfit("a review"));
-        };
-        Ok(self.active(Activity::Checking {
+    ) -> Box<TaskView> {
+        self.active(Activity::Checking {
             step: turn.step,
             turn,
             job,
             report,
-        }))
+        })
     }
 }
 

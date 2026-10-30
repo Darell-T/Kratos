@@ -344,12 +344,11 @@ impl TaskView {
         mut self: Box<Self>,
         seq: FactSeq,
         turn: Turn,
+        disputed: &[FindingId],
+        commit: Sha,
         done: RulingsDone,
     ) -> Result<Box<TaskView>, Rejection> {
-        let Work::Rule { disputed, commit } = turn.work.clone() else {
-            return Err(self.misfit("rulings"));
-        };
-        if let Some(error) = rulings_problem(&disputed, &done) {
+        if let Some(error) = rulings_problem(disputed, &done) {
             return Ok(self.retry_turn(turn, Note::InvalidReport { error }, seq));
         }
         let mut not_bug = Vec::new();
@@ -364,7 +363,7 @@ impl TaskView {
                 by: Answerer::Planner,
             });
         }
-        self.apply_rulings(&not_bug, &disputed, commit, seq)
+        self.apply_rulings(&not_bug, disputed, commit, seq)
     }
 
     /// A ruling closes the findings ruled not a bug. The rest go back to the implementer with the ruling.
