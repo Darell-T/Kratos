@@ -171,6 +171,13 @@ impl RunningEngine {
         }
     }
 
+    /// Settles the turn the fake Codex holds for the message just sent as `turn-1`, now running.
+    pub fn start_turn(&self) {
+        self.fake_codex_held("turn/start", 1);
+        let settled = codex_control::settle_start("turn-1", "inProgress", None);
+        self.fake_codex("test/settleTurn", settled);
+    }
+
     /// Waits until the engine answered `count` of the requests the fake Codex sent it, and returns
     /// the answers. An answer travels to Codex after the API's reply, so a test waits for it.
     pub fn fake_codex_answers(&self, count: usize) -> Vec<serde_json::Value> {

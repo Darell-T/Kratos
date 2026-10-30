@@ -26,13 +26,6 @@ fn next_message(
     }
 }
 
-/// Settles the turn the fake holds for the message just sent as `turn-1`, now running.
-fn start_turn(engine: &RunningEngine) {
-    engine.fake_codex_held("turn/start", 1);
-    let settled = codex_control::settle_start("turn-1", "inProgress", None);
-    engine.fake_codex("test/settleTurn", settled);
-}
-
 fn emit(engine: &RunningEngine, method: &str, params: Value) {
     engine.fake_codex("test/emit", codex_control::emit(method, params));
 }
@@ -100,7 +93,7 @@ fn a_codex_message_streams_its_reply_live_and_its_end_reaches_the_log() {
         )
         .unwrap();
     assert_eq!((sent.status, &sent.body["status"]), (201, &json!("queued")));
-    start_turn(&engine);
+    engine.start_turn();
     for delta in ["Hel", "lo"] {
         emit(
             &engine,
@@ -163,7 +156,7 @@ fn an_approval_reaches_the_socket_and_the_decision_sent_over_http_reaches_codex(
     client
         .post(&messages_path(&thread), &json!({ "text": "list files" }))
         .unwrap();
-    start_turn(&engine);
+    engine.start_turn();
 
     let asked = codex_control::ask(
         "ask-1",
