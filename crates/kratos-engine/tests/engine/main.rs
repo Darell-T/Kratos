@@ -5,6 +5,7 @@ mod agents;
 mod codex_process;
 mod data_directory;
 mod event_stream;
+mod mcp;
 mod running_engine;
 mod server;
 mod startup;

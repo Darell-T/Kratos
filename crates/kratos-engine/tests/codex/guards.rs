@@ -1,6 +1,9 @@
 //! What Kratos asks of Codex on every launch, thread, and turn, so the sandbox and the approval
 //! rules hold whatever Codex's own configuration says (D84, D93).
 
+use std::path::PathBuf;
+
+use kratos_engine::providers::codex::McpServer;
 use kratos_protocol::{AccessLimit, MessageOrigin, Permission, ThreadId, ThreadSettings};
 use serde_json::json;
 
@@ -167,6 +170,40 @@ async fn the_thread_opens_untrusted_and_the_launch_defines_every_profile() {
         );
     }
     assert!(arguments.contains(&"default_permissions=\"kratos-plan\"".to_owned()));
+}
+
+#[tokio::test]
+async fn each_thread_starts_the_kratos_mcp_server_for_its_own_id() {
+    // Catches a thread whose agent gets no Kratos tools, tools that speak for another thread,
+    // tools Codex would ask about before each call, which Kratos answers by cancelling the call,
+    // and a tool timeout that ends a wait before the tool answers it.
+    let server = McpServer {
+        program: PathBuf::from("kratos-engine"),
+        home: PathBuf::from("kratos-home"),
+        port: 4321,
+    };
+    let mut harness = Harness::start(Options {
+        mcp: Some(server),
+        ..settings(Permission::AskMe, false)
+    })
+    .await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+
+    let opened = harness.control("test/threadRequests", json!({})).await;
+    let kratos = &opened[0]["params"]["config"]["mcp_servers"]["kratos"];
+    assert_eq!(kratos["command"], "kratos-engine");
+    assert_eq!(kratos["args"], json!(["mcp"]));
+    assert_eq!(
+        kratos["env"],
+        json!({ "KRATOS_HOME": "kratos-home", "KRATOS_PORT": "4321",
+                "KRATOS_THREAD_ID": harness.thread_id })
+    );
+    assert_eq!(kratos["default_tools_approval_mode"], "approve");
+    assert!(
+        kratos["tool_timeout_sec"].as_u64().unwrap() > kratos_engine::mcp::MAX_WAIT_SECONDS,
+        "Codex must not end a wait the tool would still answer: {kratos}"
+    );
 }
 
 #[tokio::test]

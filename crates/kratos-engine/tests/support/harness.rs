@@ -10,7 +10,9 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
-use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders, Sent};
+use kratos_engine::providers::codex::{
+    self, CodexProvider, CodexSettings, McpServer, ProtectedFolders, Sent,
+};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::UsageTracker;
 use kratos_engine::usage::scheduler::{self, Clock, LimitStop, SchedulerHandle};
@@ -34,6 +36,7 @@ pub struct Options {
     pub settings: ThreadSettings,
     /// More arguments for the fake, such as `--state-file`.
     pub fake_args: Vec<OsString>,
+    pub mcp: Option<McpServer>,
 }
 
 impl Default for Options {
@@ -43,6 +46,7 @@ impl Default for Options {
             stop_timeout: Duration::from_secs(5),
             settings: ThreadSettings::default(),
             fake_args: Vec::new(),
+            mcp: None,
         }
     }
 }
@@ -107,6 +111,7 @@ impl Harness {
             stop_timeout: options.stop_timeout,
             request_timeout: Duration::from_secs(10),
             platform: DangerousCommandPlatform::Posix,
+            mcp: options.mcp,
         };
         let (provider, stops) =
             codex::start(settings, hub.clone(), store_thread.clone(), usage.clone())

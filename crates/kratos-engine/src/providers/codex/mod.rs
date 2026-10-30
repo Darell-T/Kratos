@@ -67,6 +67,14 @@ pub struct CodexSettings {
     /// The deadline of an ordinary request to Codex.
     pub request_timeout: Duration,
     pub platform: DangerousCommandPlatform,
+    pub mcp: Option<McpServer>,
+}
+
+#[derive(Clone, Debug)]
+pub struct McpServer {
+    pub program: PathBuf,
+    pub home: PathBuf,
+    pub port: u16,
 }
 
 /// What became of a continuation the scheduler sent (D39).
