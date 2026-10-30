@@ -10,7 +10,7 @@ use std::path::Path;
 
 use kratos_teams::facts::{Fact, FactSeq, StoredFact};
 use kratos_teams::fold::fold;
-use kratos_teams::view::TaskView;
+use kratos_teams::view::{Activity, Phase, TaskView};
 use serde_json::{Map, Value, json};
 
 use crate::observe::{camel_to_snake, observe};
@@ -313,7 +313,12 @@ const TRANSLATORS: [(&str, Translator); 10] = [
 /// The first `implementer.opened` is the worktree being ready. A later one is a replacement thread,
 /// which is the engine's business, so Rust has no fact for it.
 fn opened(_: &Value, view: &TaskView) -> Result<Option<Value>, String> {
-    let is_preparing = view.phase.name() == "preparing";
+    let is_preparing = matches!(
+        view.phase,
+        Phase::Active {
+            activity: Activity::Preparing { .. }
+        }
+    );
     Ok((is_preparing && view.rounds.is_empty()).then(|| json!({"kind": "prepared"})))
 }
 
