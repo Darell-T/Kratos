@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_protocol::{Seq, ServerMessage, Thread, ThreadEvent, ThreadId, Workspace};
+use kratos_protocol::{Seq, ServerMessage, Thread, ThreadEvent, ThreadId, Workspace, routes};
 use serde::Serialize;
 use serde_json::json;
 
@@ -48,11 +48,11 @@ pub fn bench_post(client: &Client, messages: NonZeroUsize) -> Result<BenchReport
 fn create_thread(client: &Client) -> Result<ThreadId, ClientError> {
     let temp_folder = std::env::temp_dir().to_string_lossy().into_owned();
     let workspace_body = json!({ "name": "bench", "path": temp_folder });
-    let workspace: Workspace = client.post("/api/workspaces", &workspace_body)?.parse()?;
+    let workspace: Workspace = client.post(routes::WORKSPACES, &workspace_body)?.parse()?;
     // A Claude thread keeps R2's plain message log, the path this probe measures.
     let thread_body =
         json!({ "workspaceId": workspace.id, "title": "bench", "provider": "claude" });
-    let thread: Thread = client.post("/api/threads", &thread_body)?.parse()?;
+    let thread: Thread = client.post(routes::THREADS, &thread_body)?.parse()?;
     Ok(thread.id)
 }
 
@@ -61,7 +61,7 @@ fn post_all(
     thread_id: &ThreadId,
     messages: usize,
 ) -> Result<Vec<Instant>, ClientError> {
-    let path = format!("/api/threads/{thread_id}/messages");
+    let path = routes::thread_messages(thread_id);
     let mut starts = Vec::with_capacity(messages);
     for number in 1..=messages {
         starts.push(Instant::now());

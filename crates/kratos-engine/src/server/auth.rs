@@ -15,9 +15,10 @@ use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use kratos_protocol::CLIENT_TOKEN_FILE;
+use kratos_protocol::routes::HEALTH;
 
+use super::ApiError;
 use super::json::discard;
-use super::{ApiError, HEALTH_PATH};
 
 #[derive(Clone)]
 pub struct ClientToken(Arc<str>);
@@ -84,7 +85,7 @@ pub(super) async fn require_client_token(
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "));
-    let is_health = request.uri().path() == HEALTH_PATH;
+    let is_health = request.uri().path() == HEALTH;
     if is_health || presented.is_some_and(|presented| token.matches(presented)) {
         return next.run(request).await;
     }

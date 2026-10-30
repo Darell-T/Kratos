@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use kratos_client::{ApiReply, ApiRequest, ClientError};
 use kratos_protocol::{
-    ApprovalDecision, Permission, RequiredText, Seq, ThreadDetails, ThreadEvent, ThreadId,
-    ThreadSettings,
+    ApprovalDecision, ApprovalId, Permission, QuestionId, RequiredText, Seq, ThreadDetails,
+    ThreadEvent, ThreadId, ThreadSettings, WorkspaceId, routes,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -152,29 +152,26 @@ fn parse_arguments<T: DeserializeOwned>(arguments: Value) -> Result<T, String> {
 
 fn whoami(call: &Call, arguments: Value) -> Answer {
     let NoArguments {} = parse_arguments(arguments)?;
-    call.get(&thread_path(&call.caller.thread_id))
+    call.get(&routes::thread(&call.caller.thread_id))
 }
 
 fn list_workspaces(call: &Call, arguments: Value) -> Answer {
     let NoArguments {} = parse_arguments(arguments)?;
-    call.get("/api/workspaces")
+    call.get(routes::WORKSPACES)
 }
 
 fn list_threads(call: &Call, arguments: Value) -> Answer {
     let InWorkspace { workspace_id } = parse_arguments(arguments)?;
     let workspace = match workspace_id {
-        Some(id) => id.into_string(),
-        None => me(call)?.thread.workspace_id.as_str().to_owned(),
+        Some(id) => WorkspaceId::new(id.into_string()),
+        None => me(call)?.thread.workspace_id,
     };
-    call.get(&format!(
-        "/api/threads?workspaceId={}",
-        percent_encode(&workspace)
-    ))
+    call.get(&routes::threads_in(&workspace))
 }
 
 fn get_thread(call: &Call, arguments: Value) -> Answer {
     let OnThread { thread_id } = parse_arguments(arguments)?;
-    call.get(&thread_path(&thread_id))
+    call.get(&routes::thread(&thread_id))
 }
 
 fn read_thread(call: &Call, arguments: Value) -> Answer {
@@ -201,7 +198,7 @@ fn create_thread(call: &Call, arguments: Value) -> Answer {
         None => me.thread.workspace_id.as_str().to_owned(),
     };
     call.post(
-        "/api/threads",
+        routes::THREADS,
         &json!({ "workspaceId": workspace, "title": request.title, "provider": "codex",
                  "settings": settings }),
     )
@@ -210,7 +207,7 @@ fn create_thread(call: &Call, arguments: Value) -> Answer {
 fn send_message(call: &Call, arguments: Value) -> Answer {
     let SendArguments { thread_id, text } = parse_arguments(arguments)?;
     call.post(
-        &format!("{}/messages", thread_path(&thread_id)),
+        &routes::thread_messages(&thread_id),
         &json!({ "text": text }),
     )
 }
@@ -229,14 +226,14 @@ fn wait_for_turn(call: &Call, arguments: Value) -> Answer {
             "Invalid arguments: timeoutSeconds must be 1 to {MAX_WAIT_SECONDS}"
         ));
     }
-    let details: ThreadDetails = parse(call.get(&thread_path(&thread_id))?)?;
+    let details: ThreadDetails = parse(call.get(&routes::thread(&thread_id))?)?;
     let outcome = wait::wait(call, thread_id, details, Duration::from_secs(seconds))?;
     Ok(serde_json::to_value(outcome).expect("a wait outcome serializes"))
 }
 
 fn stop_thread(call: &Call, arguments: Value) -> Answer {
     let OnThread { thread_id } = parse_arguments(arguments)?;
-    call.post(&format!("{}/stop", thread_path(&thread_id)), &json!({}))
+    call.post(&routes::thread_stop(&thread_id), &json!({}))
 }
 
 fn answer_question(call: &Call, arguments: Value) -> Answer {
@@ -245,7 +242,7 @@ fn answer_question(call: &Call, arguments: Value) -> Answer {
         answers,
     } = parse_arguments(arguments)?;
     call.post(
-        &format!("/api/questions/{}", percent_encode(question_id.as_str())),
+        &routes::question(&QuestionId::new(question_id.into_string())),
         &json!({ "answers": answers }),
     )
 }
@@ -256,13 +253,13 @@ fn decide_approval(call: &Call, arguments: Value) -> Answer {
         decision,
     } = parse_arguments(arguments)?;
     call.post(
-        &format!("/api/approvals/{}", percent_encode(approval_id.as_str())),
+        &routes::approval(&ApprovalId::new(approval_id.into_string())),
         &json!({ "decision": decision }),
     )
 }
 
 fn me(call: &Call) -> Result<ThreadDetails, String> {
-    parse(call.get(&thread_path(&call.caller.thread_id))?)
+    parse(call.get(&routes::thread(&call.caller.thread_id))?)
 }
 
 /// Every event after `after`, page by page, and the seq of the newest.
@@ -274,31 +271,14 @@ fn events_after(
     let mut events = Vec::new();
     let mut last = after;
     loop {
-        let path = format!("{}/events?after={}", thread_path(thread_id), last.get());
-        let page: Vec<ThreadEvent> = parse(call.get(&path)?)?;
+        let page: Vec<ThreadEvent> =
+            parse(call.get(&routes::thread_events_after(thread_id, last))?)?;
         let Some(newest) = page.last() else {
             return Ok((events, last));
         };
         last = newest.seq;
         events.extend(page);
     }
-}
-
-fn thread_path(thread_id: &ThreadId) -> String {
-    format!("/api/threads/{}", percent_encode(thread_id.as_str()))
-}
-
-/// Everything but unreserved characters, for a path segment or query value.
-fn percent_encode(text: &str) -> String {
-    let mut encoded = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
 }
 
 impl Call<'_> {

@@ -2,7 +2,7 @@ use std::io;
 use std::net::TcpStream;
 use std::time::Duration;
 
-use kratos_protocol::{ClientMessage, Seq, ThreadId};
+use kratos_protocol::{ClientMessage, Seq, ThreadId, routes};
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::{HeaderName, HeaderValue};
 use tungstenite::{Error, HandshakeError, Message, WebSocket};
@@ -31,7 +31,7 @@ impl EventSocket {
             authority: authority.to_owned(),
             source,
         })?;
-        let mut request = format!("ws://{authority}/api/events").into_client_request()?;
+        let mut request = format!("ws://{authority}{}", routes::EVENTS).into_client_request()?;
         for (name, value) in headers {
             let name = HeaderName::try_from(*name).map_err(http_format_error)?;
             let value = HeaderValue::from_str(value).map_err(http_format_error)?;

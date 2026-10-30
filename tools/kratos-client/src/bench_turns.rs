@@ -5,7 +5,9 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_protocol::{Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome, Workspace};
+use kratos_protocol::{
+    Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome, Workspace, routes,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -29,7 +31,7 @@ pub struct TurnBenchReport {
 /// Both intervals include local transport, so they upper-bound engine overhead without adding
 /// instrumentation to production. All timestamps come from this process's monotonic clock.
 pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchReport, ClientError> {
-    client.get("/api/usage")?.parse::<Value>()?;
+    client.get(routes::USAGE)?.parse::<Value>()?;
     let mut fake = Control::connect(control_file)?;
     let observer = Observer::start(&mut fake)?;
     let threads = create_threads(client)?;
@@ -58,13 +60,13 @@ pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchRepo
 fn create_threads(client: &Client) -> Result<Vec<Thread>, ClientError> {
     let workspace: Workspace = client
         .post(
-            "/api/workspaces",
+            routes::WORKSPACES,
             &json!({ "name": "turn benchmark", "path": std::env::temp_dir() }),
         )?
         .parse()?;
     (0..THREADS)
         .map(|number| {
-            client.post("/api/threads", &json!({
+            client.post(routes::THREADS, &json!({
                 "workspaceId": workspace.id, "title": format!("bench {number}"), "provider": "codex"
             }))?.parse()
         })
@@ -83,7 +85,7 @@ fn measure_turn(
     let posted_at = Instant::now();
     client
         .post(
-            &format!("/api/threads/{}/messages", thread.id),
+            &routes::thread_messages(&thread.id),
             &json!({ "messageId": message_id, "text": message_id }),
         )?
         .parse::<Value>()?;

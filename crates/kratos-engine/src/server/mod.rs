@@ -20,6 +20,11 @@ use axum::http::header::CONTENT_TYPE;
 use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
+use kratos_protocol::routes::{
+    APPROVAL, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE, MESSAGE_DISCARD, MESSAGE_RETRY,
+    MESSAGE_STEER, QUESTION, THREAD, THREAD_EVENTS, THREAD_MESSAGES, THREAD_RESUME,
+    THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE, WORKSPACES,
+};
 use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
 use kratos_store::StoreError;
 use serde::Serialize;
@@ -42,11 +47,6 @@ pub const MAX_SOCKET_MESSAGE_BYTES: usize = 64 * 1024;
 /// Time for in-flight HTTP requests to finish after shutdown. A stalled upload cannot hold the
 /// process open beyond this drain period.
 const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// The one route that needs no client token.
-const HEALTH_PATH: &str = "/api/health";
-/// The event socket, whose upgrade path is never normalized.
-const EVENTS_PATH: &str = "/api/events";
 
 #[derive(Clone)]
 pub struct ServerState {
@@ -134,47 +134,35 @@ fn router(state: ServerState) -> Router {
 /// `Acting`'s rules. The reads need none, since an agent may read every thread.
 fn agent_routes() -> Router<ServerState> {
     Router::new()
-        .route("/api/workspaces", get(workspaces::list_workspaces))
+        .route(WORKSPACES, get(workspaces::list_workspaces))
         .route(
-            "/api/threads",
+            THREADS,
             get(threads::list_threads).post(threads::create_thread),
         )
-        .route("/api/threads/{id}", get(threads::thread_details))
-        .route("/api/threads/{id}/events", get(threads::thread_events))
-        .route("/api/threads/{id}/messages", post(agents::post_message))
-        .route("/api/threads/{id}/stop", post(agents::stop))
-        .route("/api/approvals/{id}", post(agents::decide))
-        .route("/api/questions/{id}", post(agents::answer))
+        .route(THREAD, get(threads::thread_details))
+        .route(THREAD_EVENTS, get(threads::thread_events))
+        .route(THREAD_MESSAGES, post(agents::post_message))
+        .route(THREAD_STOP, post(agents::stop))
+        .route(APPROVAL, post(agents::decide))
+        .route(QUESTION, post(agents::answer))
 }
 
 /// Every other route. `router` refuses a request naming a thread on all of them, so a new route
 /// stays closed to agents until it moves to [`agent_routes`].
 fn user_routes() -> Router<ServerState> {
     Router::new()
-        .route(HEALTH_PATH, get(health))
-        .route("/api/workspaces", post(workspaces::create_workspace))
-        .route(
-            "/api/threads/{id}/messages/{message_id}",
-            delete(agents::remove_message),
-        )
-        .route(
-            "/api/threads/{id}/messages/{message_id}/steer",
-            post(agents::steer),
-        )
-        .route(
-            "/api/threads/{id}/messages/{message_id}/retry",
-            post(agents::retry_message),
-        )
-        .route(
-            "/api/threads/{id}/messages/{message_id}/discard",
-            post(agents::discard_message),
-        )
-        .route("/api/threads/{id}/resume", post(agents::resume))
-        .route("/api/threads/{id}/settings", put(agents::put_settings))
-        .route("/api/threads/{id}/skills", get(agents::skills))
-        .route("/api/continuations/{id}/schedule", post(agents::schedule))
-        .route("/api/usage", get(agents::usage))
-        .route(EVENTS_PATH, get(socket::events))
+        .route(HEALTH, get(health))
+        .route(WORKSPACES, post(workspaces::create_workspace))
+        .route(MESSAGE, delete(agents::remove_message))
+        .route(MESSAGE_STEER, post(agents::steer))
+        .route(MESSAGE_RETRY, post(agents::retry_message))
+        .route(MESSAGE_DISCARD, post(agents::discard_message))
+        .route(THREAD_RESUME, post(agents::resume))
+        .route(THREAD_SETTINGS, put(agents::put_settings))
+        .route(THREAD_SKILLS, get(agents::skills))
+        .route(CONTINUATION_SCHEDULE, post(agents::schedule))
+        .route(USAGE, get(agents::usage))
+        .route(EVENTS, get(socket::events))
 }
 
 async fn health() -> Response {

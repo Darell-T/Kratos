@@ -37,6 +37,7 @@ mod api;
 mod approvals;
 mod events;
 mod messages;
+pub mod routes;
 mod skills;
 mod socket;
 mod text;
