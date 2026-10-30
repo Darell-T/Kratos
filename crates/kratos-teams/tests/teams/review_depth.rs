@@ -3,21 +3,13 @@
 //! the user ranked by severity.
 
 use kratos_teams::decisions::{Decision, approval_report};
-use kratos_teams::facts::{ChangeSize, Depth, Ended};
+use kratos_teams::facts::{ChangeSize, Depth};
 use kratos_teams::members::Role;
 use kratos_teams::security_triggers::TriggerHit;
 use kratos_teams::view::{ApprovedBy, FindingsPause, Pass, PassKind, Waiting, Work};
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
 
 fn passes_run(task: &ScriptedTask) -> Vec<(PassKind, Depth)> {
     runs(task, Role::Reviewer)

@@ -3,7 +3,7 @@
 //! applies right before the next new step. Nothing finished is repeated.
 
 use kratos_teams::decisions::{Decision, DecisionKind, allowed_decisions};
-use kratos_teams::facts::{Ended, Fact};
+use kratos_teams::facts::Fact;
 use kratos_teams::fold::Rejection;
 use kratos_teams::members::{Bindings, Role};
 use kratos_teams::next_step::Step;
@@ -11,14 +11,6 @@ use kratos_teams::view::{ApprovedBy, FindingStatus, Trouble, Waiting, Work};
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
 
 fn swap() -> Decision {
     Decision::ReassignRoles {

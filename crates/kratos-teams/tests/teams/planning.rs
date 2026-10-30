@@ -3,20 +3,11 @@
 //! The user approves any plan before an implementer starts (D28, D37).
 
 use kratos_teams::decisions::{Decision, DecisionKind};
-use kratos_teams::facts::Ended;
 use kratos_teams::members::Role;
 use kratos_teams::view::{ApprovedBy, Brief, PlanState, Trouble, Waiting, Work};
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
 
 #[test]
 fn a_two_member_team_with_planning_off_starts_from_the_request_and_waits_for_no_plan() {

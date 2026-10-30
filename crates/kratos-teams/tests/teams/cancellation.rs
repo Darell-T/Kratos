@@ -3,21 +3,13 @@
 //! user replaced is dropped, and it cannot restart anything.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
-use kratos_teams::facts::{Declined, Ended, Fact, Outcome};
+use kratos_teams::facts::{Declined, Fact, Outcome};
 use kratos_teams::fold::Rejection;
 use kratos_teams::members::Role;
 use kratos_teams::view::{DirectionStatus, Phase};
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
 
 fn closed_as_cancelled(task: &ScriptedTask) -> bool {
     task.view().phase

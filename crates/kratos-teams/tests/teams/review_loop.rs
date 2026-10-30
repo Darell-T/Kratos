@@ -2,7 +2,6 @@
 //! security pass. Ported from the TypeScript `teams-task.test.ts`.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
-use kratos_teams::facts::Ended;
 use kratos_teams::members::Role;
 use kratos_teams::security_triggers::TriggerHit;
 use kratos_teams::view::{
@@ -12,18 +11,6 @@ use kratos_teams::view::{
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
-
-fn fix_f1() -> Ended {
-    implements_answering(vec![fixed(1)])
-}
 
 fn spawn_hit() -> TriggerHit {
     TriggerHit::Code {

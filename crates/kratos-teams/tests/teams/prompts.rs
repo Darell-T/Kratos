@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use kratos_protocol::Provider;
 use kratos_teams::decisions::{Decision, PlanChangeResponse};
 use kratos_teams::evidence::{EvidenceCheck, Seen, Start, start_check};
-use kratos_teams::facts::{Depth, Disposition, Ended, Fact, FactSeq, MessageId, StepId};
+use kratos_teams::facts::{Depth, Disposition, Fact, FactSeq, MessageId, StepId};
 use kratos_teams::members::Role;
 use kratos_teams::naming::{branch_name, commit_subject, task_title};
 use kratos_teams::prompts::{Platform, PromptContext, STEP_BACK_TEXT, Session, message};
@@ -20,18 +20,6 @@ use serde_json::{Value, json};
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
-
-fn fix_f1() -> Ended {
-    implements_answering(vec![fixed(1)])
-}
 
 fn second_round() -> ScriptedTask {
     let mut script = script(

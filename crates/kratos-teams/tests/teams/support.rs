@@ -952,3 +952,36 @@ pub fn script_commands(script: &mut Script, command: &str, results: Vec<CommandR
 pub fn delivery(id: &str) -> DeliveryId {
     DeliveryId::new(id)
 }
+
+/// A two-member task's agents: the implementer's turns and the reviewer's, in order.
+pub fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
+    Script {
+        implementer: implementer.into(),
+        reviewer: reviewer.into(),
+        ..Script::default()
+    }
+}
+
+/// An implementer turn that fixes F1.
+pub fn fix_f1() -> Ended {
+    implements_answering(vec![fixed(1)])
+}
+
+/// A three-member task whose plan the user approved, ready for the implementer.
+pub fn approved_team(
+    planner: Vec<Ended>,
+    implementer: Vec<Ended>,
+    reviewer: Vec<Ended>,
+) -> ScriptedTask {
+    let mut plans = vec![plan_ready()];
+    plans.extend(planner);
+    let mut task = Task::three().script(Script {
+        planner: plans.into(),
+        implementer: implementer.into(),
+        reviewer: reviewer.into(),
+        ..Script::default()
+    });
+    task.run();
+    task.decide(Decision::ApprovePlan { conditions: None });
+    task
+}

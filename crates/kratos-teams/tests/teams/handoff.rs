@@ -11,18 +11,6 @@ use kratos_teams::view::{ApprovedBy, Note, Phase, Trouble};
 use crate::replay::*;
 use crate::support::*;
 
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
-
-fn fix_f1() -> Ended {
-    implements_answering(vec![fixed(1)])
-}
-
 fn closed(outcome: Outcome) -> Phase {
     Phase::Closed { outcome }
 }

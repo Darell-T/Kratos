@@ -57,18 +57,6 @@ fn prefixes(log: &[StoredFact]) -> Vec<TaskView> {
     (1..=log.len()).map(|n| view_of(&log[..n])).collect()
 }
 
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
-
-fn fix_f1() -> Ended {
-    implements_answering(vec![fixed(1)])
-}
-
 fn text_for(view: &TaskView) -> String {
     let Step::Run { run } = next_step(view) else {
         panic!("a run is next");
@@ -130,24 +118,6 @@ fn cap() -> ScriptedTask {
     script_commands(&mut script_, "cmd3", vec![fails()]);
     let mut task = Task::two().script(script_);
     task.run();
-    task
-}
-
-fn approved_team(
-    planner: Vec<Ended>,
-    implementer: Vec<Ended>,
-    reviewer: Vec<Ended>,
-) -> ScriptedTask {
-    let mut plans = vec![plan_ready()];
-    plans.extend(planner);
-    let mut task = Task::three().script(Script {
-        planner: plans.into(),
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    });
-    task.run();
-    task.decide(Decision::ApprovePlan { conditions: None });
     task
 }
 

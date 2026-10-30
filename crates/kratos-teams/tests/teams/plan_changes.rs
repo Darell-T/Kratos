@@ -14,14 +14,6 @@ use kratos_teams::view::{ApprovedBy, Brief, PlanState, Resolution, Waiting, Work
 use crate::replay::*;
 use crate::support::*;
 
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
-
 /// The implementer's messages that do the work, without the one that wrote the plan.
 fn building(task: &ScriptedTask) -> Vec<&kratos_teams::view::Run> {
     runs(task, Role::Implementer)
