@@ -1,9 +1,10 @@
+use std::collections::BTreeMap;
+
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, Message, PauseReason, Permission, Provider, Question, RequiredText, Seq, Timestamp,
-    TurnId, WorkspaceId,
+    Approval, Message, PauseReason, Question, RequiredText, Seq, Timestamp, TurnId, WorkspaceId,
 };
 
 string_id! {
@@ -26,6 +27,24 @@ pub struct Thread {
     pub updated_at: Timestamp,
 }
 
+/// The agent CLI a thread runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Codex,
+    Claude,
+}
+
+impl Provider {
+    /// The name in JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provider::Codex => "codex",
+            Provider::Claude => "claude",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateThread {
@@ -36,6 +55,17 @@ pub struct CreateThread {
     /// The defaults when absent.
     #[serde(default)]
     pub settings: Option<ThreadSettings>,
+}
+
+/// How much a thread's agent may do without asking. `ApproveForMe` is not `FullAccess`, and a
+/// command the dangerous-command check flags asks the user under every permission. The variants
+/// run from least to most trusting, so `min` picks the narrower of two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Permission {
+    AskMe,
+    ApproveForMe,
+    FullAccess,
 }
 
 /// What a thread's next turn runs with. A change applies from the next turn, never to the turn
@@ -101,6 +131,28 @@ impl AccessLimit {
     pub fn covers(self, other: AccessLimit) -> bool {
         other.permission <= self.permission && (other.plan_mode || !self.plan_mode)
     }
+}
+
+/// The narrower sandbox a Team gives a member's thread. A thread without one runs by its permission
+/// alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadSandbox {
+    /// Writable besides the thread's own folder.
+    pub extra_writable_roots: Vec<String>,
+    pub outside_writes: OutsideWrites,
+    /// Set for every command the thread runs, for example a package cache inside a writable root.
+    pub env: BTreeMap<String, String>,
+}
+
+/// What happens to a write outside a sandboxed thread's roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutsideWrites {
+    /// The user decides.
+    Ask,
+    /// Refused without asking.
+    Deny,
 }
 
 fn trimmed_workspace_id<'de, D: Deserializer<'de>>(

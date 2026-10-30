@@ -21,6 +21,16 @@ pub enum TurnOutcome {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnChanges {
+    /// Files the turn edited, as the provider reported their paths.
+    pub files: Vec<String>,
+    /// The turn edited a file after its last command, so no command has checked that edit.
+    pub edited_since_command: bool,
+    pub ran_command: bool,
+}
+
 /// Text Kratos keeps only the start of, because stored events have a size budget (L3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,4 +129,26 @@ pub struct ContextUsage {
     pub total_tokens: i64,
     /// The model's context window the provider works with, when it said.
     pub context_window: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CommandResult {
+    /// On Windows a crashed process reports its NTSTATUS, which reads as a negative `i32`.
+    Exited {
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+    },
+    TimedOut {
+        output: String,
+    },
+    /// The sandbox refused the command, for example a write outside the thread's roots.
+    Refused {
+        error: String,
+    },
 }

@@ -114,6 +114,11 @@ pub struct Message {
     pub queued_at: Timestamp,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct PostMessage {
+    pub text: RequiredText,
+}
+
 /// The body of `POST /api/threads/{id}/messages` to a thread whose provider Kratos drives: `text`,
 /// or `input` parts, with an optional `messageId`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]

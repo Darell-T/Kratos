@@ -33,12 +33,12 @@ macro_rules! string_id {
     };
 }
 
-mod agents;
 mod api;
 mod approvals;
 mod events;
 mod messages;
 mod skills;
+mod socket;
 mod text;
 mod threads;
 mod time;
@@ -46,31 +46,28 @@ mod turns;
 mod usage;
 mod workspaces;
 
-pub use agents::{CommandResult, OutsideWrites, Permission, Provider, ThreadSandbox, TurnChanges};
 pub use api::{ErrorBody, Health};
 pub use approvals::{
     AnswerQuestion, Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest,
     AskReason, DecideApproval, ExtraAccess, NetworkAccess, PathAccess, PathAccessMode, Question,
     QuestionId, QuestionItem, QuestionOption, QuestionOutcome,
 };
-pub use events::{
-    ClientMessage, LiveUpdate, PauseReason, PostMessage, ReplySoFar, Seq, ServerMessage,
-    ThreadEvent, ThreadEventBody,
-};
+pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody};
 pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
-    QueueFull, SendMessage,
+    PostMessage, QueueFull, SendMessage,
 };
 pub use skills::{Skill, ThreadSkills};
+pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};
 pub use text::RequiredText;
 pub use threads::{
-    AccessLimit, CreateThread, ListEvents, ListThreads, Thread, ThreadDetails, ThreadId,
-    ThreadSettings,
+    AccessLimit, CreateThread, ListEvents, ListThreads, OutsideWrites, Permission, Provider,
+    Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
 };
 pub use time::Timestamp;
 pub use turns::{
-    AgentItem, CappedText, ContextUsage, FileChange, FileChangeKind, ItemStatus, TurnId,
-    TurnOutcome,
+    AgentItem, CappedText, CommandResult, ContextUsage, FileChange, FileChangeKind, ItemStatus,
+    TurnChanges, TurnId, TurnOutcome,
 };
 pub use usage::{
     AccountUsage, Allowance, Continuation, ContinuationId, ContinuationState, UsageBucket,
