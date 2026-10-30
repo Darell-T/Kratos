@@ -1,5 +1,5 @@
-//! A thread's turns: when the next queued message starts, how a start whose answer was lost is
-//! settled, and how a turn ends.
+//! A thread's turns: when the next queued message starts, how a queued message steers the running
+//! turn, how a start or steer whose answer was lost is settled, and how a turn ends.
 
 use std::time::Duration;
 
@@ -229,6 +229,128 @@ impl Actor {
                 Ok(())
             })
             .await;
+    }
+
+    /// Adds a queued message to the running turn. Answers once Codex has the request; the outcome
+    /// arrives as the message's status.
+    pub(super) async fn steer(
+        &mut self,
+        thread_id: &ThreadId,
+        message_id: MessageId,
+    ) -> Result<Message, ProviderError> {
+        self.load(thread_id).await?;
+        let thread = &self.threads[thread_id];
+        let (
+            Turn::Running {
+                turn_id,
+                stopping: false,
+                ..
+            },
+            Some(native_id),
+        ) = (&thread.turn, thread.native_id())
+        else {
+            return Err(ProviderError::Conflict(
+                "Only a running turn can be steered".into(),
+            ));
+        };
+        let (turn_id, native_id) = (turn_id.clone(), native_id.to_owned());
+        let message = self.message(thread_id, &message_id).await?;
+        if message.status != MessageStatus::Queued {
+            return Err(ProviderError::Conflict(format!(
+                "Only a queued message can steer the turn; message {message_id} is not queued"
+            )));
+        }
+        if message.origin.limit().is_some() {
+            return Err(ProviderError::Conflict(
+                "A message from another thread runs in a turn of its own, with no more than that thread's permission".into(),
+            ));
+        }
+        let codex = self
+            .connection()?
+            .ok_or_else(|| ProviderError::Unavailable("Codex is starting".into()))?;
+        let submitting = self
+            .write(thread_id, {
+                let message_id = message_id.clone();
+                move |write| write.set_message_status(&message_id, MessageStatus::Submitting)
+            })
+            .await?;
+        self.threads
+            .get_mut(thread_id)
+            .expect("loaded above")
+            .steering
+            .insert(message_id.clone());
+        let params = types::TurnSteerParams {
+            additional_context: None,
+            client_user_message_id: Some(message_id.as_str().to_owned()),
+            expected_turn_id: turn_id.as_str().to_owned(),
+            input: wire::user_input(&message),
+            responsesapi_client_metadata: None,
+            thread_id: native_id,
+        };
+        let thread_id = thread_id.clone();
+        self.spawn(async move {
+            let result = codex
+                .request::<methods::TurnSteer>(&params)
+                .await
+                .map(|_| ());
+            Done::Steered {
+                thread_id,
+                message_id,
+                result,
+            }
+        });
+        Ok(submitting)
+    }
+
+    pub(super) async fn on_steered(
+        &mut self,
+        thread_id: ThreadId,
+        message_id: MessageId,
+        result: Result<(), RequestError>,
+    ) {
+        let turn_id = self
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.turn.running_id().cloned());
+        match (result, turn_id) {
+            (Ok(()), Some(turn_id)) => {
+                let _ = self
+                    .write(&thread_id, {
+                        let message_id = message_id.clone();
+                        move |write| {
+                            write.set_message_status(
+                                &message_id,
+                                MessageStatus::Accepted { turn_id },
+                            )
+                        }
+                    })
+                    .await;
+            }
+            (Err(RequestError::Rpc { code, .. }), _)
+                if kratos_codex_client::rejected_before_execution(code) =>
+            {
+                // Refused before it ran: the message goes back to the queue.
+                let _ = self
+                    .write(&thread_id, {
+                        let message_id = message_id.clone();
+                        move |write| write.set_message_status(&message_id, MessageStatus::Queued)
+                    })
+                    .await;
+            }
+            (result, _) => {
+                let error = result.err().map_or_else(
+                    || "The turn ended before Codex confirmed the steer".to_owned(),
+                    |error| error.to_string(),
+                );
+                // The message stays in `steering` until the history check settles it.
+                self.check_delivery(&thread_id, &message_id, Delivery::Steer, error);
+                return;
+            }
+        }
+        if let Some(thread) = self.threads.get_mut(&thread_id) {
+            thread.steering.remove(&message_id);
+        }
+        self.dispatch(&thread_id).await;
     }
 
     /// The answer to `turn/start` or `turn/steer` was lost, so Codex may or may not have taken the
