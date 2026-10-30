@@ -24,6 +24,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::locate::INSTALL_COMMAND;
 use crate::protocol::{Method, Notification, ServerRequest, Unhandled, methods};
 use crate::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, types};
 
@@ -160,12 +161,15 @@ impl Responder {
         }
         let message = match outcome {
             Ok(result) => json!({ "id": id, "result": result }),
-            Err((code, message)) => {
-                json!({ "id": id, "error": { "code": code, "message": message } })
-            }
+            Err((code, message)) => error_reply(id, code, &message),
         };
         self.shared.write(&message)
     }
+}
+
+/// JSON-RPC's reply that request `id` failed with `code`.
+fn error_reply(id: &RequestId, code: i64, message: &str) -> Value {
+    json!({ "id": id, "error": { "code": code, "message": message } })
 }
 
 /// A handle to the connection. Clones share it.
@@ -233,7 +237,7 @@ pub enum RequestError {
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     #[error(
-        "Could not find {}. Install Codex with \"npm install -g @openai/codex\" or set CODEX_EXE.",
+        "Could not find {}. Install Codex with \"{INSTALL_COMMAND}\" or set CODEX_EXE.",
         .0.display()
     )]
     NotFound(PathBuf),
@@ -550,16 +554,14 @@ impl Reader {
             }
             Err(Unhandled::UnknownMethod) => {
                 let message = format!("Method not handled by Kratos: {method}");
-                self.shared.write(
-                    &json!({ "id": id, "error": { "code": METHOD_NOT_FOUND, "message": message } }),
-                );
+                self.shared
+                    .write(&error_reply(&id, METHOD_NOT_FOUND, &message));
             }
             Err(Unhandled::BadParams(error)) => {
                 eprintln!("codex: cannot read the parameters of {method}: {error}");
                 let message = format!("Kratos cannot read the parameters of {method}: {error}");
-                self.shared.write(
-                    &json!({ "id": id, "error": { "code": INVALID_PARAMS, "message": message } }),
-                );
+                self.shared
+                    .write(&error_reply(&id, INVALID_PARAMS, &message));
             }
         }
     }

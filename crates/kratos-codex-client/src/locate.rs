@@ -27,14 +27,16 @@ const PLATFORM: Option<(&str, &str)> = if cfg!(all(windows, target_arch = "x86_6
 
 const BINARY: &str = if cfg!(windows) { "codex.exe" } else { "codex" };
 
+pub(crate) const INSTALL_COMMAND: &str = "npm install -g @openai/codex";
+
 #[derive(Debug, thiserror::Error)]
 pub enum LocateError {
     #[error(
-        "Could not find codex on PATH. Install Codex with \"npm install -g @openai/codex\" or set CODEX_EXE."
+        "Could not find codex on PATH. Install Codex with \"{INSTALL_COMMAND}\" or set CODEX_EXE."
     )]
     NotOnPath,
     #[error(
-        "Found the npm launcher {} but not the Codex binary it starts. Reinstall Codex with \"npm install -g @openai/codex\" or set CODEX_EXE.",
+        "Found the npm launcher {} but not the Codex binary it starts. Reinstall Codex with \"{INSTALL_COMMAND}\" or set CODEX_EXE.",
         .0.display()
     )]
     NoBinaryBehindLauncher(PathBuf),
