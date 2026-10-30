@@ -82,7 +82,7 @@ pub fn plan(provider: Provider, account: Option<&AccountUsage>) -> Plan {
         .iter()
         .map(|(_, window)| window.resets_at.clone())
         .collect::<Option<Vec<Timestamp>>>()
-        .and_then(|resets| resets.into_iter().max_by(|a, b| a.as_str().cmp(b.as_str())));
+        .and_then(|resets| resets.into_iter().max_by_key(Timestamp::instant));
     let why = if spent.is_empty() {
         Some("Codex did not say which limit stopped the turn")
     } else if resets_at.is_none() {
@@ -610,6 +610,27 @@ mod tests {
                 .as_ref()
                 .map(Timestamp::as_str),
             Some(LATER)
+        );
+    }
+
+    #[test]
+    fn the_latest_reset_of_the_spent_windows_wins_by_time_not_by_text() {
+        // Catches resets compared as text, where the shorter form without milliseconds sorts after
+        // a later instant written with them.
+        let earlier = "2030-01-01T05:00:00Z";
+        let later = "2030-01-01T05:00:00.500Z";
+        let two_spent = account(
+            Allowance::Blocked,
+            vec![
+                bucket("codex", Some(window(300, 100, earlier)), None),
+                bucket("codex_other", Some(window(300, 100, later)), None),
+            ],
+        );
+
+        let planned = plan(Provider::Codex, Some(&two_spent));
+        assert_eq!(
+            planned.resets_at.as_ref().map(Timestamp::as_str),
+            Some(later)
         );
     }
 
