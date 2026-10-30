@@ -108,7 +108,7 @@ cargo run -p kratos-client -- usage
 
 ### Agent tools
 
-Every Codex thread gets a `kratos` MCP server, as Zeron's agents get `zeron mcp`. Codex starts
+Every Codex thread gets a `kratos` MCP server. Codex starts
 `kratos-engine mcp` for the thread with its id, and the server calls the engine's API with the client token. An agent
 can list workspaces and threads, read a thread, create a thread, send another thread a message labelled with its own
 id, wait for a thread's turn, stop a turn, answer a question, and decide an approval.
