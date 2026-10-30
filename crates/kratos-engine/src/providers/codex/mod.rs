@@ -21,6 +21,7 @@ mod recovery;
 mod requests;
 #[cfg(windows)]
 mod sandbox;
+mod settings;
 mod threads;
 mod turns;
 pub mod wire;
