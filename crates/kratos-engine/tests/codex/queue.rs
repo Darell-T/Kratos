@@ -46,9 +46,9 @@ async fn a_message_codex_refused_twice_before_running_it_fails_and_holds_the_que
     harness.send("b", "second").await;
 
     harness.held("turn/start", 1).await;
-    harness.fail_start(-32602, "bad input").await;
+    harness.refuse("turn/start", -32602, "bad input").await;
     harness.held("turn/start", 2).await;
-    harness.fail_start(-32602, "bad input").await;
+    harness.refuse("turn/start", -32602, "bad input").await;
 
     harness
         .wait_for(|event| {
@@ -81,7 +81,9 @@ async fn an_uncertain_delivery_is_never_sent_again_and_holds_newer_messages() {
     harness.send("a", "first").await;
     harness.held("turn/start", 1).await;
 
-    harness.fail_start(-32000, "connection reset").await;
+    harness
+        .refuse("turn/start", -32000, "connection reset")
+        .await;
     harness
         .wait_for(|event| {
             matches!(
@@ -115,7 +117,9 @@ async fn discarding_an_uncertain_message_codex_never_got_cancels_it_and_frees_th
     let mut harness = Harness::start(Options::default()).await;
     harness.send("a", "first").await;
     harness.held("turn/start", 1).await;
-    harness.fail_start(-32000, "connection reset").await;
+    harness
+        .refuse("turn/start", -32000, "connection reset")
+        .await;
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
         .await;
@@ -152,7 +156,9 @@ async fn a_delivery_the_history_shows_is_recorded_as_accepted() {
         .control("test/setThread", json!({ "thread": history }))
         .await;
 
-    harness.fail_start(-32000, "connection reset").await;
+    harness
+        .refuse("turn/start", -32000, "connection reset")
+        .await;
 
     let started = harness
         .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
@@ -289,12 +295,7 @@ async fn a_stop_waits_for_the_turn_to_end_before_the_next_message_starts() {
     let thread_id = harness.thread_id.clone();
     let stop = tokio::spawn(async move { provider.stop(thread_id).await });
     harness.held("turn/interrupt", 1).await;
-    harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "turn/interrupt", "result": {} }),
-        )
-        .await;
+    harness.settle("turn/interrupt", json!({})).await;
     stop.await.unwrap().unwrap();
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(
@@ -388,12 +389,7 @@ async fn a_turn_that_stops_on_request_but_never_ends_closes_codex() {
     let thread_id = harness.thread_id.clone();
     let stop = tokio::spawn(async move { provider.stop(thread_id).await });
     harness.held("turn/interrupt", 1).await;
-    harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "turn/interrupt", "result": {} }),
-        )
-        .await;
+    harness.settle("turn/interrupt", json!({})).await;
     stop.await.unwrap().unwrap();
 
     let ended = harness

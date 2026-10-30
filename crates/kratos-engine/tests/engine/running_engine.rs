@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fake_agents::codex_control;
+use fake_agents::codex_control::{self, ControlRequest};
 use kratos_api_client::{Client, EventSocket, Incoming};
 use kratos_protocol::{
     CLIENT_TOKEN_FILE, CreateThread, CreateWorkspace, Provider, RequiredText, Seq, ServerMessage,
@@ -147,6 +147,11 @@ impl RunningEngine {
         answer["result"].clone()
     }
 
+    /// Sends the fake Codex a request that a `codex_control` builder made.
+    pub fn fake_codex_request(&self, request: ControlRequest) {
+        self.fake_codex(request.method, request.params);
+    }
+
     /// Waits until the fake Codex holds `count` requests of `method`, and returns them.
     pub fn fake_codex_held(&self, method: &str, count: usize) -> Vec<serde_json::Value> {
         let deadline = Instant::now() + WAIT;
@@ -174,8 +179,7 @@ impl RunningEngine {
     /// Settles the turn the fake Codex holds for the message just sent as `turn-1`, now running.
     pub fn start_turn(&self) {
         self.fake_codex_held("turn/start", 1);
-        let settled = codex_control::settle_start("turn-1", "inProgress", None);
-        self.fake_codex("test/settleTurn", settled);
+        self.fake_codex_request(codex_control::settle_start("turn-1", "inProgress", None));
     }
 
     /// Waits until the engine answered `count` of the requests the fake Codex sent it, and returns

@@ -421,7 +421,7 @@ impl Fake {
                 let answers = Value::Array(self.answers.clone());
                 self.reply(id, answers);
             }
-            "test/settleTurn" => self.settle(id, params),
+            codex_control::SETTLE_TURN => self.settle(id, params),
             "test/echo" => self.reply(id, params.clone()),
             "test/fail" => self.fail(id, -32000, "boom"),
             "test/environment" => self.reply(
@@ -441,7 +441,7 @@ impl Fake {
                 self.reply(id, json!("still alive"));
             }
             "test/pid" => self.reply(id, json!(std::process::id())),
-            "test/ask" => {
+            codex_control::ASK => {
                 let request_id = match &params["requestId"] {
                     Value::Null => json!("ask-1"),
                     request_id => request_id.clone(),
@@ -451,7 +451,7 @@ impl Fake {
                 );
                 self.reply(id, Value::Null);
             }
-            "test/emit" => {
+            codex_control::EMIT => {
                 self.emit(params);
                 self.reply(id, Value::Null);
             }

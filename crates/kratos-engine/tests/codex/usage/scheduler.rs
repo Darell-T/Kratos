@@ -745,10 +745,7 @@ async fn a_message_waiting_on_the_user_holds_the_continuation() {
         .unwrap();
     harness.held("turn/steer", 1).await;
     harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "turn/steer", "code": -32000, "error": "connection reset" }),
-        )
+        .refuse("turn/steer", -32000, "connection reset")
         .await;
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))

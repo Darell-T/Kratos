@@ -27,7 +27,7 @@ fn next_message(
 }
 
 fn emit(engine: &RunningEngine, method: &str, params: Value) {
-    engine.fake_codex("test/emit", codex_control::emit(method, params));
+    engine.fake_codex_request(codex_control::emit(method, params));
 }
 
 #[test]
@@ -159,12 +159,12 @@ fn an_approval_reaches_the_socket_and_the_decision_sent_over_http_reaches_codex(
     engine.start_turn();
 
     let asked = codex_control::ask(
-        "ask-1",
+        Some("ask-1".into()),
         "item/commandExecution/requestApproval",
         json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "c1", "startedAtMs": 0,
                 "command": "ls" }),
     );
-    engine.fake_codex("test/ask", asked);
+    engine.fake_codex_request(asked);
     let requested = next_message(
         &mut socket,
         |message| matches!(message, ServerMessage::Event { event } if matches!(event.event, ThreadEventBody::ApprovalRequested { .. })),

@@ -507,12 +507,12 @@ fn only_a_full_access_agent_decides_another_thread_s_approval() {
         .unwrap();
     engine.start_turn();
     let asked = codex_control::ask(
-        "ask-1",
+        Some("ask-1".into()),
         "item/commandExecution/requestApproval",
         json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "c1", "startedAtMs": 0,
                 "command": "rm -rf build" }),
     );
-    engine.fake_codex("test/ask", asked);
+    engine.fake_codex_request(asked);
     let asked_by = std::time::Instant::now() + WAIT;
     let approval = loop {
         let details = engine

@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use fake_agents::codex_control::{self, ControlRequest};
 use kratos_codex_client::types::{
     self, ClientInfo, InitializeCapabilities, ToolRequestUserInputAnswer,
     ToolRequestUserInputResponse,
@@ -48,6 +49,10 @@ async fn control(codex: &Codex, method: &str, params: Value) -> Value {
         .request_value(method, params, REQUEST_TIMEOUT)
         .await
         .unwrap()
+}
+
+async fn control_request(codex: &Codex, request: ControlRequest) {
+    control(codex, request.method, request.params).await;
 }
 
 /// The next message that is not one of the fake's own `test/answered` reports.
@@ -274,10 +279,13 @@ async fn delivers_a_notification_before_the_reply_that_follows_it() {
 #[tokio::test]
 async fn answers_a_server_request_under_its_own_id() {
     let (codex, mut incoming) = connect_fake().await;
-    control(
+    control_request(
         &codex,
-        "test/ask",
-        json!({ "method": "item/tool/requestUserInput", "requestId": 42, "params": question("thread-A") }),
+        codex_control::ask(
+            Some(42.into()),
+            "item/tool/requestUserInput",
+            question("thread-A"),
+        ),
     )
     .await;
 
@@ -301,10 +309,9 @@ async fn refuses_to_send_an_answer_to_another_kind_of_request() {
     // Catches a command decision sent as the answer to a question, which Codex would read as a
     // reply of the wrong shape.
     let (codex, mut incoming) = connect_fake().await;
-    control(
+    control_request(
         &codex,
-        "test/ask",
-        json!({ "method": "item/tool/requestUserInput", "params": question("thread-A") }),
+        codex_control::ask(None, "item/tool/requestUserInput", question("thread-A")),
     )
     .await;
     let Incoming::Request(request) = next(&mut incoming).await else {
@@ -327,17 +334,15 @@ async fn refuses_to_send_an_answer_to_another_kind_of_request() {
 async fn answers_unknown_methods_and_unreadable_requests_itself() {
     let (codex, mut incoming) = connect_fake().await;
 
-    control(
+    control_request(
         &codex,
-        "test/ask",
-        json!({ "method": "test/unhandled", "params": {} }),
+        codex_control::ask(None, "test/unhandled", json!({})),
     )
     .await;
     let unknown = answer_seen(&mut incoming).await;
-    control(
+    control_request(
         &codex,
-        "test/ask",
-        json!({ "method": "item/tool/requestUserInput", "params": { "threadId": 7 } }),
+        codex_control::ask(None, "item/tool/requestUserInput", json!({ "threadId": 7 })),
     )
     .await;
     let unreadable = answer_seen(&mut incoming).await;
@@ -353,10 +358,9 @@ async fn answers_unknown_methods_and_unreadable_requests_itself() {
 #[tokio::test]
 async fn answers_a_dropped_request_with_an_internal_error() {
     let (codex, mut incoming) = connect_fake().await;
-    control(
+    control_request(
         &codex,
-        "test/ask",
-        json!({ "method": "item/tool/requestUserInput", "params": question("thread-A") }),
+        codex_control::ask(None, "item/tool/requestUserInput", question("thread-A")),
     )
     .await;
 
@@ -375,19 +379,24 @@ async fn answers_a_dropped_request_with_an_internal_error() {
 #[tokio::test]
 async fn sends_no_answer_after_the_server_withdraws_its_request() {
     let (codex, mut incoming) = connect_fake().await;
-    control(
+    control_request(
         &codex,
-        "test/ask",
-        json!({ "method": "item/tool/requestUserInput", "requestId": "stale", "params": question("thread-A") }),
+        codex_control::ask(
+            Some("stale".into()),
+            "item/tool/requestUserInput",
+            question("thread-A"),
+        ),
     )
     .await;
     let Incoming::Request(request) = next(&mut incoming).await else {
         panic!("expected the question");
     };
-    control(
+    control_request(
         &codex,
-        "test/emit",
-        json!({ "method": "serverRequest/resolved", "params": { "threadId": "thread-A", "requestId": "stale" } }),
+        codex_control::emit(
+            "serverRequest/resolved",
+            json!({ "threadId": "thread-A", "requestId": "stale" }),
+        ),
     )
     .await;
 

@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fake_agents::codex_control;
+use fake_agents::codex_control::{self, ControlRequest};
 use kratos_api_client::{Client, ClientError, EventSocket, Incoming};
 use kratos_protocol::{
     CreateThread, Provider, RequiredText, Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome,
@@ -100,10 +100,10 @@ fn measure_turn(
     let native_id = started_thread(&request, &message_id)?;
     let turn_id = format!("bench-turn-{number}");
     let settled = codex_control::settle_start(&turn_id, "inProgress", Some(native_id));
-    fake.call("test/settleTurn", settled)?;
+    fake.call(settled)?;
     let completion_sent = Instant::now();
     let completed = codex_control::complete(native_id, &turn_id, "completed");
-    fake.call("test/emit", completed)?;
+    fake.call(completed)?;
     await_completion(socket, &thread.id, &turn_id)?;
     Ok((
         received_at.duration_since(posted_at),
@@ -181,7 +181,10 @@ impl Control {
         Ok(Self(BufReader::new(stream)))
     }
 
-    fn call(&mut self, method: &str, params: Value) -> Result<Value, BenchError> {
+    fn call(
+        &mut self,
+        ControlRequest { method, params }: ControlRequest,
+    ) -> Result<Value, BenchError> {
         writeln!(
             self.0.get_mut(),
             "{}",
@@ -210,10 +213,10 @@ struct Observer {
 impl Observer {
     fn start(fake: &mut Control) -> Result<Self, BenchError> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
-        fake.call(
-            "test/observeTurns",
-            json!({ "port": listener.local_addr()?.port() }),
-        )?;
+        fake.call(ControlRequest {
+            method: "test/observeTurns",
+            params: json!({ "port": listener.local_addr()?.port() }),
+        })?;
         let (stream, _) = listener.accept()?;
         stream.set_read_timeout(Some(WAIT))?;
         let reader = BufReader::new(stream.try_clone()?);
