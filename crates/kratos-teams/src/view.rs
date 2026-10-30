@@ -862,6 +862,11 @@ impl TaskView {
         self.rounds.last().map_or(&self.base, |round| &round.commit)
     }
 
+    /// The number the next commit's round gets. Rounds count from 1 over the task's lifetime.
+    pub(crate) fn next_round(&self) -> u32 {
+        u32::try_from(self.rounds.len() + 1).unwrap_or(u32::MAX)
+    }
+
     /// What the next standard review diffs against. It is the last commit a standard review judged, or
     /// the base. The engine measures the change from here, so review depth matches what the reviewer reads.
     pub fn standard_review_base(&self) -> &Sha {

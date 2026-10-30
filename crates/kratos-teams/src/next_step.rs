@@ -162,7 +162,7 @@ fn turn_step(view: &TaskView, turn: &Turn) -> Step {
 }
 
 fn commit_step(view: &TaskView, step: StepId, then: &AfterCommit) -> Step {
-    let round = u32::try_from(view.rounds.len() + 1).unwrap_or(u32::MAX);
+    let round = view.next_round();
     let added_probes = match then {
         AfterCommit::Review { report } => report.added_probes.clone(),
         AfterCommit::Accept => Vec::new(),

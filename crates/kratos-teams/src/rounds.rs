@@ -142,7 +142,7 @@ impl TaskView {
         }
         view.changed_files.extend(files.iter().cloned());
         view.rounds.push(Round {
-            n: u32::try_from(view.rounds.len() + 1).unwrap_or(u32::MAX),
+            n: view.next_round(),
             commit: commit.clone(),
             report,
             files,
@@ -462,7 +462,7 @@ impl TaskView {
         report: &ReviewDone,
         checked: &EvidenceChecked,
     ) -> Result<Judged, Rejection> {
-        let round = u32::try_from(self.rounds.len()).unwrap_or(u32::MAX);
+        let round = self.rounds.last().map_or(0, |round| round.n);
         let mut added = Vec::new();
         for (id, finding) in self.new_finding_ids(report) {
             added.push(Finding {
