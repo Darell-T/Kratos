@@ -154,7 +154,7 @@ fn recorded_changes(
     loop {
         let page = store.events_after(thread_id, after, PAGE_BYTES)?;
         let Some(last) = page.last() else {
-            return Ok(changes.take());
+            return Ok(changes.finish());
         };
         after = last.seq;
         for event in &page {

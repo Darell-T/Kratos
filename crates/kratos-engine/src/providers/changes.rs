@@ -46,13 +46,12 @@ impl ChangesRecorder {
         self.edited_since_command = true;
     }
 
-    /// What the turn changed, leaving the recorder empty for the next turn.
-    pub fn take(&mut self) -> TurnChanges {
-        let taken = std::mem::take(self);
+    /// What the turn changed.
+    pub fn finish(self) -> TurnChanges {
         TurnChanges {
-            files: taken.files,
-            edited_since_command: taken.edited_since_command,
-            ran_command: taken.ran_command,
+            files: self.files,
+            edited_since_command: self.edited_since_command,
+            ran_command: self.ran_command,
         }
     }
 }
@@ -93,14 +92,9 @@ mod tests {
             output: CappedText::new("", 0),
         });
 
-        let taken = changes.take();
-        assert_eq!(taken.files, ["a.rs", "b.rs"]);
-        assert!(!taken.edited_since_command);
-        assert!(taken.ran_command);
-        assert_eq!(
-            changes.take().files,
-            Vec::<String>::new(),
-            "taking empties the recorder"
-        );
+        let finished = changes.finish();
+        assert_eq!(finished.files, ["a.rs", "b.rs"]);
+        assert!(!finished.edited_since_command);
+        assert!(finished.ran_command);
     }
 }

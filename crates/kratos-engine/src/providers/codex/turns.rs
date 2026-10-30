@@ -583,11 +583,8 @@ impl Actor {
         work: TurnWork,
         after: After,
     ) -> Result<(), ProviderError> {
-        let TurnWork {
-            mut changes,
-            context,
-        } = work;
-        let changes = changes.take();
+        let TurnWork { changes, context } = work;
+        let changes = changes.finish();
         let closed = self
             .requests
             .close(thread_id, |waiting_turn| *waiting_turn == turn_id);
