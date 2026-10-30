@@ -371,7 +371,7 @@ impl Actor {
             .and_then(|thread| thread.context.take());
         let closed = self
             .requests
-            .close(thread_id, |waiting| waiting.turn_id == turn_id);
+            .close(thread_id, |waiting_turn| *waiting_turn == turn_id);
         self.write(thread_id, move |write| {
             settle_closed(write, &closed, "The turn ended")?;
             write.complete_turn(turn_id, outcome, changes, context)?;

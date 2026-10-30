@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::actor::{Actor, Command, Done, Reply};
 use super::profiles::Profile;
-use super::requests::Answer;
+use super::requests::ApprovalAnswer;
 use super::threads::{Link, Turn};
 use super::turns::{Delivery, Stopper, read_history};
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
@@ -575,7 +575,7 @@ impl Actor {
         match (&outcome, &waiting.answer) {
             (
                 Ok(ApprovalOutcome::Decided { decision: recorded }),
-                Answer::Permissions(requested),
+                ApprovalAnswer::Permissions(requested),
             ) if *recorded == decision => {
                 waiting
                     .request

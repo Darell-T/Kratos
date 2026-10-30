@@ -8,25 +8,26 @@ use std::collections::HashMap;
 use kratos_codex_client::{IncomingRequest, RequestId, types};
 use kratos_protocol::{ApprovalId, QuestionId, ThreadId, TurnId};
 
-pub(super) struct Waiting {
+/// A request that waits on the user. `A` is what an approval's answer is built from; a question
+/// needs nothing.
+pub(super) struct Waiting<A = ()> {
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
     pub codex_id: RequestId,
     pub request: IncomingRequest,
-    pub answer: Answer,
+    pub answer: A,
 }
 
-pub(super) enum Answer {
+pub(super) enum ApprovalAnswer {
     /// `{"decision": ...}`, for a command or a patch.
     Decision,
     /// The permissions granted, from what was asked.
     Permissions(types::RequestPermissionProfile),
-    Answers,
 }
 
 #[derive(Default)]
 pub(super) struct Requests {
-    pub approvals: HashMap<ApprovalId, Waiting>,
+    pub approvals: HashMap<ApprovalId, Waiting<ApprovalAnswer>>,
     pub questions: HashMap<QuestionId, Waiting>,
 }
 
@@ -37,8 +38,11 @@ pub(super) struct Closed {
 }
 
 impl Requests {
-    pub fn close(&mut self, thread_id: &ThreadId, matches: impl Fn(&Waiting) -> bool) -> Closed {
-        let selected = |waiting: &Waiting| &waiting.thread_id == thread_id && matches(waiting);
+    /// Removes the thread's requests whose turn `in_turn` selects.
+    pub fn close(&mut self, thread_id: &ThreadId, in_turn: impl Fn(&TurnId) -> bool) -> Closed {
+        let selected = |waiting_thread: &ThreadId, waiting_turn: &TurnId| {
+            waiting_thread == thread_id && in_turn(waiting_turn)
+        };
         Closed {
             approvals: take_where(&mut self.approvals, selected),
             questions: take_where(&mut self.questions, selected),
@@ -52,8 +56,13 @@ impl Requests {
         let thread_id = approval
             .as_ref()
             .and_then(|id| self.approvals.get(id))
-            .or_else(|| question.as_ref().and_then(|id| self.questions.get(id)))
-            .map(|waiting| waiting.thread_id.clone())?;
+            .map(|waiting| waiting.thread_id.clone())
+            .or_else(|| {
+                question
+                    .as_ref()
+                    .and_then(|id| self.questions.get(id))
+                    .map(|waiting| waiting.thread_id.clone())
+            })?;
         approval.as_ref().map(|id| self.approvals.remove(id));
         question.as_ref().map(|id| self.questions.remove(id));
         Some((
@@ -81,8 +90,12 @@ impl Requests {
         let mut threads: Vec<ThreadId> = self
             .approvals
             .values()
-            .chain(self.questions.values())
             .map(|waiting| waiting.thread_id.clone())
+            .chain(
+                self.questions
+                    .values()
+                    .map(|waiting| waiting.thread_id.clone()),
+            )
             .collect();
         threads.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         threads.dedup();
@@ -99,13 +112,13 @@ impl Waiting {
     }
 }
 
-fn take_where<K: Clone + Eq + std::hash::Hash>(
-    map: &mut HashMap<K, Waiting>,
-    selected: impl Fn(&Waiting) -> bool,
+fn take_where<K: Clone + Eq + std::hash::Hash, A>(
+    map: &mut HashMap<K, Waiting<A>>,
+    selected: impl Fn(&ThreadId, &TurnId) -> bool,
 ) -> Vec<K> {
     let ids: Vec<K> = map
         .iter()
-        .filter(|(_, waiting)| selected(waiting))
+        .filter(|(_, waiting)| selected(&waiting.thread_id, &waiting.turn_id))
         .map(|(id, _)| id.clone())
         .collect();
     for id in &ids {
@@ -114,7 +127,7 @@ fn take_where<K: Clone + Eq + std::hash::Hash>(
     ids
 }
 
-fn find_id<K: Clone>(map: &HashMap<K, Waiting>, codex_id: &RequestId) -> Option<K> {
+fn find_id<K: Clone, A>(map: &HashMap<K, Waiting<A>>, codex_id: &RequestId) -> Option<K> {
     map.iter()
         .find(|(_, waiting)| &waiting.codex_id == codex_id)
         .map(|(id, _)| id.clone())

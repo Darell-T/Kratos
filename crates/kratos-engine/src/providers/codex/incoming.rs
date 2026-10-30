@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::actor::{Actor, settle_closed};
 use super::policy::{self, CommandRequest, Verdict};
-use super::requests::{Answer, Waiting};
+use super::requests::{ApprovalAnswer, Waiting};
 use super::wire;
 
 impl Actor {
@@ -211,7 +211,7 @@ impl Actor {
                     request,
                     verdict,
                     shown,
-                    Answer::Decision,
+                    ApprovalAnswer::Decision,
                 )
                 .await;
             }
@@ -236,7 +236,7 @@ impl Actor {
                     request,
                     verdict,
                     shown,
-                    Answer::Decision,
+                    ApprovalAnswer::Decision,
                 )
                 .await;
             }
@@ -256,7 +256,7 @@ impl Actor {
                     request,
                     verdict,
                     shown,
-                    Answer::Permissions(requested),
+                    ApprovalAnswer::Permissions(requested),
                 )
                 .await;
             }
@@ -278,7 +278,7 @@ impl Actor {
         request: IncomingRequest,
         verdict: Verdict,
         shown: ApprovalRequest,
-        answer: Answer,
+        answer: ApprovalAnswer,
     ) {
         let why = match verdict {
             Verdict::Accept => {
@@ -336,7 +336,7 @@ impl Actor {
                 turn_id,
                 codex_id: request.id.clone(),
                 request,
-                answer: Answer::Answers,
+                answer: (),
             },
         );
     }
