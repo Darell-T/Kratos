@@ -68,6 +68,20 @@ pub enum Permission {
     FullAccess,
 }
 
+impl Permission {
+    /// Every permission, least trusting first.
+    pub const ALL: [Permission; 3] = [
+        Permission::AskMe,
+        Permission::ApproveForMe,
+        Permission::FullAccess,
+    ];
+}
+
+/// A new permission breaks this match, as a reminder to add it to [`Permission::ALL`].
+const _: () = match Permission::AskMe {
+    Permission::AskMe | Permission::ApproveForMe | Permission::FullAccess => {}
+};
+
 /// What a thread's next turn runs with. A change applies from the next turn, never to the turn
 /// running now (D87).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

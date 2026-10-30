@@ -40,7 +40,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   resume <thread-id>
   settings <thread-id> <settings-json>
   skills <thread-id>
-  approve <approval-id> <accept|acceptForSession|decline|cancel>
+  approve <approval-id> <decision>
   answer <question-id> <answers-json>
   schedule <continuation-id>
   usage

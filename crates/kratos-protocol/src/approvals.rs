@@ -118,6 +118,23 @@ pub enum ApprovalDecision {
     Cancel,
 }
 
+impl ApprovalDecision {
+    pub const ALL: [ApprovalDecision; 4] = [
+        ApprovalDecision::Accept,
+        ApprovalDecision::AcceptForSession,
+        ApprovalDecision::Decline,
+        ApprovalDecision::Cancel,
+    ];
+}
+
+/// A new decision breaks this match, as a reminder to add it to [`ApprovalDecision::ALL`].
+const _: () = match ApprovalDecision::Accept {
+    ApprovalDecision::Accept
+    | ApprovalDecision::AcceptForSession
+    | ApprovalDecision::Decline
+    | ApprovalDecision::Cancel => {}
+};
+
 /// The body of `POST /api/approvals/{id}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

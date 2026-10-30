@@ -341,7 +341,7 @@ fn create_input() -> Value {
             "properties": {
                 "title": { "type": "string" },
                 "workspaceId": { "type": "string" },
-                "permission": { "enum": ["askMe", "approveForMe", "fullAccess"] },
+                "permission": { "enum": Permission::ALL },
                 "planMode": { "type": "boolean" },
                 "model": { "type": "string" } } })
 }
@@ -370,5 +370,93 @@ fn decide_input() -> Value {
     json!({ "type": "object", "required": ["approvalId", "decision"], "additionalProperties": false,
             "properties": {
                 "approvalId": { "type": "string" },
-                "decision": { "enum": ["accept", "acceptForSession", "decline", "cancel"] } } })
+                "decision": { "enum": ApprovalDecision::ALL } } })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `arguments` through the struct the tool named `tool` parses them with.
+    fn parse_for(tool: &str, arguments: Value) -> Result<(), String> {
+        match tool {
+            "whoami" | "list_workspaces" => parse_arguments::<NoArguments>(arguments).map(drop),
+            "list_threads" => parse_arguments::<InWorkspace>(arguments).map(drop),
+            "get_thread" | "stop_thread" => parse_arguments::<OnThread>(arguments).map(drop),
+            "read_thread" => parse_arguments::<ReadArguments>(arguments).map(drop),
+            "create_thread" => parse_arguments::<CreateArguments>(arguments).map(drop),
+            "send_message" => parse_arguments::<SendArguments>(arguments).map(drop),
+            "wait_for_turn" => parse_arguments::<WaitArguments>(arguments).map(drop),
+            "answer_question" => parse_arguments::<AnswerArguments>(arguments).map(drop),
+            "decide_approval" => parse_arguments::<DecideArguments>(arguments).map(drop),
+            other => panic!("no arguments struct named for tool {other}"),
+        }
+    }
+
+    /// Values the property `schema` admits: each enum value, else one of its type.
+    fn samples(schema: &Value) -> Vec<Value> {
+        if let Some(values) = schema["enum"].as_array() {
+            return values.clone();
+        }
+        match schema["type"].as_str() {
+            Some("string") => vec![json!("x")],
+            Some("integer") => vec![schema.get("minimum").cloned().unwrap_or(json!(1))],
+            Some("boolean") => vec![json!(true)],
+            Some("object") => samples(&schema["additionalProperties"])
+                .into_iter()
+                .map(|value| json!({ "k": value }))
+                .collect(),
+            Some("array") => samples(&schema["items"])
+                .into_iter()
+                .map(|value| json!([value]))
+                .collect(),
+            other => panic!("no sample for a property of type {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_tool_schema_describes_the_arguments_its_tool_parses() {
+        // Catches a schema that advertises a property, a type, or an enum value the tool refuses,
+        // or that marks a property optional or required unlike the tool's struct.
+        for tool in &TOOLS {
+            let schema = (tool.input)();
+            let properties = schema["properties"].as_object().unwrap();
+            let required: Vec<&str> = schema["required"]
+                .as_array()
+                .map(|names| names.iter().map(|name| name.as_str().unwrap()).collect())
+                .unwrap_or_default();
+            let full: serde_json::Map<String, Value> = properties
+                .iter()
+                .map(|(name, property)| (name.clone(), samples(property)[0].clone()))
+                .collect();
+            let minimal: serde_json::Map<String, Value> = full
+                .iter()
+                .filter(|(name, _)| required.contains(&name.as_str()))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            assert_eq!(minimal.len(), required.len(), "{}: required", tool.name);
+
+            parse_for(tool.name, Value::Object(full.clone()))
+                .unwrap_or_else(|error| panic!("{}: every property: {error}", tool.name));
+            parse_for(tool.name, Value::Object(minimal.clone()))
+                .unwrap_or_else(|error| panic!("{}: required only: {error}", tool.name));
+            for (name, property) in properties {
+                for sample in samples(property) {
+                    let mut arguments = full.clone();
+                    arguments.insert(name.clone(), sample.clone());
+                    parse_for(tool.name, Value::Object(arguments))
+                        .unwrap_or_else(|error| panic!("{}: {name}={sample}: {error}", tool.name));
+                }
+            }
+            for name in &required {
+                let mut arguments = minimal.clone();
+                arguments.remove(*name);
+                assert!(
+                    parse_for(tool.name, Value::Object(arguments)).is_err(),
+                    "{}: {name} is required by the schema only",
+                    tool.name
+                );
+            }
+        }
+    }
 }
