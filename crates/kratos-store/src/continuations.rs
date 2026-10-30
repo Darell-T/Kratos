@@ -10,7 +10,7 @@ use kratos_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::columns::{PROVIDERS, from_column, required_column, stored_name, to_column, unreadable};
+use crate::columns::{from_column, provider_name, required_column, to_column, unreadable};
 use crate::{Enqueued, QueuePlace, Store, StoreError, ThreadWrite};
 
 impl ThreadWrite<'_> {
@@ -130,7 +130,7 @@ impl Store {
             "SELECT id, paused FROM threads
              WHERE provider = ?1 AND paused IS NOT NULL AND running_turn IS NULL ORDER BY rowid",
         )?;
-        let rows = statement.query_map([stored_name(&PROVIDERS, provider)], |row| {
+        let rows = statement.query_map([provider_name(provider)], |row| {
             let pause: Option<PauseReason> = from_column(row, 1)?;
             Ok(match pause {
                 Some(PauseReason::UsageLimit { turn_id, .. }) => {

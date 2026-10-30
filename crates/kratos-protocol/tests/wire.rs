@@ -130,7 +130,7 @@ fn agent_types_match_the_typescript_json() {
         assert_eq!(parse::<CommandResult>(result_json).unwrap(), result);
     }
 
-    for provider in [Provider::Codex, Provider::Claude] {
+    for provider in Provider::ALL {
         assert_eq!(json(&provider), format!("\"{}\"", provider.as_str()));
     }
 }

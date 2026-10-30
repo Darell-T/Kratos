@@ -10,7 +10,7 @@ use kratos_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::columns::{DECISIONS, from_stored_name, required_column, stored_name, to_column};
+use crate::columns::{decision_name, from_stored_name, required_column, to_column};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// How a waiting request is settled.
@@ -60,7 +60,7 @@ impl ThreadWrite<'_> {
         settle: Settle<ApprovalDecision>,
     ) -> Result<ApprovalOutcome, StoreError> {
         let (decision, closed_reason) = match &settle {
-            Settle::Decide(decision) => (Some(stored_name(&DECISIONS, *decision)), None),
+            Settle::Decide(decision) => (Some(decision_name(*decision)), None),
             Settle::Close(reason) => (None, Some(reason.as_str())),
         };
         let settled = self.transaction.execute(
@@ -221,7 +221,7 @@ fn approval_from_row(row: &Row<'_>) -> rusqlite::Result<StoredApproval> {
     let closed_reason: Option<String> = row.get(3)?;
     let outcome = match (decision, closed_reason) {
         (Some(name), _) => ApprovalOutcome::Decided {
-            decision: from_stored_name(&DECISIONS, &name, 2, "decision")?,
+            decision: from_stored_name(ApprovalDecision::ALL, decision_name, &name, 2, "decision")?,
         },
         (None, Some(reason)) => ApprovalOutcome::Closed { reason },
         (None, None) => ApprovalOutcome::Waiting,

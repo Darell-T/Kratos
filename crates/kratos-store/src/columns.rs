@@ -7,46 +7,44 @@ use rusqlite::types::Type;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// The names the `provider` columns store.
-pub(crate) const PROVIDERS: [(Provider, &str); 2] =
-    [(Provider::Codex, "codex"), (Provider::Claude, "claude")];
-
-/// The names the `permission` column stores.
-pub(crate) const PERMISSIONS: [(Permission, &str); 3] = [
-    (Permission::AskMe, "askMe"),
-    (Permission::ApproveForMe, "approveForMe"),
-    (Permission::FullAccess, "fullAccess"),
-];
-
-/// The names the `decision` column stores.
-pub(crate) const DECISIONS: [(ApprovalDecision, &str); 4] = [
-    (ApprovalDecision::Accept, "accept"),
-    (ApprovalDecision::AcceptForSession, "acceptForSession"),
-    (ApprovalDecision::Decline, "decline"),
-    (ApprovalDecision::Cancel, "cancel"),
-];
-
-/// The name `names` stores for `value`.
-pub(crate) fn stored_name<T: Copy + Eq>(names: &[(T, &'static str)], value: T) -> &'static str {
-    names
-        .iter()
-        .find(|(known, _)| *known == value)
-        .map(|(_, name)| *name)
-        .expect("every value has a stored name")
+/// The name the `provider` columns store.
+pub(crate) fn provider_name(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "codex",
+        Provider::Claude => "claude",
+    }
 }
 
-/// The value that `names` stores as `name`, read from column `index`. `what` names the value in
-/// the error for a name this build does not know.
+/// The name the `permission` column stores.
+pub(crate) fn permission_name(permission: Permission) -> &'static str {
+    match permission {
+        Permission::AskMe => "askMe",
+        Permission::ApproveForMe => "approveForMe",
+        Permission::FullAccess => "fullAccess",
+    }
+}
+
+/// The name the `decision` column stores.
+pub(crate) fn decision_name(decision: ApprovalDecision) -> &'static str {
+    match decision {
+        ApprovalDecision::Accept => "accept",
+        ApprovalDecision::AcceptForSession => "acceptForSession",
+        ApprovalDecision::Decline => "decline",
+        ApprovalDecision::Cancel => "cancel",
+    }
+}
+
+/// The value in `all` that `name_of` stores as `name`, read from column `index`. `what` names the
+/// value in the error for a name this build does not know.
 pub(crate) fn from_stored_name<T: Copy>(
-    names: &[(T, &str)],
+    all: impl IntoIterator<Item = T>,
+    name_of: fn(T) -> &'static str,
     name: &str,
     index: usize,
     what: &str,
 ) -> rusqlite::Result<T> {
-    names
-        .iter()
-        .find(|(_, known)| *known == name)
-        .map(|(value, _)| *value)
+    all.into_iter()
+        .find(|value| name_of(*value) == name)
         .ok_or_else(|| unreadable(index, format!("unknown {what} {name}")))
 }
 
@@ -82,4 +80,27 @@ pub(crate) fn required_column<T: DeserializeOwned>(
         "a JSON value".to_owned(),
         Type::Null,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reads_back<T: Copy + Eq + std::fmt::Debug, const N: usize>(
+        all: [T; N],
+        name_of: fn(T) -> &'static str,
+    ) {
+        for value in all {
+            let read = from_stored_name(all, name_of, name_of(value), 0, "value").unwrap();
+            assert_eq!(read, value, "{} reads back as {read:?}", name_of(value));
+        }
+    }
+
+    #[test]
+    fn every_stored_name_reads_back_as_its_value() {
+        // Catches two variants stored under one name, so a row reads back as the other variant.
+        reads_back(Provider::ALL, provider_name);
+        reads_back(Permission::ALL, permission_name);
+        reads_back(ApprovalDecision::ALL, decision_name);
+    }
 }

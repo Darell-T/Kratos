@@ -36,6 +36,8 @@ pub enum Provider {
 }
 
 impl Provider {
+    pub const ALL: [Provider; 2] = [Provider::Codex, Provider::Claude];
+
     /// The name in JSON.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -44,6 +46,11 @@ impl Provider {
         }
     }
 }
+
+/// A new provider breaks this match, as a reminder to add it to [`Provider::ALL`].
+const _: () = match Provider::Codex {
+    Provider::Codex | Provider::Claude => {}
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

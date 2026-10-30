@@ -1,14 +1,12 @@
 use kratos_protocol::{
-    ContextUsage, CreateThread, PauseReason, Provider, Thread, ThreadDetails, ThreadEventBody,
-    ThreadId, ThreadSandbox, ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOutcome,
-    WorkspaceId,
+    ContextUsage, CreateThread, PauseReason, Permission, Provider, Thread, ThreadDetails,
+    ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, Timestamp, TurnChanges, TurnId,
+    TurnOutcome, WorkspaceId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::columns::{
-    PERMISSIONS, PROVIDERS, from_column, from_stored_name, stored_name, to_column,
-};
+use crate::columns::{from_column, from_stored_name, permission_name, provider_name, to_column};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// What a provider needs to run a thread's turns.
@@ -51,11 +49,11 @@ impl Store {
                 thread.id.as_str(),
                 thread.workspace_id.as_str(),
                 thread.title,
-                stored_name(&PROVIDERS, thread.provider),
+                provider_name(thread.provider),
                 thread.created_at.as_str(),
                 thread.updated_at.as_str(),
                 settings.model,
-                stored_name(&PERMISSIONS, settings.permission),
+                permission_name(settings.permission),
                 settings.plan_mode,
                 settings.context_limit_tokens,
             ],
@@ -132,7 +130,7 @@ impl ThreadWrite<'_> {
              WHERE id = ?5",
             params![
                 settings.model,
-                stored_name(&PERMISSIONS, settings.permission),
+                permission_name(settings.permission),
                 settings.plan_mode,
                 settings.context_limit_tokens,
                 self.thread_id().as_str(),
@@ -221,7 +219,7 @@ impl ThreadWrite<'_> {
             params![
                 Uuid::new_v4().to_string(),
                 self.thread_id().as_str(),
-                stored_name(&PROVIDERS, provider),
+                provider_name(provider),
                 native_id,
                 now,
                 plan,
@@ -271,7 +269,13 @@ fn settings_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadSettings> {
     let permission: String = row.get(8)?;
     Ok(ThreadSettings {
         model: row.get(7)?,
-        permission: from_stored_name(&PERMISSIONS, &permission, 8, "permission")?,
+        permission: from_stored_name(
+            Permission::ALL,
+            permission_name,
+            &permission,
+            8,
+            "permission",
+        )?,
         plan_mode: row.get(9)?,
         context_limit_tokens: row.get(10)?,
     })
@@ -284,7 +288,7 @@ fn thread_from_row(row: &Row<'_>) -> rusqlite::Result<Thread> {
         id: ThreadId::new(row.get(0)?),
         workspace_id: WorkspaceId::new(row.get(1)?),
         title: row.get(2)?,
-        provider: from_stored_name(&PROVIDERS, &provider, 3, "provider")?,
+        provider: from_stored_name(Provider::ALL, provider_name, &provider, 3, "provider")?,
         created_at: Timestamp::from_stored(row.get(4)?),
         updated_at: Timestamp::from_stored(row.get(5)?),
     })
