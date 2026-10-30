@@ -187,9 +187,11 @@ pub enum Waiting {
         detail: String,
         left: Activity,
     },
-    /// A usage limit stopped the turn, and the user decides what happens next.
+    /// A usage limit stopped the turn, and the user decides what happens next. The turn has no hold
+    /// while the user decides. The decision gives it one from `stop`.
     UsageLimit {
         turn: Turn,
+        stop: Stop,
         ask: UsageLimitAsk,
     },
     Approved {

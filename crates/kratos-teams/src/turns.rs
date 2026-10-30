@@ -185,17 +185,17 @@ impl TaskView {
     /// The provider stopped the turn at a usage limit. The step keeps its identity and goes to the one
     /// scheduler. With account handoff on, the user is asked first, every time (D40).
     fn hold_turn(self: Box<Self>, mut turn: Turn, delivered: bool) -> Box<TaskView> {
-        turn.hold = Some(Hold::ToScheduler {
-            stop: Stop {
-                message: turn.message.clone(),
-                delivered,
-                user_accepted_wait: false,
-            },
-        });
+        let stop = Stop {
+            message: turn.message.clone(),
+            delivered,
+            user_accepted_wait: false,
+        };
         if self.policy.account_handoff {
+            turn.hold = None;
             let ask = UsageLimitAsk::Handoff;
-            return self.waiting(Waiting::UsageLimit { turn, ask });
+            return self.waiting(Waiting::UsageLimit { turn, stop, ask });
         }
+        turn.hold = Some(Hold::ToScheduler { stop });
         self.active(Activity::Turn { turn })
     }
 
@@ -241,12 +241,12 @@ impl TaskView {
         step: StepId,
         why: Declined,
     ) -> Result<Box<TaskView>, Rejection> {
-        let turn = self.held_turn(step, "continuation_declined")?;
-        if !matches!(turn.hold, Some(Hold::ToScheduler { .. })) {
+        let mut turn = self.held_turn(step, "continuation_declined")?;
+        let Some(Hold::ToScheduler { stop }) = turn.hold.take() else {
             return Err(self.misfit("continuation_declined"));
-        }
+        };
         let ask = UsageLimitAsk::LongWait { why };
-        Ok(self.waiting(Waiting::UsageLimit { turn, ask }))
+        Ok(self.waiting(Waiting::UsageLimit { turn, stop, ask }))
     }
 
     /// `HandedOff` sends the step again as a fresh session. `Unavailable` goes on to the scheduler.

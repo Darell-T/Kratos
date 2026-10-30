@@ -18,7 +18,7 @@ use crate::reports::{FindingId, RulingVerdict};
 use crate::task_plan::Amendment;
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, Finding, FindingStatus, Hold, Phase,
-    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, TaskView, Turn,
+    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, Stop, TaskView, Turn,
     UsageLimitAsk, Waiting, Work,
 };
 
@@ -589,20 +589,19 @@ fn reassign(
     Ok(view)
 }
 
-fn usage_limit_turn(view: &TaskView, decision: DecisionKind) -> Result<Turn, Rejection> {
+fn usage_limit_turn(view: &TaskView, decision: DecisionKind) -> Result<(Turn, Stop), Rejection> {
     match &view.phase {
         Phase::Waiting {
-            waiting: Waiting::UsageLimit { turn, .. },
-        } => Ok(turn.clone()),
+            waiting: Waiting::UsageLimit { turn, stop, .. },
+        } => Ok((turn.clone(), stop.clone())),
         _ => Err(not_allowed(view, decision)),
     }
 }
 
 fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
-    let mut turn = usage_limit_turn(&view, DecisionKind::KeepWaiting)?;
-    if let Some(Hold::ToScheduler { stop }) = &mut turn.hold {
-        stop.user_accepted_wait = true;
-    }
+    let (mut turn, mut stop) = usage_limit_turn(&view, DecisionKind::KeepWaiting)?;
+    stop.user_accepted_wait = true;
+    turn.hold = Some(Hold::ToScheduler { stop });
     Ok(view.active(Activity::Turn { turn }))
 }
 
@@ -612,10 +611,12 @@ fn handoff(view: Box<TaskView>, approved: bool) -> Result<Box<TaskView>, Rejecti
     } else {
         DecisionKind::DeclineHandoff
     };
-    let mut turn = usage_limit_turn(&view, decision)?;
-    if let (true, Some(Hold::ToScheduler { stop })) = (approved, turn.hold.clone()) {
-        turn.hold = Some(Hold::HandOff { stop });
-    }
+    let (mut turn, stop) = usage_limit_turn(&view, decision)?;
+    turn.hold = Some(if approved {
+        Hold::HandOff { stop }
+    } else {
+        Hold::ToScheduler { stop }
+    });
     Ok(view.active(Activity::Turn { turn }))
 }
 
