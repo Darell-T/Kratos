@@ -290,7 +290,20 @@ fn ended(event: &ThreadEventBody, reply: Option<&str>) -> Option<Value> {
         ThreadEventBody::ThreadPaused { reason } => {
             Some(json!({ "state": "paused", "reason": reason }))
         }
-        _ => None,
+        ThreadEventBody::UserMessage { .. }
+        | ThreadEventBody::MessageQueued { .. }
+        | ThreadEventBody::MessageStatusChanged { .. }
+        | ThreadEventBody::TurnStarted { .. }
+        | ThreadEventBody::ItemCompleted { .. }
+        | ThreadEventBody::ApprovalDecided { .. }
+        | ThreadEventBody::ApprovalClosed { .. }
+        | ThreadEventBody::QuestionAnswered { .. }
+        | ThreadEventBody::QuestionClosed { .. }
+        | ThreadEventBody::ThreadResumed
+        | ThreadEventBody::SettingsChanged { .. }
+        | ThreadEventBody::ProviderError { .. }
+        | ThreadEventBody::ContinuationChanged { .. }
+        | ThreadEventBody::ProviderSession { .. } => None,
     }
 }
 
