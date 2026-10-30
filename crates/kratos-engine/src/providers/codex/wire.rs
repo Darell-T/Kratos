@@ -438,12 +438,6 @@ fn usage_window(window: &types::RateLimitWindow) -> UsageWindow {
     }
 }
 
-/// The Codex thread an MCP server's form belongs to.
-pub fn elicitation_thread(params: &types::McpServerElicitationRequestParams) -> String {
-    let value = serde_json::to_value(params).expect("Codex requests serialize");
-    value["threadId"].as_str().unwrap_or_default().to_owned()
-}
-
 /// A finished `command/exec`. Measured on Codex 0.159.1: a command that runs out of time ends with
 /// exit code 124 on Linux, as `timeout` reports it.
 pub fn command_result(done: types::CommandExecResponse) -> CommandResult {

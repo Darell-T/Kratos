@@ -138,3 +138,23 @@ server_requests! {
     Permissions = "item/permissions/requestApproval": types::PermissionsRequestApprovalParams;
     McpElicitation = "mcpServer/elicitation/request": types::McpServerElicitationRequestParams;
 }
+
+impl ServerRequest {
+    /// The Codex thread the request belongs to.
+    pub fn thread_id(&self) -> &str {
+        use types::McpServerElicitationRequestParams as Elicitation;
+        match self {
+            ServerRequest::CommandApproval(params) => &params.thread_id,
+            ServerRequest::FileChangeApproval(params) => &params.thread_id,
+            ServerRequest::UserInput(params) => &params.thread_id,
+            ServerRequest::Permissions(params) => &params.thread_id,
+            ServerRequest::McpElicitation(
+                Elicitation::Variant0 { thread_id, .. }
+                | Elicitation::Variant1 { thread_id, .. }
+                | Elicitation::Variant2 { thread_id, .. }
+                | Elicitation::Variant3 { thread_id, .. }
+                | Elicitation::Variant4 { thread_id, .. },
+            ) => thread_id,
+        }
+    }
+}

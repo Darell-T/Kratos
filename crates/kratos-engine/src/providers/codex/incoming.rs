@@ -180,8 +180,7 @@ impl Actor {
     }
 
     async fn on_request(&mut self, request: IncomingRequest) {
-        let native_id = request_thread(&request.request);
-        let Some(thread_id) = self.thread_of(&native_id) else {
+        let Some(thread_id) = self.thread_of(request.request.thread_id()) else {
             // A thread Kratos does not run cannot be granted anything.
             cancel(request);
             return;
@@ -339,16 +338,6 @@ impl Actor {
                 answer: (),
             },
         );
-    }
-}
-
-fn request_thread(request: &ServerRequest) -> String {
-    match request {
-        ServerRequest::CommandApproval(params) => params.thread_id.clone(),
-        ServerRequest::FileChangeApproval(params) => params.thread_id.clone(),
-        ServerRequest::UserInput(params) => params.thread_id.clone(),
-        ServerRequest::Permissions(params) => params.thread_id.clone(),
-        ServerRequest::McpElicitation(params) => wire::elicitation_thread(params),
     }
 }
 

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use kratos_codex_client::{IncomingRequest, RequestId, types};
+use kratos_codex_client::{IncomingRequest, RequestId, ServerRequest, types};
 use kratos_protocol::{ApprovalId, QuestionId, ThreadId, TurnId};
 
 /// A request that waits on the user. `A` is what an approval's answer is built from; a question
@@ -107,8 +107,11 @@ impl Requests {
 impl Waiting {
     fn is_blocking(&self) -> bool {
         match &self.request.request {
-            kratos_codex_client::ServerRequest::UserInput(params) => params.is_blocking,
-            _ => true,
+            ServerRequest::UserInput(params) => params.is_blocking,
+            ServerRequest::CommandApproval(_)
+            | ServerRequest::FileChangeApproval(_)
+            | ServerRequest::Permissions(_)
+            | ServerRequest::McpElicitation(_) => true,
         }
     }
 }
