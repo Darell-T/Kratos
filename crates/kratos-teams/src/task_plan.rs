@@ -13,7 +13,7 @@ use std::fmt;
 use globset::{Glob, GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::evidence::{climbs, is_rooted, repo_path};
+use crate::evidence::{RepoPath, repo_path};
 
 /// A glob relative to the repository root that names files a task may change: `src/auth/**`,
 /// `docs/*.md`, `Cargo.toml`. A folder needs an explicit `/**`, because Kratos cannot tell a file from a
@@ -37,12 +37,11 @@ pub enum PatternError {
 
 impl ScopePattern {
     pub fn new(glob: &str) -> Result<ScopePattern, PatternError> {
-        let text = repo_path(glob.trim());
-        if is_rooted(&text) || climbs(&text) {
-            return Err(PatternError::OutsideRepository {
+        let text = RepoPath::parse(glob.trim())
+            .map_err(|_| PatternError::OutsideRepository {
                 pattern: glob.to_owned(),
-            });
-        }
+            })?
+            .into_string();
         let matcher = compile(&text)?.compile_matcher();
         Ok(ScopePattern { text, matcher })
     }
@@ -198,13 +197,12 @@ pub fn probe_copy_problem(
     to: &str,
 ) -> Option<CopyProblem> {
     // A glob matches text, so `tests/../../x` would match `tests/**` without this check.
-    let path = repo_path(to);
-    let allowed = !is_rooted(&path)
-        && !climbs(&path)
-        && constraints
+    let allowed = RepoPath::parse(to).is_ok_and(|path| {
+        constraints
             .test_paths
             .iter()
-            .any(|pattern| pattern.covers(&path));
+            .any(|pattern| pattern.covers(path.as_str()))
+    });
     if !allowed {
         return Some(CopyProblem::OutsideAllowedPaths);
     }
