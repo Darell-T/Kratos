@@ -31,7 +31,8 @@ use std::time::Duration;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
-    MessageId, MessageInput, QuestionId, QuestionOutcome, Skill, ThreadId, ThreadSettings,
+    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, Skill, ThreadId,
+    ThreadSettings,
 };
 use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
@@ -170,11 +171,13 @@ impl CodexProvider {
         thread_id: ThreadId,
         message_id: MessageId,
         input: Vec<MessageInput>,
+        origin: MessageOrigin,
     ) -> Result<Sent, ProviderError> {
         self.ask(|reply| actor::Command::Send {
             thread_id,
             message_id,
             input,
+            origin,
             reply,
         })
         .await

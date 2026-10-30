@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime};
 use kratos_engine::providers::codex::ProviderError;
 use kratos_engine::usage::scheduler::{self, Clock, LimitStop, SchedulerHandle};
 use kratos_protocol::{
-    Continuation, ContinuationId, ContinuationState, MessageInput, MessageOrigin, MessageStatus,
-    Provider, ThreadEventBody, TurnId,
+    AccessLimit, Continuation, ContinuationId, ContinuationState, MessageInput, MessageOrigin,
+    MessageStatus, Permission, Provider, ThreadEventBody, ThreadSettings, TurnId,
 };
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, watch};
@@ -103,7 +103,11 @@ fn free() -> Value {
 
 /// Runs turn-1 until it stops at the usage limit with `usage` as Codex's account read.
 async fn stop_at_the_limit(harness: &mut Harness, usage: Value) {
-    harness.running_turn("a", "turn-1").await;
+    stop_at_the_limit_as(harness, usage, MessageOrigin::User).await;
+}
+
+async fn stop_at_the_limit_as(harness: &mut Harness, usage: Value, origin: MessageOrigin) {
+    harness.running_turn_as("a", "turn-1", origin).await;
     harness.control("test/rateLimits", usage).await;
     harness
         .emit(
@@ -166,7 +170,7 @@ async fn a_stop_at_the_five_hour_window_continues_at_the_reset_once_codex_allows
     assert_eq!(
         origin,
         MessageOrigin::Continuation {
-            continuation_id: scheduled.id.clone()
+            continuation_id: scheduled.id.clone(),
         }
     );
     assert!(
@@ -193,6 +197,43 @@ async fn a_stop_at_the_five_hour_window_continues_at_the_reset_once_codex_allows
         .filter(|message| matches!(message.origin, MessageOrigin::Continuation { .. }))
         .count();
     assert!(continuations <= 1);
+}
+
+#[tokio::test]
+async fn a_continuation_runs_with_no_more_than_the_turn_it_carries_on() {
+    // Catches a turn another thread asked for that stops at the usage limit and then carries on
+    // with the receiver's own wider permission.
+    let clock = ManualClock::starting_at(at(RESET - HOUR));
+    let full_access = ThreadSettings {
+        permission: Permission::FullAccess,
+        ..ThreadSettings::default()
+    };
+    let mut harness = Harness::start(Options {
+        settings: full_access,
+        ..Options::default()
+    })
+    .await;
+    harness.start_scheduler(clock.clone()).await;
+    let sender = harness.another_thread("sender").await;
+    let limit = AccessLimit {
+        permission: Permission::ApproveForMe,
+        plan_mode: false,
+    };
+    let origin = MessageOrigin::Thread {
+        thread_id: sender,
+        limit,
+    };
+
+    stop_at_the_limit_as(&mut harness, spent(), origin).await;
+    next_continuation(&mut harness).await;
+    clock.wait_for_wake_up_at(at(RESET)).await;
+    harness.control("test/rateLimits", free()).await;
+    clock.advance_to(at(RESET));
+
+    continuation_starts(&mut harness).await;
+    let started = harness.held("turn/start", 2).await;
+    assert_eq!(started[0]["params"]["permissions"], "kratos-approve");
+    assert_eq!(started[1]["params"]["permissions"], "kratos-approve");
 }
 
 #[tokio::test]
