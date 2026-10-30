@@ -58,7 +58,7 @@ pub enum LiveUpdate {
     },
     /// Every reply of the running turn so far, sent when a client subscribes or falls behind.
     Snapshot {
-        turn_id: Option<TurnId>,
+        turn_id: TurnId,
         replies: Vec<ReplySoFar>,
     },
     /// An item the agent started, such as a command now running.

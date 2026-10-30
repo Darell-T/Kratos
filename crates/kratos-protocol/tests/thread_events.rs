@@ -447,7 +447,7 @@ fn live_updates_have_their_socket_shape() {
         ServerMessage::Live {
             thread_id,
             update: LiveUpdate::Snapshot {
-                turn_id: Some(turn()),
+                turn_id: turn(),
                 replies: vec![ReplySoFar {
                     item_id: "i-1".into(),
                     text: "Hello".into(),
