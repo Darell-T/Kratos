@@ -293,7 +293,7 @@ fn a_new_codex_thread_s_settings_meet_the_checks_a_settings_change_meets() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
-    let workspace = client.create_workspace("repo", home.path()).unwrap().id;
+    let workspace = engine.create_workspace().id;
     let create = |settings: Value| {
         client
             .post(

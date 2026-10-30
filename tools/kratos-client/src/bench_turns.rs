@@ -7,10 +7,14 @@ use std::time::{Duration, Instant};
 
 use fake_agents::codex_control;
 use kratos_api_client::{Client, ClientError, EventSocket, Incoming};
-use kratos_protocol::{Provider, Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome, routes};
+use kratos_protocol::{
+    CreateThread, Provider, RequiredText, Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome,
+    routes,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::bench::temp_workspace;
 use crate::{BenchError, BenchReport};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -58,11 +62,16 @@ pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchRepo
 }
 
 fn create_threads(client: &Client) -> Result<Vec<Thread>, BenchError> {
-    let workspace = client.create_workspace("turn benchmark", &std::env::temp_dir())?;
+    let workspace = client.create_workspace(&temp_workspace("turn benchmark"))?;
     (0..THREADS)
         .map(|number| {
-            let title = format!("bench {number}");
-            client.create_thread(&workspace.id, &title, Provider::Codex, None)
+            client.create_thread(&CreateThread {
+                workspace_id: workspace.id.clone(),
+                title: RequiredText::new(&format!("bench {number}"))
+                    .expect("the title is not blank"),
+                provider: Provider::Codex,
+                settings: None,
+            })
         })
         .collect::<Result<_, _>>()
         .map_err(BenchError::from)

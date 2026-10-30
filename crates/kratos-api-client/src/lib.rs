@@ -12,12 +12,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, Provider, Seq, Thread, ThreadId, ThreadSettings,
-    Workspace, WorkspaceId, routes,
+    ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, CreateThread, CreateWorkspace, Seq, Thread, ThreadId,
+    Workspace, routes,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde_json::json;
 
 pub use follower::{Followed, ThreadFollower};
 pub use http::{ApiReply, ApiRequest};
@@ -91,26 +90,14 @@ impl Client {
         self.send(&ApiRequest::json("PUT", path, body))
     }
 
-    /// Registers the existing absolute folder `path` as a workspace named `name`.
-    pub fn create_workspace(&self, name: &str, path: &Path) -> Result<Workspace, ClientError> {
-        let body = json!({ "name": name, "path": path.to_string_lossy() });
-        self.post(routes::WORKSPACES, &body)?.parse()
+    /// Registers the workspace `request` describes. Its path must name an existing absolute
+    /// folder.
+    pub fn create_workspace(&self, request: &CreateWorkspace) -> Result<Workspace, ClientError> {
+        self.post(routes::WORKSPACES, request)?.parse()
     }
 
-    /// Creates a thread of `provider` in workspace `workspace_id`. `None` settings are the engine's
-    /// defaults.
-    pub fn create_thread(
-        &self,
-        workspace_id: &WorkspaceId,
-        title: &str,
-        provider: Provider,
-        settings: Option<ThreadSettings>,
-    ) -> Result<Thread, ClientError> {
-        let mut body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
-        if let Some(settings) = settings {
-            body["settings"] = json!(settings);
-        }
-        self.post(routes::THREADS, &body)?.parse()
+    pub fn create_thread(&self, request: &CreateThread) -> Result<Thread, ClientError> {
+        self.post(routes::THREADS, request)?.parse()
     }
 
     /// Sends `request` over a new HTTP/1.1 connection and reads the whole reply. The request goes

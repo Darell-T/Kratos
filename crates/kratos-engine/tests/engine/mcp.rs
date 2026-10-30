@@ -8,7 +8,8 @@ use std::time::{Duration, Instant};
 use fake_agents::codex_control;
 use kratos_api_client::{ApiRequest, ClientError};
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, Permission, Provider, Thread, ThreadSettings, WorkspaceId,
+    ACTING_THREAD_HEADER, CreateThread, Permission, Provider, RequiredText, Thread, ThreadSettings,
+    WorkspaceId,
 };
 use serde_json::{Value, json};
 
@@ -103,8 +104,7 @@ impl Drop for Mcp {
 }
 
 fn workspace(engine: &RunningEngine) -> WorkspaceId {
-    let client = engine.client();
-    client.create_workspace("repo", engine.home()).unwrap().id
+    engine.create_workspace().id
 }
 
 fn thread(
@@ -113,14 +113,16 @@ fn thread(
     provider: Provider,
     permission: Permission,
 ) -> Thread {
-    let settings = ThreadSettings {
-        permission,
-        ..ThreadSettings::default()
+    let request = CreateThread {
+        workspace_id: workspace.clone(),
+        title: RequiredText::new("chat").unwrap(),
+        provider,
+        settings: Some(ThreadSettings {
+            permission,
+            ..ThreadSettings::default()
+        }),
     };
-    engine
-        .client()
-        .create_thread(workspace, "chat", provider, Some(settings))
-        .unwrap()
+    engine.client().create_thread(&request).unwrap()
 }
 
 #[test]

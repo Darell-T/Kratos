@@ -3,7 +3,10 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_protocol::{Provider, Seq, ServerMessage, ThreadEvent, ThreadId, routes};
+use kratos_protocol::{
+    CreateThread, CreateWorkspace, Provider, RequiredText, Seq, ServerMessage, ThreadEvent,
+    ThreadId, routes,
+};
 use serde::Serialize;
 use serde_json::json;
 
@@ -48,10 +51,24 @@ pub fn bench_post(client: &Client, messages: NonZeroUsize) -> Result<BenchReport
 }
 
 fn create_thread(client: &Client) -> Result<ThreadId, BenchError> {
-    let workspace = client.create_workspace("bench", &std::env::temp_dir())?;
+    let workspace = client.create_workspace(&temp_workspace("bench"))?;
     // A Claude thread keeps R2's plain message log, the path this probe measures.
-    let thread = client.create_thread(&workspace.id, "bench", Provider::Claude, None)?;
+    let thread = client.create_thread(&CreateThread {
+        workspace_id: workspace.id,
+        title: RequiredText::new("bench").expect("the title is not blank"),
+        provider: Provider::Claude,
+        settings: None,
+    })?;
     Ok(thread.id)
+}
+
+/// A workspace named `name` on the system's temporary folder.
+pub(crate) fn temp_workspace(name: &str) -> CreateWorkspace {
+    CreateWorkspace {
+        name: RequiredText::new(name).expect("the name is not blank"),
+        path: RequiredText::new(&std::env::temp_dir().to_string_lossy())
+            .expect("the temporary folder has a path"),
+    }
 }
 
 fn post_all(

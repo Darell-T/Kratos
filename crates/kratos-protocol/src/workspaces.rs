@@ -34,7 +34,7 @@ pub struct Workspace {
 
 /// The engine also requires `path` to name an existing absolute directory, which only the
 /// filesystem can answer, so that check runs in the route, not here.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWorkspace {
     pub name: RequiredText,
     pub path: RequiredText,

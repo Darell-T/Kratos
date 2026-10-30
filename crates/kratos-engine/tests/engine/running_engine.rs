@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use fake_agents::codex_control;
 use kratos_api_client::{Client, EventSocket, Incoming};
 use kratos_protocol::{
-    CLIENT_TOKEN_FILE, Provider, Seq, ServerMessage, Thread, ThreadEvent, ThreadId,
+    CLIENT_TOKEN_FILE, CreateThread, CreateWorkspace, Provider, RequiredText, Seq, ServerMessage,
+    Thread, ThreadEvent, ThreadId, Workspace,
 };
 use serde_json::json;
 
@@ -189,13 +190,24 @@ impl RunningEngine {
         }
     }
 
+    /// Registers the engine's home, an existing absolute folder, as the workspace "repo".
+    pub fn create_workspace(&self) -> Workspace {
+        let request = CreateWorkspace {
+            name: RequiredText::new("repo").unwrap(),
+            path: RequiredText::new(&self.home.to_string_lossy()).unwrap(),
+        };
+        self.client().create_workspace(&request).unwrap()
+    }
+
     /// Creates a workspace on the engine's home and a thread of `provider` in it.
     pub fn create_thread_of(&self, provider: Provider) -> Thread {
-        let client = self.client();
-        let workspace = client.create_workspace("repo", &self.home).unwrap();
-        client
-            .create_thread(&workspace.id, "chat", provider, None)
-            .unwrap()
+        let request = CreateThread {
+            workspace_id: self.create_workspace().id,
+            title: RequiredText::new("chat").unwrap(),
+            provider,
+            settings: None,
+        };
+        self.client().create_thread(&request).unwrap()
     }
 
     pub fn home(&self) -> &Path {
