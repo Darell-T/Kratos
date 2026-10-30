@@ -32,6 +32,7 @@ pub(super) struct Requests {
 }
 
 /// The requests a closing step removed, to settle in the records.
+#[derive(Default)]
 pub(super) struct Closed {
     pub approvals: Vec<ApprovalId>,
     pub questions: Vec<QuestionId>,

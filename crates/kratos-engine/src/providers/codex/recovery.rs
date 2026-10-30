@@ -7,14 +7,14 @@
 use std::collections::{BTreeMap, HashMap};
 
 use kratos_protocol::{
-    ApprovalId, MessageId, PauseReason, Provider, QuestionId, Seq, ThreadEventBody, ThreadId,
-    TurnChanges, TurnId, TurnOutcome,
+    MessageId, PauseReason, Provider, Seq, ThreadEventBody, ThreadId, TurnChanges, TurnId,
+    TurnOutcome,
 };
-use kratos_store::{Settle, Store, StoreError, ThreadWrite};
+use kratos_store::{Store, StoreError, ThreadWrite};
 use tokio::sync::mpsc;
 
-use super::actor::{Actor, Server};
-use super::requests::Requests;
+use super::actor::{Actor, Server, settle_closed};
+use super::requests::{Closed, Requests};
 use super::wire::ChangesRecorder;
 use super::{CodexSettings, queue};
 use crate::hub::{Hub, PAGE_BYTES};
@@ -29,9 +29,11 @@ fn add_waiting_requests(
 ) -> Result<(), StoreError> {
     let approvals = store.waiting_approvals(thread_id)?;
     let questions = store.waiting_questions(thread_id)?;
-    work.approvals
+    work.requests
+        .approvals
         .extend(approvals.into_iter().map(|approval| approval.id));
-    work.questions
+    work.requests
+        .questions
         .extend(questions.into_iter().map(|question| question.id));
     Ok(())
 }
@@ -45,8 +47,7 @@ struct Unfinished {
     /// The turn the log shows running, and what its recorded items changed.
     running_turn: Option<(TurnId, TurnChanges)>,
     sending: Vec<MessageId>,
-    approvals: Vec<ApprovalId>,
-    questions: Vec<QuestionId>,
+    requests: Closed,
 }
 
 impl Actor {
@@ -96,23 +97,13 @@ impl Actor {
 /// Closes the thread's waiting requests, ends its running turn as interrupted, and marks each
 /// message being sent as uncertain, in one write.
 fn settle(write: &mut ThreadWrite<'_>, work: Unfinished) -> Result<(), StoreError> {
-    close_requests(write, &work)?;
+    settle_closed(write, &work.requests, RESTARTED)?;
     if let Some((turn_id, changes)) = work.running_turn {
         write.complete_turn(turn_id, TurnOutcome::Interrupted, changes, None)?;
         queue::pause_if_waiting(write, PauseReason::Interrupted)?;
     }
     for message_id in work.sending {
         queue::mark_uncertain(write, message_id, UNCONFIRMED.to_owned())?;
-    }
-    Ok(())
-}
-
-fn close_requests(write: &mut ThreadWrite<'_>, work: &Unfinished) -> Result<(), StoreError> {
-    for approval in &work.approvals {
-        write.settle_approval(approval, Settle::Close(RESTARTED.to_owned()))?;
-    }
-    for question in &work.questions {
-        write.settle_question(question, Settle::Close(RESTARTED.to_owned()))?;
     }
     Ok(())
 }
