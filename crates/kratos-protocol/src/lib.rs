@@ -14,8 +14,8 @@ macro_rules! string_id {
         pub struct $name(String);
 
         impl $name {
-            /// For an id that did not come from a client. Ids from clients arrive through
-            /// `Deserialize`.
+            /// Builds the id as given, without the checks an id's own `Deserialize` may apply.
+            /// The engine checks every id it receives.
             pub fn new(id: String) -> $name {
                 $name(id)
             }
