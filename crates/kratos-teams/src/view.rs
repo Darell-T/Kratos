@@ -520,11 +520,13 @@ impl Turn {
 
     /// Makes the step's next message due at `seq`, under a new message id. `follows` names the message
     /// it continues in the same session, or `None` for a fresh session. `due` decides which queued user
-    /// messages ride along, so it always moves with the message.
+    /// messages ride along, so it always moves with the message. A hold describes the old message, so
+    /// the new one starts without it.
     pub(crate) fn resend(&mut self, seq: FactSeq, follows: Option<MessageId>) {
         self.message = MessageId::due_at(seq);
         self.due = seq;
         self.follows = follows;
+        self.hold = None;
     }
 }
 

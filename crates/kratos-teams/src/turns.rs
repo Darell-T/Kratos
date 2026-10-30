@@ -146,7 +146,12 @@ impl TaskView {
         }
         turn.retries.push(cause);
         let follows = (cause != Retry::Lost).then(|| turn.message.clone());
+        let hold = turn.hold.take();
         turn.resend(seq, follows);
+        // FIXME: a kept `Hold::Scheduled` names a continuation that will never carry this correction,
+        // so `next_step` waits on the engine and the step stalls. Dropping the hold changes behavior,
+        // so it goes with the fix that moves the hold onto `Activity::Turn`.
+        turn.hold = hold;
         turn.note = Some(note);
         self.active(Activity::Turn { turn })
     }
@@ -323,7 +328,6 @@ impl TaskView {
         let follows = Some(turn.message.clone());
         turn.resend(seq, follows);
         turn.note = None;
-        turn.hold = None;
         Ok(self.active(Activity::Turn { turn }))
     }
 
