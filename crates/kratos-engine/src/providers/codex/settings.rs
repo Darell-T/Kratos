@@ -1,4 +1,5 @@
-//! A thread's settings: replacing them, and which ones Codex can honor (D76, D87).
+//! A thread's settings: replacing them, and which ones Codex can honor, judged by the context
+//! windows Codex reports (D76, D87).
 
 use kratos_protocol::{ThreadId, ThreadSettings};
 
@@ -63,6 +64,28 @@ impl Actor {
                 "contextLimitTokens: Codex has not reported this model's context window yet; run a turn first"
                     .into(),
             )),
+        }
+    }
+
+    /// Learns a model's own context window from Codex's report on `thread_id` (D76).
+    pub(super) fn learn_window(&mut self, thread_id: &ThreadId, reported: Option<i64>) {
+        let thread = self
+            .threads
+            .get_mut(thread_id)
+            .expect("the caller found the thread");
+        let loaded_without_limit = matches!(
+            thread.link,
+            super::threads::Link::Attached {
+                context_limit: None,
+                ..
+            }
+        );
+        if loaded_without_limit
+            && let (Some(window), Some(model)) = (reported, thread.model())
+            && let Ok(window) = u64::try_from(window)
+        {
+            // The model's own window, seen with no setting of Kratos's in force (D76).
+            self.windows.insert(model.to_owned(), window);
         }
     }
 }

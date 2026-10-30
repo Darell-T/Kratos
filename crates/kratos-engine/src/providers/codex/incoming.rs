@@ -136,21 +136,7 @@ impl Actor {
             return;
         };
         let context = wire::context_usage(&usage.token_usage);
-        let thread = self.threads.get_mut(&thread_id).expect("found above");
-        let loaded_without_limit = matches!(
-            thread.link,
-            super::threads::Link::Attached {
-                context_limit: None,
-                ..
-            }
-        );
-        if loaded_without_limit
-            && let (Some(window), Some(model)) = (context.context_window, thread.model())
-            && let Ok(window) = u64::try_from(window)
-        {
-            // The model's own window, seen with no setting of Kratos's in force (D76).
-            self.windows.insert(model.to_owned(), window);
-        }
+        self.learn_window(&thread_id, context.context_window);
         let thread = self.threads.get_mut(&thread_id).expect("found above");
         if let Some(work) = thread.turn.work_mut() {
             work.context = Some(context.clone());
