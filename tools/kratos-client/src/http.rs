@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::ClientError;
@@ -38,6 +39,14 @@ impl ApiRequest {
     pub fn header(mut self, name: &str, value: &str) -> ApiRequest {
         self.headers.push((name.to_owned(), value.to_owned()));
         self
+    }
+
+    /// A request carrying `body` as JSON.
+    pub fn json<T: Serialize>(method: &str, path: &str, body: &T) -> ApiRequest {
+        let body = serde_json::to_vec(body).expect("a request body serializes");
+        ApiRequest::new(method, path)
+            .header("Content-Type", "application/json")
+            .body(body)
     }
 
     pub fn body(mut self, body: Vec<u8>) -> ApiRequest {

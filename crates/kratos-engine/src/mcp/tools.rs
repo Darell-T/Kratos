@@ -6,17 +6,16 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use kratos_client::{ApiReply, ApiRequest, ClientError};
+use kratos_client::{ApiReply, ClientError};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, Permission, QuestionId, RequiredText, Seq, ThreadDetails,
     ThreadEvent, ThreadId, ThreadSettings, WorkspaceId, routes,
 };
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{Call, MAX_WAIT_SECONDS, transcript, wait};
-use crate::server::ACTING_THREAD_HEADER;
 
 type Answer = Result<Value, String>;
 
@@ -283,21 +282,11 @@ fn events_after(
 
 impl Call<'_> {
     fn get(&self, path: &str) -> Answer {
-        self.send(ApiRequest::new("GET", path))
+        reply_body(self.caller.client.get(path))
     }
 
-    fn post(&self, path: &str, body: &Value) -> Answer {
-        let body = serde_json::to_vec(body).expect("a JSON value serializes");
-        self.send(
-            ApiRequest::new("POST", path)
-                .header("Content-Type", "application/json")
-                .body(body),
-        )
-    }
-
-    fn send(&self, request: ApiRequest) -> Answer {
-        let request = request.header(ACTING_THREAD_HEADER, self.caller.thread_id.as_str());
-        reply_body(self.caller.client.send(&request))
+    fn post(&self, path: &str, body: &impl Serialize) -> Answer {
+        reply_body(self.caller.client.post(path, body))
     }
 }
 

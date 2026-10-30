@@ -7,12 +7,10 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use kratos_protocol::{AccessLimit, MessageOrigin, ThreadId, ThreadSettings};
+use kratos_protocol::{ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings};
 use kratos_store::{ProviderThread, StoreError};
 
 use super::{ApiError, ServerState};
-
-pub const ACTING_THREAD_HEADER: &str = "Kratos-Thread";
 
 /// Answers 403 to a request that names a thread, whatever the header holds, before the route runs.
 pub(super) async fn refuse_agents(request: Request, next: Next) -> Response {

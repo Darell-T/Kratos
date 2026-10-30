@@ -43,7 +43,10 @@ pub struct Caller {
 
 impl Caller {
     pub fn new(client: Client, thread_id: ThreadId) -> Caller {
-        Caller { client, thread_id }
+        Caller {
+            client: client.acting_for(thread_id.clone()),
+            thread_id,
+        }
     }
 }
 

@@ -8,6 +8,9 @@ pub const DEFAULT_HOME_FOLDER: &str = ".kratos";
 pub const DEFAULT_PORT: u16 = 4200;
 /// The file in the data folder that holds the engine's client token.
 pub const CLIENT_TOKEN_FILE: &str = "client-token";
+/// The header naming the thread whose agent makes a request through Kratos's tools. A request
+/// without it comes from the user.
+pub const ACTING_THREAD_HEADER: &str = "Kratos-Thread";
 
 /// The body of every failed HTTP request, for example `{"error":"Unknown thread 42"}`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

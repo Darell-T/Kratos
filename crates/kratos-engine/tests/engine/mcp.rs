@@ -6,8 +6,9 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use kratos_client::{ApiRequest, ClientError};
-use kratos_engine::server::ACTING_THREAD_HEADER;
-use kratos_protocol::{Permission, Thread, ThreadSettings, Workspace, WorkspaceId};
+use kratos_protocol::{
+    ACTING_THREAD_HEADER, Permission, Thread, ThreadSettings, Workspace, WorkspaceId,
+};
 use serde_json::{Value, json};
 
 use crate::running_engine::{RunningEngine, WAIT};

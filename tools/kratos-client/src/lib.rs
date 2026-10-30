@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use kratos_protocol::{CLIENT_TOKEN_FILE, Seq, ThreadId};
+use kratos_protocol::{ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, Seq, ThreadId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -36,6 +36,9 @@ pub struct Client {
     /// The file holding the engine's client token, sent as `Authorization: Bearer` unless a
     /// request names its own.
     token_file: Option<PathBuf>,
+    /// The thread named in the `Kratos-Thread` header of every HTTP request, unless a request
+    /// names its own.
+    acting_for: Option<ThreadId>,
 }
 
 impl Client {
@@ -48,6 +51,7 @@ impl Client {
             Some(authority) if !authority.is_empty() && !authority.contains('/') => Ok(Client {
                 authority: authority.to_owned(),
                 token_file: None,
+                acting_for: None,
             }),
             _ => Err(ClientError::Address(base_url.to_owned())),
         }
@@ -62,6 +66,14 @@ impl Client {
         self
     }
 
+    /// Sends every HTTP request as the agent of `thread_id`, as Kratos's tools do. The event socket
+    /// goes without the header, since the engine refuses an agent there and a follower reads only
+    /// what an agent may read anyway.
+    pub fn acting_for(mut self, thread_id: ThreadId) -> Client {
+        self.acting_for = Some(thread_id);
+        self
+    }
+
     pub fn get(&self, path: &str) -> Result<ApiReply, ClientError> {
         self.send(&ApiRequest::new("GET", path))
     }
@@ -69,11 +81,7 @@ impl Client {
     /// POSTs `body` as JSON. Tests pass `serde_json::json!` values to send requests the protocol
     /// types would refuse to build, such as a blank name.
     pub fn post<T: Serialize>(&self, path: &str, body: &T) -> Result<ApiReply, ClientError> {
-        let body = serde_json::to_vec(body).expect("a request body serializes");
-        let request = ApiRequest::new("POST", path)
-            .header("Content-Type", "application/json")
-            .body(body);
-        self.send(&request)
+        self.send(&ApiRequest::json("POST", path, body))
     }
 
     pub fn delete(&self, path: &str) -> Result<ApiReply, ClientError> {
@@ -82,25 +90,25 @@ impl Client {
 
     /// PUTs `body` as JSON.
     pub fn put<T: Serialize>(&self, path: &str, body: &T) -> Result<ApiReply, ClientError> {
-        let body = serde_json::to_vec(body).expect("a request body serializes");
-        let request = ApiRequest::new("PUT", path)
-            .header("Content-Type", "application/json")
-            .body(body);
-        self.send(&request)
+        self.send(&ApiRequest::json("PUT", path, body))
     }
 
     /// Sends `request` over a new HTTP/1.1 connection and reads the whole reply. The request goes
-    /// out as given, with only a missing Host, Content-Length, Authorization, and `Connection:
-    /// close` added. An answer that arrives before the body is fully sent, such as a 413, is still
-    /// returned.
+    /// out as given, with only a missing Host, Content-Length, Authorization, Kratos-Thread, and
+    /// `Connection: close` added. An answer that arrives before the body is fully sent, such as a
+    /// 413, is still returned.
     pub fn send(&self, request: &ApiRequest) -> Result<ApiReply, ClientError> {
-        let bearer = self.bearer();
-        let request = match &bearer {
-            Some(bearer) if !request.names_header("Authorization") => {
-                request.clone().header("Authorization", bearer)
-            }
-            _ => request.clone(),
-        };
+        let mut request = request.clone();
+        if let Some(bearer) = self.bearer()
+            && !request.names_header("Authorization")
+        {
+            request = request.header("Authorization", &bearer);
+        }
+        if let Some(thread_id) = &self.acting_for
+            && !request.names_header(ACTING_THREAD_HEADER)
+        {
+            request = request.header(ACTING_THREAD_HEADER, thread_id.as_str());
+        }
         self.send_raw(&request.encode(&self.authority))
     }
 

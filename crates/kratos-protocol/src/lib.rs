@@ -47,7 +47,10 @@ mod turns;
 mod usage;
 mod workspaces;
 
-pub use api::{CLIENT_TOKEN_FILE, DEFAULT_HOME_FOLDER, DEFAULT_PORT, ErrorBody, HOME_VAR, Health};
+pub use api::{
+    ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, DEFAULT_HOME_FOLDER, DEFAULT_PORT, ErrorBody,
+    HOME_VAR, Health,
+};
 pub use approvals::{
     AnswerQuestion, Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest,
     AskReason, DecideApproval, ExtraAccess, NetworkAccess, PathAccess, PathAccessMode, Question,

@@ -37,7 +37,6 @@ use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
 use crate::usage::scheduler::SchedulerHandle;
 
-pub use acting::ACTING_THREAD_HEADER;
 pub use auth::ClientToken;
 
 /// The largest request body a route reads. One byte more answers 413.
