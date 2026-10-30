@@ -4,7 +4,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use kratos_protocol::{DEFAULT_HOME_FOLDER, DEFAULT_PORT, HOME_VAR};
+use kratos_protocol::{DEFAULT_PORT, HOME_VAR, engine_home};
 
 use crate::mcp::THREAD_ID_VAR;
 
@@ -50,12 +50,8 @@ impl Config {
 }
 
 fn home_from_env(user_home: Option<&Path>) -> Result<PathBuf, ConfigError> {
-    let requested = match non_empty_var(HOME_VAR) {
-        Some(home) => PathBuf::from(home),
-        None => user_home
-            .ok_or(ConfigError::NoHomeFolder)?
-            .join(DEFAULT_HOME_FOLDER),
-    };
+    let requested =
+        engine_home(std::env::var_os(HOME_VAR), user_home).ok_or(ConfigError::NoHomeFolder)?;
     std::path::absolute(&requested).map_err(|source| ConfigError::Home {
         path: requested,
         source,

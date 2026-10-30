@@ -6,7 +6,6 @@
 //! relative values.
 
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
@@ -14,8 +13,8 @@ use std::time::Duration;
 use kratos_api_client::{ApiReply, ApiRequest, Client, ClientError, Followed, Incoming};
 use kratos_client::{BenchError, Normalizer, bench_post, bench_turns};
 use kratos_protocol::{
-    ApprovalId, ContinuationId, DEFAULT_HOME_FOLDER, DEFAULT_PORT, HOME_VAR, MessageId, QuestionId,
-    Seq, ServerMessage, ThreadId, WorkspaceId, routes,
+    ApprovalId, ContinuationId, DEFAULT_PORT, HOME_VAR, MessageId, QuestionId, Seq, ServerMessage,
+    ThreadId, WorkspaceId, engine_home, routes,
 };
 use serde_json::{Value, json};
 
@@ -393,14 +392,9 @@ fn json_argument(text: &str, name: &str) -> Result<Value, Failure> {
     serde_json::from_str(text).or_else(|_| usage(format!("{name} must be JSON, got {text:?}")))
 }
 
-/// `client` with the token of the engine on `$KRATOS_HOME`, else on `.kratos` in the user's home
-/// folder.
+/// `client` with the token of the engine on the data folder [`engine_home`] names, if any.
 fn with_token(client: Client) -> Client {
-    let home = std::env::var_os(HOME_VAR)
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::home_dir().map(|home| home.join(DEFAULT_HOME_FOLDER)));
-    match home {
+    match engine_home(std::env::var_os(HOME_VAR), std::env::home_dir().as_deref()) {
         Some(home) => client.with_token_from(&home),
         None => client,
     }

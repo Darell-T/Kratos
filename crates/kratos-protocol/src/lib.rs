@@ -48,8 +48,7 @@ mod usage;
 mod workspaces;
 
 pub use api::{
-    ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, DEFAULT_HOME_FOLDER, DEFAULT_PORT, ErrorBody,
-    HOME_VAR, Health,
+    ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, DEFAULT_PORT, ErrorBody, HOME_VAR, Health, engine_home,
 };
 pub use approvals::{
     AnswerQuestion, Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest,
