@@ -73,8 +73,7 @@ async fn send_to_codex(
         }
     };
     let codex = state.codex()?;
-    let request: SendMessage = read_json(body).await?;
-    let (message_id, input) = request.into_parts().map_err(ApiError::bad_request)?;
+    let SendMessage { message_id, input } = read_json(body).await?;
     let message_id = message_id.unwrap_or_else(|| MessageId::new(Uuid::new_v4().to_string()));
     Ok(sent_reply(
         codex.send(thread_id, message_id, input, origin).await?,

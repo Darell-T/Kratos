@@ -462,15 +462,14 @@ fn live_updates_have_their_socket_shape() {
 fn a_message_body_is_text_or_parts_with_an_optional_id() {
     // Catches a body that accepts both forms at once, an empty part list, or an id the store would
     // have to truncate, each of which would queue a message the client did not mean.
-    let parse = |body: &str| serde_json::from_str::<SendMessage>(body).map(SendMessage::into_parts);
+    let parse = |body: &str| serde_json::from_str::<SendMessage>(body);
 
-    let (id, input) = parse(r#"{"text":"  hi  "}"#).unwrap().unwrap();
-    assert_eq!(id, None);
+    let SendMessage { message_id, input } = parse(r#"{"text":"  hi  "}"#).unwrap();
+    assert_eq!(message_id, None);
     assert_eq!(input, [MessageInput::Text { text: text("hi") }]);
-    let (id, input) = parse(r#"{"messageId":"m-9","input":[{"type":"image","path":"C:\\a.png"}]}"#)
-        .unwrap()
-        .unwrap();
-    assert_eq!(id, Some(MessageId::new("m-9".into())));
+    let SendMessage { message_id, input } =
+        parse(r#"{"messageId":"m-9","input":[{"type":"image","path":"C:\\a.png"}]}"#).unwrap();
+    assert_eq!(message_id, Some(MessageId::new("m-9".into())));
     assert_eq!(
         input,
         [MessageInput::Image {
@@ -478,13 +477,9 @@ fn a_message_body_is_text_or_parts_with_an_optional_id() {
         }]
     );
 
-    assert!(
-        parse(r#"{"text":"hi","input":[{"type":"text","text":"hi"}]}"#)
-            .unwrap()
-            .is_err()
-    );
-    assert!(parse(r#"{"input":[]}"#).unwrap().is_err());
-    assert!(parse(r#"{"messageId":"m"}"#).unwrap().is_err());
+    assert!(parse(r#"{"text":"hi","input":[{"type":"text","text":"hi"}]}"#).is_err());
+    assert!(parse(r#"{"input":[]}"#).is_err());
+    assert!(parse(r#"{"messageId":"m"}"#).is_err());
     let longest = "x".repeat(128);
     assert!(parse(&format!(r#"{{"messageId":"{longest}","text":"hi"}}"#)).is_ok());
     for refused in [

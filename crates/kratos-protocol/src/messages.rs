@@ -120,28 +120,46 @@ pub struct PostMessage {
 }
 
 /// The body of `POST /api/threads/{id}/messages` to a thread whose provider Kratos drives: `text`,
-/// or `input` parts, with an optional `messageId`.
+/// or `input` parts, with an optional `messageId`. Text alone parses as one text part, and it
+/// serializes as parts.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase", try_from = "SendMessageBody")]
 pub struct SendMessage {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The id the client chose.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<MessageId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<RequiredText>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub input: Option<Vec<MessageInput>>,
+    /// Never empty.
+    pub input: Vec<MessageInput>,
 }
 
-impl SendMessage {
-    /// The message's parts and the id the client chose. `Err` names what is wrong with the body.
-    pub fn into_parts(self) -> Result<(Option<MessageId>, Vec<MessageInput>), &'static str> {
-        match (self.text, self.input) {
-            (Some(text), None) => Ok((self.message_id, vec![MessageInput::Text { text }])),
-            (None, Some(input)) if !input.is_empty() => Ok((self.message_id, input)),
-            (None, Some(_)) => Err("input: must not be empty"),
-            (Some(_), Some(_)) => Err("send either text or input, not both"),
-            (None, None) => Err("missing field `text` or `input`"),
-        }
+/// [`SendMessage`] as a client writes it, before the check that it holds exactly one non-empty
+/// form.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SendMessageBody {
+    #[serde(default)]
+    message_id: Option<MessageId>,
+    #[serde(default)]
+    text: Option<RequiredText>,
+    #[serde(default)]
+    input: Option<Vec<MessageInput>>,
+}
+
+impl TryFrom<SendMessageBody> for SendMessage {
+    type Error = &'static str;
+
+    fn try_from(body: SendMessageBody) -> Result<SendMessage, &'static str> {
+        let input = match (body.text, body.input) {
+            (Some(text), None) => vec![MessageInput::Text { text }],
+            (None, Some(input)) if !input.is_empty() => input,
+            (None, Some(_)) => return Err("input: must not be empty"),
+            (Some(_), Some(_)) => return Err("send either text or input, not both"),
+            (None, None) => return Err("missing field `text` or `input`"),
+        };
+        Ok(SendMessage {
+            message_id: body.message_id,
+            input,
+        })
     }
 }
 

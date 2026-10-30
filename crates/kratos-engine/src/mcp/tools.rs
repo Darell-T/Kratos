@@ -9,8 +9,8 @@ use std::time::Duration;
 use kratos_client::{ApiReply, ClientError};
 use kratos_protocol::{
     AnswerQuestion, ApprovalDecision, ApprovalId, CreateThread, DecideApproval, ErrorBody,
-    Permission, Provider, QuestionId, RequiredText, SendMessage, Seq, ThreadDetails, ThreadEvent,
-    ThreadId, ThreadSettings, WorkspaceId, routes,
+    MessageInput, Permission, Provider, QuestionId, RequiredText, SendMessage, Seq, ThreadDetails,
+    ThreadEvent, ThreadId, ThreadSettings, WorkspaceId, routes,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -214,8 +214,7 @@ fn send_message(call: &Call, arguments: Value) -> Answer {
         &routes::thread_messages(&thread_id),
         &SendMessage {
             message_id: None,
-            text: Some(text),
-            input: None,
+            input: vec![MessageInput::Text { text }],
         },
     )
 }
