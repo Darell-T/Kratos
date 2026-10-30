@@ -250,7 +250,7 @@ impl Actor {
             }
             Link::Attached { native_id, .. } => Some(native_id.clone()),
             Link::Attaching => return Ok(None),
-            Link::Detached | Link::Failed => None,
+            Link::Detached => None,
         };
         let Some(codex) = self.connection()? else {
             return Ok(None);
@@ -278,15 +278,11 @@ impl Actor {
                 // A thread Codex already unloaded needs nothing more.
                 let _ = codex.request::<methods::ThreadUnsubscribe>(&params).await;
             }
-            let result = open_thread(&codex, native_id, folder, model, profile, config)
-                .await
-                .map(|opened| Opened {
-                    context_limit,
-                    ..opened
-                });
+            let result = open_thread(&codex, native_id, folder, model, profile, config).await;
             Done::Attached {
                 thread_id,
                 generation,
+                context_limit,
                 result,
             }
         });
@@ -297,6 +293,7 @@ impl Actor {
         &mut self,
         thread_id: ThreadId,
         generation: u64,
+        context_limit: Option<u64>,
         result: Result<Opened, RequestError>,
     ) {
         let Some(thread) = self.threads.get_mut(&thread_id) else {
@@ -311,7 +308,7 @@ impl Actor {
                 thread.link = Link::Attached {
                     native_id: opened.native_id.clone(),
                     model: opened.model.clone(),
-                    context_limit: opened.context_limit,
+                    context_limit,
                 };
                 let recorded = if opened.is_new {
                     let plan = self.plan.clone();
@@ -337,7 +334,7 @@ impl Actor {
             }
             Err(error) => {
                 let message = format!("Codex could not load the thread: {error}");
-                thread.link = Link::Failed;
+                thread.link = Link::Detached;
                 fail_discards(thread, &message);
                 self.pause_if_waiting(&thread_id, PauseReason::Unavailable { error: message })
                     .await;
@@ -559,7 +556,6 @@ async fn open_thread(
                 model: resumed.model,
                 turns: resumed.thread.turns,
                 is_new: false,
-                context_limit: None,
             })
         }
         None => {
@@ -579,7 +575,6 @@ async fn open_thread(
                 model: started.model,
                 turns: started.thread.turns,
                 is_new: true,
-                context_limit: None,
             })
         }
     }

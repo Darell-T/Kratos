@@ -45,7 +45,7 @@ impl ThreadState {
     pub fn native_id(&self) -> Option<&str> {
         match &self.link {
             Link::Attached { native_id, .. } => Some(native_id),
-            Link::Detached | Link::Attaching | Link::Failed => None,
+            Link::Detached | Link::Attaching => None,
         }
     }
 
@@ -61,6 +61,8 @@ impl ThreadState {
 
 /// Whether the thread is loaded in the running app-server.
 pub(super) enum Link {
+    /// Not loaded. A load that failed leaves the thread here, and the pause says why. Kratos does
+    /// not start a new Codex thread in its place (L7), and the next use tries again.
     Detached,
     /// `thread/start` or `thread/resume` is out.
     Attaching,
@@ -70,9 +72,6 @@ pub(super) enum Link {
         /// The context limit Codex loaded the thread with (D76).
         context_limit: Option<u64>,
     },
-    /// Codex could not load the thread; the pause says why. Kratos does not start a new Codex
-    /// thread in its place (L7), and the next use tries again.
-    Failed,
 }
 
 /// What Codex reported during a turn, kept from its start, since reports can arrive before the

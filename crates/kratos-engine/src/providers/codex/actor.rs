@@ -185,6 +185,8 @@ pub(super) enum Done {
     Attached {
         thread_id: ThreadId,
         generation: u64,
+        /// The context limit the thread was loaded with (D76).
+        context_limit: Option<u64>,
         result: Result<Opened, RequestError>,
     },
     StartAnswered {
@@ -240,7 +242,6 @@ pub(super) struct Opened {
     pub model: String,
     pub turns: Vec<types::Turn>,
     pub is_new: bool,
-    pub context_limit: Option<u64>,
 }
 
 /// The app-server, as far as the actor knows.
@@ -332,8 +333,12 @@ impl Actor {
             Done::Attached {
                 thread_id,
                 generation,
+                context_limit,
                 result,
-            } => self.on_attached(thread_id, generation, result).await,
+            } => {
+                self.on_attached(thread_id, generation, context_limit, result)
+                    .await
+            }
             Done::StartAnswered {
                 thread_id,
                 attempt,
