@@ -520,7 +520,7 @@ impl Actor {
             _ if limit < MIN_CONTEXT_TOKENS => Err(ProviderError::Unsupported(format!(
                 "contextLimitTokens: must be at least {MIN_CONTEXT_TOKENS}"
             ))),
-            Some(window) if limit > window as u64 => Err(ProviderError::Unsupported(format!(
+            Some(window) if limit > window => Err(ProviderError::Unsupported(format!(
                 "contextLimitTokens: the model's context window is {window} tokens"
             ))),
             Some(_) => Ok(()),

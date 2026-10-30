@@ -263,7 +263,7 @@ pub(crate) struct Actor {
     pub(super) restarts: super::connection::Restarts,
     /// Each model's own context window, as Codex reported it with no setting of Kratos's in force
     /// (D76).
-    pub(super) windows: HashMap<String, i64>,
+    pub(super) windows: HashMap<String, u64>,
     /// The plan that pays for the running server's account (D24).
     pub(super) plan: Option<String>,
     pub(super) threads: HashMap<ThreadId, ThreadState>,

@@ -59,8 +59,8 @@ fn with_limit(limit: u64) -> ThreadSettings {
     }
 }
 
-/// Runs turn-1 with Codex reporting a 200,000-token window, and ends it.
-async fn learn_the_window(harness: &mut Harness) {
+/// Runs turn-1 with Codex reporting `window` as the model's context window, and ends it.
+async fn learn_the_window(harness: &mut Harness, window: i64) {
     harness.running_turn("a", "turn-1").await;
     let breakdown = json!({ "cachedInputTokens": 0, "inputTokens": 10, "outputTokens": 1,
                             "reasoningOutputTokens": 0, "totalTokens": 11 });
@@ -68,7 +68,7 @@ async fn learn_the_window(harness: &mut Harness) {
         .emit(
             "thread/tokenUsage/updated",
             json!({ "threadId": THREAD, "turnId": "turn-1",
-                    "tokenUsage": { "last": breakdown, "total": breakdown, "modelContextWindow": 200000 } }),
+                    "tokenUsage": { "last": breakdown, "total": breakdown, "modelContextWindow": window } }),
         )
         .await;
     harness.complete(THREAD, "turn-1", "completed").await;
@@ -95,10 +95,27 @@ async fn a_context_limit_waits_until_codex_has_reported_the_model_s_window() {
 }
 
 #[tokio::test]
+async fn a_negative_window_from_codex_is_not_taken_as_the_model_s_window() {
+    // Catches a negative window read as a huge one, which would accept any context limit (D76).
+    let mut harness = Harness::start(Options::default()).await;
+    learn_the_window(&mut harness, -1).await;
+
+    let refused = harness
+        .provider
+        .set_settings(harness.thread_id.clone(), with_limit(50_000))
+        .await;
+
+    assert!(
+        matches!(refused, Err(ProviderError::Unsupported(ref text)) if text.contains("has not reported")),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
 async fn a_context_limit_larger_than_the_model_s_window_is_refused() {
     // Catches Kratos inventing a larger window than the model has (D76).
     let mut harness = Harness::start(Options::default()).await;
-    learn_the_window(&mut harness).await;
+    learn_the_window(&mut harness, 200_000).await;
 
     let refused = harness
         .provider
@@ -115,7 +132,7 @@ async fn a_context_limit_larger_than_the_model_s_window_is_refused() {
 async fn a_new_context_limit_reloads_the_thread_with_it_before_the_next_turn() {
     // Catches a limit stored but never sent, since Codex applies one only when it loads a thread.
     let mut harness = Harness::start(Options::default()).await;
-    learn_the_window(&mut harness).await;
+    learn_the_window(&mut harness, 200_000).await;
 
     harness
         .provider
@@ -146,7 +163,7 @@ async fn a_new_context_limit_reloads_the_thread_with_it_before_the_next_turn() {
 async fn a_limit_changed_while_a_turn_runs_reaches_codex_before_the_next_turn() {
     // Catches a change made mid-turn that is stored and then never applied.
     let mut harness = Harness::start(Options::default()).await;
-    learn_the_window(&mut harness).await;
+    learn_the_window(&mut harness, 200_000).await;
     harness.running_turn("b", "turn-2").await;
 
     harness

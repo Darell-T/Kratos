@@ -152,6 +152,7 @@ impl Actor {
         );
         if loaded_without_limit
             && let (Some(window), Some(model)) = (context.context_window, thread.model())
+            && let Ok(window) = u64::try_from(window)
         {
             // The model's own window, seen with no setting of Kratos's in force (D76).
             self.windows.insert(model.to_owned(), window);
