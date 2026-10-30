@@ -18,7 +18,7 @@ use super::profiles::Profile;
 use super::requests::ApprovalAnswer;
 use super::threads::{Link, Turn};
 use super::turns::{Delivery, Stopper, read_history};
-use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
+use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, queue, wire};
 
 /// The text of the message Kratos sends to carry on a turn that stopped at a usage limit (D39).
 const CONTINUATION_TEXT: &str = "Continue the task you were working on. You stopped earlier because the usage limit was reached.";
@@ -473,10 +473,11 @@ impl Actor {
         self.load(thread_id).await?;
         let resumed = self
             .write(thread_id, |write| {
-                let held = write
-                    .pending_messages()?
-                    .into_iter()
-                    .find(|message| !matches!(message.status, MessageStatus::Queued));
+                // Unlike queue::held_message, a message still being sent refuses the resume too.
+                let held = write.pending_messages()?.into_iter().find(|message| {
+                    message.status == MessageStatus::Submitting
+                        || queue::holds_queue(&message.status)
+                });
                 if let Some(held) = held {
                     return Ok(Err(held.id));
                 }
@@ -778,12 +779,7 @@ impl Actor {
 /// Why the thread cannot take a continuation on its own, if it cannot: a message waits on the user,
 /// or the queue is paused for something the reset does not fix.
 fn blocks_continuation(write: &mut ThreadWrite<'_>) -> Result<Option<String>, StoreError> {
-    if let Some(held) = write.pending_messages()?.into_iter().find(|message| {
-        matches!(
-            message.status,
-            MessageStatus::Failed { .. } | MessageStatus::Unknown { .. }
-        )
-    }) {
+    if let Some(held) = queue::held_message(write)? {
         return Ok(Some(format!(
             "Message {} waits for you to retry, remove, or discard it",
             held.id
@@ -797,12 +793,7 @@ fn blocks_continuation(write: &mut ThreadWrite<'_>) -> Result<Option<String>, St
 
 /// Lifts a pause that a refused or uncertain message caused, once no such message is left.
 fn resume_when_settled(write: &mut ThreadWrite<'_>) -> Result<(), StoreError> {
-    let held = write.pending_messages()?.iter().any(|message| {
-        matches!(
-            message.status,
-            MessageStatus::Failed { .. } | MessageStatus::Unknown { .. }
-        )
-    });
+    let held = queue::held_message(write)?.is_some();
     let paused_by_message = matches!(
         write.provider_thread()?.paused,
         Some(PauseReason::Refused { .. } | PauseReason::DeliveryUncertain { .. })

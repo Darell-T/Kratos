@@ -1,8 +1,25 @@
-//! Writes that hold or pause a thread's queue, each made inside the write of the step that needs
-//! it (D11).
+//! What holds a thread's queue, and the writes that pause it, each made inside the write of the
+//! step that needs it (D11).
 
-use kratos_protocol::{MessageId, MessageStatus, PauseReason};
+use kratos_protocol::{Message, MessageId, MessageStatus, PauseReason};
 use kratos_store::{StoreError, ThreadWrite};
+
+/// Whether a message holds the queue until the user settles it: Codex refused it, or its delivery
+/// is uncertain (D11).
+pub(super) fn holds_queue(status: &MessageStatus) -> bool {
+    matches!(
+        status,
+        MessageStatus::Failed { .. } | MessageStatus::Unknown { .. }
+    )
+}
+
+/// The first waiting message that holds the queue.
+pub(super) fn held_message(write: &ThreadWrite<'_>) -> Result<Option<Message>, StoreError> {
+    Ok(write
+        .pending_messages()?
+        .into_iter()
+        .find(|message| holds_queue(&message.status)))
+}
 
 /// Pauses the queue for `reason` only when messages wait in it.
 pub(super) fn pause_if_waiting(

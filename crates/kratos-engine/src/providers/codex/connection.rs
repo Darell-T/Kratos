@@ -513,17 +513,15 @@ fn settle_from_history(
         write.set_message_status(&message_id, MessageStatus::Accepted { turn_id })?;
     }
     let pending = write.pending_messages()?;
-    let uncertain = pending.iter().any(|message| {
-        matches!(
-            message.status,
-            MessageStatus::Unknown { .. } | MessageStatus::Failed { .. }
-        )
-    });
+    let held = pending
+        .iter()
+        .any(|message| queue::holds_queue(&message.status));
+    // Only a delivery pause lifts here; resume_when_settled also lifts a refusal's.
     let paused_for_delivery = matches!(
         write.provider_thread()?.paused,
         Some(PauseReason::DeliveryUncertain { .. })
     );
-    match (paused_for_delivery && !uncertain, pending.is_empty()) {
+    match (paused_for_delivery && !held, pending.is_empty()) {
         (false, _) => {}
         (true, true) => {
             write.resume()?;
