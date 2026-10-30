@@ -46,6 +46,23 @@ pub(super) fn pause_if_waiting(
     Ok(())
 }
 
+/// Marks a message Codex refused before acting on it, and pauses the queue on it until the user
+/// retries or removes it.
+pub(super) fn mark_refused(
+    write: &mut ThreadWrite<'_>,
+    message_id: MessageId,
+    error: String,
+) -> Result<(), StoreError> {
+    write.set_message_status(
+        &message_id,
+        MessageStatus::Failed {
+            error: error.clone(),
+        },
+    )?;
+    write.pause(PauseReason::Refused { message_id, error })?;
+    Ok(())
+}
+
 /// Marks a message whose delivery is uncertain, and pauses the queue on it until Codex's history or
 /// the user settles it.
 pub(super) fn mark_uncertain(

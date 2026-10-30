@@ -221,14 +221,7 @@ impl Actor {
         let message_id = message_id.clone();
         let _ = self
             .write(thread_id, move |write| {
-                write.set_message_status(
-                    &message_id,
-                    MessageStatus::Failed {
-                        error: error.clone(),
-                    },
-                )?;
-                write.pause(PauseReason::Refused { message_id, error })?;
-                Ok(())
+                queue::mark_refused(write, message_id, error)
             })
             .await;
     }
