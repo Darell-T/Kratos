@@ -674,23 +674,11 @@ pub fn implements_without_running() -> Ended {
 }
 
 pub fn implementer_invalid(error: &str) -> Ended {
-    implementer_report(
-        Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
-        checked(),
-    )
+    implementer_report(invalid_report(error), checked())
 }
 
 pub fn implementer_invalid_after_edit(error: &str) -> Ended {
-    implementer_report(
-        Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
-        edited_after_check(),
-    )
+    implementer_report(invalid_report(error), edited_after_check())
 }
 
 pub fn implementer_blocked(summary: &str) -> Ended {
@@ -703,13 +691,7 @@ pub fn implementer_blocked(summary: &str) -> Ended {
 }
 
 pub fn implementer_asks(question: &str) -> Ended {
-    implementer_report(
-        Report::Question {
-            summary: "Half done.".to_owned(),
-            question: question.to_owned(),
-        },
-        checked(),
-    )
+    implementer_report(question_report("Half done.", question), checked())
 }
 
 pub fn implementer_wants_plan_change(reason: &str, extra: &[&str]) -> Ended {
@@ -754,19 +736,13 @@ pub fn plan_with(scope: &str) -> Ended {
 
 pub fn plan_question(question: &str) -> Ended {
     reported(Reported::Plan {
-        report: Report::Question {
-            summary: "Read the code.".to_owned(),
-            question: question.to_owned(),
-        },
+        report: question_report("Read the code.", question),
     })
 }
 
 pub fn plan_invalid(error: &str) -> Ended {
     reported(Reported::Plan {
-        report: Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
+        report: invalid_report(error),
     })
 }
 
@@ -782,10 +758,7 @@ pub fn planner_answers(answer: &str) -> Ended {
 
 pub fn planner_asks_user(question: &str) -> Ended {
     reported(Reported::Answer {
-        report: Report::Question {
-            summary: "Read the code.".to_owned(),
-            question: question.to_owned(),
-        },
+        report: question_report("Read the code.", question),
     })
 }
 
@@ -803,10 +776,7 @@ pub fn planner_wants_plan_change(reason: &str) -> Ended {
 
 pub fn planner_answer_invalid(error: &str) -> Ended {
     reported(Reported::Answer {
-        report: Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
+        report: invalid_report(error),
     })
 }
 
@@ -829,10 +799,7 @@ pub fn planner_rules(rulings: &[(u32, RulingVerdict)]) -> Ended {
 
 pub fn planner_ruling_question(question: &str) -> Ended {
     reported(Reported::Rulings {
-        report: Report::Question {
-            summary: "Read the code.".to_owned(),
-            question: question.to_owned(),
-        },
+        report: question_report("Read the code.", question),
     })
 }
 
@@ -874,10 +841,7 @@ pub fn still_open(finding: u32, diagnosis: &str) -> Ended {
 
 pub fn reviewer_invalid(error: &str) -> Ended {
     reported(Reported::Review {
-        report: Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
+        report: invalid_report(error),
     })
 }
 
@@ -891,11 +855,24 @@ pub fn reviewer_blocked(summary: &str) -> Ended {
 
 pub fn reviewer_asks(question: &str) -> Ended {
     reported(Reported::Review {
-        report: Report::Question {
-            summary: "Read the diff.".to_owned(),
-            question: question.to_owned(),
-        },
+        report: question_report("Read the diff.", question),
     })
+}
+
+/// What a report of any kind is when the reply could not be used.
+fn invalid_report<T>(error: &str) -> Report<T> {
+    Report::Invalid {
+        error: error.to_owned(),
+        raw: "{}".to_owned(),
+    }
+}
+
+/// A report of any kind that stops short to ask `question`.
+fn question_report<T>(summary: &str, question: &str) -> Report<T> {
+    Report::Question {
+        summary: summary.to_owned(),
+        question: question.to_owned(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
