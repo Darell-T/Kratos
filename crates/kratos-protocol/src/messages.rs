@@ -1,29 +1,18 @@
-use std::fmt;
-
 use serde::de::{Deserializer, Error};
 use serde::{Deserialize, Serialize};
 
 use crate::{AccessLimit, ContinuationId, RequiredText, ThreadId, Timestamp, TurnId};
 
-/// A message's id. A client may choose it, so that sending the same message again after a lost
-/// reply finds the first one instead of queueing a copy (D85); otherwise the engine issues a UUID.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-#[serde(transparent)]
-pub struct MessageId(String);
+string_id! {
+    /// A message's id. A client may choose it, so that sending the same message again after a lost
+    /// reply finds the first one instead of queueing a copy (D85); otherwise the engine issues a
+    /// UUID.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+    MessageId
+}
 
 /// Longer ids are refused, so an id never grows a row past a page.
 pub const MAX_MESSAGE_ID_CHARS: usize = 128;
-
-impl MessageId {
-    /// For ids the engine issued or read from its records.
-    pub fn new(id: String) -> MessageId {
-        MessageId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 impl<'de> Deserialize<'de> for MessageId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -34,12 +23,6 @@ impl<'de> Deserialize<'de> for MessageId {
             )));
         }
         Ok(MessageId(id))
-    }
-}
-
-impl fmt::Display for MessageId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
     }
 }
 

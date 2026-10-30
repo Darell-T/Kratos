@@ -4,6 +4,35 @@
 //! fields, `kind` tags on thread events, and `type` tags on socket messages. Parsing is the
 //! validation: blank text fails to parse, so a handler never sees it.
 
+/// Declares an id that is a string on the wire, with `new`, `as_str`, and `Display`. Each id gives
+/// its own doc comment and derives, and an id that refuses some strings writes its own
+/// `Deserialize`.
+macro_rules! string_id {
+    ($(#[$attribute:meta])* $name:ident) => {
+        $(#[$attribute])*
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            /// For an id that did not come from a client. Ids from clients arrive through
+            /// `Deserialize`.
+            pub fn new(id: String) -> $name {
+                $name(id)
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
 mod agents;
 mod api;
 mod approvals;

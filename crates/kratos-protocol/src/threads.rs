@@ -1,5 +1,3 @@
-use std::fmt;
-
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
@@ -8,26 +6,11 @@ use crate::{
     TurnId, WorkspaceId,
 };
 
-/// A thread's id. The engine issues UUIDs. Any string parses, because a thread that does not exist
-/// answers 404.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ThreadId(String);
-
-impl ThreadId {
-    pub fn new(id: String) -> ThreadId {
-        ThreadId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ThreadId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
+string_id! {
+    /// A thread's id. The engine issues UUIDs. Any string parses, because a thread that does not
+    /// exist answers 404.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+    ThreadId
 }
 
 /// One task run by one agent on this machine.

@@ -1,30 +1,14 @@
 use std::collections::BTreeMap;
-use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
 use crate::{FileChange, TurnId};
 
-/// An approval's id, issued by the engine. A provider's own request id lives only as long as its
-/// process, so it never leaves the engine.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ApprovalId(String);
-
-impl ApprovalId {
-    pub fn new(id: String) -> ApprovalId {
-        ApprovalId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ApprovalId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
+string_id! {
+    /// An approval's id, issued by the engine. A provider's own request id lives only as long as
+    /// its process, so it never leaves the engine.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    ApprovalId
 }
 
 /// Something an agent wants to do that waits for the user's decision (D83).
@@ -160,25 +144,10 @@ pub enum ApprovalOutcome {
     },
 }
 
-/// A question's id, issued by the engine.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct QuestionId(String);
-
-impl QuestionId {
-    pub fn new(id: String) -> QuestionId {
-        QuestionId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for QuestionId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
+string_id! {
+    /// A question's id, issued by the engine.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    QuestionId
 }
 
 /// Questions an agent asks the user in the middle of a turn.

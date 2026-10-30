@@ -1,5 +1,3 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 
 use crate::{MessageId, Provider, Timestamp, TurnId};
@@ -61,26 +59,11 @@ pub struct UsageWindow {
     pub resets_at: Option<Timestamp>,
 }
 
-/// A continuation's id, issued by the scheduler before it sends anything, so a retry of the same
-/// continuation is recognizable (D39).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ContinuationId(String);
-
-impl ContinuationId {
-    pub fn new(id: String) -> ContinuationId {
-        ContinuationId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ContinuationId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
+string_id! {
+    /// A continuation's id, issued by the scheduler before it sends anything, so a retry of the
+    /// same continuation is recognizable (D39).
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    ContinuationId
 }
 
 /// The scheduler's plan to carry on a turn that stopped at a usage limit (D39, D41).

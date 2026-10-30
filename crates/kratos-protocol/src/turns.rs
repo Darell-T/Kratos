@@ -1,26 +1,9 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 
-/// A turn's id, as the provider issued it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TurnId(String);
-
-impl TurnId {
-    pub fn new(id: String) -> TurnId {
-        TurnId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for TurnId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
+string_id! {
+    /// A turn's id, as the provider issued it.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    TurnId
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
