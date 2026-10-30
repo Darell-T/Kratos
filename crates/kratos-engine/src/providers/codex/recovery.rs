@@ -87,7 +87,7 @@ impl Actor {
             reconcile: Vec::new(),
             done,
             completions,
-            limit_stops: Some(limit_stops),
+            limit_stops,
         };
         Ok((actor, uncertain))
     }
