@@ -12,7 +12,7 @@ use serde_json::json;
 use super::actor::{Actor, Done, MAX_STARTING, Reply};
 use super::profiles::Profile;
 use super::threads::Turn;
-use super::{ProviderError, wire};
+use super::{ProviderError, policy, wire};
 
 /// How long `turn/interrupt` may take to answer.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -622,8 +622,8 @@ fn turn_start_params(
     }));
     params.client_user_message_id = Some(message.id.as_str().to_owned());
     params.model = settings.model.clone();
-    params.approval_policy = Some(types::AskForApproval::Untrusted);
-    params.approvals_reviewer = Some(types::ApprovalsReviewer::User);
+    params.approval_policy = Some(policy::APPROVAL_POLICY);
+    params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
     params.permissions = Some(Profile::for_settings(settings).id().to_owned());
     params.collaboration_mode = model.map(|model| types::CollaborationMode {
         mode: if settings.plan_mode {

@@ -5,12 +5,18 @@
 
 use std::path::Path;
 
+use kratos_codex_client::types;
 use kratos_command_safety::{
     DangerousCommandPlatform, dangerous_command, reads_commands_from_input, split_command_text,
 };
 use kratos_protocol::{AskReason, FileChange, FileChangeKind, Permission, ThreadSettings};
 
 use super::profiles::ProtectedFolders;
+
+/// The policy every thread and turn opens with, so each request reaches this module first.
+pub(super) const APPROVAL_POLICY: types::AskForApproval = types::AskForApproval::Untrusted;
+/// Codex's requests go to the user through Kratos, never to Codex's own reviewer.
+pub(super) const APPROVALS_REVIEWER: types::ApprovalsReviewer = types::ApprovalsReviewer::User;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {

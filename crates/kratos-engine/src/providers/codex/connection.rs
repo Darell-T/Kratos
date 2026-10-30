@@ -20,8 +20,7 @@ use tokio::sync::mpsc;
 use super::actor::{Actor, Done, Opened, Server, settle_closed};
 use super::profiles::Profile;
 use super::threads::{Link, ThreadState, Turn};
-use super::wire;
-use super::{CodexSettings, ProviderError};
+use super::{CodexSettings, ProviderError, policy, wire};
 use crate::mcp::{self, McpServer};
 
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(1);
@@ -556,8 +555,8 @@ async fn open_thread(
                 wire::required(json!({ "threadId": native_id }));
             params.cwd = Some(folder);
             params.model = model;
-            params.approval_policy = Some(types::AskForApproval::Untrusted);
-            params.approvals_reviewer = Some(types::ApprovalsReviewer::User);
+            params.approval_policy = Some(policy::APPROVAL_POLICY);
+            params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
             params.permissions = Some(profile);
             params.config = config;
             let resumed = codex.request::<methods::ThreadResume>(&params).await?;
@@ -573,8 +572,8 @@ async fn open_thread(
             let params = types::ThreadStartParams {
                 cwd: Some(folder),
                 model,
-                approval_policy: Some(types::AskForApproval::Untrusted),
-                approvals_reviewer: Some(types::ApprovalsReviewer::User),
+                approval_policy: Some(policy::APPROVAL_POLICY),
+                approvals_reviewer: Some(policy::APPROVALS_REVIEWER),
                 permissions: Some(profile),
                 config,
                 ephemeral: Some(false),
