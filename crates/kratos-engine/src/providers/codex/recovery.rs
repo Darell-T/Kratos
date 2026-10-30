@@ -15,9 +15,9 @@ use tokio::sync::mpsc;
 
 use super::actor::{Actor, Server, settle_closed};
 use super::requests::{Closed, Requests};
-use super::wire::ChangesRecorder;
 use super::{CodexSettings, queue};
 use crate::hub::{Hub, PAGE_BYTES};
+use crate::providers::changes::ChangesRecorder;
 use crate::store_thread::StoreThread;
 use crate::usage::LimitStop;
 use crate::usage::UsageTracker;

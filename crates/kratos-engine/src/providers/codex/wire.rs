@@ -10,8 +10,8 @@ use kratos_protocol::{
     AccessLimit, AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult,
     ContextUsage, ExtraAccess, FileChange, FileChangeKind, ItemStatus, Message, MessageInput,
     MessageOrigin, NetworkAccess, PathAccess, PathAccessMode, Permission, Provider, Question,
-    QuestionId, QuestionItem, QuestionOption, ThreadId, Timestamp, TurnChanges, TurnId,
-    TurnOutcome, UsageBucket, UsageWindow,
+    QuestionId, QuestionItem, QuestionOption, ThreadId, Timestamp, TurnId, TurnOutcome,
+    UsageBucket, UsageWindow,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -508,61 +508,6 @@ pub fn command_outcome(result: Result<types::CommandExecResponse, RequestError>)
     }
 }
 
-/// What a turn changed, recorded from its finished items as they arrive.
-#[derive(Debug, Default)]
-pub struct ChangesRecorder {
-    files: Vec<String>,
-    edited_since_command: bool,
-    ran_command: bool,
-}
-
-impl ChangesRecorder {
-    pub fn record(&mut self, item: &AgentItem) {
-        match item {
-            AgentItem::FileChanges {
-                status: ItemStatus::Completed,
-                changes,
-                ..
-            } => {
-                for change in changes {
-                    self.edited(&change.path);
-                    if let FileChangeKind::Update {
-                        move_path: Some(path),
-                    } = &change.kind
-                    {
-                        self.edited(path);
-                    }
-                }
-            }
-            AgentItem::Command {
-                status: ItemStatus::Completed | ItemStatus::Failed,
-                ..
-            } => {
-                self.ran_command = true;
-                self.edited_since_command = false;
-            }
-            _ => {}
-        }
-    }
-
-    fn edited(&mut self, path: &str) {
-        if !self.files.iter().any(|file| file == path) {
-            self.files.push(path.to_owned());
-        }
-        self.edited_since_command = true;
-    }
-
-    /// What the turn changed, leaving the recorder empty for the next turn.
-    pub fn take(&mut self) -> TurnChanges {
-        let taken = std::mem::take(self);
-        TurnChanges {
-            files: taken.files,
-            edited_since_command: taken.edited_since_command,
-            ran_command: taken.ran_command,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -652,39 +597,6 @@ mod tests {
                 stdout: "ok".to_owned(),
                 stderr: String::new()
             }
-        );
-    }
-
-    #[test]
-    fn a_turn_reports_each_edited_file_once_including_a_move_destination() {
-        // Catches a recorder that misses a rename's destination, repeats a file edited twice, or
-        // keeps reporting an edit as unchecked after a later command ran.
-        let mut changes = ChangesRecorder::default();
-        let recorded = |value: Value| agent_item(&item(value)).unwrap();
-        let patch = |path: &str, kind: Value| {
-            recorded(
-                json!({ "type": "fileChange", "id": "p", "status": "completed",
-                "changes": [{ "path": path, "kind": kind, "diff": "" }] }),
-            )
-        };
-        changes.record(&patch(
-            "a.rs",
-            json!({ "type": "update", "move_path": "b.rs" }),
-        ));
-        changes.record(&patch("a.rs", json!({ "type": "update" })));
-        changes.record(&recorded(
-            json!({ "type": "commandExecution", "id": "c", "command": "cargo test",
-            "commandActions": [], "cwd": "/w", "status": "failed" }),
-        ));
-
-        let taken = changes.take();
-        assert_eq!(taken.files, ["a.rs", "b.rs"]);
-        assert!(!taken.edited_since_command);
-        assert!(taken.ran_command);
-        assert_eq!(
-            changes.take().files,
-            Vec::<String>::new(),
-            "taking empties the recorder"
         );
     }
 

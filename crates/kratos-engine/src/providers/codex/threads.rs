@@ -6,7 +6,7 @@ use kratos_codex_client::types;
 use kratos_protocol::{ContextUsage, FileChange, Message, MessageId, ThreadSettings, TurnId};
 
 use super::actor::Reply;
-use super::wire::ChangesRecorder;
+use crate::providers::changes::ChangesRecorder;
 
 pub(super) struct ThreadState {
     pub folder: String,
