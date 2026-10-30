@@ -1,16 +1,27 @@
-//! What each provider account may still use (D38). Providers write what their CLI reports; the
-//! usage API and the resume scheduler read it.
+//! Account usage (D38), and the stops at a usage limit that the scheduler continues (D39, D41).
 //!
-//! A full read replaces an account's snapshot, and only a full read says whether the account may
-//! use its included quota. Missing information never becomes permission: no read, a failed read,
-//! or a read without that answer leaves the allowance unavailable. A rolling update only fills in
-//! the buckets it names and never clears what it leaves out, as Codex's schema directs.
+//! The tracker holds what each provider account may still use. Providers write what their CLI
+//! reports; the usage API and the resume scheduler read it. A full read replaces an account's
+//! snapshot, and only a full read says whether the account may use its included quota. Missing
+//! information never becomes permission: no read, a failed read, or a read without that answer
+//! leaves the allowance unavailable. A rolling update only fills in the buckets it names and never
+//! clears what it leaves out, as Codex's schema directs.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use kratos_protocol::{AccountUsage, Allowance, Provider, Timestamp, UsageBucket, UsageReport};
+use kratos_protocol::{
+    AccountUsage, Allowance, Provider, ThreadId, Timestamp, TurnId, UsageBucket, UsageReport,
+};
 use tokio::sync::watch;
+
+/// A turn that stopped at a usage limit, reported by its provider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LimitStop {
+    pub thread_id: ThreadId,
+    pub turn_id: TurnId,
+    pub provider: Provider,
+}
 
 #[derive(Clone)]
 pub struct UsageTracker {
