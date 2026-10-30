@@ -282,13 +282,19 @@ impl TaskView {
         ProbeStatus::Rejected { reason }
     }
 
-    /// Approval covers one commit. Probes nobody added are rejected when the user delegated the choice,
-    /// so the approval always lists what was kept and what was not.
+    /// Approval covers one commit.
     pub(crate) fn enter_approved(
         mut self: Box<Self>,
         commit: Sha,
         by: ApprovedBy,
     ) -> Box<TaskView> {
+        self.reject_unadded_probes();
+        self.waiting(Waiting::Approved { commit, by })
+    }
+
+    /// Probes nobody added are rejected at approval when the user delegated the choice, so the
+    /// approval always lists what was kept and what was not.
+    fn reject_unadded_probes(&mut self) {
         if matches!(self.policy.probes, ProbePolicy::Delegated { .. }) {
             for probe in &mut self.probes {
                 if probe.status == ProbeStatus::Offered {
@@ -298,7 +304,6 @@ impl TaskView {
                 }
             }
         }
-        self.waiting(Waiting::Approved { commit, by })
     }
 
     fn merge_probes(&mut self, checked: &EvidenceChecked, added: &[Finding]) {
