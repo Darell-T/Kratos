@@ -1,8 +1,9 @@
 //! A thread's events as the short lines `read_thread` returns: who said what, which commands ran,
 //! and what the thread waits on.
 
-use kratos_protocol::{AgentItem, MessageInput, MessageOrigin, ThreadEventBody};
-use serde::Serialize;
+use kratos_protocol::{
+    AgentItem, MessageInput, MessageOrigin, PauseReason, ThreadEventBody, TurnOutcome,
+};
 
 pub const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
 
@@ -18,7 +19,7 @@ pub fn line(event: &ThreadEventBody) -> Option<String> {
         }
         ThreadEventBody::ItemCompleted { item, .. } => item_line(item),
         ThreadEventBody::TurnCompleted { outcome, .. } => {
-            Some(format!("turn ended: {}", wire_name(outcome)))
+            Some(format!("turn ended: {}", outcome_text(outcome)))
         }
         ThreadEventBody::ApprovalRequested { approval } => {
             Some(format!("waiting for approval {}", approval.id))
@@ -26,7 +27,7 @@ pub fn line(event: &ThreadEventBody) -> Option<String> {
         ThreadEventBody::QuestionAsked { question } => {
             Some(format!("waiting for an answer to question {}", question.id))
         }
-        ThreadEventBody::ThreadPaused { reason } => Some(format!("paused: {}", wire_name(reason))),
+        ThreadEventBody::ThreadPaused { reason } => Some(format!("paused: {}", pause_text(reason))),
         _ => None,
     }
 }
@@ -84,10 +85,77 @@ fn input_text(input: &[MessageInput]) -> String {
     parts.join(" ")
 }
 
-fn wire_name<T: Serialize>(value: &T) -> String {
-    match serde_json::to_value(value) {
-        Ok(serde_json::Value::String(name)) => name,
-        Ok(other) => other.to_string(),
-        Err(_) => "unknown".to_owned(),
+fn outcome_text(outcome: &TurnOutcome) -> String {
+    match outcome {
+        TurnOutcome::Completed => "completed".to_owned(),
+        TurnOutcome::Interrupted => "interrupted".to_owned(),
+        TurnOutcome::Failed { error } => format!("failed, {error}"),
+    }
+}
+
+fn pause_text(reason: &PauseReason) -> String {
+    match reason {
+        PauseReason::TurnFailed { error, .. } => format!("the last turn failed, {error}"),
+        PauseReason::TimedOut { .. } => "the last turn ran past its deadline".to_owned(),
+        PauseReason::Interrupted => "the last turn did not finish".to_owned(),
+        PauseReason::Refused { message_id, error } => {
+            format!("the provider refused message {message_id}, {error}")
+        }
+        PauseReason::DeliveryUncertain { message_id, error } => {
+            format!("no one knows whether the provider got message {message_id}, {error}")
+        }
+        PauseReason::Unavailable { error } => format!("the provider is unavailable, {error}"),
+        PauseReason::UsageLimit {
+            resets_at: Some(resets_at),
+            ..
+        } => format!("usage limit until {}", resets_at.as_str()),
+        PauseReason::UsageLimit {
+            resets_at: None, ..
+        } => "usage limit".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use kratos_protocol::{Timestamp, TurnChanges, TurnId};
+
+    #[test]
+    fn a_transcript_names_how_a_turn_ended_and_why_a_thread_waits_in_words() {
+        // Catches the JSON object of a tagged enum, such as {"outcome":"completed"}, printed where
+        // the reading agent expects a word, and an error left out of a failed turn's line.
+        let ended = |outcome| ThreadEventBody::TurnCompleted {
+            turn_id: TurnId::new("turn".to_owned()),
+            outcome,
+            changes: TurnChanges {
+                files: Vec::new(),
+                edited_since_command: false,
+                ran_command: false,
+            },
+            context: None,
+        };
+        assert_eq!(
+            line(&ended(TurnOutcome::Completed)).as_deref(),
+            Some("turn ended: completed")
+        );
+        assert_eq!(
+            line(&ended(TurnOutcome::Failed {
+                error: "boom".to_owned()
+            }))
+            .as_deref(),
+            Some("turn ended: failed, boom")
+        );
+        let paused = ThreadEventBody::ThreadPaused {
+            reason: PauseReason::UsageLimit {
+                turn_id: TurnId::new("turn".to_owned()),
+                resets_at: Some(Timestamp::from_stored(
+                    "2026-10-30T12:00:00.000Z".to_owned(),
+                )),
+            },
+        };
+        assert_eq!(
+            line(&paused).as_deref(),
+            Some("paused: usage limit until 2026-10-30T12:00:00.000Z")
+        );
     }
 }
