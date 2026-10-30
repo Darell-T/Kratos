@@ -5,8 +5,10 @@
 
 use std::collections::HashMap;
 
-use kratos_codex_client::{IncomingRequest, RequestId, ServerRequest, types};
-use kratos_protocol::{ApprovalId, QuestionId, ThreadId, TurnId};
+use kratos_codex_client::{IncomingRequest, RequestId, ServerRequest, ServerResponse, types};
+use kratos_protocol::{ApprovalDecision, ApprovalId, QuestionId, ThreadId, TurnId};
+
+use super::wire;
 
 /// A request that waits on the user. `A` is what an approval's answer is built from; a question
 /// needs nothing.
@@ -19,10 +21,27 @@ pub(super) struct Waiting<A = ()> {
 }
 
 pub(super) enum ApprovalAnswer {
-    /// `{"decision": ...}`, for a command or a patch.
-    Decision,
+    Command,
+    FileChange,
     /// The permissions granted, from what was asked.
     Permissions(types::RequestPermissionProfile),
+}
+
+impl ApprovalAnswer {
+    /// Codex's answer once `decision` is made.
+    pub fn response(&self, decision: ApprovalDecision) -> ServerResponse {
+        match self {
+            ApprovalAnswer::Command => {
+                ServerResponse::CommandApproval(wire::command_decision(decision))
+            }
+            ApprovalAnswer::FileChange => {
+                ServerResponse::FileChangeApproval(wire::file_change_decision(decision))
+            }
+            ApprovalAnswer::Permissions(requested) => {
+                ServerResponse::Permissions(wire::permissions_decision(decision, requested))
+            }
+        }
+    }
 }
 
 #[derive(Default)]

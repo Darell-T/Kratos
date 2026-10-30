@@ -5,10 +5,13 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use kratos_codex_client::types::{ClientInfo, InitializeCapabilities};
+use kratos_codex_client::types::{
+    self, ClientInfo, InitializeCapabilities, ToolRequestUserInputAnswer,
+    ToolRequestUserInputResponse,
+};
 use kratos_codex_client::{
-    Codex, ConnectError, Incoming, Launch, Notification, RequestError, ServerRequest, connect,
-    methods,
+    Codex, ConnectError, Incoming, Launch, Notification, RequestError, ServerRequest,
+    ServerResponse, connect, methods,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -64,6 +67,19 @@ async fn answer_seen(incoming: &mut mpsc::Receiver<Incoming>) -> Value {
             return params;
         }
     }
+}
+
+fn answers(choices: &[(&str, &str)]) -> ServerResponse {
+    let answers = choices
+        .iter()
+        .map(|(id, answer)| {
+            let answer = ToolRequestUserInputAnswer {
+                answers: vec![(*answer).to_owned()],
+            };
+            ((*id).to_owned(), answer)
+        })
+        .collect();
+    ServerResponse::UserInput(ToolRequestUserInputResponse { answers })
 }
 
 fn question(thread_id: &str) -> Value {
@@ -210,11 +226,38 @@ async fn answers_a_server_request_under_its_own_id() {
     assert!(
         matches!(request.request, ServerRequest::UserInput(ref params) if params.thread_id == "thread-A")
     );
-    assert!(request.answer(&json!({ "answers": { "choice": { "answers": ["Yes"] } } })));
+    assert!(request.answer(answers(&[("choice", "Yes")])));
 
     assert_eq!(
         answer_seen(&mut incoming).await,
         json!({ "result": { "answers": { "choice": { "answers": ["Yes"] } } } })
+    );
+    codex.close().await;
+}
+
+#[tokio::test]
+async fn refuses_to_send_an_answer_to_another_kind_of_request() {
+    // Catches a command decision sent as the answer to a question, which Codex would read as a
+    // reply of the wrong shape.
+    let (codex, mut incoming) = connect_fake().await;
+    control(
+        &codex,
+        "test/ask",
+        json!({ "method": "item/tool/requestUserInput", "params": question("thread-A") }),
+    )
+    .await;
+    let Incoming::Request(request) = next(&mut incoming).await else {
+        panic!("expected the question");
+    };
+
+    let decision = types::CommandExecutionRequestApprovalResponse {
+        decision: types::CommandExecutionApprovalDecision::Accept,
+    };
+    assert!(!request.answer(ServerResponse::CommandApproval(decision)));
+
+    assert_eq!(
+        answer_seen(&mut incoming).await,
+        json!({ "error": { "code": -32603, "message": "Kratos answered item/tool/requestUserInput with an answer to item/commandExecution/requestApproval" } })
     );
     codex.close().await;
 }
@@ -287,7 +330,7 @@ async fn sends_no_answer_after_the_server_withdraws_its_request() {
     )
     .await;
 
-    assert!(!request.answer(&json!({ "answers": {} })));
+    assert!(!request.answer(answers(&[])));
 
     control(&codex, "test/notify", json!({ "barrier": true })).await;
     while let Ok(message) = incoming.try_recv() {

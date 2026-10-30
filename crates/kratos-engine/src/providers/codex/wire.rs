@@ -1,11 +1,11 @@
 //! Codex's generated protocol types in Kratos's terms, and back. Nothing else in the engine reads a
-//! Codex item or writes a Codex request by hand.
+//! Codex item or writes a Codex request or answer by hand.
 
 use std::collections::{BTreeMap, HashMap};
 
 use std::time::{Duration, SystemTime};
 
-use kratos_codex_client::types;
+use kratos_codex_client::{ServerRequest, ServerResponse, types};
 use kratos_protocol::{
     AccessLimit, AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult,
     ContextUsage, ExtraAccess, FileChange, FileChangeKind, ItemStatus, Message, MessageInput,
@@ -14,7 +14,7 @@ use kratos_protocol::{
     TurnOutcome, UsageBucket, UsageWindow,
 };
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// The most of a command's output a stored event keeps (L3). A proposal until measured on real
 /// sessions: Codex already shortens what it shows the model.
@@ -237,8 +237,30 @@ pub fn answers(answers: BTreeMap<String, Vec<String>>) -> types::ToolRequestUser
     }
 }
 
-pub fn command_decision(decision: ApprovalDecision) -> Value {
-    json!({ "decision": decision_name(decision) })
+pub fn command_decision(
+    decision: ApprovalDecision,
+) -> types::CommandExecutionRequestApprovalResponse {
+    use types::CommandExecutionApprovalDecision as Codex;
+    let decision = match decision {
+        ApprovalDecision::Accept => Codex::Accept,
+        ApprovalDecision::AcceptForSession => Codex::AcceptForSession,
+        ApprovalDecision::Decline => Codex::Decline,
+        ApprovalDecision::Cancel => Codex::Cancel,
+    };
+    types::CommandExecutionRequestApprovalResponse { decision }
+}
+
+pub fn file_change_decision(
+    decision: ApprovalDecision,
+) -> types::FileChangeRequestApprovalResponse {
+    use types::FileChangeApprovalDecision as Codex;
+    let decision = match decision {
+        ApprovalDecision::Accept => Codex::Accept,
+        ApprovalDecision::AcceptForSession => Codex::AcceptForSession,
+        ApprovalDecision::Decline => Codex::Decline,
+        ApprovalDecision::Cancel => Codex::Cancel,
+    };
+    types::FileChangeRequestApprovalResponse { decision }
 }
 
 /// Codex's answer to a request for extra permissions: what it asked for, for this turn or the
@@ -246,14 +268,47 @@ pub fn command_decision(decision: ApprovalDecision) -> Value {
 pub fn permissions_decision(
     decision: ApprovalDecision,
     requested: &types::RequestPermissionProfile,
-) -> Value {
-    match decision {
-        ApprovalDecision::Accept => json!({ "permissions": requested, "scope": "turn" }),
-        ApprovalDecision::AcceptForSession => {
-            json!({ "permissions": requested, "scope": "session" })
+) -> types::PermissionsRequestApprovalResponse {
+    let granted = types::GrantedPermissionProfile {
+        file_system: requested.file_system.clone(),
+        network: requested.network.clone(),
+    };
+    let (permissions, scope) = match decision {
+        ApprovalDecision::Accept => (granted, types::PermissionGrantScope::Turn),
+        ApprovalDecision::AcceptForSession => (granted, types::PermissionGrantScope::Session),
+        ApprovalDecision::Decline | ApprovalDecision::Cancel => (
+            types::GrantedPermissionProfile::default(),
+            types::PermissionGrantScope::Turn,
+        ),
+    };
+    types::PermissionsRequestApprovalResponse {
+        permissions,
+        scope,
+        strict_auto_review: None,
+    }
+}
+
+/// The answer to a request Kratos will not put to the user: the refusal of its kind.
+pub fn refusal(request: &ServerRequest) -> ServerResponse {
+    match request {
+        ServerRequest::CommandApproval(_) => {
+            ServerResponse::CommandApproval(command_decision(ApprovalDecision::Cancel))
         }
-        ApprovalDecision::Decline | ApprovalDecision::Cancel => {
-            json!({ "permissions": {}, "scope": "turn" })
+        ServerRequest::FileChangeApproval(_) => {
+            ServerResponse::FileChangeApproval(file_change_decision(ApprovalDecision::Cancel))
+        }
+        ServerRequest::Permissions(params) => ServerResponse::Permissions(permissions_decision(
+            ApprovalDecision::Decline,
+            &params.permissions,
+        )),
+        ServerRequest::UserInput(_) => ServerResponse::UserInput(answers(BTreeMap::new())),
+        ServerRequest::McpElicitation(_) => {
+            ServerResponse::McpElicitation(types::McpServerElicitationRequestResponse {
+                action: types::McpServerElicitationAction::Cancel,
+                // Codex has always been sent both keys as explicit nulls.
+                content: Some(Value::Null),
+                meta: Some(Value::Null),
+            })
         }
     }
 }
@@ -339,15 +394,6 @@ fn path_name(path: &types::FileSystemPath) -> String {
     match subpath {
         Some(subpath) => format!("{name}/{}", subpath.0),
         None => name.to_owned(),
-    }
-}
-
-fn decision_name(decision: ApprovalDecision) -> &'static str {
-    match decision {
-        ApprovalDecision::Accept => "accept",
-        ApprovalDecision::AcceptForSession => "acceptForSession",
-        ApprovalDecision::Decline => "decline",
-        ApprovalDecision::Cancel => "cancel",
     }
 }
 
@@ -510,10 +556,61 @@ impl ChangesRecorder {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn item(value: Value) -> types::ThreadItem {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn each_refusal_is_the_answer_codex_has_always_been_sent() {
+        // Catches a refusal that changed shape, such as an MCP form refusal without its explicit
+        // nulls, or a permissions refusal that grants what was asked.
+        let params = |extra: Value| {
+            let mut params =
+                json!({ "threadId": "t", "turnId": "u", "itemId": "i", "startedAtMs": 0 });
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            params
+        };
+        let cases = [
+            (
+                ServerRequest::CommandApproval(required(params(
+                    json!({ "command": "ls", "cwd": "/w" }),
+                ))),
+                json!({ "decision": "cancel" }),
+            ),
+            (
+                ServerRequest::FileChangeApproval(required(params(json!({})))),
+                json!({ "decision": "cancel" }),
+            ),
+            (
+                ServerRequest::Permissions(required(params(
+                    json!({ "cwd": "/w", "permissions": { "network": { "enabled": true } } }),
+                ))),
+                json!({ "permissions": {}, "scope": "turn" }),
+            ),
+            (
+                ServerRequest::UserInput(required(params(
+                    json!({ "questions": [], "isBlocking": true }),
+                ))),
+                json!({ "answers": {} }),
+            ),
+            (
+                ServerRequest::McpElicitation(required(json!({ "threadId": "t", "turnId": "u",
+                    "serverName": "docs", "mode": "form", "message": "Sign in",
+                    "requestedSchema": { "type": "object", "properties": {} } }))),
+                json!({ "action": "cancel", "content": null, "_meta": null }),
+            ),
+        ];
+        for (request, expected) in cases {
+            let refused = serde_json::to_value(refusal(&request)).unwrap();
+            assert_eq!(refused, expected, "{}", request.method());
+        }
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use kratos_codex_client::{Codex, RequestError, methods, types};
+use kratos_codex_client::{Codex, RequestError, ServerResponse, methods, types};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId,
     ContinuationState, Message, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason,
@@ -15,7 +15,6 @@ use uuid::Uuid;
 
 use super::actor::{Actor, Command, Deferred, Done, Reply};
 use super::profiles::Profile;
-use super::requests::ApprovalAnswer;
 use super::threads::{Link, Turn};
 use super::turns::{Delivery, Stopper, read_history};
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, queue, wire};
@@ -547,17 +546,9 @@ impl Actor {
             })
             .await
         };
-        match (&outcome, &waiting.answer) {
-            (
-                Ok(ApprovalOutcome::Decided { decision: recorded }),
-                ApprovalAnswer::Permissions(requested),
-            ) if *recorded == decision => {
-                waiting
-                    .request
-                    .answer(&wire::permissions_decision(decision, requested));
-            }
-            (Ok(ApprovalOutcome::Decided { decision: recorded }), _) if *recorded == decision => {
-                waiting.request.answer(&wire::command_decision(decision));
+        match &outcome {
+            Ok(ApprovalOutcome::Decided { decision: recorded }) if *recorded == decision => {
+                waiting.request.answer(waiting.answer.response(decision));
             }
             // Recorded otherwise, or not recorded: dropping the request answers Codex.
             _ => {}
@@ -597,7 +588,9 @@ impl Actor {
             })
             .await;
         if matches!(outcome, Ok(QuestionOutcome::Answered)) {
-            waiting.request.answer(&wire::answers(answers));
+            waiting
+                .request
+                .answer(ServerResponse::UserInput(wire::answers(answers)));
         }
         outcome
     }

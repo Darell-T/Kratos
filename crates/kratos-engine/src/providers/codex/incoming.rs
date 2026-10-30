@@ -8,7 +8,6 @@ use kratos_protocol::{
     Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason, LiveUpdate, Provider,
     QuestionId, ThreadEventBody, ThreadId, TurnId,
 };
-use serde_json::json;
 use uuid::Uuid;
 
 use super::actor::{Actor, settle_closed};
@@ -182,7 +181,7 @@ impl Actor {
     async fn on_request(&mut self, request: IncomingRequest) {
         let Some(thread_id) = self.thread_of(request.request.thread_id()) else {
             // A thread Kratos does not run cannot be granted anything.
-            cancel(request);
+            refuse(request);
             return;
         };
         match &request.request {
@@ -210,7 +209,7 @@ impl Actor {
                     request,
                     verdict,
                     shown,
-                    ApprovalAnswer::Decision,
+                    ApprovalAnswer::Command,
                 )
                 .await;
             }
@@ -235,7 +234,7 @@ impl Actor {
                     request,
                     verdict,
                     shown,
-                    ApprovalAnswer::Decision,
+                    ApprovalAnswer::FileChange,
                 )
                 .await;
             }
@@ -264,9 +263,7 @@ impl Actor {
                 self.ask_question(thread_id, request, question).await;
             }
             // Kratos shows no MCP forms yet, so the tool call that asked is declined.
-            ServerRequest::McpElicitation(_) => {
-                request.answer(&json!({ "action": "cancel", "content": null, "_meta": null }));
-            }
+            ServerRequest::McpElicitation(_) => refuse(request),
         }
     }
 
@@ -281,7 +278,7 @@ impl Actor {
     ) {
         let why = match verdict {
             Verdict::Accept => {
-                request.answer(&wire::command_decision(ApprovalDecision::Accept));
+                request.answer(answer.response(ApprovalDecision::Accept));
                 return;
             }
             Verdict::Ask(why) => why,
@@ -298,7 +295,7 @@ impl Actor {
             .await
             .is_err()
         {
-            cancel(request);
+            refuse(request);
             return;
         }
         self.requests.approvals.insert(
@@ -325,7 +322,7 @@ impl Actor {
             .await
             .is_err()
         {
-            request.answer(&json!({ "answers": {} }));
+            refuse(request);
             return;
         }
         self.requests.questions.insert(
@@ -342,16 +339,7 @@ impl Actor {
 }
 
 /// Answers a request Kratos will not put to the user with the refusal of its kind.
-fn cancel(request: IncomingRequest) {
-    let answer = match &request.request {
-        ServerRequest::CommandApproval(_) | ServerRequest::FileChangeApproval(_) => {
-            wire::command_decision(ApprovalDecision::Cancel)
-        }
-        ServerRequest::Permissions(_) => json!({ "permissions": {}, "scope": "turn" }),
-        ServerRequest::UserInput(_) => json!({ "answers": {} }),
-        ServerRequest::McpElicitation(_) => {
-            json!({ "action": "cancel", "content": null, "_meta": null })
-        }
-    };
-    request.answer(&answer);
+fn refuse(request: IncomingRequest) {
+    let refusal = wire::refusal(&request.request);
+    request.answer(refusal);
 }

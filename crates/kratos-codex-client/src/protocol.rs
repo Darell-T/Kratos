@@ -112,11 +112,18 @@ pub(crate) enum Unhandled {
 }
 
 macro_rules! server_requests {
-    ($($name:ident = $method:literal: $params:ty;)*) => {
+    ($($name:ident = $method:literal: $params:ty => $response:ty;)*) => {
         /// A request from the server that waits for Kratos's answer.
         #[derive(Clone, Debug, PartialEq)]
         pub enum ServerRequest {
             $($name($params),)*
+        }
+
+        /// Kratos's answer to a [`ServerRequest`] of the same kind.
+        #[derive(Clone, Debug, PartialEq, Serialize)]
+        #[serde(untagged)]
+        pub enum ServerResponse {
+            $($name($response),)*
         }
 
         impl ServerRequest {
@@ -127,16 +134,31 @@ macro_rules! server_requests {
                 };
                 parsed.map_err(|error| Unhandled::BadParams(error.to_string()))
             }
+
+            pub fn method(&self) -> &'static str {
+                match self {
+                    $(ServerRequest::$name(_) => $method,)*
+                }
+            }
+        }
+
+        impl ServerResponse {
+            /// The method of the request this answers.
+            pub fn method(&self) -> &'static str {
+                match self {
+                    $(ServerResponse::$name(_) => $method,)*
+                }
+            }
         }
     };
 }
 
 server_requests! {
-    CommandApproval = "item/commandExecution/requestApproval": types::CommandExecutionRequestApprovalParams;
-    FileChangeApproval = "item/fileChange/requestApproval": types::FileChangeRequestApprovalParams;
-    UserInput = "item/tool/requestUserInput": types::ToolRequestUserInputParams;
-    Permissions = "item/permissions/requestApproval": types::PermissionsRequestApprovalParams;
-    McpElicitation = "mcpServer/elicitation/request": types::McpServerElicitationRequestParams;
+    CommandApproval = "item/commandExecution/requestApproval": types::CommandExecutionRequestApprovalParams => types::CommandExecutionRequestApprovalResponse;
+    FileChangeApproval = "item/fileChange/requestApproval": types::FileChangeRequestApprovalParams => types::FileChangeRequestApprovalResponse;
+    UserInput = "item/tool/requestUserInput": types::ToolRequestUserInputParams => types::ToolRequestUserInputResponse;
+    Permissions = "item/permissions/requestApproval": types::PermissionsRequestApprovalParams => types::PermissionsRequestApprovalResponse;
+    McpElicitation = "mcpServer/elicitation/request": types::McpServerElicitationRequestParams => types::McpServerElicitationRequestResponse;
 }
 
 impl ServerRequest {

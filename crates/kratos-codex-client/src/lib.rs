@@ -24,7 +24,7 @@ pub use connection::{
     Codex, ConnectError, Exit, Incoming, IncomingRequest, Launch, RequestError, RequestId, connect,
 };
 pub use locate::{LocateError, locate_codex};
-pub use protocol::{Method, Notification, ServerRequest, methods};
+pub use protocol::{Method, Notification, ServerRequest, ServerResponse, methods};
 
 /// JSON-RPC's error for a message that is not JSON.
 const PARSE_ERROR: i64 = -32700;

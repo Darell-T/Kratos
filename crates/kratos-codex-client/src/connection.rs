@@ -25,7 +25,7 @@ use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::locate::INSTALL_COMMAND;
-use crate::protocol::{Method, Notification, ServerRequest, Unhandled, methods};
+use crate::protocol::{Method, Notification, ServerRequest, ServerResponse, Unhandled, methods};
 use crate::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, types};
 
 /// Messages that wait for the consumer. When it falls this far behind, the reader stops reading,
@@ -121,11 +121,21 @@ pub struct IncomingRequest {
 }
 
 impl IncomingRequest {
-    /// Sends `result` unless the server already withdrew the request with
-    /// `serverRequest/resolved`, or the connection ended. Returns whether it was sent.
-    pub fn answer<T: Serialize>(mut self, result: &T) -> bool {
+    /// Sends `response` unless the server already withdrew the request with
+    /// `serverRequest/resolved`, or the connection ended. Returns whether it was sent. An answer to
+    /// another kind of request is not sent: the server gets an internal error instead.
+    pub fn answer(mut self, response: ServerResponse) -> bool {
         let responder = self.responder.take().expect("answered at most once");
-        let result = serde_json::to_value(result).expect("answer types serialize");
+        if response.method() != self.request.method() {
+            let message = format!(
+                "Kratos answered {} with an answer to {}",
+                self.request.method(),
+                response.method()
+            );
+            responder.send(&self.id, Err((INTERNAL_ERROR, message)));
+            return false;
+        }
+        let result = serde_json::to_value(&response).expect("answer types serialize");
         responder.send(&self.id, Ok(result))
     }
 
