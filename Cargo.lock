@@ -675,6 +675,7 @@ dependencies = [
 name = "kratos-process"
 version = "0.1.0"
 dependencies = [
+ "fake-agents",
  "libc",
  "tokio",
  "windows-sys",

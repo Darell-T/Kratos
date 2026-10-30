@@ -2,6 +2,7 @@
 
 use std::time::{Duration, Instant};
 
+use fake_agents::process_is_running;
 use kratos_process::OwnedChild;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -45,30 +46,9 @@ async fn grandchild_id(owner: &mut OwnedChild) -> u32 {
         .unwrap_or_else(|_| panic!("not a process id: {line:?}"))
 }
 
-/// A zombie, which a container's init may never reap, counts as ended.
-#[cfg(unix)]
-fn is_running(id: u32) -> bool {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "stat=", "-p", &id.to_string()])
-        .output()
-        .expect("ps runs");
-    let state = String::from_utf8_lossy(&output.stdout);
-    let state = state.trim();
-    !state.is_empty() && !state.starts_with('Z')
-}
-
-#[cfg(windows)]
-fn is_running(id: u32) -> bool {
-    let output = std::process::Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {id}"), "/NH", "/FO", "CSV"])
-        .output()
-        .expect("tasklist runs");
-    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{id}\""))
-}
-
 async fn assert_ends(id: u32) {
     let started = Instant::now();
-    while is_running(id) {
+    while process_is_running(id) {
         assert!(
             started.elapsed() < GONE_WITHIN,
             "process {id} still runs {GONE_WITHIN:?} after its tree was ended"
@@ -81,7 +61,7 @@ async fn assert_ends(id: u32) {
 async fn dropping_the_owner_ends_the_grandchild_too() {
     let mut owner = OwnedChild::spawn(parent_of_a_sleeper()).unwrap();
     let grandchild = grandchild_id(&mut owner).await;
-    assert!(is_running(grandchild));
+    assert!(process_is_running(grandchild));
 
     drop(owner);
 

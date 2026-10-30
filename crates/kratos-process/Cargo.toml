@@ -24,6 +24,7 @@ windows-sys = { version = "0.61.2", features = [
 libc = "0.2.191"
 
 [dev-dependencies]
+fake-agents.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "time"] }
 
 [lints]
