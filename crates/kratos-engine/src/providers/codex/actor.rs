@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Duration;
 
-use kratos_codex_client::{Codex, ConnectError, Incoming, RequestError, types};
+use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
     MessageId, MessageInput, MessageOrigin, Provider, QuestionId, QuestionOutcome, Skill, ThreadId,
@@ -16,6 +16,7 @@ use kratos_protocol::{
 use kratos_store::{Settle, StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
 
+use super::connection::StartError;
 use super::queue;
 use super::requests::Requests;
 use super::threads::ThreadState;
@@ -175,7 +176,7 @@ impl Deferred {
 pub(super) enum Done {
     Connected {
         generation: u64,
-        result: Result<(Codex, mpsc::Receiver<Incoming>), ConnectError>,
+        result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     },
     Account {
         generation: u64,

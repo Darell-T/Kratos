@@ -29,6 +29,17 @@ const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);
 const SETTLED_AFTER: Duration = Duration::from_secs(60);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Why the app-server did not come up.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum StartError {
+    #[error(transparent)]
+    Connect(#[from] ConnectError),
+    /// The server started, but its sandbox is not ready, so it was closed.
+    #[cfg(windows)]
+    #[error("Codex did not complete the handshake: {0}")]
+    Sandbox(#[source] super::sandbox::SandboxError),
+}
+
 #[derive(Default)]
 pub(super) struct Restarts {
     failures_in_a_row: u32,
@@ -151,7 +162,7 @@ impl Actor {
     pub(super) async fn on_connected(
         &mut self,
         generation: u64,
-        result: Result<(Codex, mpsc::Receiver<Incoming>), ConnectError>,
+        result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     ) {
         if generation != self.generation {
             if let Ok((codex, _)) = result {
@@ -480,7 +491,7 @@ impl Actor {
 async fn connect_ready(
     launch: Launch,
     capabilities: types::InitializeCapabilities,
-) -> Result<(Codex, mpsc::Receiver<Incoming>), ConnectError> {
+) -> Result<(Codex, mpsc::Receiver<Incoming>), StartError> {
     #[cfg(windows)]
     let cwd = launch.cwd.clone();
     let (codex, incoming) = connect(launch, capabilities).await?;
@@ -489,7 +500,7 @@ async fn connect_ready(
         let mut incoming = incoming;
         if let Err(error) = super::sandbox::prepare(&codex, &mut incoming, cwd).await {
             codex.close().await;
-            return Err(ConnectError::Handshake(error));
+            return Err(StartError::Sandbox(error));
         }
         Ok((codex, incoming))
     }

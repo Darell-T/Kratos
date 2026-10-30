@@ -15,11 +15,22 @@ pub(super) fn launch_arguments() -> [OsString; 2] {
     ["-c".into(), format!("windows.sandbox=\"{MODE}\"").into()]
 }
 
+/// Why the sandbox is not ready, so no thread may start.
+#[derive(Debug, thiserror::Error)]
+pub(super) enum SandboxError {
+    /// A readiness or setup request to Codex failed.
+    #[error(transparent)]
+    Request(#[from] RequestError),
+    /// Codex answered, and Kratos's own checks refused what it reported.
+    #[error("Windows sandbox is unavailable: {0}. No agent commands were started")]
+    Unavailable(String),
+}
+
 pub(super) async fn prepare(
     codex: &Codex,
     incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
     cwd: PathBuf,
-) -> Result<(), RequestError> {
+) -> Result<(), SandboxError> {
     let readiness = codex
         .request::<methods::WindowsSandboxReadiness>(&())
         .await?;
@@ -34,7 +45,7 @@ pub(super) async fn prepare(
         .request::<methods::WindowsSandboxSetupStart>(&params)
         .await?;
     if !setup.started {
-        return Err(setup_error("Codex did not start sandbox setup"));
+        return Err(unavailable("Codex did not start sandbox setup"));
     }
     tokio::time::timeout(SETUP_TIMEOUT, wait_for_setup(incoming))
         .await
@@ -46,31 +57,31 @@ pub(super) async fn prepare(
         .request::<methods::WindowsSandboxReadiness>(&())
         .await?;
     if readiness.status != types::WindowsSandboxReadiness::Ready {
-        return Err(setup_error("setup completed but readiness is not ready"));
+        return Err(unavailable("setup completed but readiness is not ready"));
     }
     Ok(())
 }
 
 async fn wait_for_setup(
     incoming: &mut tokio::sync::mpsc::Receiver<Incoming>,
-) -> Result<(), RequestError> {
+) -> Result<(), SandboxError> {
     while let Some(message) = incoming.recv().await {
         match message {
             Incoming::Notification(Notification::WindowsSandboxSetupCompleted(completed)) => {
                 if completed.mode != MODE {
-                    return Err(setup_error(
+                    return Err(unavailable(
                         "Codex completed a different sandbox implementation",
                     ));
                 }
                 return if completed.success {
                     Ok(())
                 } else {
-                    Err(setup_error(
+                    Err(unavailable(
                         completed.error.as_deref().unwrap_or("no error reported"),
                     ))
                 };
             }
-            Incoming::Exited(exit) => return Err(RequestError::Exited(exit)),
+            Incoming::Exited(exit) => return Err(RequestError::Exited(exit).into()),
             Incoming::Request(request) => {
                 request.fail(
                     kratos_codex_client::INTERNAL_ERROR,
@@ -81,16 +92,13 @@ async fn wait_for_setup(
             Incoming::Notification(_) => {}
         }
     }
-    Err(setup_error(
+    Err(unavailable(
         "Codex closed before reporting setup completion",
     ))
 }
 
-fn setup_error(error: &str) -> RequestError {
-    RequestError::Rpc {
-        code: kratos_codex_client::INTERNAL_ERROR,
-        message: format!("Windows sandbox is unavailable: {error}. No agent commands were started"),
-    }
+fn unavailable(error: &str) -> SandboxError {
+    SandboxError::Unavailable(error.to_owned())
 }
 
 #[cfg(test)]
