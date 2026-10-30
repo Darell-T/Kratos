@@ -108,6 +108,7 @@ impl Store {
             queue: self.pending_messages(thread_id)?,
             approvals: self.waiting_approvals(thread_id)?,
             questions: self.waiting_questions(thread_id)?,
+            last_seq: self.last_seq(thread_id)?,
         })
     }
 

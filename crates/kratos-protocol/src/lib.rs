@@ -34,7 +34,10 @@ pub use messages::{
 };
 pub use skills::{Skill, ThreadSkills};
 pub use text::RequiredText;
-pub use threads::{CreateThread, ListThreads, Thread, ThreadDetails, ThreadId, ThreadSettings};
+pub use threads::{
+    AccessLimit, CreateThread, ListEvents, ListThreads, Thread, ThreadDetails, ThreadId,
+    ThreadSettings,
+};
 pub use time::Timestamp;
 pub use turns::{
     AgentItem, CappedText, ContextUsage, FileChange, FileChangeKind, ItemStatus, TurnId,

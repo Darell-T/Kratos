@@ -31,8 +31,9 @@ impl Provider {
 }
 
 /// How much a thread's agent may do without asking. `ApproveForMe` is not `FullAccess`, and a
-/// command the dangerous-command check flags asks the user under every permission.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// command the dangerous-command check flags asks the user under every permission. The variants
+/// run from least to most trusting, so `min` picks the narrower of two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Permission {
     AskMe,

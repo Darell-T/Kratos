@@ -4,7 +4,7 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, Message, PauseReason, Permission, Provider, Question, RequiredText, Timestamp,
+    Approval, Message, PauseReason, Permission, Provider, Question, RequiredText, Seq, Timestamp,
     TurnId, WorkspaceId,
 };
 
@@ -81,6 +81,45 @@ impl Default for ThreadSettings {
     }
 }
 
+impl ThreadSettings {
+    pub fn access(&self) -> AccessLimit {
+        AccessLimit {
+            permission: self.permission,
+            plan_mode: self.plan_mode,
+        }
+    }
+
+    /// These settings with no more access than `limit`.
+    pub fn limited_to(&self, limit: AccessLimit) -> ThreadSettings {
+        ThreadSettings {
+            permission: self.permission.min(limit.permission),
+            plan_mode: self.plan_mode || limit.plan_mode,
+            ..self.clone()
+        }
+    }
+}
+
+/// How much a thread may do: its permission, and whether it only plans. A thread that takes a
+/// message from another thread drops to no more than the sender's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessLimit {
+    pub permission: Permission,
+    pub plan_mode: bool,
+}
+
+impl AccessLimit {
+    pub const FULL: AccessLimit = AccessLimit {
+        permission: Permission::FullAccess,
+        plan_mode: false,
+    };
+
+    /// Whether `other` is no more than this: no higher permission, and planning if this plans.
+    pub fn covers(self, other: AccessLimit) -> bool {
+        other.permission <= self.permission && (other.plan_mode || !self.plan_mode)
+    }
+}
+
 fn trimmed_workspace_id<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<WorkspaceId, D::Error> {
@@ -91,6 +130,15 @@ fn trimmed_workspace_id<'de, D: Deserializer<'de>>(
 #[serde(rename_all = "camelCase")]
 pub struct ListThreads {
     pub workspace_id: WorkspaceId,
+}
+
+/// The query of `GET /api/threads/{id}/events`. Without `after`, the page starts at the first
+/// event.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ListEvents {
+    #[serde(default)]
+    pub after: Option<Seq>,
 }
 
 /// The body of `GET /api/threads/{id}`: the thread and what its next turn waits on.
@@ -106,4 +154,7 @@ pub struct ThreadDetails {
     pub queue: Vec<Message>,
     pub approvals: Vec<Approval>,
     pub questions: Vec<Question>,
+    /// The thread's newest event when these details were read, so a client that reads the events
+    /// after it misses nothing that changed them.
+    pub last_seq: Seq,
 }
