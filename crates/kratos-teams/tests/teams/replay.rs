@@ -34,9 +34,7 @@ pub fn waiting(view: &TaskView) -> Option<&Waiting> {
 /// The pause a task is in because of trouble, if any.
 pub fn trouble(view: &TaskView) -> Option<(Trouble, Role, &str)> {
     match waiting(view)? {
-        Waiting::Trouble {
-            why, role, detail, ..
-        } => Some((*why, *role, detail)),
+        Waiting::Trouble { why, detail, left } => Some((*why, left.role(), detail)),
         _ => None,
     }
 }

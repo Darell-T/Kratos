@@ -301,22 +301,16 @@ impl TaskView {
             _ => return Err(self.misfit("step_failed")),
         };
         let detail = format!("{}: {error}", step.as_str());
-        Ok(self.pause_in_trouble(Trouble::System, left.role(), detail, left))
+        Ok(self.pause_in_trouble(Trouble::System, detail, left))
     }
 
     pub(crate) fn pause_in_trouble(
         self: Box<Self>,
         why: Trouble,
-        role: Role,
         detail: String,
         left: Activity,
     ) -> Box<TaskView> {
-        self.waiting(Waiting::Trouble {
-            why,
-            role,
-            detail,
-            left,
-        })
+        self.waiting(Waiting::Trouble { why, detail, left })
     }
 
     fn on_cleaned(self: Box<Self>) -> Result<Box<TaskView>, Rejection> {
@@ -470,11 +464,10 @@ impl TaskView {
             return Err(self.misfit("role_change_rejected"));
         };
         self.pending_roles = None;
-        let role = then.role();
         let held = self.start_turn(then, step, step.0)?;
         let Phase::Active { activity: left } = held.phase.clone() else {
             return Err(held.misfit("role_change_rejected"));
         };
-        Ok(held.pause_in_trouble(Trouble::RoleChange, role, reason, left))
+        Ok(held.pause_in_trouble(Trouble::RoleChange, reason, left))
     }
 }

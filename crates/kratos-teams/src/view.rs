@@ -182,9 +182,9 @@ pub enum Waiting {
         why: FindingsPause,
         ids: Vec<FindingId>,
     },
+    /// `left.role()` names whose job failed.
     Trouble {
         why: Trouble,
-        role: Role,
         detail: String,
         left: Activity,
     },

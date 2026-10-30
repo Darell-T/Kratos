@@ -167,8 +167,7 @@ impl TaskView {
         turn: Turn,
         detail: String,
     ) -> Box<TaskView> {
-        let role = turn.work.role();
-        self.pause_in_trouble(why, role, detail, Activity::Turn { turn })
+        self.pause_in_trouble(why, detail, Activity::Turn { turn })
     }
 
     fn turn_lost(mut self: Box<Self>, turn: Turn, reason: String, seq: FactSeq) -> Box<TaskView> {
