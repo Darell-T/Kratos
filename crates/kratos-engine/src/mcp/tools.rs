@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use kratos_client::{ApiReply, ClientError};
 use kratos_protocol::{
-    ApprovalDecision, ApprovalId, Permission, QuestionId, RequiredText, Seq, ThreadDetails,
-    ThreadEvent, ThreadId, ThreadSettings, WorkspaceId, routes,
+    AnswerQuestion, ApprovalDecision, ApprovalId, CreateThread, DecideApproval, ErrorBody,
+    Permission, Provider, QuestionId, RequiredText, SendMessage, Seq, ThreadDetails, ThreadEvent,
+    ThreadId, ThreadSettings, WorkspaceId, routes,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -192,14 +193,18 @@ fn create_thread(call: &Call, arguments: Value) -> Answer {
         model: request.model.map(RequiredText::into_string),
         ..ThreadSettings::default()
     };
-    let workspace = match request.workspace_id {
-        Some(id) => id.into_string(),
-        None => me.thread.workspace_id.as_str().to_owned(),
+    let workspace_id = match request.workspace_id {
+        Some(id) => WorkspaceId::new(id.into_string()),
+        None => me.thread.workspace_id,
     };
     call.post(
         routes::THREADS,
-        &json!({ "workspaceId": workspace, "title": request.title, "provider": "codex",
-                 "settings": settings }),
+        &CreateThread {
+            workspace_id,
+            title: request.title,
+            provider: Provider::Codex,
+            settings: Some(settings),
+        },
     )
 }
 
@@ -207,7 +212,11 @@ fn send_message(call: &Call, arguments: Value) -> Answer {
     let SendArguments { thread_id, text } = parse_arguments(arguments)?;
     call.post(
         &routes::thread_messages(&thread_id),
-        &json!({ "text": text }),
+        &SendMessage {
+            message_id: None,
+            text: Some(text),
+            input: None,
+        },
     )
 }
 
@@ -242,7 +251,7 @@ fn answer_question(call: &Call, arguments: Value) -> Answer {
     } = parse_arguments(arguments)?;
     call.post(
         &routes::question(&QuestionId::new(question_id.into_string())),
-        &json!({ "answers": answers }),
+        &AnswerQuestion { answers },
     )
 }
 
@@ -253,7 +262,7 @@ fn decide_approval(call: &Call, arguments: Value) -> Answer {
     } = parse_arguments(arguments)?;
     call.post(
         &routes::approval(&ApprovalId::new(approval_id.into_string())),
-        &json!({ "decision": decision }),
+        &DecideApproval { decision },
     )
 }
 
@@ -295,9 +304,9 @@ fn reply_body(reply: Result<ApiReply, ClientError>) -> Answer {
     if (200..300).contains(&reply.status) {
         return Ok(reply.body);
     }
-    let reason = match reply.body["error"].as_str() {
-        Some(reason) => reason.to_owned(),
-        None => reply.body.to_string(),
+    let reason = match ErrorBody::deserialize(&reply.body) {
+        Ok(ErrorBody { error }) => error,
+        Err(_) => reply.body.to_string(),
     };
     Err(format!("Kratos refused ({}): {reason}", reply.status))
 }

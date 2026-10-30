@@ -121,14 +121,14 @@ pub struct PostMessage {
 
 /// The body of `POST /api/threads/{id}/messages` to a thread whose provider Kratos drives: `text`,
 /// or `input` parts, with an optional `messageId`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SendMessage {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_id: Option<MessageId>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<RequiredText>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input: Option<Vec<MessageInput>>,
 }
 
