@@ -447,8 +447,8 @@ impl Fake {
                     Value::Null => json!("ask-1"),
                     request_id => request_id.clone(),
                 };
-                send(
-                    &json!({ "id": request_id, "method": params["method"], "params": params["params"] }),
+                self.send(
+                    json!({ "id": request_id, "method": params["method"], "params": params["params"] }),
                 );
                 self.reply(id, Value::Null);
             }
