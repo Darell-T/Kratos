@@ -47,18 +47,6 @@ impl Store {
             appended: Vec::new(),
         })
     }
-
-    /// Appends `body` as the thread's next event in a write of its own. See [`ThreadWrite`].
-    pub fn append_event(
-        &mut self,
-        thread_id: &ThreadId,
-        body: &ThreadEventBody,
-    ) -> Result<ThreadEvent, StoreError> {
-        let mut write = self.write_thread(thread_id)?;
-        write.append(body.clone())?;
-        let mut events = write.commit()?;
-        Ok(events.pop().expect("the write appended one event"))
-    }
 }
 
 impl ThreadWrite<'_> {
