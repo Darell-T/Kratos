@@ -1,5 +1,6 @@
 //! A thread's turns: when the next queued message starts, how a queued message steers the running
-//! turn, how a start or steer whose answer was lost is settled, and how a turn ends.
+//! turn, how a start or steer whose answer was lost is settled, how a turn is stopped, and how it
+//! ends.
 
 use std::time::Duration;
 
@@ -626,6 +627,20 @@ impl Actor {
             .await;
         if paused.is_ok() {
             self.interrupt(&thread_id, Stopper::Deadline);
+        }
+    }
+
+    pub(super) async fn stop(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
+        if let Err(error) = self.load(thread_id).await {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        let thread = self.threads.get_mut(thread_id).expect("loaded above");
+        match &mut thread.turn {
+            Turn::Idle => drop(reply.send(Ok(()))),
+            // Stopped as soon as its id is known.
+            Turn::Starting { stop_waiters, .. } => stop_waiters.push(reply),
+            Turn::Running { .. } => self.interrupt(thread_id, Stopper::Users(vec![reply])),
         }
     }
 

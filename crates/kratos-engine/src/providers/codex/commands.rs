@@ -1,4 +1,6 @@
-//! What handles ask of the actor.
+//! What handles ask of the actor. `on_command` hands each command to the method that serves it,
+//! and the two commands that only pass a request through to Codex, listing skills and running a
+//! command, are served here.
 
 use std::time::Duration;
 
@@ -8,8 +10,6 @@ use serde_json::json;
 
 use super::actor::{Actor, Command, Deferred, Reply};
 use super::profiles::Profile;
-use super::threads::Turn;
-use super::turns::Stopper;
 use super::{ProviderError, wire};
 
 impl Actor {
@@ -113,20 +113,6 @@ impl Actor {
                 self.dispatch(&thread_id).await;
             }
             Command::Shutdown { reply } => drop(reply.send(())),
-        }
-    }
-
-    async fn stop(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
-        if let Err(error) = self.load(thread_id).await {
-            let _ = reply.send(Err(error));
-            return;
-        }
-        let thread = self.threads.get_mut(thread_id).expect("loaded above");
-        match &mut thread.turn {
-            Turn::Idle => drop(reply.send(Ok(()))),
-            // Stopped as soon as its id is known.
-            Turn::Starting { stop_waiters, .. } => stop_waiters.push(reply),
-            Turn::Running { .. } => self.interrupt(thread_id, Stopper::Users(vec![reply])),
         }
     }
 
