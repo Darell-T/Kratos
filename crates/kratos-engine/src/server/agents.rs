@@ -39,6 +39,7 @@ impl ServerState {
     pub(super) fn codex(&self) -> Result<&CodexProvider, ApiError> {
         self.codex
             .as_ref()
+            .map(|codex| &codex.provider)
             .map_err(|missing| ApiError::unavailable(missing.clone()))
     }
 }
@@ -317,9 +318,14 @@ pub(super) async fn schedule(
     id: Result<Path<ContinuationId>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let continuation_id = path(id)?;
-    let scheduler = state.scheduler.as_ref().ok_or_else(|| {
-        ApiError::unavailable("Kratos cannot schedule continuations without Codex".to_owned())
-    })?;
+    let scheduler = state
+        .codex
+        .as_ref()
+        .ok()
+        .and_then(|codex| codex.scheduler.as_ref())
+        .ok_or_else(|| {
+            ApiError::unavailable("Kratos cannot schedule continuations without Codex".to_owned())
+        })?;
     let continuation = scheduler.schedule(continuation_id).await?;
     Ok(json_reply(StatusCode::OK, &continuation))
 }

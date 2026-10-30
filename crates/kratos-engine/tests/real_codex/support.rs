@@ -9,7 +9,7 @@ use kratos_client::Client;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
-use kratos_engine::server::{self, ClientToken, ServerState};
+use kratos_engine::server::{self, ClientToken, Codex, ServerState};
 use kratos_engine::store_thread;
 use kratos_engine::usage::UsageTracker;
 use kratos_protocol::{Seq, Thread, ThreadEventBody, ThreadSettings, TurnOutcome};
@@ -117,8 +117,10 @@ impl Harness {
         let state = ServerState {
             store,
             hub: hub.clone(),
-            codex: Ok(provider.clone()),
-            scheduler: None,
+            codex: Ok(Codex {
+                provider: provider.clone(),
+                scheduler: None,
+            }),
             usage,
             token,
         };

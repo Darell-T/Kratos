@@ -121,7 +121,7 @@ fn run_server(
         let hub = Hub::new(store.clone());
         let usage = UsageTracker::default();
         let port = listener.local_addr()?.port();
-        let (codex, scheduler) = match codex_settings(home, port) {
+        let codex = match codex_settings(home, port) {
             Ok(settings) => {
                 let (provider, stops) =
                     codex::start(settings, hub.clone(), store.clone(), usage.clone()).await?;
@@ -135,25 +135,27 @@ fn run_server(
                     stops,
                 )
                 .await?;
-                (Ok(provider), Some(scheduler))
+                Ok(server::Codex {
+                    provider,
+                    scheduler: Some(scheduler),
+                })
             }
             Err(missing) => {
                 eprintln!("Codex threads are unavailable: {missing}");
-                (Err(missing.to_string()), None)
+                Err(missing.to_string())
             }
         };
         let state = ServerState {
             hub,
             store,
             codex,
-            scheduler,
             usage,
             token,
         };
         server::serve(listener, state.clone(), shutdown_signal()).await?;
         // Codex ends before the store closes, so nothing it reports goes unrecorded (L2).
         if let Ok(codex) = &state.codex {
-            codex.shutdown().await;
+            codex.provider.shutdown().await;
         }
         Ok(())
     })

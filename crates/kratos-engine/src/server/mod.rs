@@ -49,12 +49,17 @@ const EVENTS_PATH: &str = "/api/events";
 pub struct ServerState {
     pub store: StoreThread,
     pub hub: Hub,
-    /// The Codex provider, or why Codex cannot run, such as no Codex installed.
-    pub codex: Result<CodexProvider, String>,
-    /// The usage scheduler, which runs only beside the Codex provider.
-    pub scheduler: Option<SchedulerHandle>,
+    /// Codex and its scheduler, or why Codex cannot run, such as no Codex installed.
+    pub codex: Result<Codex, String>,
     pub usage: UsageTracker,
     pub token: ClientToken,
+}
+
+#[derive(Clone)]
+pub struct Codex {
+    pub provider: CodexProvider,
+    /// The usage scheduler. `None` only where a test drives Codex without one.
+    pub scheduler: Option<SchedulerHandle>,
 }
 
 /// Serves the API on `listener` until `shutdown` completes, then stops accepting and lets the HTTP
