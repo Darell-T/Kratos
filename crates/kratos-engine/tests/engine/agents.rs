@@ -1,6 +1,7 @@
 //! The engine binary driving a Codex thread over its API: the client token (D19), a message whose
 //! reply streams live, an approval decided over HTTP, and the account's usage.
 
+use fake_agents::codex_control;
 use kratos_client::{ApiRequest, Client, ClientError};
 use kratos_protocol::{LiveUpdate, Provider, ServerMessage, Thread, ThreadEventBody};
 use serde_json::{Value, json};
@@ -28,15 +29,12 @@ fn next_message(
 /// Settles the turn the fake holds for the message just sent as `turn-1`, now running.
 fn start_turn(engine: &RunningEngine) {
     engine.fake_codex_held("turn/start", 1);
-    engine.fake_codex(
-        "test/settleTurn",
-        json!({ "method": "turn/start",
-                "result": { "turn": { "id": "turn-1", "items": [], "status": "inProgress" } } }),
-    );
+    let settled = codex_control::settle_start("turn-1", "inProgress");
+    engine.fake_codex("test/settleTurn", settled);
 }
 
 fn emit(engine: &RunningEngine, method: &str, params: Value) {
-    engine.fake_codex("test/emit", json!({ "method": method, "params": params }));
+    engine.fake_codex("test/emit", codex_control::emit(method, params));
 }
 
 #[test]
@@ -167,12 +165,13 @@ fn an_approval_reaches_the_socket_and_the_decision_sent_over_http_reaches_codex(
         .unwrap();
     start_turn(&engine);
 
-    engine.fake_codex(
-        "test/ask",
-        json!({ "requestId": "ask-1", "method": "item/commandExecution/requestApproval",
-                "params": { "threadId": "thread-A", "turnId": "turn-1", "itemId": "c1",
-                            "startedAtMs": 0, "command": "ls" } }),
+    let asked = codex_control::ask(
+        "ask-1",
+        "item/commandExecution/requestApproval",
+        json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "c1", "startedAtMs": 0,
+                "command": "ls" }),
     );
+    engine.fake_codex("test/ask", asked);
     let requested = next_message(
         &mut socket,
         |message| matches!(message, ServerMessage::Event { event } if matches!(event.event, ThreadEventBody::ApprovalRequested { .. })),

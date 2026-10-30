@@ -17,9 +17,11 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use fake_agents::codex_control;
 use serde_json::{Value, json};
 
 fn main() {
@@ -81,10 +83,7 @@ fn flag_or_variable(arguments: &[String], flag: &str, variable: &str) -> Option<
 fn serve_control(fake: Arc<Mutex<Fake>>, path: &str) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a localhost port is free");
     let port = listener.local_addr().expect("the port is known").port();
-    // Written whole and renamed, so a test that sees the file reads the whole port.
-    let partial = format!("{path}.partial");
-    std::fs::write(&partial, port.to_string()).expect("the control file is writable");
-    std::fs::rename(&partial, path).expect("the control file can be renamed");
+    codex_control::write_port(Path::new(path), port).expect("the control file is writable");
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let fake = fake.clone();

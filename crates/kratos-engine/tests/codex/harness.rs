@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use fake_agents::codex_control;
 use futures_util::StreamExt;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
@@ -262,8 +263,9 @@ impl Harness {
     async fn connect(&mut self) -> &mut Control {
         if self.control.is_none() {
             let deadline = tokio::time::Instant::now() + WAIT;
+            // Codex starts on demand inside this runtime, so the wait sleeps instead of blocking.
             let port = loop {
-                if let Ok(port) = std::fs::read_to_string(&self.control_file) {
+                if let Ok(port) = codex_control::read_port(&self.control_file) {
                     break port;
                 }
                 assert!(
@@ -272,9 +274,7 @@ impl Harness {
                 );
                 tokio::time::sleep(Duration::from_millis(20)).await;
             };
-            let stream = TcpStream::connect(("127.0.0.1", port.trim().parse::<u16>().unwrap()))
-                .await
-                .unwrap();
+            let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
             let (reader, writer) = stream.into_split();
             self.control = Some(Control {
                 reader: BufReader::new(reader),
@@ -314,20 +314,13 @@ impl Harness {
 
     /// Answers the oldest held `turn/start` with a turn in `status`.
     pub async fn settle_start(&mut self, turn_id: &str, status: &str) {
-        let turn = json!({ "id": turn_id, "items": [], "status": status });
-        self.control(
-            "test/settleTurn",
-            json!({ "method": "turn/start", "result": { "turn": turn } }),
-        )
-        .await;
+        let params = codex_control::settle_start(turn_id, status);
+        self.control("test/settleTurn", params).await;
     }
 
     pub async fn fail_start(&mut self, code: i64, error: &str) {
-        self.control(
-            "test/settleTurn",
-            json!({ "method": "turn/start", "code": code, "error": error }),
-        )
-        .await;
+        let params = codex_control::fail_start(code, error);
+        self.control("test/settleTurn", params).await;
     }
 
     /// Sends message `id` and starts its turn as `turn_id`, which then runs until a test ends it.
@@ -355,26 +348,20 @@ impl Harness {
 
     /// Makes the fake send the provider the request `method` under Codex's id `request_id`.
     pub async fn ask(&mut self, request_id: &str, method: &str, params: Value) {
-        self.control(
-            "test/ask",
-            json!({ "requestId": request_id, "method": method, "params": params }),
-        )
-        .await;
+        let params = codex_control::ask(request_id, method, params);
+        self.control("test/ask", params).await;
     }
 
     /// Sends a notification to the provider.
     pub async fn emit(&mut self, method: &str, params: Value) {
-        self.control("test/emit", json!({ "method": method, "params": params }))
+        self.control("test/emit", codex_control::emit(method, params))
             .await;
     }
 
     /// Ends `turn_id` of Codex thread `native_id` with `status`.
     pub async fn complete(&mut self, native_id: &str, turn_id: &str, status: &str) {
-        self.emit(
-            "turn/completed",
-            json!({ "threadId": native_id, "turn": { "id": turn_id, "items": [], "status": status } }),
-        )
-        .await;
+        let params = codex_control::complete(native_id, turn_id, status);
+        self.control("test/emit", params).await;
     }
 
     /// The next event of the thread, waiting for it.

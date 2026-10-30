@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use fake_agents::codex_control;
 use kratos_client::{Client, EventSocket, Incoming};
 use kratos_protocol::{
     CLIENT_TOKEN_FILE, Provider, Seq, ServerMessage, Thread, ThreadEvent, ThreadId,
@@ -125,7 +126,7 @@ impl RunningEngine {
         let control = self.fake_codex_control_file();
         let deadline = Instant::now() + WAIT;
         let port = loop {
-            if let Ok(port) = std::fs::read_to_string(&control) {
+            if let Ok(port) = codex_control::read_port(&control) {
                 break port;
             }
             assert!(
@@ -134,8 +135,7 @@ impl RunningEngine {
             );
             thread::sleep(Duration::from_millis(20));
         };
-        let mut stream =
-            std::net::TcpStream::connect(("127.0.0.1", port.trim().parse().unwrap())).unwrap();
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         let request = json!({ "id": 1, "method": method, "params": params });
         std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
