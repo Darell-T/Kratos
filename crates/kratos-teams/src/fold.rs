@@ -262,6 +262,15 @@ impl TaskView {
         self
     }
 
+    /// Moves the phase out so a reducer can take its activity by value. The caller sets the phase
+    /// again before it returns the view, so the placeholder is never seen.
+    pub(crate) fn take_phase(&mut self) -> Phase {
+        let placeholder = Phase::Closed {
+            outcome: Outcome::Cancelled,
+        };
+        std::mem::replace(&mut self.phase, placeholder)
+    }
+
     /// Plan first when the Team plans first, and otherwise start work.
     fn on_prepared(self: Box<Self>, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
         let Phase::Active {

@@ -160,13 +160,7 @@ impl TaskView {
     }
 
     fn take_committing(mut self: Box<Self>) -> Result<(Box<TaskView>, AfterCommit), Rejection> {
-        let phase = std::mem::replace(
-            &mut self.phase,
-            Phase::Closed {
-                outcome: crate::facts::Outcome::Cancelled,
-            },
-        );
-        match phase {
+        match self.take_phase() {
             Phase::Active {
                 activity: Activity::Committing { then, .. },
             } => Ok((self, then)),
@@ -405,13 +399,7 @@ impl TaskView {
     // -----------------------------------------------------------------------------------------
 
     fn take_checking(mut self: Box<Self>) -> Result<(Box<TaskView>, Checking), Rejection> {
-        let phase = std::mem::replace(
-            &mut self.phase,
-            Phase::Closed {
-                outcome: crate::facts::Outcome::Cancelled,
-            },
-        );
-        match phase {
+        match self.take_phase() {
             Phase::Active {
                 activity: Activity::Checking { turn, job, report },
             } => Ok((self, Checking { turn, job, report })),

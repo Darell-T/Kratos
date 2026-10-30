@@ -8,8 +8,7 @@
 use kratos_protocol::TurnChanges;
 
 use crate::facts::{
-    ContinuationId, Declined, Ended, FactSeq, HandoffOutcome, MessageId, Outcome, StepId,
-    UnixMillis,
+    ContinuationId, Declined, Ended, FactSeq, HandoffOutcome, MessageId, StepId, UnixMillis,
 };
 use crate::fold::Rejection;
 use crate::members::Role;
@@ -29,13 +28,7 @@ impl TaskView {
         mut self: Box<Self>,
         message: &MessageId,
     ) -> Result<(Box<TaskView>, Turn), Rejection> {
-        let phase = std::mem::replace(
-            &mut self.phase,
-            Phase::Closed {
-                outcome: Outcome::Cancelled,
-            },
-        );
-        match phase {
+        match self.take_phase() {
             Phase::Active {
                 activity: Activity::Turn { turn },
             } if turn.awaits(message) => Ok((self, turn)),
