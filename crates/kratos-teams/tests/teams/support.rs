@@ -18,8 +18,8 @@ use kratos_teams::facts::{
 };
 use kratos_teams::fold::{Rejection, fold};
 use kratos_teams::members::{Bindings, Member, MemberId, Role};
+use kratos_teams::naming::{branch_name, task_title};
 use kratos_teams::next_step::{CheckStep, Step, next_step};
-use kratos_teams::prompts::{branch_name, task_title};
 use kratos_teams::reports::{
     AddedProbe, AnswerDone, Check, FindingId, FindingReport, ImplementerDone, Kind, Location,
     Report, Reported, Response, ResponseOutcome, ReviewDone, Ruling, RulingVerdict, RulingsDone,

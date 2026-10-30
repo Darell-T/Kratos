@@ -1,5 +1,4 @@
-//! Every message an agent receives, and the text Kratos writes from the task, which is the title, the
-//! commit subject, and the branch name. The functions are pure, so the same view and run always give the
+//! Every message an agent receives. The functions are pure, so the same view and run always give the
 //! same text.
 //!
 //! Members never talk to each other. Kratos writes each message from the record, so Kratos alone decides
@@ -18,8 +17,6 @@
 //!
 //! A message never holds the implementer's conversation or summary for the reviewer (D90), the findings
 //! Kratos dropped or listed for the implementer, or the reviewer's conversation for anyone.
-
-use kratos_protocol::Provider;
 
 use crate::evidence::{EVIDENCE_TIMEOUT, MIN_QUOTE_LEN};
 use crate::facts::ProbePolicy;
@@ -89,68 +86,6 @@ fn sections<I: IntoIterator<Item = Option<String>>>(parts: I) -> String {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n\n")
-}
-
-// ---------------------------------------------------------------------------------------------
-// The text Kratos writes from the task.
-// ---------------------------------------------------------------------------------------------
-
-const TITLE_LIMIT: usize = 60;
-
-/// The task's first line, with headings and extra whitespace stripped, at most 60 characters. Kratos
-/// names the task's commits with it, so no agent text reaches a commit. `"Task"` for a blank request.
-pub fn task_title(text: &str) -> String {
-    let first = text
-        .lines()
-        .map(|line| {
-            // A control character in a title would reach the commit subject and the terminal.
-            let printable: String = line
-                .chars()
-                .filter(|c| !c.is_control() || *c == '\t')
-                .collect();
-            printable
-                .trim_start_matches('#')
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .find(|line| !line.is_empty())
-        .unwrap_or_else(|| "Task".to_owned());
-    if first.chars().count() <= TITLE_LIMIT {
-        return first;
-    }
-    let cut: String = first.chars().take(TITLE_LIMIT - 3).collect();
-    format!("{}...", cut.trim_end())
-}
-
-pub fn commit_subject(title: &str, round: u32) -> String {
-    format!("{title} (round {round})")
-}
-
-const SLUG_LIMIT: usize = 40;
-
-/// `codex/add-login`: the implementer's provider, a slash, and a slug of the title (D36). `taken` is the
-/// repository's existing branch names, and a clash gets `-2`, `-3`, and so on.
-pub fn branch_name(provider: Provider, title: &str, taken: &[String]) -> String {
-    let mut slug = String::new();
-    for character in title.chars() {
-        if character.is_ascii_alphanumeric() {
-            slug.push(character.to_ascii_lowercase());
-        } else if !slug.ends_with('-') {
-            slug.push('-');
-        }
-    }
-    let slug: String = slug.chars().take(SLUG_LIMIT).collect();
-    let slug = slug.trim_matches('-');
-    let slug = if slug.is_empty() { "task" } else { slug };
-    let base = format!("{}/{slug}", provider.as_str());
-    if !taken.contains(&base) {
-        return base;
-    }
-    (2..)
-        .map(|n| format!("{base}-{n}"))
-        .find(|candidate| !taken.contains(candidate))
-        .unwrap_or(base)
 }
 
 /// Kratos's own step-back prompt, so the user can send it with one click.

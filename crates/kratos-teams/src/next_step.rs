@@ -10,7 +10,7 @@ use serde::Serialize;
 
 use crate::facts::{Outcome, ProbePolicy, Sha, StepId};
 use crate::members::{Bindings, MemberId};
-use crate::prompts::commit_subject;
+use crate::naming::commit_subject;
 use crate::reports::{AddedProbe, FindingId, FindingReport, Kind, ReviewDone};
 use crate::security_triggers::Trigger;
 use crate::task_plan::ProbeConstraints;
@@ -70,7 +70,7 @@ pub struct CommitStep {
     /// What the standard review of this commit will diff against. Measure the change from there, for
     /// `Committed::size`.
     pub review_base: Sha,
-    /// From `prompts::commit_subject`: the task's first line and the round, with no agent text, so that
+    /// From `naming::commit_subject`: the task's first line and the round, with no agent text, so that
     /// no trailer can appear.
     pub subject: String,
     /// Probes the implementer says it added. The engine runs each before and after the fix and answers

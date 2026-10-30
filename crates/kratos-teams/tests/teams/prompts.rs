@@ -9,10 +9,8 @@ use kratos_teams::decisions::{Decision, PlanChangeResponse};
 use kratos_teams::evidence::{EvidenceCheck, Seen, Start, start_check};
 use kratos_teams::facts::{Depth, Disposition, Ended, Fact, FactSeq, MessageId, StepId};
 use kratos_teams::members::Role;
-use kratos_teams::prompts::{
-    Platform, PromptContext, STEP_BACK_TEXT, Session, branch_name, commit_subject, message,
-    task_title,
-};
+use kratos_teams::naming::{branch_name, commit_subject, task_title};
+use kratos_teams::prompts::{Platform, PromptContext, STEP_BACK_TEXT, Session, message};
 use kratos_teams::reports::{
     FinalReply, Report, ReportKind, Reported, RulingVerdict, parse_report, report_json_schema,
 };
