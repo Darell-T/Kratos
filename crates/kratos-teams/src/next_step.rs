@@ -188,13 +188,11 @@ fn commit_step(view: &TaskView, step: StepId, then: &AfterCommit) -> Step {
 
 fn check_step(view: &TaskView, step: StepId, job: &ReviewJob, report: &ReviewDone) -> Step {
     let is_standard = job.pass.kind() == PassKind::Standard;
-    let candidates = report
-        .findings
-        .iter()
-        .enumerate()
+    let candidates = view
+        .new_finding_ids(report)
         .filter(|(_, report)| report.can_block())
-        .map(|(index, report)| Candidate {
-            id: FindingId::nth(view.findings.len() + index),
+        .map(|(id, report)| Candidate {
+            id,
             report: report.clone(),
         })
         .collect();

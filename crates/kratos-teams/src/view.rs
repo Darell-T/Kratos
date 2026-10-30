@@ -760,6 +760,20 @@ impl TaskView {
         self.findings.iter().filter(|finding| finding.is_open())
     }
 
+    /// The id each of a review's new findings gets, in report order. The evidence check and the fold
+    /// that judges it must agree on which id is which.
+    pub(crate) fn new_finding_ids<'a>(
+        &self,
+        report: &'a ReviewDone,
+    ) -> impl Iterator<Item = (FindingId, &'a FindingReport)> + use<'a> {
+        let first = self.findings.len();
+        report
+            .findings
+            .iter()
+            .enumerate()
+            .map(move |(index, finding)| (FindingId::nth(first + index), finding))
+    }
+
     /// Every text a requirement or constraint quote may come from (D30): the request, the user's
     /// constraints, task requirements and member messages, the approved plan with its conditions and
     /// amendments, and the three rules files.

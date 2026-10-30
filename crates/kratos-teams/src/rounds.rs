@@ -472,8 +472,7 @@ impl TaskView {
     ) -> Result<Judged, Rejection> {
         let round = u32::try_from(self.rounds.len()).unwrap_or(u32::MAX);
         let mut added = Vec::new();
-        for (index, finding) in report.findings.iter().enumerate() {
-            let id = FindingId::nth(self.findings.len() + index);
+        for (id, finding) in self.new_finding_ids(report) {
             added.push(Finding {
                 id,
                 round,
