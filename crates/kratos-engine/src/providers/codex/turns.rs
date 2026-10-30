@@ -12,7 +12,7 @@ use serde_json::json;
 use super::actor::{Actor, Done, MAX_STARTING, Reply};
 use super::profiles::Profile;
 use super::threads::Turn;
-use super::{ProviderError, policy, wire};
+use super::{ProviderError, policy, queue, wire};
 
 /// How long `turn/interrupt` may take to answer.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -328,14 +328,7 @@ impl Actor {
     ) {
         let _ = self
             .write(thread_id, move |write| {
-                write.set_message_status(
-                    &message_id,
-                    MessageStatus::Unknown {
-                        error: error.clone(),
-                    },
-                )?;
-                write.pause(PauseReason::DeliveryUncertain { message_id, error })?;
-                Ok(())
+                queue::mark_uncertain(write, message_id, error)
             })
             .await;
     }

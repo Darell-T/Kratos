@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use kratos_protocol::{
-    ApprovalId, MessageId, MessageStatus, PauseReason, Provider, QuestionId, Seq, ThreadEventBody,
-    ThreadId, TurnChanges, TurnId, TurnOutcome,
+    ApprovalId, MessageId, PauseReason, Provider, QuestionId, Seq, ThreadEventBody, ThreadId,
+    TurnChanges, TurnId, TurnOutcome,
 };
 use kratos_store::{Settle, Store, StoreError, ThreadWrite};
 use tokio::sync::mpsc;
@@ -102,12 +102,7 @@ fn settle(write: &mut ThreadWrite<'_>, work: Unfinished) -> Result<(), StoreErro
         queue::pause_if_waiting(write, PauseReason::Interrupted)?;
     }
     for message_id in work.sending {
-        let error = UNCONFIRMED.to_owned();
-        let status = MessageStatus::Unknown {
-            error: error.clone(),
-        };
-        write.set_message_status(&message_id, status)?;
-        write.pause(PauseReason::DeliveryUncertain { message_id, error })?;
+        queue::mark_uncertain(write, message_id, UNCONFIRMED.to_owned())?;
     }
     Ok(())
 }
