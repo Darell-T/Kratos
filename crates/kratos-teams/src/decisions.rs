@@ -288,10 +288,7 @@ pub(crate) fn apply_decision(
 ) -> Result<Box<TaskView>, Rejection> {
     let kind = decision.kind();
     if !allowed_decisions(&view).contains(&kind) {
-        return Err(Rejection::NotAllowed {
-            decision: kind,
-            phase: view.phase.name(),
-        });
+        return Err(not_allowed(&view, kind));
     }
     let invalid = |reason: &str| Rejection::InvalidDecision {
         decision: kind,
@@ -322,6 +319,13 @@ pub(crate) fn apply_decision(
 
 type Invalid<'a> = &'a dyn Fn(&str) -> Rejection;
 
+fn not_allowed(view: &TaskView, decision: DecisionKind) -> Rejection {
+    Rejection::NotAllowed {
+        decision,
+        phase: view.phase.name(),
+    }
+}
+
 fn not_blank(text: &str, what: &str, invalid: Invalid<'_>) -> Result<(), Rejection> {
     if text.trim().is_empty() {
         return Err(invalid(&format!("{what} must not be blank")));
@@ -344,7 +348,7 @@ fn approve_plan(
         revision,
     } = view.plan.clone()
     else {
-        return Err(view.misfit("approve_plan"));
+        return Err(not_allowed(&view, DecisionKind::ApprovePlan));
     };
     view.plan = PlanState::Approved {
         plan,
@@ -368,7 +372,7 @@ fn revise_plan(
 ) -> Result<Box<TaskView>, Rejection> {
     not_blank(&feedback, "the feedback", invalid)?;
     let PlanState::Drafted { author, .. } = &view.plan else {
-        return Err(view.misfit("revise_plan"));
+        return Err(not_allowed(&view, DecisionKind::RevisePlan));
     };
     let work = Work::Plan {
         author: *author,
@@ -387,7 +391,7 @@ fn answer(
 ) -> Result<Box<TaskView>, Rejection> {
     not_blank(&text, "the answer", invalid)?;
     let Some(question) = view.pending_question() else {
-        return Err(view.misfit("answer"));
+        return Err(not_allowed(&view, DecisionKind::Answer));
     };
     let resolution = Resolution::Answered {
         question: question.text.clone(),
@@ -423,7 +427,7 @@ fn rule(
                     ..
                 },
         } => (disputed.clone(), commit.clone()),
-        _ => return Err(view.misfit("rule")),
+        _ => return Err(not_allowed(&view, DecisionKind::Rule)),
     };
     if let Some(stranger) = not_bug.iter().find(|id| !disputed.contains(id)) {
         return Err(invalid(&format!("{stranger} is not a disputed finding")));
@@ -451,7 +455,7 @@ fn plan_change(
     seq: FactSeq,
 ) -> Result<Box<TaskView>, Rejection> {
     let Some(request) = view.pending_plan_change().cloned() else {
-        return Err(view.misfit("plan_change"));
+        return Err(not_allowed(&view, DecisionKind::PlanChange));
     };
     if response == PlanChangeResponse::Replan {
         return replan(view, &request.reason, instructions, seq);
@@ -527,7 +531,7 @@ fn resume(view: Box<TaskView>, seq: FactSeq) -> Result<Box<TaskView>, Rejection>
         waiting: Waiting::Trouble { left, .. },
     } = view.phase.clone()
     else {
-        return Err(view.misfit("resume"));
+        return Err(not_allowed(&view, DecisionKind::Resume));
     };
     Ok(view.retake(left, seq))
 }
@@ -585,17 +589,17 @@ fn reassign(
     Ok(view)
 }
 
-fn usage_limit_turn(view: &TaskView) -> Result<Turn, Rejection> {
+fn usage_limit_turn(view: &TaskView, decision: DecisionKind) -> Result<Turn, Rejection> {
     match &view.phase {
         Phase::Waiting {
             waiting: Waiting::UsageLimit { turn, .. },
         } => Ok(turn.clone()),
-        _ => Err(view.misfit("a usage-limit decision")),
+        _ => Err(not_allowed(view, decision)),
     }
 }
 
 fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
-    let mut turn = usage_limit_turn(&view)?;
+    let mut turn = usage_limit_turn(&view, DecisionKind::KeepWaiting)?;
     if let Some(Hold::ToScheduler { stop }) = &mut turn.hold {
         stop.user_accepted_wait = true;
     }
@@ -603,7 +607,12 @@ fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
 }
 
 fn handoff(view: Box<TaskView>, approved: bool) -> Result<Box<TaskView>, Rejection> {
-    let mut turn = usage_limit_turn(&view)?;
+    let decision = if approved {
+        DecisionKind::ApproveHandoff
+    } else {
+        DecisionKind::DeclineHandoff
+    };
+    let mut turn = usage_limit_turn(&view, decision)?;
     if let (true, Some(Hold::ToScheduler { stop })) = (approved, turn.hold.clone()) {
         turn.hold = Some(Hold::HandOff { stop });
     }
