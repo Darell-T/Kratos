@@ -13,7 +13,7 @@ use kratos_store::{Enqueued, QueuePlace, Settle, StoreError, ThreadWrite};
 use serde_json::json;
 use uuid::Uuid;
 
-use super::actor::{Actor, Command, Done, Reply};
+use super::actor::{Actor, Command, Deferred, Done, Reply};
 use super::profiles::Profile;
 use super::requests::ApprovalAnswer;
 use super::threads::{Link, Turn};
@@ -24,32 +24,6 @@ use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, queue, wire};
 const CONTINUATION_TEXT: &str = "Continue the task you were working on. You stopped earlier because the usage limit was reached.";
 /// The smallest context window a thread may ask for (D76).
 const MIN_CONTEXT_TOKENS: u64 = 1_000;
-
-impl Command {
-    /// Answers the command with `error`, for a command that cannot run.
-    pub(super) fn fail(self, error: ProviderError) {
-        let message = error.to_string();
-        let again = || ProviderError::Unavailable(message.clone());
-        match self {
-            Command::Send { reply, .. } => drop(reply.send(Err(error))),
-            Command::Steer { reply, .. }
-            | Command::Remove { reply, .. }
-            | Command::Retry { reply, .. }
-            | Command::Discard { reply, .. } => drop(reply.send(Err(again()))),
-            Command::Stop { reply, .. }
-            | Command::Resume { reply, .. }
-            | Command::SetSettings { reply, .. }
-            | Command::CheckSettings { reply, .. }
-            | Command::RefreshUsage { reply } => drop(reply.send(Err(again()))),
-            Command::Continue { reply, .. } => drop(reply.send(Err(again()))),
-            Command::Decide { reply, .. } => drop(reply.send(Err(again()))),
-            Command::Answer { reply, .. } => drop(reply.send(Err(again()))),
-            Command::Skills { reply, .. } => drop(reply.send(Err(again()))),
-            Command::Run { reply, .. } => drop(reply.send(Err(again()))),
-            Command::Shutdown { reply } => drop(reply.send(())),
-        }
-    }
-}
 
 impl Actor {
     // #lizard forgives: one arm per command, each a call.
@@ -139,7 +113,7 @@ impl Actor {
             } => self.run_command(thread_id, command, timeout, reply).await,
             Command::RefreshUsage { reply } => match self.connection() {
                 Ok(Some(codex)) => self.read_usage(codex, Some(reply)),
-                Ok(None) => self.deferred.push(Command::RefreshUsage { reply }),
+                Ok(None) => self.deferred.push(Deferred::RefreshUsage { reply }),
                 Err(error) => drop(reply.send(Err(error))),
             },
             Command::Continue {
@@ -363,7 +337,7 @@ impl Actor {
                 if matches!(thread.link, Link::Attaching) {
                     thread.discards.push((message_id, reply));
                 } else {
-                    self.deferred.push(Command::Discard {
+                    self.deferred.push(Deferred::Discard {
                         thread_id,
                         message_id,
                         reply,
@@ -636,7 +610,7 @@ impl Actor {
         let codex = match self.connection() {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::Skills { thread_id, reply });
+                self.deferred.push(Deferred::Skills { thread_id, reply });
                 return;
             }
             Err(error) => {
@@ -664,7 +638,7 @@ impl Actor {
         let codex = match self.connection() {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::Run {
+                self.deferred.push(Deferred::Run {
                     thread_id,
                     command,
                     timeout,

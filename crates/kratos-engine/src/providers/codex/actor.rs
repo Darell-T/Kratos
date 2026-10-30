@@ -109,6 +109,67 @@ pub(super) enum Command {
     },
 }
 
+/// A command that waits for the app-server to come up, then runs again from the start.
+pub(super) enum Deferred {
+    Discard {
+        thread_id: ThreadId,
+        message_id: MessageId,
+        reply: Reply<Message>,
+    },
+    RefreshUsage {
+        reply: Reply<()>,
+    },
+    Skills {
+        thread_id: ThreadId,
+        reply: Reply<Vec<Skill>>,
+    },
+    Run {
+        thread_id: ThreadId,
+        command: Vec<String>,
+        timeout: Duration,
+        reply: Reply<CommandResult>,
+    },
+}
+
+impl Deferred {
+    /// Answers the command with `error`, for an app-server that did not come up.
+    pub(super) fn fail(self, error: ProviderError) {
+        match self {
+            Deferred::Discard { reply, .. } => drop(reply.send(Err(error))),
+            Deferred::RefreshUsage { reply } => drop(reply.send(Err(error))),
+            Deferred::Skills { reply, .. } => drop(reply.send(Err(error))),
+            Deferred::Run { reply, .. } => drop(reply.send(Err(error))),
+        }
+    }
+
+    pub(super) fn into_command(self) -> Command {
+        match self {
+            Deferred::Discard {
+                thread_id,
+                message_id,
+                reply,
+            } => Command::Discard {
+                thread_id,
+                message_id,
+                reply,
+            },
+            Deferred::RefreshUsage { reply } => Command::RefreshUsage { reply },
+            Deferred::Skills { thread_id, reply } => Command::Skills { thread_id, reply },
+            Deferred::Run {
+                thread_id,
+                command,
+                timeout,
+                reply,
+            } => Command::Run {
+                thread_id,
+                command,
+                timeout,
+                reply,
+            },
+        }
+    }
+}
+
 /// Work the actor started, finished. Each names the thread, turn, or attempt it belongs to, so the
 /// actor can tell a stale one.
 pub(super) enum Done {
@@ -210,8 +271,7 @@ pub(crate) struct Actor {
     /// Threads waiting for a start slot, oldest first.
     pub(super) ready: VecDeque<ThreadId>,
     pub(super) next_attempt: u64,
-    /// Commands that wait for the app-server to come up.
-    pub(super) deferred: Vec<Command>,
+    pub(super) deferred: Vec<Deferred>,
     /// Threads to load once the app-server is up, so its history settles their uncertain messages.
     pub(super) reconcile: Vec<ThreadId>,
     pub(super) done: mpsc::UnboundedSender<Done>,
