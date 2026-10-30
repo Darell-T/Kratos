@@ -168,7 +168,7 @@ impl TaskView {
     pub(crate) fn start(started: &TaskStarted, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
         if [&started.request, &started.title, &started.branch]
             .iter()
-            .any(|text| text.trim().is_empty())
+            .any(|text| crate::is_blank(text))
         {
             return Err(Rejection::InvalidStart(
                 "the request, the title, and the branch must not be blank",

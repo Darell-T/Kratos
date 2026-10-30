@@ -327,7 +327,7 @@ fn not_allowed(view: &TaskView, decision: DecisionKind) -> Rejection {
 }
 
 fn not_blank(text: &str, what: &str, invalid: Invalid<'_>) -> Result<(), Rejection> {
-    if text.trim().is_empty() {
+    if crate::is_blank(text) {
         return Err(invalid(&format!("{what} must not be blank")));
     }
     Ok(())

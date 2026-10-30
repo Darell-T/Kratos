@@ -49,7 +49,7 @@ impl TaskView {
         let Coverage {
             missing, repeated, ..
         } = coverage(&open, responses.iter().map(|r| r.finding));
-        let is_blank_dispute = |response: &Response| matches!(&response.outcome, ResponseOutcome::Disputed { reason } if reason.trim().is_empty());
+        let is_blank_dispute = |response: &Response| matches!(&response.outcome, ResponseOutcome::Disputed { reason } if crate::is_blank(reason));
         let unexplained: Vec<FindingId> = open
             .iter()
             .filter(|id| {

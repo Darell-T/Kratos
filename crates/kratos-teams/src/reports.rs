@@ -480,7 +480,7 @@ fn plan_change<T>(summary: String, ask: AskWire) -> Result<Report<T>, String> {
 }
 
 fn require_text(field: &str, text: &str) -> Result<(), String> {
-    if text.trim().is_empty() {
+    if crate::is_blank(text) {
         return Err(format!("{field}: must not be blank"));
     }
     Ok(())

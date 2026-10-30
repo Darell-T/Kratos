@@ -105,7 +105,7 @@ impl TaskPlan {
         done_means: Vec<String>,
         scope: Vec<ScopePattern>,
     ) -> Result<TaskPlan, PlanProblem> {
-        if build.trim().is_empty() {
+        if crate::is_blank(&build) {
             return Err(PlanProblem::NothingToBuild);
         }
         if done_means.is_empty() {
@@ -113,7 +113,7 @@ impl TaskPlan {
         }
         if done_means
             .iter()
-            .any(|statement| statement.trim().is_empty())
+            .any(|statement| crate::is_blank(statement))
         {
             return Err(PlanProblem::BlankDoneMeans);
         }
