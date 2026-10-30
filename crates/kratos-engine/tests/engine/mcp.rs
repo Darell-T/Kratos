@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use kratos_client::ApiRequest;
+use kratos_client::{ApiRequest, ClientError};
 use kratos_engine::server::ACTING_THREAD_HEADER;
 use kratos_protocol::{Permission, Thread, ThreadSettings, Workspace, WorkspaceId};
 use serde_json::{Value, json};
@@ -378,6 +378,86 @@ fn the_engine_acts_for_a_thread_only_on_another_thread_that_exists() {
             .unwrap();
         assert_eq!(events.body, json!([]), "nothing joined {}", thread.id);
     }
+}
+
+#[test]
+fn a_request_naming_a_thread_reaches_only_the_routes_kratos_s_tools_call() {
+    // Catches a route that runs an agent's request with the user's power because its handler never
+    // reads Kratos-Thread, such as a settings change that raises a thread to Full access, and a
+    // refusal that comes only after the route has acted.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let workspace = workspace(&engine);
+    let agent = thread(&engine, &workspace, "codex", Permission::AskMe);
+    let target = thread(&engine, &workspace, "codex", Permission::AskMe);
+    let target_path = format!("/api/threads/{}", target.id);
+    let send = |body: Value| client.post(&format!("{target_path}/messages"), &body);
+    send(json!({ "text": "work" })).unwrap();
+    engine.fake_codex_held("turn/start", 1);
+    send(json!({ "messageId": "queued", "text": "later" })).unwrap();
+    let other_folder = home.path().join("other");
+    std::fs::create_dir(&other_folder).unwrap();
+    let state = || {
+        let target = client.get(&target_path).unwrap().body;
+        (target, client.get("/api/workspaces").unwrap().body)
+    };
+    let before = state();
+    let queued = format!("{target_path}/messages/queued");
+    let full_access = ThreadSettings {
+        permission: Permission::FullAccess,
+        ..ThreadSettings::default()
+    };
+
+    let reached: Vec<String> = [
+        ("GET", "/api/health".to_owned(), json!(null)),
+        (
+            "POST",
+            "/api/workspaces".to_owned(),
+            json!({ "name": "other", "path": other_folder }),
+        ),
+        ("DELETE", queued.clone(), json!(null)),
+        ("POST", format!("{queued}/steer"), json!(null)),
+        ("POST", format!("{queued}/retry"), json!(null)),
+        ("POST", format!("{queued}/discard"), json!(null)),
+        ("POST", format!("{target_path}/resume"), json!(null)),
+        ("PUT", format!("{target_path}/settings"), json!(full_access)),
+        ("GET", format!("{target_path}/skills"), json!(null)),
+        (
+            "POST",
+            "/api/continuations/any/schedule".to_owned(),
+            json!(null),
+        ),
+        ("GET", "/api/usage".to_owned(), json!(null)),
+    ]
+    .into_iter()
+    .filter_map(|(method, path, body)| {
+        let mut request =
+            ApiRequest::new(method, &path).header(ACTING_THREAD_HEADER, agent.id.as_str());
+        if !body.is_null() {
+            request = request
+                .header("Content-Type", "application/json")
+                .body(body.to_string().into_bytes());
+        }
+        let reply = client.send(&request).unwrap();
+        (reply.status != 403).then(|| format!("{method} {path}: {} {}", reply.status, reply.body))
+    })
+    .collect();
+    let socket = client.connect_events(&[(ACTING_THREAD_HEADER, agent.id.as_str())]);
+
+    assert!(
+        reached.is_empty(),
+        "an agent's request reached {reached:#?}"
+    );
+    assert!(
+        matches!(socket, Err(ClientError::Handshake(403))),
+        "the event socket"
+    );
+    assert_eq!(
+        state(),
+        before,
+        "a refused request changed a thread or the workspaces"
+    );
 }
 
 #[test]

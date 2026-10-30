@@ -1,14 +1,27 @@
 //! Requests a thread's agent makes through Kratos's tools. The `Kratos-Thread` header names that
-//! thread, and a request without it comes from the user. Such a request may give no thread more
-//! access than the acting thread has, and may not act on the acting thread itself.
+//! thread, and a request without it comes from the user. Such a request reaches only the routes the
+//! tools call, may give no thread more access than the acting thread has, and may not act on the
+//! acting thread itself.
 
+use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use kratos_protocol::{AccessLimit, MessageOrigin, ThreadId, ThreadSettings};
 use kratos_store::{ProviderThread, StoreError};
 
 use super::{ApiError, ServerState};
 
 pub const ACTING_THREAD_HEADER: &str = "Kratos-Thread";
+
+/// Answers 403 to a request that names a thread, whatever the header holds, before the route runs.
+pub(super) async fn refuse_agents(request: Request, next: Next) -> Response {
+    if request.headers().contains_key(ACTING_THREAD_HEADER) {
+        return forbidden("Kratos's tools cannot call this route. Only the user can.")
+            .into_response();
+    }
+    next.run(request).await
+}
 
 pub(super) struct Acting(ProviderThread);
 

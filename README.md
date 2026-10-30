@@ -113,10 +113,12 @@ Every Codex thread gets a `kratos` MCP server. Codex starts
 can list workspaces and threads, read a thread, create a thread, send another thread a message labelled with its own
 id, wait for a thread's turn, stop a turn, answer a question, and decide an approval.
 
-The server names the agent's thread in a `Kratos-Thread` header on every request, and the engine checks each one
-against that thread. A thread it creates gets at most its permission, only a Full access thread may decide another
-thread's approval, and no request acts on the agent's own thread. The server runs outside the agent's sandbox, so
-sandboxed commands still cannot read the token.
+The server names the agent's thread in a `Kratos-Thread` header on every request. The engine answers 403 to that
+header on every route the tools do not call, such as a settings change, a steer, or a schedule. A new route stays
+closed to agents until it is added to `agent_routes` in `crates/kratos-engine/src/server/mod.rs`. On the open routes
+the engine checks each request against the agent's thread. A thread it creates gets at most its permission, only a Full access thread may
+decide another thread's approval, and no request acts on the agent's own thread. The server runs outside the agent's
+sandbox, so sandboxed commands still cannot read the token.
 
 A message from another thread runs in a turn of its own. When it starts, the receiving thread's settings drop to the
 narrower of the two threads' permissions, and to plan mode if either thread plans. They stay there after the turn,

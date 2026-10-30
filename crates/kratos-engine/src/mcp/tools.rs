@@ -1,6 +1,7 @@
 //! The tools, as a table: adding a tool is adding a row. A tool answers with JSON text, or with a
 //! refusal that Codex shows the agent as a failed tool call. Every request names the caller's
-//! thread in the `Kratos-Thread` header, and the engine refuses what that thread may not do.
+//! thread in the `Kratos-Thread` header, and the engine refuses what that thread may not do. A tool
+//! reaches only the routes the engine opens to agents, in `server::agent_routes`.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::Ordering;
