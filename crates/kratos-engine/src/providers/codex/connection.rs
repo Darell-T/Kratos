@@ -13,7 +13,6 @@ use kratos_codex_client::{
     Codex, ConnectError, Exit, Incoming, Launch, RequestError, connect, methods, types,
 };
 use kratos_protocol::{MessageStatus, PauseReason, Provider, ThreadId, TurnId, TurnOutcome};
-use kratos_store::{StoreError, ThreadWrite};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -359,8 +358,10 @@ impl Actor {
         if found.is_empty() {
             return Ok(());
         }
-        self.write(thread_id, move |write| settle_from_history(write, found))
-            .await
+        self.write(thread_id, move |write| {
+            queue::settle_from_history(write, found)
+        })
+        .await
     }
 
     /// Codex ended. A turn it was running ended with it; a start it was answering stays uncertain
@@ -466,36 +467,6 @@ fn fail_discards(thread: &mut ThreadState, error: &str) {
     for (_, reply) in std::mem::take(&mut thread.discards) {
         let _ = reply.send(Err(ProviderError::Unavailable(error.to_owned())));
     }
-}
-
-/// Records each found message as accepted by its turn, then lifts a delivery pause once nothing
-/// uncertain is left, or turns it into an interrupted pause while messages wait.
-fn settle_from_history(
-    write: &mut ThreadWrite<'_>,
-    found: Vec<(kratos_protocol::MessageId, TurnId)>,
-) -> Result<(), StoreError> {
-    for (message_id, turn_id) in found {
-        write.set_message_status(&message_id, MessageStatus::Accepted { turn_id })?;
-    }
-    let pending = write.pending_messages()?;
-    let held = pending
-        .iter()
-        .any(|message| queue::holds_queue(&message.status));
-    // Only a delivery pause lifts here; resume_when_settled also lifts a refusal's.
-    let paused_for_delivery = matches!(
-        write.provider_thread()?.paused,
-        Some(PauseReason::DeliveryUncertain { .. })
-    );
-    match (paused_for_delivery && !held, pending.is_empty()) {
-        (false, _) => {}
-        (true, true) => {
-            write.resume()?;
-        }
-        (true, false) => {
-            write.pause(PauseReason::Interrupted)?;
-        }
-    }
-    Ok(())
 }
 
 /// Resumes the Codex thread `native_id`, or starts one in `folder`, with every turn's approvals

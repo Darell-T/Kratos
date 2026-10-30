@@ -1,11 +1,12 @@
-//! A thread's queue of messages: sending, removing, retrying, and discarding them, resuming a
-//! paused queue, and continuing after a usage limit (D11, D39, D85). What holds or pauses the queue
-//! is written inside the write of the step that needs it.
+//! A thread's queue of messages: sending, removing, retrying, and discarding them, settling
+//! uncertain ones from Codex's history, resuming a paused queue, and continuing after a usage limit
+//! (D11, D39, D85). What holds or pauses the queue is written inside the write of the step that
+//! needs it.
 
 use kratos_codex_client::{RequestError, types};
 use kratos_protocol::{
     ContinuationId, ContinuationState, Message, MessageId, MessageInput, MessageOrigin,
-    MessageStatus, PauseReason, RequiredText, ThreadId,
+    MessageStatus, PauseReason, RequiredText, ThreadId, TurnId,
 };
 use kratos_store::{Enqueued, QueuePlace, StoreError, ThreadWrite};
 use uuid::Uuid;
@@ -373,6 +374,34 @@ fn resume_when_settled(write: &mut ThreadWrite<'_>) -> Result<(), StoreError> {
     );
     if paused_by_message && !held {
         write.resume()?;
+    }
+    Ok(())
+}
+
+/// Records each found message as accepted by its turn, then lifts a delivery pause once nothing
+/// uncertain is left, or turns it into an interrupted pause while messages wait.
+pub(super) fn settle_from_history(
+    write: &mut ThreadWrite<'_>,
+    found: Vec<(kratos_protocol::MessageId, TurnId)>,
+) -> Result<(), StoreError> {
+    for (message_id, turn_id) in found {
+        write.set_message_status(&message_id, MessageStatus::Accepted { turn_id })?;
+    }
+    let pending = write.pending_messages()?;
+    let held = pending.iter().any(|message| holds_queue(&message.status));
+    // Only a delivery pause lifts here; resume_when_settled also lifts a refusal's.
+    let paused_for_delivery = matches!(
+        write.provider_thread()?.paused,
+        Some(PauseReason::DeliveryUncertain { .. })
+    );
+    match (paused_for_delivery && !held, pending.is_empty()) {
+        (false, _) => {}
+        (true, true) => {
+            write.resume()?;
+        }
+        (true, false) => {
+            write.pause(PauseReason::Interrupted)?;
+        }
     }
     Ok(())
 }
