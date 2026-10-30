@@ -208,7 +208,9 @@ fn a_closed_task_accepts_no_decision_and_no_result() {
     assert_eq!(kratos_teams::decisions::allowed_decisions(&view), []);
     assert!(view.accepts(&Fact::Prepared).is_err());
     assert!(matches!(
-        kratos_teams::decisions::check_decision(&view, &Decision::Resume),
+        view.accepts(&Fact::UserDecided {
+            decision: Decision::Resume
+        }),
         Err(Rejection::NotAllowed { .. })
     ));
 }

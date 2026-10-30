@@ -2,13 +2,13 @@
 //!
 //! Every scenario builds a `ScriptedTask`, lets it run until the task waits, and asserts on the view
 //! and on the steps it ran. The loop is the one the engine runs, so these tests also prove that the
-//! public interface is enough to drive a task: `fold`, `next_step`, `accepts`, `check_decision`, and the
-//! two-call evidence check. It reads nothing but facts and writes nothing but facts.
+//! public interface is enough to drive a task: `fold`, `next_step`, `accepts`, `allowed_decisions`, and
+//! the two-call evidence check. It reads nothing but facts and writes nothing but facts.
 
 use std::collections::{BTreeMap, VecDeque};
 
 use kratos_protocol::{CommandResult, Permission, Provider, TurnChanges};
-use kratos_teams::decisions::{Decision, allowed_decisions, check_decision};
+use kratos_teams::decisions::{Decision, allowed_decisions};
 use kratos_teams::diff::Diff;
 use kratos_teams::evidence::{Seen, Start, finish_check, rerun, start_check};
 use kratos_teams::facts::{
@@ -276,7 +276,7 @@ impl ScriptedTask {
         }
     }
 
-    /// The user decides. The harness runs the same check the engine runs, then records the fact, then runs the loop.
+    /// The user decides. `append` runs the same check the engine runs and records the fact, then the loop runs.
     pub fn decide(&mut self, decision: Decision) -> Vec<String> {
         let view = self.view();
         assert!(
@@ -285,7 +285,6 @@ impl ScriptedTask {
             decision.kind(),
             view.phase.name()
         );
-        check_decision(&view, &decision).expect("the decision applies");
         self.append(Fact::UserDecided { decision })
             .expect("the decision applies");
         self.run()
@@ -293,8 +292,6 @@ impl ScriptedTask {
 
     /// A decision the user makes while an agent works. The loop does not run afterwards.
     pub fn decide_while_working(&mut self, decision: Decision) {
-        let view = self.view();
-        check_decision(&view, &decision).expect("the decision applies");
         self.append(Fact::UserDecided { decision })
             .expect("the decision applies");
     }

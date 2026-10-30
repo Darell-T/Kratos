@@ -376,12 +376,11 @@ fn an_answer_cannot_be_blank() {
     });
     task.run();
 
-    let refused = kratos_teams::decisions::check_decision(
-        &task.view(),
-        &Decision::Answer {
+    let refused = task.view().accepts(&Fact::UserDecided {
+        decision: Decision::Answer {
             text: "  ".to_owned(),
         },
-    );
+    });
 
     assert!(matches!(refused, Err(Rejection::InvalidDecision { .. })));
 }
@@ -395,12 +394,11 @@ fn an_answer_is_refused_when_no_question_waits() {
     });
     task.run();
 
-    let refused = kratos_teams::decisions::check_decision(
-        &task.view(),
-        &Decision::Answer {
+    let refused = task.view().accepts(&Fact::UserDecided {
+        decision: Decision::Answer {
             text: "Postgres.".to_owned(),
         },
-    );
+    });
 
     assert!(matches!(refused, Err(Rejection::NotAllowed { .. })));
 }

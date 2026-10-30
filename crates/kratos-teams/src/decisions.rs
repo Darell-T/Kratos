@@ -1,8 +1,9 @@
 //! What the user may do, when, and what each choice does to the task.
 //!
-//! `allowed_decisions` is the list the engine shows. `check_decision` is the check it runs when a
-//! decision arrives, and it is a dry run of the real thing, so what is allowed and what applies cannot
-//! drift apart. `apply_decision` is the real thing, which the fold calls for a `UserDecided` fact.
+//! `allowed_decisions` is the list the engine shows. When a decision arrives, the engine checks its
+//! `UserDecided` fact with `TaskView::accepts`, which is a dry run of the real thing, so what is allowed
+//! and what applies cannot drift apart. `apply_decision` is the real thing, which the fold calls for
+//! that fact.
 //!
 //! A cancel is available whenever a task is alive. A role change is available until its application
 //! checkpoint starts. User messages are facts that never change the phase.
@@ -250,12 +251,6 @@ fn probes_offered(view: &TaskView) -> bool {
             .probes
             .iter()
             .any(|probe| probe.status == ProbeStatus::Offered)
-}
-
-/// Whether `decision` would apply right now, which needs the phase to allow it and its content to be
-/// valid. The engine calls this when it records a decision.
-pub fn check_decision(view: &TaskView, decision: &Decision) -> Result<(), Rejection> {
-    apply_decision(Box::new(view.clone()), decision.clone(), view.seq.next()).map(drop)
 }
 
 // ---------------------------------------------------------------------------------------------

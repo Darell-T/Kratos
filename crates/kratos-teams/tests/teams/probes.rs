@@ -3,7 +3,7 @@
 //! implementer adds a probe to the project, and the approval report always lists what was kept and what
 //! was not, with the output that showed each bug.
 
-use kratos_teams::decisions::{Decision, DecisionKind, approval_report, check_decision};
+use kratos_teams::decisions::{Decision, DecisionKind, approval_report};
 use kratos_teams::evidence::ProbeCapture;
 use kratos_teams::facts::{ChangeSize, Ended, Fact, ProbePolicy};
 use kratos_teams::fold::Rejection;
@@ -193,12 +193,11 @@ fn a_pick_must_be_a_probe_the_reviewer_left() {
     ));
     task.run();
 
-    let refused = check_decision(
-        &task.view(),
-        &Decision::KeepProbes {
+    let refused = task.view().accepts(&Fact::UserDecided {
+        decision: Decision::KeepProbes {
             keep: vec!["probes/other.rs".to_owned()],
         },
-    );
+    });
 
     assert!(matches!(refused, Err(Rejection::InvalidDecision { .. })));
 }

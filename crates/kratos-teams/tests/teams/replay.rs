@@ -1,7 +1,7 @@
 //! Reading a finished task, and the check that a restart at any fact continues the same way.
 
 use kratos_teams::decisions::{
-    Decision, DecisionKind, Finish, PlanChangeResponse, allowed_decisions, check_decision,
+    Decision, DecisionKind, Finish, PlanChangeResponse, allowed_decisions,
 };
 use kratos_teams::facts::{Fact, MessageId, StoredFact};
 use kratos_teams::fold::fold;
@@ -197,9 +197,10 @@ pub fn assert_log_replayable(log: &[StoredFact]) {
         assert_eq!(next_step(&restored), next_step(&view));
         for kind in allowed_decisions(&view) {
             let decision = sample_decision(kind, &view);
-            check_decision(&view, &decision).unwrap_or_else(|error| {
-                panic!("{kind} is allowed after fact {n} but refused: {error}")
-            });
+            view.accepts(&Fact::UserDecided { decision })
+                .unwrap_or_else(|error| {
+                    panic!("{kind} is allowed after fact {n} but refused: {error}")
+                });
         }
         if let Some(message) = view.phase.waiting_message() {
             assert!(
