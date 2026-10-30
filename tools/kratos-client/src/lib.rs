@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use kratos_protocol::{Seq, ThreadId};
+use kratos_protocol::{CLIENT_TOKEN_FILE, Seq, ThreadId};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -38,9 +38,6 @@ pub struct Client {
     token_file: Option<PathBuf>,
 }
 
-/// The file in the engine's data directory that holds its client token.
-const TOKEN_FILE: &str = "client-token";
-
 impl Client {
     /// `base_url` is `http://host:port`, for example `http://127.0.0.1:4200`.
     pub fn new(base_url: &str) -> Result<Client, ClientError> {
@@ -61,7 +58,7 @@ impl Client {
     /// a client follows the engine through restarts. Without the file no token goes, as the
     /// TypeScript engine expects.
     pub fn with_token_from(mut self, home: &Path) -> Client {
-        self.token_file = Some(home.join(TOKEN_FILE));
+        self.token_file = Some(home.join(CLIENT_TOKEN_FILE));
         self
     }
 

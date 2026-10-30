@@ -10,7 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kratos_client::{Client, EventSocket, Incoming};
-use kratos_protocol::{Seq, ServerMessage, Thread, ThreadEvent, ThreadId, Workspace};
+use kratos_protocol::{
+    CLIENT_TOKEN_FILE, Seq, ServerMessage, Thread, ThreadEvent, ThreadId, Workspace,
+};
 use serde_json::json;
 
 const ENGINE: &str = env!("CARGO_BIN_EXE_kratos-engine");
@@ -109,7 +111,7 @@ impl RunningEngine {
 
     /// The client token this engine issued at its start.
     pub fn token(&self) -> String {
-        std::fs::read_to_string(self.home.join("client-token")).unwrap()
+        std::fs::read_to_string(self.home.join(CLIENT_TOKEN_FILE)).unwrap()
     }
 
     /// A `test/*` request to the fake Codex this engine started, waiting for it to start. Panics

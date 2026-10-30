@@ -15,7 +15,7 @@ use kratos_client::{
     ApiReply, ApiRequest, Client, ClientError, Followed, Incoming, Normalizer, bench_post,
     bench_turns,
 };
-use kratos_protocol::{Seq, ServerMessage, ThreadId};
+use kratos_protocol::{DEFAULT_HOME_FOLDER, DEFAULT_PORT, HOME_VAR, Seq, ServerMessage, ThreadId};
 use serde_json::{Value, json};
 
 pub const USAGE: &str = "\
@@ -57,7 +57,6 @@ request sends exactly what it is told, for the Host, Origin, and size-cap checks
 socket-send sends one message of exactly <bytes> bytes and reports whether the engine closed
 the socket.";
 
-const DEFAULT_URL: &str = "http://127.0.0.1:4200";
 /// `subscribe` gives up when the engine sends nothing for this long.
 const SUBSCRIBE_WAIT: Duration = Duration::from_secs(60);
 /// `socket-send` waits this long to learn whether the engine closes the socket.
@@ -137,7 +136,7 @@ pub fn run(arguments: &[String]) -> Result<(), Failure> {
         .option("--url")
         .map(str::to_owned)
         .or_else(|| std::env::var("KRATOS_URL").ok())
-        .unwrap_or_else(|| DEFAULT_URL.to_owned());
+        .unwrap_or_else(|| format!("http://127.0.0.1:{DEFAULT_PORT}"));
     let mut session = Session {
         client: with_token(Client::new(&url)?),
         normalizer: args.normalize.then(Normalizer::default),
@@ -389,10 +388,10 @@ fn json_argument(text: &str, name: &str) -> Result<Value, Failure> {
 /// `client` with the token of the engine on `$KRATOS_HOME`, else on `.kratos` in the user's home
 /// folder.
 fn with_token(client: Client) -> Client {
-    let home = std::env::var_os("KRATOS_HOME")
+    let home = std::env::var_os(HOME_VAR)
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::home_dir().map(|home| home.join(".kratos")));
+        .or_else(|| std::env::home_dir().map(|home| home.join(DEFAULT_HOME_FOLDER)));
     match home {
         Some(home) => client.with_token_from(&home),
         None => client,

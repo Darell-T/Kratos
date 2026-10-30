@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kratos_protocol::{
-    AccessLimit, Approval, ApprovalDecision, ApprovalOutcome, AskReason, MessageOrigin, Permission,
-    QuestionOutcome, ThreadEventBody, ThreadSettings,
+    AccessLimit, Approval, ApprovalDecision, ApprovalOutcome, AskReason, CLIENT_TOKEN_FILE,
+    MessageOrigin, Permission, QuestionOutcome, ThreadEventBody, ThreadSettings,
 };
 use serde_json::{Value, json};
 
@@ -175,7 +175,7 @@ async fn a_patch_into_kratos_s_own_folder_reaches_the_user_under_full_access() {
     // protected folder must reach the user whatever the permission (D20).
     let mut harness = Harness::start(with_permission(Permission::FullAccess)).await;
     harness.running_turn("a", "turn-1").await;
-    let target = harness.root.path().join("kratos").join("client-token");
+    let target = harness.root.path().join("kratos").join(CLIENT_TOKEN_FILE);
     harness
         .emit(
             "item/started",
