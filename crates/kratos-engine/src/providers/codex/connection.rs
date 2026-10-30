@@ -255,23 +255,21 @@ impl Actor {
         let Some(codex) = self.connection()? else {
             return Ok(None);
         };
-        let stored = self
+        let native_id = self
             .store
             .call({
                 let thread_id = thread_id.clone();
                 move |store| store.provider_thread(&thread_id)
             })
-            .await?;
+            .await?
+            .native_id;
         let thread = self.threads.get_mut(thread_id).expect("loaded above");
         thread.link = Link::Attaching;
-        let profile = Profile::for_settings(&stored.settings).id().to_owned();
-        let config = thread_config(
-            stored.settings.context_limit_tokens,
-            self.settings.mcp.as_ref(),
-            thread_id,
-        );
+        let profile = Profile::for_settings(&thread.settings).id().to_owned();
+        let context_limit = thread.settings.context_limit_tokens;
+        let config = thread_config(context_limit, self.settings.mcp.as_ref(), thread_id);
+        let (folder, model) = (thread.folder.clone(), thread.settings.model.clone());
         let (thread_id, generation) = (thread_id.clone(), self.generation);
-        let context_limit = stored.settings.context_limit_tokens;
         self.spawn(async move {
             if let Some(native_id) = reload {
                 let params = types::ThreadUnsubscribeParams {
@@ -280,19 +278,12 @@ impl Actor {
                 // A thread Codex already unloaded needs nothing more.
                 let _ = codex.request::<methods::ThreadUnsubscribe>(&params).await;
             }
-            let result = open_thread(
-                &codex,
-                stored.native_id,
-                stored.folder,
-                stored.settings.model,
-                profile,
-                config,
-            )
-            .await
-            .map(|opened| Opened {
-                context_limit,
-                ..opened
-            });
+            let result = open_thread(&codex, native_id, folder, model, profile, config)
+                .await
+                .map(|opened| Opened {
+                    context_limit,
+                    ..opened
+                });
             Done::Attached {
                 thread_id,
                 generation,
