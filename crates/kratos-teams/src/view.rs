@@ -809,13 +809,7 @@ impl TaskView {
             .amendments
             .iter()
             .flat_map(|a| a.instructions.as_deref());
-        let rules = [
-            &self.rules.agents_md,
-            &self.rules.claude_md,
-            &self.rules.review_md,
-        ]
-        .into_iter()
-        .flat_map(|text| text.as_deref());
+        let rules = self.rules.files().into_iter().flat_map(|(_, text)| text);
         std::iter::once(self.request.as_str())
             .chain(self.constraints.iter().map(String::as_str))
             .chain(self.requirements.iter().map(String::as_str))

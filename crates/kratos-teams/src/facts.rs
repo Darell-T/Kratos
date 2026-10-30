@@ -161,6 +161,23 @@ pub struct RulesSnapshot {
     pub review_md: Option<String>,
 }
 
+impl RulesSnapshot {
+    /// The files every member reads as project instructions, by name.
+    pub fn instruction_files(&self) -> [(&'static str, Option<&str>); 2] {
+        [
+            ("AGENTS.md", self.agents_md.as_deref()),
+            ("CLAUDE.md", self.claude_md.as_deref()),
+        ]
+    }
+
+    /// Every rules file, by name. The reviewer reads all of them, and a quote may come from any of them.
+    /// `REVIEW.md` is for the reviewer alone.
+    pub fn files(&self) -> [(&'static str, Option<&str>); 3] {
+        let [agents, claude] = self.instruction_files();
+        [agents, claude, ("REVIEW.md", self.review_md.as_deref())]
+    }
+}
+
 /// Who decides which of the reviewer's probe tests become permanent tests (D78).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

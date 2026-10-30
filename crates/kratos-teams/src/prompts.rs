@@ -218,25 +218,16 @@ fn user_words(view: &TaskView) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn rules_section(heading: &str, files: &[(&str, &Option<String>)]) -> Option<String> {
+fn rules_section(heading: &str, files: &[(&str, Option<&str>)]) -> Option<String> {
     let present: Vec<String> = files
         .iter()
-        .filter_map(|(name, text)| {
-            text.as_deref()
-                .map(|text| format!("## {name}\n\n{}", text.trim()))
-        })
+        .filter_map(|(name, text)| text.map(|text| format!("## {name}\n\n{}", text.trim())))
         .collect();
     (!present.is_empty()).then(|| format!("{heading}\n\n{}", present.join("\n\n")))
 }
 
 fn instructions(view: &TaskView) -> Option<String> {
-    rules_section(
-        "# Project instructions",
-        &[
-            ("AGENTS.md", &view.rules.agents_md),
-            ("CLAUDE.md", &view.rules.claude_md),
-        ],
-    )
+    rules_section("# Project instructions", &view.rules.instruction_files())
 }
 
 /// The approved plan with the conditions the user attached and the amended scope.
@@ -785,14 +776,7 @@ fn review_message(view: &TaskView, job: &ReviewJob, ctx: &PromptContext<'_>) -> 
         outside_scope_text(view),
         Some(what_to_review(view, job, ctx.diff_stat)),
         focus,
-        rules_section(
-            "# Project rules",
-            &[
-                ("AGENTS.md", &view.rules.agents_md),
-                ("CLAUDE.md", &view.rules.claude_md),
-                ("REVIEW.md", &view.rules.review_md),
-            ],
-        ),
+        rules_section("# Project rules", &view.rules.files()),
         is_standard.then(|| open_to_review(view)).flatten(),
         already_reported(view),
         Some(evidence_rules(ctx.platform)),
