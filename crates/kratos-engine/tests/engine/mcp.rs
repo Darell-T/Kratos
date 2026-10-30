@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use kratos_client::{ApiRequest, ClientError};
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, Permission, Thread, ThreadSettings, Workspace, WorkspaceId,
+    ACTING_THREAD_HEADER, Permission, Provider, Thread, ThreadSettings, WorkspaceId,
 };
 use serde_json::{Value, json};
 
@@ -102,22 +102,14 @@ impl Drop for Mcp {
 }
 
 fn workspace(engine: &RunningEngine) -> WorkspaceId {
-    let workspace: Workspace = engine
-        .client()
-        .post(
-            "/api/workspaces",
-            &json!({ "name": "repo", "path": engine.home() }),
-        )
-        .unwrap()
-        .parse()
-        .unwrap();
-    workspace.id
+    let client = engine.client();
+    client.create_workspace("repo", engine.home()).unwrap().id
 }
 
 fn thread(
     engine: &RunningEngine,
     workspace: &WorkspaceId,
-    provider: &str,
+    provider: Provider,
     permission: Permission,
 ) -> Thread {
     let settings = ThreadSettings {
@@ -126,13 +118,7 @@ fn thread(
     };
     engine
         .client()
-        .post(
-            "/api/threads",
-            &json!({ "workspaceId": workspace, "title": "chat", "provider": provider,
-                     "settings": settings }),
-        )
-        .unwrap()
-        .parse()
+        .create_thread(workspace, "chat", provider, Some(settings))
         .unwrap()
 }
 
@@ -144,8 +130,8 @@ fn the_server_lists_kratos_tools_and_speaks_for_its_thread() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let workspace = workspace(&engine);
-    let me = thread(&engine, &workspace, "claude", Permission::AskMe);
-    let other = thread(&engine, &workspace, "claude", Permission::AskMe);
+    let me = thread(&engine, &workspace, Provider::Claude, Permission::AskMe);
+    let other = thread(&engine, &workspace, Provider::Claude, Permission::AskMe);
     let mut mcp = Mcp::start(&engine, &me);
 
     let tools = mcp.request("tools/list", json!({}));
@@ -201,8 +187,8 @@ fn a_long_wait_holds_up_no_other_call_and_ends_when_codex_cancels_it() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let workspace = workspace(&engine);
-    let me = thread(&engine, &workspace, "codex", Permission::AskMe);
-    let busy = thread(&engine, &workspace, "codex", Permission::AskMe);
+    let me = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    let busy = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
     engine
         .client()
         .post(
@@ -245,8 +231,13 @@ fn an_agent_messages_another_thread_under_its_own_name_but_never_itself() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let workspace = workspace(&engine);
-    let sender = thread(&engine, &workspace, "codex", Permission::ApproveForMe);
-    let receiver = thread(&engine, &workspace, "codex", Permission::FullAccess);
+    let sender = thread(
+        &engine,
+        &workspace,
+        Provider::Codex,
+        Permission::ApproveForMe,
+    );
+    let receiver = thread(&engine, &workspace, Provider::Codex, Permission::FullAccess);
     let mut mcp = Mcp::start(&engine, &sender);
 
     let (sent, refused) = mcp.tool(
@@ -306,8 +297,13 @@ fn a_thread_another_thread_lowered_cannot_create_its_way_back_to_full_access() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let workspace = workspace(&engine);
-    let sender = thread(&engine, &workspace, "codex", Permission::ApproveForMe);
-    let receiver = thread(&engine, &workspace, "codex", Permission::FullAccess);
+    let sender = thread(
+        &engine,
+        &workspace,
+        Provider::Codex,
+        Permission::ApproveForMe,
+    );
+    let receiver = thread(&engine, &workspace, Provider::Codex, Permission::FullAccess);
 
     let (sent, refused) = Mcp::start(&engine, &sender).tool(
         "send_message",
@@ -339,8 +335,8 @@ fn the_engine_acts_for_a_thread_only_on_another_thread_that_exists() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let workspace = workspace(&engine);
-    let receiver = thread(&engine, &workspace, "codex", Permission::AskMe);
-    let log_only = thread(&engine, &workspace, "claude", Permission::AskMe);
+    let receiver = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    let log_only = thread(&engine, &workspace, Provider::Claude, Permission::AskMe);
     let messages = |thread: &Thread| format!("/api/threads/{}/messages", thread.id);
 
     for (path, acting, status, reason) in [
@@ -390,8 +386,8 @@ fn a_request_naming_a_thread_reaches_only_the_routes_kratos_s_tools_call() {
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
     let workspace = workspace(&engine);
-    let agent = thread(&engine, &workspace, "codex", Permission::AskMe);
-    let target = thread(&engine, &workspace, "codex", Permission::AskMe);
+    let agent = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    let target = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
     let target_path = format!("/api/threads/{}", target.id);
     let send = |body: Value| client.post(&format!("{target_path}/messages"), &body);
     send(json!({ "text": "work" })).unwrap();
@@ -468,7 +464,7 @@ fn a_new_thread_never_gets_more_permission_than_the_agent_that_creates_it() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let workspace = workspace(&engine);
-    let creator = thread(&engine, &workspace, "codex", Permission::AskMe);
+    let creator = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
     let mut mcp = Mcp::start(&engine, &creator);
 
     let (wider, refused) = mcp.tool(
@@ -496,9 +492,9 @@ fn only_a_full_access_agent_decides_another_thread_s_approval() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let workspace = workspace(&engine);
-    let worker = thread(&engine, &workspace, "codex", Permission::FullAccess);
-    let asker = thread(&engine, &workspace, "codex", Permission::AskMe);
-    let boss = thread(&engine, &workspace, "codex", Permission::FullAccess);
+    let worker = thread(&engine, &workspace, Provider::Codex, Permission::FullAccess);
+    let asker = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    let boss = thread(&engine, &workspace, Provider::Codex, Permission::FullAccess);
     engine
         .client()
         .post(

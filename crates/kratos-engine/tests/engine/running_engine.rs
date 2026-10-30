@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use kratos_client::{Client, EventSocket, Incoming};
 use kratos_protocol::{
-    CLIENT_TOKEN_FILE, Seq, ServerMessage, Thread, ThreadEvent, ThreadId, Workspace,
+    CLIENT_TOKEN_FILE, Provider, Seq, ServerMessage, Thread, ThreadEvent, ThreadId,
 };
 use serde_json::json;
 
@@ -190,20 +190,11 @@ impl RunningEngine {
     }
 
     /// Creates a workspace on the engine's home and a thread of `provider` in it.
-    pub fn create_thread_of(&self, provider: &str) -> Thread {
+    pub fn create_thread_of(&self, provider: Provider) -> Thread {
         let client = self.client();
-        let workspace_body = json!({ "name": "repo", "path": self.home });
-        let workspace: Workspace = client
-            .post("/api/workspaces", &workspace_body)
-            .unwrap()
-            .parse()
-            .unwrap();
-        let thread_body =
-            json!({ "workspaceId": workspace.id, "title": "chat", "provider": provider });
+        let workspace = client.create_workspace("repo", &self.home).unwrap();
         client
-            .post("/api/threads", &thread_body)
-            .unwrap()
-            .parse()
+            .create_thread(&workspace.id, "chat", provider, None)
             .unwrap()
     }
 
@@ -220,7 +211,7 @@ impl RunningEngine {
     /// Creates a workspace on the engine's home, which is an existing absolute folder, and a
     /// Claude thread in it, which keeps R2's plain message log.
     pub fn create_thread(&self) -> Thread {
-        self.create_thread_of("claude")
+        self.create_thread_of(Provider::Claude)
     }
 
     /// Ends the process abruptly, as a crash would, and waits for it to exit.

@@ -3,7 +3,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_protocol::{Seq, ServerMessage, Thread, ThreadEvent, ThreadId, Workspace, routes};
+use kratos_protocol::{Provider, Seq, ServerMessage, ThreadEvent, ThreadId, routes};
 use serde::Serialize;
 use serde_json::json;
 
@@ -46,13 +46,9 @@ pub fn bench_post(client: &Client, messages: NonZeroUsize) -> Result<BenchReport
 }
 
 fn create_thread(client: &Client) -> Result<ThreadId, ClientError> {
-    let temp_folder = std::env::temp_dir().to_string_lossy().into_owned();
-    let workspace_body = json!({ "name": "bench", "path": temp_folder });
-    let workspace: Workspace = client.post(routes::WORKSPACES, &workspace_body)?.parse()?;
+    let workspace = client.create_workspace("bench", &std::env::temp_dir())?;
     // A Claude thread keeps R2's plain message log, the path this probe measures.
-    let thread_body =
-        json!({ "workspaceId": workspace.id, "title": "bench", "provider": "claude" });
-    let thread: Thread = client.post(routes::THREADS, &thread_body)?.parse()?;
+    let thread = client.create_thread(&workspace.id, "bench", Provider::Claude, None)?;
     Ok(thread.id)
 }
 

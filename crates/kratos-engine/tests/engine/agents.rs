@@ -2,7 +2,7 @@
 //! reply streams live, an approval decided over HTTP, and the account's usage.
 
 use kratos_client::{ApiRequest, Client, ClientError};
-use kratos_protocol::{LiveUpdate, ServerMessage, Thread, ThreadEventBody};
+use kratos_protocol::{LiveUpdate, Provider, ServerMessage, Thread, ThreadEventBody};
 use serde_json::{Value, json};
 
 use crate::running_engine::{RunningEngine, next_text, subscribed};
@@ -92,7 +92,7 @@ fn a_codex_message_streams_its_reply_live_and_its_end_reaches_the_log() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
-    let thread = engine.create_thread_of("codex");
+    let thread = engine.create_thread_of(Provider::Codex);
     let mut socket = subscribed(&engine, &thread.id, 0);
 
     let sent = client
@@ -160,7 +160,7 @@ fn an_approval_reaches_the_socket_and_the_decision_sent_over_http_reaches_codex(
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
-    let thread = engine.create_thread_of("codex");
+    let thread = engine.create_thread_of(Provider::Codex);
     let mut socket = subscribed(&engine, &thread.id, 0);
     client
         .post(&messages_path(&thread), &json!({ "text": "list files" }))
@@ -241,7 +241,7 @@ fn skills_come_from_codex_and_the_missing_slash_commands_say_why() {
     // should be (D97).
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
-    let thread = engine.create_thread_of("codex");
+    let thread = engine.create_thread_of(Provider::Codex);
 
     let skills = engine
         .client()
@@ -265,8 +265,8 @@ fn without_codex_a_codex_thread_answers_503_and_other_threads_still_work() {
     let missing = home.path().join("no-codex-here");
     let engine = RunningEngine::start_with_codex(home.path(), &missing);
     let client = engine.client();
-    let codex = engine.create_thread_of("codex");
-    let claude = engine.create_thread_of("claude");
+    let codex = engine.create_thread_of(Provider::Codex);
+    let claude = engine.create_thread_of(Provider::Claude);
 
     let refused = client
         .post(&messages_path(&codex), &json!({ "text": "hello" }))
@@ -294,14 +294,7 @@ fn a_new_codex_thread_s_settings_meet_the_checks_a_settings_change_meets() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
-    let workspace = client
-        .post(
-            "/api/workspaces",
-            &json!({ "name": "repo", "path": home.path() }),
-        )
-        .unwrap()
-        .body["id"]
-        .clone();
+    let workspace = client.create_workspace("repo", home.path()).unwrap().id;
     let create = |settings: Value| {
         client
             .post(
@@ -324,10 +317,7 @@ fn a_new_codex_thread_s_settings_meet_the_checks_a_settings_change_meets() {
     assert_eq!(blank_model.status, 400, "{}", blank_model.body);
     assert_eq!(plain.status, 201, "{}", plain.body);
     let threads = client
-        .get(&format!(
-            "/api/threads?workspaceId={}",
-            workspace.as_str().unwrap()
-        ))
+        .get(&format!("/api/threads?workspaceId={}", workspace.as_str()))
         .unwrap();
     assert_eq!(
         threads.body.as_array().unwrap().len(),
@@ -343,7 +333,7 @@ fn a_message_id_sent_again_with_another_message_answers_409() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
-    let thread = engine.create_thread_of("codex");
+    let thread = engine.create_thread_of(Provider::Codex);
     let send = |body: Value| client.post(&messages_path(&thread), &body).unwrap();
 
     let first = send(json!({ "messageId": "same", "text": "first instruction" }));
@@ -374,7 +364,7 @@ fn a_full_queue_answers_429_and_stores_nothing() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
-    let thread = engine.create_thread_of("codex");
+    let thread = engine.create_thread_of(Provider::Codex);
     for n in 0..10 {
         let sent = client
             .post(

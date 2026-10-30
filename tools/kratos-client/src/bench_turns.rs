@@ -5,9 +5,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_protocol::{
-    Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome, Workspace, routes,
-};
+use kratos_protocol::{Provider, Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome, routes};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -58,17 +56,11 @@ pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchRepo
 }
 
 fn create_threads(client: &Client) -> Result<Vec<Thread>, ClientError> {
-    let workspace: Workspace = client
-        .post(
-            routes::WORKSPACES,
-            &json!({ "name": "turn benchmark", "path": std::env::temp_dir() }),
-        )?
-        .parse()?;
+    let workspace = client.create_workspace("turn benchmark", &std::env::temp_dir())?;
     (0..THREADS)
         .map(|number| {
-            client.post(routes::THREADS, &json!({
-                "workspaceId": workspace.id, "title": format!("bench {number}"), "provider": "codex"
-            }))?.parse()
+            let title = format!("bench {number}");
+            client.create_thread(&workspace.id, &title, Provider::Codex, None)
         })
         .collect()
 }

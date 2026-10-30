@@ -14,9 +14,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use kratos_protocol::{ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, Seq, ThreadId};
+use kratos_protocol::{
+    ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, Provider, Seq, Thread, ThreadId, ThreadSettings,
+    Workspace, WorkspaceId, routes,
+};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::json;
 
 pub use bench::{BenchReport, bench_post};
 pub use bench_turns::{TurnBenchReport, bench_turns};
@@ -91,6 +95,28 @@ impl Client {
     /// PUTs `body` as JSON.
     pub fn put<T: Serialize>(&self, path: &str, body: &T) -> Result<ApiReply, ClientError> {
         self.send(&ApiRequest::json("PUT", path, body))
+    }
+
+    /// Registers the existing absolute folder `path` as a workspace named `name`.
+    pub fn create_workspace(&self, name: &str, path: &Path) -> Result<Workspace, ClientError> {
+        let body = json!({ "name": name, "path": path.to_string_lossy() });
+        self.post(routes::WORKSPACES, &body)?.parse()
+    }
+
+    /// Creates a thread of `provider` in workspace `workspace_id`. `None` settings are the engine's
+    /// defaults.
+    pub fn create_thread(
+        &self,
+        workspace_id: &WorkspaceId,
+        title: &str,
+        provider: Provider,
+        settings: Option<ThreadSettings>,
+    ) -> Result<Thread, ClientError> {
+        let mut body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
+        if let Some(settings) = settings {
+            body["settings"] = json!(settings);
+        }
+        self.post(routes::THREADS, &body)?.parse()
     }
 
     /// Sends `request` over a new HTTP/1.1 connection and reads the whole reply. The request goes
