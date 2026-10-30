@@ -15,8 +15,8 @@ use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
-use super::ApiError;
 use super::json::discard;
+use super::{ApiError, HEALTH_PATH};
 
 /// The file in the data directory that holds the token.
 pub const TOKEN_FILE: &str = "client-token";
@@ -86,7 +86,7 @@ pub(super) async fn require_client_token(
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "));
-    let is_health = request.uri().path() == "/api/health";
+    let is_health = request.uri().path() == HEALTH_PATH;
     if is_health || presented.is_some_and(|presented| token.matches(presented)) {
         return next.run(request).await;
     }

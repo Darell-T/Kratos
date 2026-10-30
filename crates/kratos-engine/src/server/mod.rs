@@ -40,6 +40,11 @@ pub const MAX_SOCKET_MESSAGE_BYTES: usize = 64 * 1024;
 /// process open beyond this drain period.
 const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The one route that needs no client token.
+const HEALTH_PATH: &str = "/api/health";
+/// The event socket, whose upgrade path is never normalized.
+const EVENTS_PATH: &str = "/api/events";
+
 #[derive(Clone)]
 pub struct ServerState {
     pub store: StoreThread,
@@ -121,7 +126,7 @@ fn agent_routes() -> Router<ServerState> {
 /// stays closed to agents until it moves to [`agent_routes`].
 fn user_routes() -> Router<ServerState> {
     Router::new()
-        .route("/api/health", get(routes::health))
+        .route(HEALTH_PATH, get(routes::health))
         .route("/api/workspaces", post(routes::create_workspace))
         .route(
             "/api/threads/{id}/messages/{message_id}",
@@ -144,7 +149,7 @@ fn user_routes() -> Router<ServerState> {
         .route("/api/threads/{id}/skills", get(agents::skills))
         .route("/api/continuations/{id}/schedule", post(agents::schedule))
         .route("/api/usage", get(agents::usage))
-        .route("/api/events", get(socket::events))
+        .route(EVENTS_PATH, get(socket::events))
 }
 
 #[derive(Debug)]

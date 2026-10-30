@@ -3,6 +3,8 @@ use axum::http::Uri;
 use axum::middleware::Next;
 use axum::response::Response;
 
+use super::EVENTS_PATH;
+
 /// TypeScript HTTP routes ignore empty segments after checking the `/api/` prefix. Its socket
 /// upgrade handler requires exactly `/api/events`, so that endpoint keeps its original spelling.
 pub(super) async fn normalize_http_api_path(mut request: Request, next: Next) -> Response {
@@ -15,7 +17,7 @@ pub(super) async fn normalize_http_api_path(mut request: Request, next: Next) ->
                 .collect::<Vec<_>>()
                 .join("/")
         );
-        if normalized != "/api/events" {
+        if normalized != EVENTS_PATH {
             let path_and_query = match request.uri().query() {
                 Some(query) => format!("{normalized}?{query}"),
                 None => normalized,
