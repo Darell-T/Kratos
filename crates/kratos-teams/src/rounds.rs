@@ -7,18 +7,17 @@
 use std::collections::BTreeMap;
 
 use crate::evidence::{EvidenceCheck, Rerun, RerunVerdict};
-use crate::facts::{ChangeSize, Depth, EvidenceChecked, FactSeq, ProbePolicy, ProbeRun, Sha};
+use crate::facts::{ChangeSize, Depth, EvidenceChecked, FactSeq, ProbeRun, Sha};
 use crate::fold::Rejection;
 use crate::reports::{
-    AddedProbe, FindingId, FindingReport, ImplementerDone, Kind, Response, ResponseOutcome,
-    ReviewDone, RulingVerdict, RulingsDone, Severity, Verdict,
+    FindingId, FindingReport, ImplementerDone, Kind, Response, ResponseOutcome, ReviewDone,
+    RulingVerdict, RulingsDone, Severity, Verdict,
 };
 use crate::security_triggers::MAX_HITS;
-use crate::task_plan::{CopyProblem, probe_copy_problem};
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, ClosedHow, FIX_ATTEMPTS, Finding,
-    FindingStatus, FindingsPause, ListedWhy, Note, Pass, PassKind, Phase, Probe, ProbeRejection,
-    ProbeStatus, Review, ReviewJob, Round, RulingRecord, TaskView, Turn, Waiting, Work,
+    FindingStatus, FindingsPause, ListedWhy, Note, Pass, PassKind, Phase, Review, ReviewJob, Round,
+    RulingRecord, TaskView, Turn, Waiting, Work,
 };
 
 /// A report of the reviewer, taken out of the view for checking.
@@ -76,48 +75,6 @@ impl TaskView {
             (!unexplained.is_empty())
                 .then(|| format!("Give a reason for each dispute: {}.", id_list(&unexplained))),
         ])
-    }
-
-    /// `None` when the probes an implementer added are ones it may add, and name probes the reviewer
-    /// left. Only the implementer adds a probe to the project, and only when the user chose it or
-    /// delegated the choice (D78).
-    pub(crate) fn probes_problem(&self, work: &Work, done: &ImplementerDone) -> Option<String> {
-        let picks = match work {
-            Work::Implement {
-                brief: Brief::KeepProbes { paths },
-            } => Some(paths),
-            _ => None,
-        };
-        let delegated = matches!(self.policy.probes, ProbePolicy::Delegated { .. });
-        let added: Vec<&str> = done.added_probes.iter().map(|p| p.from.as_str()).collect();
-        if picks.is_none() && !delegated {
-            return (!added.is_empty())
-                .then(|| "added_probes: you may not add probes now. Leave it empty.".to_owned());
-        }
-        if let Some(unknown) = added.iter().find(|from| !self.offers_probe(from)) {
-            return Some(format!(
-                "added_probes: {unknown} is not a probe the reviewer left."
-            ));
-        }
-        let missing: Vec<&str> = picks
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .filter(|path| !added.contains(path))
-            .collect();
-        (!missing.is_empty()).then(|| {
-            format!(
-                "added_probes: add each probe the user chose. Missing: {}.",
-                missing.join(", ")
-            )
-        })
-    }
-
-    /// Whether `path` is a probe the reviewer left that still waits for a choice.
-    pub(crate) fn offers_probe(&self, path: &str) -> bool {
-        self.probes
-            .iter()
-            .any(|probe| probe.path == path && probe.status == ProbeStatus::Offered)
     }
 
     // -----------------------------------------------------------------------------------------
@@ -225,63 +182,6 @@ impl TaskView {
         self.begin_step(Work::Review { job }, seq)
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Probes.
-    // -----------------------------------------------------------------------------------------
-
-    /// Decides the fate of each probe the implementer added. Git showed whether it fails before the fix
-    /// and passes after it. The constraints are the user's, and the rules apply them here, so the
-    /// engine cannot keep a probe the user refused.
-    fn apply_probe_runs(
-        &mut self,
-        added: &[AddedProbe],
-        runs: &[ProbeRun],
-    ) -> Result<(), Rejection> {
-        for probe in added {
-            let Some(run) = runs.iter().find(|run| run.from == probe.from) else {
-                return Err(Rejection::InvalidFact(format!(
-                    "committed has no probe run for {}",
-                    probe.from
-                )));
-            };
-            let status = self.judge_added_probe(probe, run);
-            if let Some(entry) = self.probes.iter_mut().find(|p| p.path == probe.from) {
-                entry.status = status;
-            }
-        }
-        Ok(())
-    }
-
-    fn judge_added_probe(&self, probe: &AddedProbe, run: &ProbeRun) -> ProbeStatus {
-        let ProbePolicy::Delegated { constraints } = &self.policy.probes else {
-            return Self::probe_by_run(probe, run);
-        };
-        match probe_copy_problem(constraints, &self.scope(), &probe.to) {
-            Some(CopyProblem::OutsideAllowedPaths) => ProbeStatus::Rejected {
-                reason: ProbeRejection::OutsideAllowedPaths,
-            },
-            Some(CopyProblem::OutsideScope) => ProbeStatus::Rejected {
-                reason: ProbeRejection::OutsideScope,
-            },
-            None => Self::probe_by_run(probe, run),
-        }
-    }
-
-    /// A kept probe must fail before the fix and pass after it.
-    fn probe_by_run(probe: &AddedProbe, run: &ProbeRun) -> ProbeStatus {
-        let reason = if !run.failed_before_fix {
-            ProbeRejection::PassedBeforeTheFix
-        } else if !run.passed_after_fix {
-            ProbeRejection::FailedAfterTheFix
-        } else {
-            return ProbeStatus::Retained {
-                as_path: probe.to.clone(),
-                evidence: run.evidence.clone(),
-            };
-        };
-        ProbeStatus::Rejected { reason }
-    }
-
     /// Approval covers one commit.
     pub(crate) fn enter_approved(
         mut self: Box<Self>,
@@ -290,49 +190,6 @@ impl TaskView {
     ) -> Box<TaskView> {
         self.reject_unadded_probes();
         self.waiting(Waiting::Approved { commit, by })
-    }
-
-    /// Probes nobody added are rejected at approval when the user delegated the choice, so the
-    /// approval always lists what was kept and what was not.
-    fn reject_unadded_probes(&mut self) {
-        if matches!(self.policy.probes, ProbePolicy::Delegated { .. }) {
-            for probe in &mut self.probes {
-                if probe.status == ProbeStatus::Offered {
-                    probe.status = ProbeStatus::Rejected {
-                        reason: ProbeRejection::NotAdded,
-                    };
-                }
-            }
-        }
-    }
-
-    fn merge_probes(&mut self, checked: &EvidenceChecked, added: &[Finding]) {
-        for capture in &checked.probes {
-            let finding = added
-                .iter()
-                .find(|f| f.report.probes.contains(&capture.path));
-            let showed = finding.and_then(|f| match checked.checks.get(&f.id) {
-                Some(EvidenceCheck::Confirmed { output, .. }) => output.clone(),
-                _ => None,
-            });
-            let entry = Probe {
-                path: capture.path.clone(),
-                content: capture.content.clone(),
-                truncated: capture.truncated,
-                finding: finding.map(|f| f.id),
-                showed,
-                status: ProbeStatus::Offered,
-            };
-            match self.probes.iter_mut().find(|p| p.path == capture.path) {
-                Some(existing) => {
-                    existing.content = entry.content;
-                    existing.truncated = entry.truncated;
-                    existing.finding = existing.finding.or(entry.finding);
-                    existing.showed = existing.showed.take().or(entry.showed);
-                }
-                None => self.probes.push(entry),
-            }
-        }
     }
 
     // -----------------------------------------------------------------------------------------

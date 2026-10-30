@@ -4,8 +4,8 @@
 //! (`Active`), the user must decide (`Waiting`), or the task is ending (`Closing`, `Closed`). Only
 //! `Waiting` needs the user, and it names exactly what the user is asked.
 //!
-//! Folding lives in `fold.rs`, `turns.rs`, `rounds.rs`, `user_messages.rs`, and `decisions.rs`. This file is
-//! the data they build, plus the questions the other modules ask of it.
+//! Folding lives in `fold.rs`, `turns.rs`, `rounds.rs`, `probes.rs`, `user_messages.rs`, and
+//! `decisions.rs`. This file is the data they build, plus the questions the other modules ask of it.
 
 use std::collections::{BTreeMap, BTreeSet};
 

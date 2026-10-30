@@ -161,35 +161,6 @@ pub struct ProbeConstraints {
     pub note: String,
 }
 
-/// Why a probe copy breaks the user's constraints. The git half of the check, that the probe fails
-/// before the fix and passes after, is the engine's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CopyProblem {
-    /// The path is not inside the repository, or not under one of the user's test paths.
-    OutsideAllowedPaths,
-    OutsideScope,
-}
-
-/// Whether the implementer may keep a probe at `to`: under one of the user's test paths and inside
-/// the agreed scope. A pure path rule, so the engine cannot apply it more loosely than the user wrote it.
-pub fn probe_copy_problem(
-    constraints: &ProbeConstraints,
-    scope: &Scope,
-    to: &str,
-) -> Option<CopyProblem> {
-    // A glob matches text, so `tests/../../x` would match `tests/**` without this check.
-    let allowed = RepoPath::parse(to).is_ok_and(|path| {
-        constraints
-            .test_paths
-            .iter()
-            .any(|pattern| pattern.covers(path.as_str()))
-    });
-    if !allowed {
-        return Some(CopyProblem::OutsideAllowedPaths);
-    }
-    (!scope.covers(to)).then_some(CopyProblem::OutsideScope)
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeSource {

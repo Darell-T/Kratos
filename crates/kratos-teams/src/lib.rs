@@ -44,6 +44,7 @@ pub mod task_plan;
 pub mod view;
 
 // These add methods to `TaskView`. They have nothing to export.
+mod probes;
 mod rounds;
 mod turns;
 mod user_messages;
