@@ -8,6 +8,7 @@ use std::time::Duration;
 use kratos_codex_client::types::{ClientInfo, InitializeCapabilities};
 use kratos_codex_client::{
     Codex, ConnectError, Incoming, Launch, Notification, RequestError, ServerRequest, connect,
+    methods,
 };
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -76,13 +77,15 @@ fn question(thread_id: &str) -> Value {
 }
 
 #[tokio::test]
-async fn completes_the_handshake_and_exposes_the_initialize_result() {
+async fn completes_the_handshake_before_returning_the_handle() {
+    // Catches a handle returned before the `initialized` notification, which the fake, like Codex,
+    // requires before it serves any other request.
     let (codex, _incoming) = connect_fake().await;
 
-    let info = codex.info();
-    assert_eq!(info.user_agent, "kratos-test/9.9.9 (fake codex)");
-    assert_eq!(*info.codex_home, "C:\\fake\\.codex");
-    assert_eq!(info.platform_family, "windows");
+    codex
+        .request::<methods::WindowsSandboxReadiness>(&())
+        .await
+        .unwrap();
     codex.close().await;
 }
 
