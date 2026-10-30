@@ -219,10 +219,7 @@ impl TaskView {
         let job = ReviewJob {
             pass: Pass::Standard,
             commit,
-            diff_base: self
-                .last_reviewed
-                .clone()
-                .unwrap_or_else(|| self.base.clone()),
+            diff_base: self.standard_review_base().clone(),
             depth: if thorough {
                 Depth::Thorough
             } else {

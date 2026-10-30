@@ -852,6 +852,12 @@ impl TaskView {
         self.rounds.last().map_or(&self.base, |round| &round.commit)
     }
 
+    /// What the next standard review diffs against. It is the last commit a standard review judged, or
+    /// the base. The engine measures the change from here, so review depth matches what the reviewer reads.
+    pub fn standard_review_base(&self) -> &Sha {
+        self.last_reviewed.as_ref().unwrap_or(&self.base)
+    }
+
     pub fn is_user_decides_probes(&self) -> bool {
         matches!(self.policy.probes, ProbePolicy::UserDecides)
     }

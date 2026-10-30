@@ -97,8 +97,9 @@ pub struct Candidate {
 pub struct CheckStep {
     pub step: StepId,
     pub commit: Sha,
-    /// The commit the lines of a finding must fall inside the diff of. `None` in the first standard
-    /// review, where every confirmed finding counts as inside. The other passes diff from the base.
+    /// The commit the lines of a finding must fall inside the diff of, which is the one the reviewer
+    /// diffed against. `None` in the first standard review, where every confirmed finding counts as
+    /// inside.
     pub ranges_base: Option<Sha>,
     /// New findings, each to run through `evidence::start_check`. A nit, a pre-existing problem, or a
     /// design opinion comes back from `start_check` as nothing to check.
@@ -175,10 +176,7 @@ fn commit_step(view: &TaskView, step: StepId, then: &AfterCommit) -> Step {
             step,
             round,
             since: view.head().clone(),
-            review_base: view
-                .last_reviewed
-                .clone()
-                .unwrap_or_else(|| view.base.clone()),
+            review_base: view.standard_review_base().clone(),
             subject: commit_subject(&view.title, round),
             added_probes,
             constraints,
@@ -205,11 +203,8 @@ fn check_step(view: &TaskView, step: StepId, job: &ReviewJob, report: &ReviewDon
         triggers: view.triggers.clone(),
         base: view.base.clone(),
     });
-    let ranges_base = if is_standard {
-        view.last_reviewed.clone()
-    } else {
-        Some(view.base.clone())
-    };
+    let is_first_standard = is_standard && view.last_reviewed.is_none();
+    let ranges_base = (!is_first_standard).then(|| job.diff_base.clone());
     Step::Check {
         check: Box::new(CheckStep {
             step,
