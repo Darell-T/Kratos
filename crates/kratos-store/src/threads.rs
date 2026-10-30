@@ -40,7 +40,7 @@ impl Store {
             created_at: now.clone(),
             updated_at: now,
         };
-        let settings = request.settings.clone().unwrap_or_default();
+        let settings = request.settings_or_default();
         // One statement, so the workspace cannot go missing between the check and the insert.
         let inserted = self.connection.execute(
             "INSERT INTO threads (id, workspace_id, title, provider, created_at, updated_at, model,

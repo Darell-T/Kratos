@@ -57,6 +57,13 @@ pub struct CreateThread {
     pub settings: Option<ThreadSettings>,
 }
 
+impl CreateThread {
+    /// The settings the new thread gets.
+    pub fn settings_or_default(&self) -> ThreadSettings {
+        self.settings.clone().unwrap_or_default()
+    }
+}
+
 /// How much a thread's agent may do without asking. `ApproveForMe` is not `FullAccess`, and a
 /// command the dangerous-command check flags asks the user under every permission. The variants
 /// run from least to most trusting, so `min` picks the narrower of two.

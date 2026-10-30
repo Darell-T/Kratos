@@ -37,7 +37,7 @@ pub(super) async fn create_thread(
 ) -> Result<Response, ApiError> {
     let request: CreateThread = read_json(body).await?;
     if let Some(acting) = Acting::of(&state, &headers).await? {
-        acting.may_create(&request.settings.clone().unwrap_or_default())?;
+        acting.may_create(&request.settings_or_default())?;
     }
     if let (Provider::Codex, Some(settings)) = (request.provider, &request.settings) {
         state.codex()?.check_settings(settings.clone()).await?;
