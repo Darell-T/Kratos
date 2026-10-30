@@ -19,7 +19,6 @@ use std::time::Duration;
 use kratos_api_client::Client;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
-use kratos_protocol::ThreadId;
 use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
 
 use kratos_engine::config::{Config, ConfigError};
@@ -67,7 +66,7 @@ fn mcp(config: &Config) -> Result<(), StartError> {
     let client = Client::new(&format!("http://127.0.0.1:{}", config.port))
         .expect("a loopback address is valid")
         .with_token_from(&config.home);
-    let caller = mcp::Caller::new(client, ThreadId::new(thread_id));
+    let caller = mcp::Caller::new(client, thread_id);
     mcp::serve(&caller, io::stdin().lock(), io::stdout())?;
     Ok(())
 }

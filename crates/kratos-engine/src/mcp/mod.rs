@@ -22,13 +22,11 @@ use kratos_protocol::{HOME_VAR, ThreadId};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::config::PORT_VAR;
+use crate::config::{PORT_VAR, THREAD_ID_VAR};
 
 pub const MAX_WAIT_SECONDS: u64 = 1800;
 /// The `kratos-engine` subcommand that runs this server.
 pub const SUBCOMMAND: &str = "mcp";
-/// The variable that names the thread whose agent the server serves.
-pub const THREAD_ID_VAR: &str = "KRATOS_THREAD_ID";
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const PARSE_ERROR: i64 = -32700;
