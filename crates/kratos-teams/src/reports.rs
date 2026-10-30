@@ -362,23 +362,35 @@ impl FinalReply {
 /// that must not be blank, finding ids that parse, scope globs that compile. It never fails and never
 /// panics. A reply that cannot be used becomes `Report::Invalid`.
 pub fn parse_report(kind: ReportKind, reply: &FinalReply, changes: &TurnChanges) -> Reported {
+    let json = reply_json(reply);
     let raw = reply.raw();
-    let parsed = reply_json(reply).and_then(|value| match kind {
-        ReportKind::Plan => PlanWire::read(value).map(|report| Reported::Plan { report }),
-        ReportKind::Implementer => {
-            ImplementerWire::read(value).map(|report| Reported::Implementer {
-                report,
-                changes: changes.clone(),
-            })
-        }
-        ReportKind::Review => ReviewWire::read(value).map(|report| Reported::Review { report }),
-        ReportKind::Answer => AnswerWire::read(value).map(|report| Reported::Answer { report }),
-        ReportKind::Rulings => RulingsWire::read(value).map(|report| Reported::Rulings { report }),
-    });
-    match parsed {
-        Ok(reported) => reported,
-        Err(error) => invalid(kind, error, raw, changes),
+    match kind {
+        ReportKind::Plan => Reported::Plan {
+            report: read_or_invalid(json, raw, PlanWire::read),
+        },
+        ReportKind::Implementer => Reported::Implementer {
+            report: read_or_invalid(json, raw, ImplementerWire::read),
+            changes: changes.clone(),
+        },
+        ReportKind::Review => Reported::Review {
+            report: read_or_invalid(json, raw, ReviewWire::read),
+        },
+        ReportKind::Answer => Reported::Answer {
+            report: read_or_invalid(json, raw, AnswerWire::read),
+        },
+        ReportKind::Rulings => Reported::Rulings {
+            report: read_or_invalid(json, raw, RulingsWire::read),
+        },
     }
+}
+
+fn read_or_invalid<T>(
+    json: Result<Value, String>,
+    raw: String,
+    read: fn(Value) -> Result<Report<T>, String>,
+) -> Report<T> {
+    json.and_then(read)
+        .unwrap_or_else(|error| Report::Invalid { error, raw })
 }
 
 fn reply_json(reply: &FinalReply) -> Result<Value, String> {
@@ -388,27 +400,6 @@ fn reply_json(reply: &FinalReply) -> Result<Value, String> {
             serde_json::from_str(text).map_err(|_| "The report is not valid JSON.".to_owned())
         }
         FinalReply::Json(value) => Ok(value.clone()),
-    }
-}
-
-fn invalid(kind: ReportKind, error: String, raw: String, changes: &TurnChanges) -> Reported {
-    match kind {
-        ReportKind::Plan => Reported::Plan {
-            report: Report::Invalid { error, raw },
-        },
-        ReportKind::Implementer => Reported::Implementer {
-            report: Report::Invalid { error, raw },
-            changes: changes.clone(),
-        },
-        ReportKind::Review => Reported::Review {
-            report: Report::Invalid { error, raw },
-        },
-        ReportKind::Answer => Reported::Answer {
-            report: Report::Invalid { error, raw },
-        },
-        ReportKind::Rulings => Reported::Rulings {
-            report: Report::Invalid { error, raw },
-        },
     }
 }
 
