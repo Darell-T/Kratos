@@ -37,7 +37,7 @@ fn a_clean_review_approves_in_one_round_and_lists_what_cannot_block_without_chec
     assert_eq!(view.phase, approved(1, ApprovedBy::Reviewer));
     assert_eq!(outcomes(&view), ["Nit", "Design", "PreExisting"]);
     assert_eq!(checks(&task)[0].candidates, []);
-    assert_eq!(task.script.commands_run(), 0);
+    assert_eq!(task.commands_run(), 0);
     assert_eq!(runs(&task, Role::Implementer).len(), 1);
     assert_eq!(view.last_reviewed, Some(sha(1)));
     assert_replayable(&task);

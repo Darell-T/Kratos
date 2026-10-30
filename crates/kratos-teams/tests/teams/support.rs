@@ -68,15 +68,10 @@ pub struct Script {
     pub probes: Vec<kratos_teams::evidence::ProbeCapture>,
     /// The files each round's commit changed.
     pub files: Vec<String>,
-    pub ran: BTreeMap<String, usize>,
 }
 
-impl Script {
-    /// How many evidence commands ran, counting a rerun of the same command again.
-    pub fn commands_run(&self) -> usize {
-        self.ran.values().sum()
-    }
-}
+/// How many times each evidence command ran, by command text.
+type CommandsRan = BTreeMap<String, usize>;
 
 impl Script {
     fn next_ended(&mut self, role: Role) -> Ended {
@@ -91,8 +86,8 @@ impl Script {
     }
 
     /// The command's scripted results in order, then the last one again. A command nobody scripted exits 0.
-    fn run_command(&mut self, command: &str) -> CommandResult {
-        let count = self.ran.entry(command.to_owned()).or_default();
+    fn run_command(&self, ran: &mut CommandsRan, command: &str) -> CommandResult {
+        let count = ran.entry(command.to_owned()).or_default();
         let result = self
             .commands
             .get(command)
@@ -101,7 +96,7 @@ impl Script {
         result.cloned().unwrap_or_else(passes)
     }
 
-    fn evidence_for(&mut self, step: &CheckStep) -> EvidenceChecked {
+    fn evidence_for(&mut self, step: &CheckStep, ran: &mut CommandsRan) -> EvidenceChecked {
         let sources: Vec<&str> = step.sources.iter().map(String::as_str).collect();
         let outside = self.outside_diff.clone();
         let mut checks = BTreeMap::new();
@@ -119,7 +114,7 @@ impl Script {
                 Start::Done(done) => done,
                 Start::RunCommand(command) => finish_check(
                     &candidate.report,
-                    &self.run_command(&command),
+                    &self.run_command(ran, &command),
                     diff.as_ref(),
                 ),
             };
@@ -128,7 +123,12 @@ impl Script {
         let rechecks = step
             .recheck
             .iter()
-            .map(|open| (open.id, rerun(&self.run_command(&open.report.evidence))))
+            .map(|open| {
+                (
+                    open.id,
+                    rerun(&self.run_command(ran, &open.report.evidence)),
+                )
+            })
             .collect();
         let security_hits = step
             .scan
@@ -165,6 +165,7 @@ pub struct ScriptedTask {
     pub script: Script,
     /// Every step the loop ran, in order.
     pub steps: Vec<Step>,
+    commands_ran: CommandsRan,
 }
 
 impl ScriptedTask {
@@ -180,7 +181,13 @@ impl ScriptedTask {
             continuations: 0,
             script,
             steps: Vec::new(),
+            commands_ran: CommandsRan::new(),
         }
+    }
+
+    /// How many evidence commands ran, counting a rerun of the same command again.
+    pub fn commands_run(&self) -> usize {
+        self.commands_ran.values().sum()
     }
 
     /// A restart folds the same facts again.
@@ -208,6 +215,7 @@ impl ScriptedTask {
             continuations: 0,
             script,
             steps: Vec::new(),
+            commands_ran: CommandsRan::new(),
         }
     }
 
@@ -312,7 +320,7 @@ impl ScriptedTask {
             },
             Step::Commit { commit } => self.committed(commit.round, &commit.added_probes),
             Step::Check { check } => Fact::EvidenceChecked {
-                checked: Box::new(self.script.evidence_for(check)),
+                checked: Box::new(self.script.evidence_for(check, &mut self.commands_ran)),
             },
             Step::ApplyRoles { .. } if self.script.role_change_fails => Fact::RoleChangeRejected {
                 reason: "the reviewer is not signed in".to_owned(),
