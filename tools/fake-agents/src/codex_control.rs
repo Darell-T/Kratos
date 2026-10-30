@@ -10,10 +10,14 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 /// `test/settleTurn` params that answer the oldest held `turn/start` with turn `turn_id` in
-/// `status`, such as `inProgress`.
-pub fn settle_start(turn_id: &str, status: &str) -> Value {
+/// `status`, such as `inProgress`. With `thread_id`, only a request for that Codex thread matches.
+pub fn settle_start(turn_id: &str, status: &str, thread_id: Option<&str>) -> Value {
     let turn = json!({ "id": turn_id, "items": [], "status": status });
-    json!({ "method": "turn/start", "result": { "turn": turn } })
+    let mut params = json!({ "method": "turn/start", "result": { "turn": turn } });
+    if let Some(thread_id) = thread_id {
+        params["threadId"] = json!(thread_id);
+    }
+    params
 }
 
 /// `test/settleTurn` params that answer the oldest held `turn/start` with JSON-RPC error `code`.

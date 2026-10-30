@@ -1,5 +1,5 @@
 use fake_agents::responses::Reply;
-use kratos_client::Incoming;
+use kratos_api_client::Incoming;
 use kratos_protocol::{
     CLIENT_TOKEN_FILE, Permission, Seq, ServerMessage, Thread, ThreadEventBody, ThreadSettings,
     TurnOutcome,

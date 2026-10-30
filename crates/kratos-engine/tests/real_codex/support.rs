@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use fake_agents::responses::{Reply, Server};
 use futures_util::StreamExt;
-use kratos_client::Client;
+use kratos_api_client::Client;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};

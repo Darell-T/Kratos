@@ -8,12 +8,12 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-httparse.workspace = true
+fake-agents.workspace = true
+kratos-api-client.workspace = true
 kratos-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tungstenite.workspace = true
 
 [lints]
 workspace = true

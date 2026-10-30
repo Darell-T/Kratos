@@ -11,10 +11,8 @@ use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
-use kratos_client::{
-    ApiReply, ApiRequest, Client, ClientError, Followed, Incoming, Normalizer, bench_post,
-    bench_turns,
-};
+use kratos_api_client::{ApiReply, ApiRequest, Client, ClientError, Followed, Incoming};
+use kratos_client::{BenchError, Normalizer, bench_post, bench_turns};
 use kratos_protocol::{
     ApprovalId, ContinuationId, DEFAULT_HOME_FOLDER, DEFAULT_PORT, HOME_VAR, MessageId, QuestionId,
     Seq, ServerMessage, ThreadId, WorkspaceId, routes,
@@ -70,11 +68,18 @@ pub enum Failure {
     /// The command line is wrong. Nothing was sent.
     Usage(String),
     Client(ClientError),
+    Bench(BenchError),
 }
 
 impl From<ClientError> for Failure {
     fn from(error: ClientError) -> Failure {
         Failure::Client(error)
+    }
+}
+
+impl From<BenchError> for Failure {
+    fn from(error: BenchError) -> Failure {
+        Failure::Bench(error)
     }
 }
 

@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
-use kratos_client::Client;
+use kratos_api_client::Client;
 use kratos_codex_client::RequestId;
 use kratos_protocol::{HOME_VAR, ThreadId};
 use serde::Deserialize;

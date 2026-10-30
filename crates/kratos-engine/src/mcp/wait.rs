@@ -4,7 +4,7 @@
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use kratos_client::ClientError;
+use kratos_api_client::ClientError;
 use kratos_protocol::{
     Approval, PauseReason, Question, Seq, ThreadDetails, ThreadEventBody, ThreadId, TurnOutcome,
 };

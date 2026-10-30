@@ -2,7 +2,7 @@
 //! reply streams live, an approval decided over HTTP, and the account's usage.
 
 use fake_agents::codex_control;
-use kratos_client::{ApiRequest, Client, ClientError};
+use kratos_api_client::{ApiRequest, Client, ClientError};
 use kratos_protocol::{LiveUpdate, Provider, ServerMessage, Thread, ThreadEventBody};
 use serde_json::{Value, json};
 
@@ -15,7 +15,7 @@ fn messages_path(thread: &Thread) -> String {
 
 /// The next socket message about the thread that `wanted` picks, skipping the rest.
 fn next_message(
-    socket: &mut kratos_client::EventSocket,
+    socket: &mut kratos_api_client::EventSocket,
     mut wanted: impl FnMut(&ServerMessage) -> bool,
 ) -> ServerMessage {
     loop {
@@ -29,7 +29,7 @@ fn next_message(
 /// Settles the turn the fake holds for the message just sent as `turn-1`, now running.
 fn start_turn(engine: &RunningEngine) {
     engine.fake_codex_held("turn/start", 1);
-    let settled = codex_control::settle_start("turn-1", "inProgress");
+    let settled = codex_control::settle_start("turn-1", "inProgress", None);
     engine.fake_codex("test/settleTurn", settled);
 }
 

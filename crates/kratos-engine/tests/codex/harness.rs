@@ -314,7 +314,7 @@ impl Harness {
 
     /// Answers the oldest held `turn/start` with a turn in `status`.
     pub async fn settle_start(&mut self, turn_id: &str, status: &str) {
-        let params = codex_control::settle_start(turn_id, status);
+        let params = codex_control::settle_start(turn_id, status, None);
         self.control("test/settleTurn", params).await;
     }
 

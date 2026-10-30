@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kratos_client::Client;
+use kratos_api_client::Client;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_protocol::ThreadId;

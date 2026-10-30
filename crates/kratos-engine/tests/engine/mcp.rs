@@ -6,7 +6,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use fake_agents::codex_control;
-use kratos_client::{ApiRequest, ClientError};
+use kratos_api_client::{ApiRequest, ClientError};
 use kratos_protocol::{
     ACTING_THREAD_HEADER, Permission, Provider, Thread, ThreadSettings, WorkspaceId,
 };
@@ -504,7 +504,7 @@ fn only_a_full_access_agent_decides_another_thread_s_approval() {
         )
         .unwrap();
     engine.fake_codex_held("turn/start", 1);
-    let settled = codex_control::settle_start("turn-1", "inProgress");
+    let settled = codex_control::settle_start("turn-1", "inProgress", None);
     engine.fake_codex("test/settleTurn", settled);
     let asked = codex_control::ask(
         "ask-1",

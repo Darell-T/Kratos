@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use kratos_client::{ApiReply, ClientError};
+use kratos_api_client::{ApiReply, ClientError};
 use kratos_protocol::{
     AnswerQuestion, ApprovalDecision, ApprovalId, CreateThread, DecideApproval, ErrorBody,
     MessageInput, Permission, Provider, QuestionId, RequiredText, SendMessage, Seq, ThreadDetails,

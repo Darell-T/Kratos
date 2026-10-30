@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fake_agents::codex_control;
-use kratos_client::{Client, EventSocket, Incoming};
+use kratos_api_client::{Client, EventSocket, Incoming};
 use kratos_protocol::{
     CLIENT_TOKEN_FILE, Provider, Seq, ServerMessage, Thread, ThreadEvent, ThreadId,
 };
