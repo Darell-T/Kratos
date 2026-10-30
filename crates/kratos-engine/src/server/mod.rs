@@ -246,17 +246,21 @@ impl ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> ApiError {
-        if !error.is_refusal() {
-            return ApiError::internal(&error);
-        }
         match error {
             StoreError::UnknownThread(_) | StoreError::UnknownWorkspace(_) => {
                 ApiError::new(StatusCode::NOT_FOUND, error)
             }
             StoreError::MessageIdTaken(_) => ApiError::new(StatusCode::CONFLICT, error),
-            // FIXME: the other refusals are the caller's doing yet answer 500 like a store failure.
+            // FIXME: these refusals are the caller's doing yet answer 500 like a store failure.
             // The statuses are kept until someone decides them.
-            other => ApiError::internal(&other),
+            StoreError::UnknownMessage { .. }
+            | StoreError::UnknownApproval(_)
+            | StoreError::UnknownQuestion(_)
+            | StoreError::UnknownContinuation(_)
+            | StoreError::MessageTransition { .. } => ApiError::internal(&error),
+            StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => {
+                ApiError::internal(&error)
+            }
         }
     }
 }
