@@ -30,13 +30,6 @@ pub enum Profile {
     FullAccess,
 }
 
-const PROFILES: [(Profile, &str); 4] = [
-    (Profile::Plan, "kratos-plan"),
-    (Profile::AskMe, "kratos-ask"),
-    (Profile::ApproveForMe, "kratos-approve"),
-    (Profile::FullAccess, ":danger-full-access"),
-];
-
 impl Profile {
     pub fn for_settings(settings: &ThreadSettings) -> Profile {
         match (settings.plan_mode, settings.permission) {
@@ -49,11 +42,12 @@ impl Profile {
 
     /// The id the app-server knows the profile by.
     pub fn id(self) -> &'static str {
-        PROFILES
-            .iter()
-            .find(|(profile, _)| *profile == self)
-            .map(|(_, id)| *id)
-            .expect("every profile has an id")
+        match self {
+            Profile::Plan => "kratos-plan",
+            Profile::AskMe => "kratos-ask",
+            Profile::ApproveForMe => "kratos-approve",
+            Profile::FullAccess => ":danger-full-access",
+        }
     }
 }
 
