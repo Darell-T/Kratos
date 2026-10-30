@@ -602,7 +602,11 @@ fn skills(params: &Value) -> Value {
 
 fn plugins(params: &Value) -> Value {
     let cwd = params["cwds"][0].as_str().unwrap_or_default();
-    json!({ "marketplaces": [{ "name": cwd, "plugins": [{ "id": "project", "name": "Project plugin", "installed": true, "enabled": true }] }] })
+    json!({ "marketplaces": [{ "name": cwd, "plugins": [{
+        "id": "project", "name": "Project plugin", "installed": true, "enabled": true,
+        "authPolicy": "ON_USE", "installPolicy": "AVAILABLE",
+        "source": { "type": "local", "path": cwd },
+    }] }] })
 }
 
 /// Starts a copy of this fake that sleeps, outside any wait, and returns its process id. The client

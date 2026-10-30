@@ -106,6 +106,67 @@ async fn completes_the_handshake_before_returning_the_handle() {
 }
 
 #[tokio::test]
+async fn the_fake_answers_each_request_it_models_in_the_generated_shape() {
+    // Catches a fake reply that lacks a field the committed schema requires, which an engine test
+    // would otherwise report as an unreadable answer far from the fake. Turn requests, command
+    // runs, and rate limit reads are left out because a test supplies those answers.
+    let (codex, _incoming) = connect_fake().await;
+    let folder = std::env::temp_dir().display().to_string();
+
+    let started = codex
+        .request::<methods::ThreadStart>(&types::ThreadStartParams::default())
+        .await
+        .unwrap();
+    let thread_id = started.thread.id;
+    let resume: types::ThreadResumeParams =
+        serde_json::from_value(json!({ "threadId": thread_id })).unwrap();
+    codex
+        .request::<methods::ThreadResume>(&resume)
+        .await
+        .unwrap();
+    let read = types::ThreadReadParams {
+        include_turns: Some(true),
+        thread_id: thread_id.clone(),
+    };
+    codex.request::<methods::ThreadRead>(&read).await.unwrap();
+    let unsubscribe = types::ThreadUnsubscribeParams { thread_id };
+    codex
+        .request::<methods::ThreadUnsubscribe>(&unsubscribe)
+        .await
+        .unwrap();
+    codex
+        .request::<methods::ModelList>(&types::ModelListParams::default())
+        .await
+        .unwrap();
+    let skills = types::SkillsListParams {
+        cwds: vec![folder.clone()],
+        force_reload: Some(false),
+    };
+    codex.request::<methods::SkillsList>(&skills).await.unwrap();
+    let plugins = types::PluginInstalledParams {
+        cwds: Some(vec![types::AbsolutePathBuf(folder)]),
+        ..types::PluginInstalledParams::default()
+    };
+    codex
+        .request::<methods::PluginInstalled>(&plugins)
+        .await
+        .unwrap();
+    codex
+        .request::<methods::AccountRead>(&types::GetAccountParams::default())
+        .await
+        .unwrap();
+    let setup = types::WindowsSandboxSetupStartParams {
+        mode: types::WindowsSandboxSetupMode::Elevated,
+        cwd: None,
+    };
+    codex
+        .request::<methods::WindowsSandboxSetupStart>(&setup)
+        .await
+        .unwrap();
+    codex.close().await;
+}
+
+#[tokio::test]
 async fn refuses_a_handshake_whose_result_has_the_wrong_shape() {
     let error = connect(launch(&["--bad-initialize"]), capabilities())
         .await
