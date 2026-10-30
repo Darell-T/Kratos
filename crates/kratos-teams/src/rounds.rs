@@ -18,7 +18,7 @@ use crate::task_plan::{CopyProblem, probe_copy_problem};
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, ClosedHow, FIX_ATTEMPTS, Finding,
     FindingStatus, FindingsPause, ListedWhy, Note, Pass, PassKind, Phase, Probe, ProbeRejection,
-    ProbeStatus, Retry, Review, ReviewJob, Round, RulingRecord, TaskView, Turn, Waiting, Work,
+    ProbeStatus, Review, ReviewJob, Round, RulingRecord, TaskView, Turn, Waiting, Work,
 };
 
 /// A report of the reviewer, taken out of the view for checking.
@@ -350,12 +350,7 @@ impl TaskView {
             return Err(self.misfit("rulings"));
         };
         if let Some(error) = rulings_problem(&disputed, &done) {
-            return Ok(self.retry_turn(
-                turn,
-                Retry::InvalidReport,
-                Note::InvalidReport { error },
-                seq,
-            ));
+            return Ok(self.retry_turn(turn, Note::InvalidReport { error }, seq));
         }
         let mut not_bug = Vec::new();
         for ruling in done.rulings {
@@ -447,7 +442,7 @@ impl TaskView {
                 verdict: report.verdict,
                 findings: judged.reviewed,
             };
-            return Ok(view.retry_turn(turn, Retry::VerdictMismatch, note, seq));
+            return Ok(view.retry_turn(turn, note, seq));
         }
         view.merge_probes(&checked, &judged.added);
         view.findings = judged.findings;

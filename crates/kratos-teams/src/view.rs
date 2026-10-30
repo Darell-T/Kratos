@@ -405,6 +405,16 @@ pub enum Note {
 }
 
 impl Note {
+    /// The cause whose retry this correction spends.
+    pub(crate) fn cause(&self) -> Retry {
+        match self {
+            Note::InvalidReport { .. } => Retry::InvalidReport,
+            Note::UncheckedEdits => Retry::UncheckedEdits,
+            Note::Lost { .. } => Retry::Lost,
+            Note::VerdictMismatch { .. } => Retry::VerdictMismatch,
+        }
+    }
+
     /// What the pause says when a second problem of the same cause stops the step.
     pub fn detail(&self) -> String {
         match self {

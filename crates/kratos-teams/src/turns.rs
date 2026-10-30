@@ -112,12 +112,9 @@ impl TaskView {
         finished: Finish<T>,
     ) -> Result<Box<TaskView>, Rejection> {
         match report {
-            Report::Invalid { error, .. } => Ok(self.retry_turn(
-                turn,
-                Retry::InvalidReport,
-                Note::InvalidReport { error },
-                seq,
-            )),
+            Report::Invalid { error, .. } => {
+                Ok(self.retry_turn(turn, Note::InvalidReport { error }, seq))
+            }
             Report::Blocked { summary } => {
                 turn.note = None;
                 Ok(self.pause_turn(Trouble::Blocked, turn, summary))
@@ -137,10 +134,10 @@ impl TaskView {
     pub(crate) fn retry_turn(
         self: Box<Self>,
         mut turn: Turn,
-        cause: Retry,
         note: Note,
         seq: FactSeq,
     ) -> Box<TaskView> {
+        let cause = note.cause();
         if turn.retries.contains(&cause) {
             let detail = note.detail();
             // A reviewer is asked for a fresh review, so it keeps no correction. Everyone else is
@@ -173,7 +170,7 @@ impl TaskView {
             self.dirty = true;
         }
         self.requeue_steered(&turn.member);
-        self.retry_turn(turn, Retry::Lost, Note::Lost { reason }, seq)
+        self.retry_turn(turn, Note::Lost { reason }, seq)
     }
 
     // -----------------------------------------------------------------------------------------
@@ -393,15 +390,10 @@ impl TaskView {
             .responses_problem(&done.responses)
             .or_else(|| self.probes_problem(&turn.work, &done))
         {
-            return Ok(self.retry_turn(
-                turn,
-                Retry::InvalidReport,
-                Note::InvalidReport { error },
-                seq,
-            ));
+            return Ok(self.retry_turn(turn, Note::InvalidReport { error }, seq));
         }
         if self.dirty {
-            return Ok(self.retry_turn(turn, Retry::UncheckedEdits, Note::UncheckedEdits, seq));
+            return Ok(self.retry_turn(turn, Note::UncheckedEdits, seq));
         }
         Ok(self.active(Activity::Committing {
             step: turn.step,
