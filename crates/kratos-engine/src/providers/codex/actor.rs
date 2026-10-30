@@ -339,15 +339,13 @@ impl Actor {
     {
         match self.hub.write(thread_id.clone(), job).await {
             Ok(written) => Ok(written.value),
-            Err(
-                error @ (StoreError::UnknownThread(_)
-                | StoreError::UnknownMessage { .. }
-                | StoreError::UnknownApproval(_)
-                | StoreError::UnknownQuestion(_)
-                | StoreError::UnknownContinuation(_)
-                | StoreError::MessageTransition { .. }
-                | StoreError::MessageIdTaken(_)),
-            ) => Err(ProviderError::Store(error)),
+            // FIXME: an unknown workspace is a refusal yet stops Codex. No thread write names a
+            // workspace, so it cannot happen here; the outcome is kept until someone decides it.
+            Err(error)
+                if error.is_refusal() && !matches!(error, StoreError::UnknownWorkspace(_)) =>
+            {
+                Err(ProviderError::Store(error))
+            }
             Err(error) => {
                 eprintln!("cannot record Codex work, so Codex stops: {error}");
                 self.stop_server(&format!("Kratos could not record Codex's work: {error}"))

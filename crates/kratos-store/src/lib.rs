@@ -120,8 +120,8 @@ pub enum OpenError {
     },
 }
 
-/// The `Unknown…` cases are expected absences that the API answers with 404; the rest are
-/// failures.
+/// What went wrong with a store call. [`StoreError::is_refusal`] tells a request the store refused
+/// from a store that failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("Unknown workspace {0}")]
@@ -165,4 +165,23 @@ pub enum StoreError {
     },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+}
+
+impl StoreError {
+    /// Whether the store refused the request for what it asked, such as an unknown id or a move
+    /// the queue forbids, and wrote nothing. Otherwise the store itself failed. A new variant must
+    /// be classified here.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            StoreError::UnknownWorkspace(_)
+            | StoreError::UnknownThread(_)
+            | StoreError::UnknownMessage { .. }
+            | StoreError::UnknownApproval(_)
+            | StoreError::UnknownQuestion(_)
+            | StoreError::UnknownContinuation(_)
+            | StoreError::MessageTransition { .. }
+            | StoreError::MessageIdTaken(_) => true,
+            StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => false,
+        }
+    }
 }
