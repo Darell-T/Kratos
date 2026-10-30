@@ -72,7 +72,7 @@ pub fn message(view: &TaskView, run: &Run, ctx: &PromptContext<'_>) -> String {
     let note = run
         .note
         .as_ref()
-        .filter(|_| run.role != Role::Reviewer)
+        .filter(|_| Note::reaches_new_session(run.role))
         .map(correction);
     sections([
         note,

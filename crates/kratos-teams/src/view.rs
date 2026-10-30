@@ -406,6 +406,12 @@ pub enum Note {
 }
 
 impl Note {
+    /// Whether a correction reaches `role` in a new session. A reviewer's new session is a fresh
+    /// review, so it starts with no correction. Everyone else is asked again with the same note.
+    pub(crate) fn reaches_new_session(role: Role) -> bool {
+        role != Role::Reviewer
+    }
+
     /// The cause whose retry this correction spends.
     pub(crate) fn cause(&self) -> Retry {
         match self {

@@ -147,9 +147,8 @@ impl TaskView {
         let cause = note.cause();
         if turn.retries.contains(&cause) {
             let detail = note.detail();
-            // A reviewer is asked for a fresh review, so it keeps no correction. Everyone else is
-            // asked again with the same note.
-            turn.note = (turn.work.role() != Role::Reviewer).then_some(note);
+            // A resume after the pause opens a new session.
+            turn.note = Note::reaches_new_session(turn.work.role()).then_some(note);
             return self.pause_turn(cause.into(), turn, detail);
         }
         turn.retries.push(cause);
