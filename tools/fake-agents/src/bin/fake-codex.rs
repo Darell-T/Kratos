@@ -29,12 +29,7 @@ fn main() {
         return;
     }
     let fake = Arc::new(Mutex::new(Fake {
-        hang_initialize: arguments
-            .iter()
-            .any(|argument| argument == "--hang-initialize"),
-        bad_initialize: arguments
-            .iter()
-            .any(|argument| argument == "--bad-initialize"),
+        initialize: InitializeMode::from_arguments(&arguments),
         fail_resume: arguments.iter().any(|argument| argument == "--fail-resume"),
         ..Fake::default()
     }));
@@ -129,11 +124,31 @@ enum Out {
     Caller(Value),
 }
 
+/// How the fake answers `initialize`.
+#[derive(Default)]
+enum InitializeMode {
+    #[default]
+    Answer,
+    Hang,
+    Malformed,
+}
+
+impl InitializeMode {
+    fn from_arguments(arguments: &[String]) -> InitializeMode {
+        let has = |flag: &str| arguments.iter().any(|argument| argument == flag);
+        match (has("--hang-initialize"), has("--bad-initialize")) {
+            (false, false) => InitializeMode::Answer,
+            (true, false) => InitializeMode::Hang,
+            (false, true) => InitializeMode::Malformed,
+            (true, true) => panic!("--hang-initialize and --bad-initialize cannot both be set"),
+        }
+    }
+}
+
 #[derive(Default)]
 struct Fake {
     turn_observer: Option<TcpStream>,
-    hang_initialize: bool,
-    bad_initialize: bool,
+    initialize: InitializeMode,
     fail_resume: bool,
     initialized: bool,
     /// Every held request, in arrival order, for `test/turnRequests`.
@@ -298,11 +313,10 @@ impl Fake {
     }
 
     fn initialize(&mut self, id: Value, params: &Value) {
-        if self.hang_initialize {
-            return;
-        }
-        if self.bad_initialize {
-            return self.reply(&id, json!({}));
+        match self.initialize {
+            InitializeMode::Answer => {}
+            InitializeMode::Hang => return,
+            InitializeMode::Malformed => return self.reply(&id, json!({})),
         }
         let client = &params["clientInfo"];
         self.reply(
