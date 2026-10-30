@@ -8,7 +8,7 @@
 
 use serde::Serialize;
 
-use crate::evidence::GIT_DIFF_ARGS;
+use crate::diff::GIT_DIFF_ARGS;
 use crate::facts::{Outcome, ProbePolicy, Sha, StepId};
 use crate::members::{Bindings, MemberId};
 use crate::prompts::commit_subject;

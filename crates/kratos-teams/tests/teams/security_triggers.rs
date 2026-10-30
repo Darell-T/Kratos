@@ -2,7 +2,7 @@
 //! proof of safety. Ported from `teams-evidence.test.ts`, with Rust process, network, filesystem, and
 //! permission cases added.
 
-use kratos_teams::evidence::{Diff, DiffFile};
+use kratos_teams::diff::{Diff, DiffFile};
 use kratos_teams::security_triggers::{
     DEFAULT_PATTERNS, LineProblem, MAX_HIT_LINE, MAX_HITS, Trigger, TriggerError, TriggerHit,
     default_triggers, match_triggers, parse_triggers,

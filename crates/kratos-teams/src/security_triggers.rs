@@ -12,7 +12,7 @@ use fancy_regex::RegexBuilder;
 use globset::GlobMatcher;
 use serde::{Deserialize, Serialize};
 
-use crate::evidence::DiffFile;
+use crate::diff::DiffFile;
 use crate::task_plan::compile;
 
 /// One trigger, as parsed from `REVIEW.md` or taken from the defaults. It is stored as text in the

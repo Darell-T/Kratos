@@ -9,7 +9,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use kratos_protocol::{CommandResult, Permission, Provider, TurnChanges};
 use kratos_teams::decisions::{Decision, allowed_decisions, check_decision};
-use kratos_teams::evidence::{Diff, Seen, Start, finish_check, rerun, start_check};
+use kratos_teams::diff::Diff;
+use kratos_teams::evidence::{Seen, Start, finish_check, rerun, start_check};
 use kratos_teams::facts::{
     ChangeSize, ContinuationId, Declined, DeliveryId, Ended, EvidenceChecked, Fact, FactSeq,
     HandoffOutcome, LargeChange, MessageId, ProbePolicy, ProbeRun, RoundCap, RulesSnapshot, Sha,

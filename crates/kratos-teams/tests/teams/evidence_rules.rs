@@ -2,10 +2,10 @@
 //! the diff parser that says which lines a round changed. Ported from `teams-evidence.test.ts`.
 
 use kratos_protocol::CommandResult;
+use kratos_teams::diff::{Diff, GIT_DIFF_ARGS, LineRange};
 use kratos_teams::evidence::{
-    CommandJudgment, Diff, DropWhy, EvidenceCheck, GIT_DIFF_ARGS, LineRange, LocationProblem,
-    RerunVerdict, Seen, Start, finish_check, judge_command, location_problem, quote_appears, rerun,
-    start_check,
+    CommandJudgment, DropWhy, EvidenceCheck, LocationProblem, RerunVerdict, Seen, Start,
+    finish_check, judge_command, location_problem, quote_appears, rerun, start_check,
 };
 use kratos_teams::reports::Location;
 

@@ -18,7 +18,8 @@
 //! | `decisions`         | what the user may do, when, and what each choice does |
 //! | `task_plan`         | the plan document, the scope, and probe constraints |
 //! | `reports`           | what agents hand back: wire shapes, schemas, and typed reports |
-//! | `evidence`          | location, quote, and command checks, and the diff parser |
+//! | `evidence`          | location, quote, and command checks |
+//! | `diff`              | `git diff` output, parsed into changed files, changed lines, and added lines |
 //! | `prompts`           | every message an agent receives, and the task title, commit subject, and branch name |
 //! | `security_triggers` | which diffs get a security review |
 //! | `permissions`       | what each role may do without asking |
@@ -27,6 +28,7 @@
 //! result only after `TaskView::accepts` says it still applies.
 
 pub mod decisions;
+pub mod diff;
 pub mod evidence;
 pub mod facts;
 pub mod fold;
