@@ -1,6 +1,8 @@
 use kratos_protocol::{Seq, ThreadEvent, ThreadEventBody, ThreadId, Timestamp};
-use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
+use rusqlite::{Transaction, TransactionBehavior, params};
 
+use crate::events::last_seq_of;
+use crate::json::to_column;
 use crate::{Store, StoreError};
 
 /// One `BEGIN IMMEDIATE` transaction over one thread's records: its events, queue, approvals,
@@ -28,15 +30,7 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let at = Timestamp::now();
-        let last_seq: Option<u64> = transaction
-            .query_row(
-                "SELECT COALESCE((SELECT MAX(seq) FROM thread_events WHERE thread_id = threads.id), 0)
-                 FROM threads WHERE id = ?1",
-                [thread_id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(last_seq) = last_seq else {
+        let Some(last_seq) = last_seq_of(&transaction, thread_id)? else {
             return Err(StoreError::UnknownThread(thread_id.clone()));
         };
         Ok(ThreadWrite {
@@ -61,10 +55,14 @@ impl ThreadWrite<'_> {
 
     pub fn append(&mut self, body: ThreadEventBody) -> Result<&ThreadEvent, StoreError> {
         let seq = self.last_seq + 1;
-        let stored = serde_json::to_string(&body).expect("a thread event body serializes");
         self.transaction.execute(
             "INSERT INTO thread_events (thread_id, seq, at, event) VALUES (?1, ?2, ?3, ?4)",
-            params![self.thread_id.as_str(), seq, self.at.as_str(), stored],
+            params![
+                self.thread_id.as_str(),
+                seq,
+                self.at.as_str(),
+                to_column(&body)
+            ],
         )?;
         self.last_seq = seq;
         self.appended.push(ThreadEvent {
