@@ -11,6 +11,7 @@ use kratos_protocol::{
 use serde_json::json;
 
 use super::actor::{Actor, Done, MAX_STARTING, Reply};
+use super::approvals::settle_closed;
 use super::profiles::Profile;
 use super::threads::{Turn, TurnWork};
 use super::{ProviderError, policy, queue, wire};
@@ -577,6 +578,43 @@ impl Actor {
             self.report_limit_stop(thread_id, turn_id);
         }
         self.dispatch(thread_id).await;
+    }
+
+    /// Records how a turn ended and closes what waited on it, then pauses the queue as `after`
+    /// says.
+    pub(super) async fn record_turn_end(
+        &mut self,
+        thread_id: &ThreadId,
+        turn_id: kratos_protocol::TurnId,
+        outcome: TurnOutcome,
+        work: TurnWork,
+        after: After,
+    ) -> Result<(), ProviderError> {
+        let TurnWork {
+            mut changes,
+            context,
+        } = work;
+        let changes = changes.take();
+        let closed = self
+            .requests
+            .close(thread_id, |waiting_turn| *waiting_turn == turn_id);
+        self.write(thread_id, move |write| {
+            settle_closed(write, &closed, "The turn ended")?;
+            write.complete_turn(turn_id, outcome, changes, context)?;
+            match after {
+                After::Continue => {}
+                After::PauseIfWaiting(reason) => queue::pause_if_waiting(write, reason)?,
+                After::Pause(reason) => {
+                    write.pause(reason)?;
+                }
+            }
+            Ok(())
+        })
+        .await?;
+        if let Some(thread) = self.threads.get_mut(thread_id) {
+            thread.file_items.clear();
+        }
+        Ok(())
     }
 
     /// Sets the running turn's deadline again, from now.

@@ -11,16 +11,15 @@ use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
     MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, Skill, ThreadId,
-    ThreadSettings, TurnOutcome,
+    ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
 
-use super::approvals::{Requests, settle_closed};
+use super::approvals::Requests;
 use super::connection::StartError;
-use super::queue;
-use super::threads::{ThreadState, TurnWork};
-use super::turns::{After, Delivery, Stopper};
+use super::threads::ThreadState;
+use super::turns::{Delivery, Stopper};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
@@ -420,43 +419,6 @@ impl Actor {
                 Err(ProviderError::Store(error))
             }
         }
-    }
-
-    /// Records how a turn ended and closes what waited on it, then pauses the queue as `after`
-    /// says.
-    pub(super) async fn record_turn_end(
-        &mut self,
-        thread_id: &ThreadId,
-        turn_id: kratos_protocol::TurnId,
-        outcome: TurnOutcome,
-        work: TurnWork,
-        after: After,
-    ) -> Result<(), ProviderError> {
-        let TurnWork {
-            mut changes,
-            context,
-        } = work;
-        let changes = changes.take();
-        let closed = self
-            .requests
-            .close(thread_id, |waiting_turn| *waiting_turn == turn_id);
-        self.write(thread_id, move |write| {
-            settle_closed(write, &closed, "The turn ended")?;
-            write.complete_turn(turn_id, outcome, changes, context)?;
-            match after {
-                After::Continue => {}
-                After::PauseIfWaiting(reason) => queue::pause_if_waiting(write, reason)?,
-                After::Pause(reason) => {
-                    write.pause(reason)?;
-                }
-            }
-            Ok(())
-        })
-        .await?;
-        if let Some(thread) = self.threads.get_mut(thread_id) {
-            thread.file_items.clear();
-        }
-        Ok(())
     }
 
     async fn shutdown(&mut self) {
