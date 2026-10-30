@@ -221,7 +221,7 @@ impl ScriptedTask {
         let view = self.view();
         let step = next_step(&view);
         let fact = match &step {
-            Step::Wait { on } => match engine_turn(&view) {
+            Step::Wait { on } => match view.phase.waiting_message().cloned() {
                 Some(message) if matches!(on, kratos_teams::next_step::Wait::Engine { .. }) => {
                     self.continuation_result(&view, message)
                 }
@@ -373,10 +373,6 @@ impl ScriptedTask {
             probe_runs,
         }
     }
-}
-
-fn engine_turn(view: &TaskView) -> Option<MessageId> {
-    view.phase.waiting_message().cloned()
 }
 
 pub fn step_name(step: &Step) -> String {
