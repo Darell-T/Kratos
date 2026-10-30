@@ -17,7 +17,8 @@ use kratos_store::{StoreError, ThreadWrite};
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::actor::{Actor, Done, Opened, Server, settle_closed};
+use super::actor::{Actor, Done, Opened, Server};
+use super::approvals::settle_closed;
 use super::profiles::Profile;
 use super::threads::{Link, ThreadState};
 use super::{CodexSettings, ProviderError, policy, queue, wire};

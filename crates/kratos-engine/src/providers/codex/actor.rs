@@ -13,12 +13,12 @@ use kratos_protocol::{
     MessageId, MessageInput, MessageOrigin, Provider, QuestionId, QuestionOutcome, Skill, ThreadId,
     ThreadSettings, TurnOutcome,
 };
-use kratos_store::{Settle, StoreError, ThreadWrite};
+use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
 
+use super::approvals::{Requests, settle_closed};
 use super::connection::StartError;
 use super::queue;
-use super::requests::Requests;
 use super::threads::{ThreadState, TurnWork};
 use super::turns::{After, Delivery, Stopper};
 use super::{CodexSettings, Continued, ProviderError, Sent};
@@ -471,21 +471,6 @@ impl Actor {
     async fn shutdown(&mut self) {
         self.stop_server("Kratos is shutting down").await;
     }
-}
-
-/// Settles requests a step closed, in the same write as the step.
-pub(super) fn settle_closed(
-    write: &mut ThreadWrite<'_>,
-    closed: &super::requests::Closed,
-    reason: &str,
-) -> Result<(), StoreError> {
-    for approval in &closed.approvals {
-        write.settle_approval(approval, Settle::Close(reason.to_owned()))?;
-    }
-    for question in &closed.questions {
-        write.settle_question(question, Settle::Close(reason.to_owned()))?;
-    }
-    Ok(())
 }
 
 async fn next_incoming(server: &mut Server) -> Incoming {

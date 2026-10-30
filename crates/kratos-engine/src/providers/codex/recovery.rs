@@ -13,8 +13,8 @@ use kratos_protocol::{
 use kratos_store::{Store, StoreError, ThreadWrite};
 use tokio::sync::mpsc;
 
-use super::actor::{Actor, Server, settle_closed};
-use super::requests::{Closed, Requests};
+use super::actor::{Actor, Server};
+use super::approvals::{Closed, Requests, settle_closed};
 use super::{CodexSettings, queue};
 use crate::hub::{Hub, PAGE_BYTES};
 use crate::providers::changes::ChangesRecorder;

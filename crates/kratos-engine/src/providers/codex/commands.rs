@@ -1,15 +1,13 @@
 //! What handles ask of the actor.
 
-use std::collections::BTreeMap;
 use std::time::Duration;
 
-use kratos_codex_client::{Codex, RequestError, ServerResponse, methods, types};
+use kratos_codex_client::{Codex, RequestError, methods, types};
 use kratos_protocol::{
-    ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId,
-    ContinuationState, Message, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason,
-    Provider, QuestionId, QuestionOutcome, RequiredText, Skill, ThreadId,
+    CommandResult, ContinuationId, ContinuationState, Message, MessageId, MessageInput,
+    MessageOrigin, MessageStatus, PauseReason, Provider, RequiredText, Skill, ThreadId,
 };
-use kratos_store::{Enqueued, QueuePlace, Settle, StoreError, ThreadWrite};
+use kratos_store::{Enqueued, QueuePlace, StoreError, ThreadWrite};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -470,70 +468,6 @@ impl Actor {
                 "Settle message {held} before resuming: retry or remove it if it failed, discard it if its delivery is uncertain"
             ))
         })
-    }
-
-    async fn decide(
-        &mut self,
-        approval_id: ApprovalId,
-        decision: ApprovalDecision,
-    ) -> Result<ApprovalOutcome, ProviderError> {
-        let Some(waiting) = self.requests.approvals.remove(&approval_id) else {
-            return self.recorded_approval(&approval_id).await;
-        };
-        let outcome = {
-            let approval_id = approval_id.clone();
-            self.write(&waiting.thread_id, move |write| {
-                write.settle_approval(&approval_id, Settle::Decide(decision))
-            })
-            .await
-        };
-        match &outcome {
-            Ok(ApprovalOutcome::Decided { decision: recorded }) if *recorded == decision => {
-                waiting.request.answer(waiting.answer.response(decision));
-            }
-            // Recorded otherwise, or not recorded: dropping the request answers Codex.
-            _ => {}
-        }
-        outcome
-    }
-
-    async fn recorded_approval(
-        &self,
-        approval_id: &ApprovalId,
-    ) -> Result<ApprovalOutcome, ProviderError> {
-        let lookup = approval_id.clone();
-        self.store
-            .call(move |store| store.approval(&lookup))
-            .await?
-            .map(|stored| stored.outcome)
-            .ok_or_else(|| ProviderError::UnknownApproval(approval_id.clone()))
-    }
-
-    async fn answer(
-        &mut self,
-        question_id: QuestionId,
-        answers: BTreeMap<String, Vec<String>>,
-    ) -> Result<QuestionOutcome, ProviderError> {
-        let Some(waiting) = self.requests.questions.remove(&question_id) else {
-            let lookup = question_id.clone();
-            return self
-                .store
-                .call(move |store| store.question(&lookup))
-                .await?
-                .map(|stored| stored.outcome)
-                .ok_or(ProviderError::UnknownQuestion(question_id));
-        };
-        let outcome = self
-            .write(&waiting.thread_id, move |write| {
-                write.settle_question(&question_id, Settle::Decide(()))
-            })
-            .await;
-        if matches!(outcome, Ok(QuestionOutcome::Answered)) {
-            waiting
-                .request
-                .answer(ServerResponse::UserInput(wire::answers(answers)));
-        }
-        outcome
     }
 
     async fn skills(&mut self, thread_id: ThreadId, reply: Reply<Vec<Skill>>) {

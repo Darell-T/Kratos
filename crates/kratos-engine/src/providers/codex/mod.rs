@@ -11,6 +11,7 @@
 //! never sent again: only the provider's history or the user settles it.
 
 mod actor;
+mod approvals;
 mod commands;
 mod connection;
 mod incoming;
@@ -18,7 +19,6 @@ pub mod policy;
 pub mod profiles;
 mod queue;
 mod recovery;
-mod requests;
 #[cfg(windows)]
 mod sandbox;
 mod settings;
