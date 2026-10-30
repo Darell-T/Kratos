@@ -12,7 +12,6 @@
 use std::ffi::OsString;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
@@ -64,10 +63,7 @@ fn run() -> Result<(), StartError> {
 }
 
 fn mcp(config: &Config) -> Result<(), StartError> {
-    let thread_id = std::env::var(mcp::THREAD_ID_VAR)
-        .ok()
-        .filter(|id| !id.is_empty())
-        .ok_or(StartError::McpThread)?;
+    let thread_id = config.mcp_thread.clone().ok_or(StartError::McpThread)?;
     let client = Client::new(&format!("http://127.0.0.1:{}", config.port))
         .expect("a loopback address is valid")
         .with_token_from(&config.home);
@@ -101,8 +97,9 @@ fn serve(config: &Config) -> Result<(), StartError> {
         config.home.display()
     );
     let (store_thread, store_jobs) = store_thread::channel();
-    let home = config.home.clone();
-    let server = std::thread::spawn(move || run_server(listener, store_thread, &home, token));
+    let server_config = config.clone();
+    let server =
+        std::thread::spawn(move || run_server(listener, store_thread, &server_config, token));
     store_jobs.run(store);
     server.join().expect("the server thread does not panic")
 }
@@ -110,7 +107,7 @@ fn serve(config: &Config) -> Result<(), StartError> {
 fn run_server(
     listener: TcpListener,
     store: StoreThread,
-    home: &Path,
+    config: &Config,
     token: ClientToken,
 ) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -121,7 +118,7 @@ fn run_server(
         let hub = Hub::new(store.clone());
         let usage = UsageTracker::default();
         let port = listener.local_addr()?.port();
-        let codex = match codex_settings(home, port) {
+        let codex = match codex_settings(config, port) {
             Ok(settings) => {
                 let (provider, stops) =
                     codex::start(settings, hub.clone(), store.clone(), usage.clone()).await?;
@@ -161,32 +158,27 @@ fn run_server(
     })
 }
 
-fn codex_settings(home: &Path, port: u16) -> Result<CodexSettings, CodexMissing> {
-    let program = locate_codex(
-        std::env::var_os("CODEX_EXE").as_deref(),
-        std::env::var_os("PATH").as_deref(),
-    )?;
-    let server_folder = home.join("codex-server");
+fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMissing> {
+    let program = locate_codex(config.codex_exe.as_deref(), config.path.as_deref())?;
+    let server_folder = config.home.join("codex-server");
     std::fs::create_dir_all(&server_folder).map_err(CodexMissing::ServerFolder)?;
-    let user_home = std::env::home_dir();
-    let codex_home = std::env::var_os("CODEX_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| user_home.as_ref().map(|home| home.join(".codex")))
-        .and_then(|codex_home| std::path::absolute(codex_home).ok());
     Ok(CodexSettings {
         program,
         extra_args: Vec::<OsString>::new(),
         env_set: Vec::new(),
         server_folder,
-        protected: ProtectedFolders::new(home.to_path_buf(), codex_home, user_home),
+        protected: ProtectedFolders::new(
+            config.home.clone(),
+            config.codex_home.clone(),
+            config.user_home.clone(),
+        ),
         turn_timeout: TURN_TIMEOUT,
         stop_timeout: STOP_TIMEOUT,
         request_timeout: REQUEST_TIMEOUT,
         platform: DangerousCommandPlatform::host(),
         mcp: Some(McpServer {
             program: std::env::current_exe().map_err(CodexMissing::Engine)?,
-            home: home.to_path_buf(),
+            home: config.home.clone(),
             port,
         }),
     })
