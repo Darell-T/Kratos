@@ -21,7 +21,7 @@ mod write;
 use std::path::{Path, PathBuf};
 
 use kratos_protocol::{
-    ApprovalId, ContinuationId, MessageId, QuestionId, Seq, ThreadId, WorkspaceId,
+    ApprovalId, ContinuationId, MessageId, MessageStatus, QuestionId, Seq, ThreadId, WorkspaceId,
 };
 use rusqlite::Connection;
 
@@ -141,11 +141,15 @@ pub enum StoreError {
     UnknownContinuation(ContinuationId),
     /// A caller asked for a status change the queue's rules forbid, such as resending a message
     /// whose delivery is uncertain (D11). Nothing was written.
-    #[error("message {message_id} cannot go from {from} to {to}")]
+    #[error(
+        "message {message_id} cannot go from {} to {}",
+        messages::status_name(.from),
+        messages::status_name(.to)
+    )]
     MessageTransition {
         message_id: MessageId,
-        from: &'static str,
-        to: &'static str,
+        from: MessageStatus,
+        to: MessageStatus,
     },
     /// A client sent an id the thread already holds with another message. Nothing was written.
     #[error("Message {0} was already sent with different content; send it under a new id")]

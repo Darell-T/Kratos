@@ -184,7 +184,7 @@ fn a_message_whose_delivery_is_uncertain_is_never_queued_again() {
             matches!(
                 refused,
                 Err(StoreError::MessageTransition {
-                    from: "unknown",
+                    from: MessageStatus::Unknown { .. },
                     ..
                 })
             ),

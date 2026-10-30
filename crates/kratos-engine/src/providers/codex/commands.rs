@@ -473,37 +473,32 @@ impl Actor {
     /// user may settle it (D11). An open continuation is cancelled: the user took over (D39).
     async fn resume(&mut self, thread_id: &ThreadId) -> Result<(), ProviderError> {
         self.load(thread_id).await?;
-        self.write(thread_id, |write| {
-            let held = write.pending_messages()?.into_iter().find(|message| {
-                !matches!(message.status, MessageStatus::Queued)
-            });
-            if let Some(held) = held {
-                return Err(StoreError::MessageTransition {
-                    message_id: held.id,
-                    from: "held",
-                    to: "resumed",
-                });
-            }
-            if let Some(open) = write.open_continuation()? {
-                write.update_continuation(
-                    &open.id,
-                    open.resets_at,
-                    ContinuationState::Cancelled {
-                        reason: "The user resumed the thread".into(),
-                    },
-                )?;
-            }
-            write.resume()?;
-            Ok(())
-        })
-        .await
-        .map_err(|error| match error {
-            ProviderError::Store(StoreError::MessageTransition { message_id, .. }) => {
-                ProviderError::Conflict(format!(
-                    "Settle message {message_id} before resuming: retry or remove it if it failed, discard it if its delivery is uncertain"
-                ))
-            }
-            other => other,
+        let resumed = self
+            .write(thread_id, |write| {
+                let held = write
+                    .pending_messages()?
+                    .into_iter()
+                    .find(|message| !matches!(message.status, MessageStatus::Queued));
+                if let Some(held) = held {
+                    return Ok(Err(held.id));
+                }
+                if let Some(open) = write.open_continuation()? {
+                    write.update_continuation(
+                        &open.id,
+                        open.resets_at,
+                        ContinuationState::Cancelled {
+                            reason: "The user resumed the thread".into(),
+                        },
+                    )?;
+                }
+                write.resume()?;
+                Ok(Ok(()))
+            })
+            .await?;
+        resumed.map_err(|held| {
+            ProviderError::Conflict(format!(
+                "Settle message {held} before resuming: retry or remove it if it failed, discard it if its delivery is uncertain"
+            ))
         })
     }
 
