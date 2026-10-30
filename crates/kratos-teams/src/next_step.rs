@@ -8,7 +8,6 @@
 
 use serde::Serialize;
 
-use crate::diff::GIT_DIFF_ARGS;
 use crate::facts::{Outcome, ProbePolicy, Sha, StepId};
 use crate::members::{Bindings, MemberId};
 use crate::prompts::commit_subject;
@@ -111,8 +110,6 @@ pub struct CheckStep {
     pub scan: Option<Scan>,
     /// Texts a requirement quote may come from.
     pub sources: Vec<String>,
-    /// The arguments every diff the engine reads for this step is made with.
-    pub git_diff_args: Vec<String>,
 }
 
 /// The one step the task needs next. Each phase has exactly one answer.
@@ -216,7 +213,6 @@ fn check_step(view: &TaskView, step: StepId, job: &ReviewJob, report: &ReviewDon
                 .into_iter()
                 .map(str::to_owned)
                 .collect(),
-            git_diff_args: GIT_DIFF_ARGS.iter().map(|arg| (*arg).to_owned()).collect(),
         }),
     }
 }

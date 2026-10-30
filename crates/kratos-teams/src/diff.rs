@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::paths::repo_path;
 use crate::reports::Location;
 
-/// The git arguments every diff the rules parse must come from, followed by the revision range.
+/// The git arguments for every diff the engine makes for the rules, followed by the revision range.
+/// That covers each diff a check or a scan parses and the one `Committed::size` measures.
 ///
 /// - `core.quotePath=false` keeps non-ASCII file names as written. Without it git writes each byte of
 ///   such a name as an octal escape.
