@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 
 use super::actor::{Actor, Done, Opened, Server, settle_closed};
 use super::profiles::Profile;
-use super::threads::{Link, ThreadState, Turn};
+use super::threads::{Link, ThreadState};
 use super::{CodexSettings, ProviderError, policy, queue, wire};
 use crate::mcp::{self, McpServer};
 
@@ -407,12 +407,9 @@ impl Actor {
             let thread = self.threads.get_mut(thread_id).expect("listed above");
             thread.link = Link::Detached;
             fail_discards(thread, &format!("Codex could not load the thread: {error}"));
-            let Turn::Running { turn_id, .. } = &thread.turn else {
+            let Some((turn_id, work)) = thread.turn.end_running() else {
                 continue;
             };
-            let turn_id = turn_id.clone();
-            thread.turn = Turn::Idle;
-            let changes = thread.changes.take();
             let outcome = TurnOutcome::Failed {
                 error: error.clone(),
             };
@@ -425,7 +422,7 @@ impl Actor {
                     thread_id,
                     turn_id,
                     outcome,
-                    changes,
+                    work,
                     super::turns::After::PauseIfWaiting(pause),
                 )
                 .await;

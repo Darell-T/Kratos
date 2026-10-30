@@ -11,7 +11,7 @@ use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
     MessageId, MessageInput, MessageOrigin, Provider, QuestionId, QuestionOutcome, Skill, ThreadId,
-    ThreadSettings, TurnChanges, TurnOutcome,
+    ThreadSettings, TurnOutcome,
 };
 use kratos_store::{Settle, StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::connection::StartError;
 use super::queue;
 use super::requests::Requests;
-use super::threads::ThreadState;
+use super::threads::{ThreadState, TurnWork};
 use super::turns::{After, Delivery, Stopper};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
@@ -424,13 +424,14 @@ impl Actor {
         thread_id: &ThreadId,
         turn_id: kratos_protocol::TurnId,
         outcome: TurnOutcome,
-        changes: TurnChanges,
+        work: TurnWork,
         after: After,
     ) -> Result<(), ProviderError> {
-        let context = self
-            .threads
-            .get_mut(thread_id)
-            .and_then(|thread| thread.context.take());
+        let TurnWork {
+            mut changes,
+            context,
+        } = work;
+        let changes = changes.take();
         let closed = self
             .requests
             .close(thread_id, |waiting_turn| *waiting_turn == turn_id);

@@ -110,7 +110,9 @@ impl Actor {
             return;
         };
         let thread = self.threads.get_mut(&thread_id).expect("found above");
-        thread.changes.record(&item);
+        if let Some(work) = thread.turn.work_mut() {
+            work.changes.record(&item);
+        }
         let turn_id = TurnId::new(completed.turn_id);
         let _ = self
             .write(&thread_id, move |write| {
@@ -158,7 +160,9 @@ impl Actor {
             self.windows.insert(model.to_owned(), window);
         }
         let thread = self.threads.get_mut(&thread_id).expect("found above");
-        thread.context = Some(context.clone());
+        if let Some(work) = thread.turn.work_mut() {
+            work.context = Some(context.clone());
+        }
         self.hub.publish(
             &thread_id,
             LiveUpdate::Context {

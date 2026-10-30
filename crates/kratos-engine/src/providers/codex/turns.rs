@@ -11,7 +11,7 @@ use serde_json::json;
 
 use super::actor::{Actor, Done, MAX_STARTING, Reply};
 use super::profiles::Profile;
-use super::threads::Turn;
+use super::threads::{Turn, TurnWork};
 use super::{ProviderError, policy, queue, wire};
 
 /// How long `turn/interrupt` may take to answer.
@@ -150,9 +150,8 @@ impl Actor {
             message_id: message_id.clone(),
             early_completion: None,
             stop_waiters: Vec::new(),
+            work: TurnWork::default(),
         };
-        thread.changes.take();
-        thread.context = None;
         thread.file_items.clear();
         thread.turn_settings = thread.settings.clone();
         let mut params = turn_start_params(native_id, &message, thread.model(), &thread.settings);
@@ -360,17 +359,17 @@ impl Actor {
         let Turn::Starting {
             early_completion,
             stop_waiters,
+            work,
             ..
-        } = std::mem::replace(
-            &mut thread.turn,
-            Turn::Running {
-                turn_id: turn_id.clone(),
-                stopping: false,
-                deadline_epoch: 0,
-            },
-        )
+        } = std::mem::replace(&mut thread.turn, Turn::Idle)
         else {
             unreachable!("accept_start follows a start");
+        };
+        thread.turn = Turn::Running {
+            turn_id: turn_id.clone(),
+            stopping: false,
+            deadline_epoch: 0,
+            work,
         };
         if recorded.is_err() {
             return;
@@ -428,9 +427,7 @@ impl Actor {
         if !is_running {
             return;
         }
-        let turn_id = TurnId::new(turn.id.clone());
-        thread.turn = Turn::Idle;
-        let changes = thread.changes.take();
+        let (turn_id, work) = thread.turn.end_running().expect("the turn runs");
         let outcome = wire::turn_outcome(&turn).unwrap_or(TurnOutcome::Failed {
             error: "Codex reported the turn finished while still in progress".to_owned(),
         });
@@ -447,7 +444,7 @@ impl Actor {
             TurnOutcome::Completed | TurnOutcome::Interrupted => After::Continue,
         };
         if self
-            .record_turn_end(thread_id, turn_id.clone(), outcome, changes, after)
+            .record_turn_end(thread_id, turn_id.clone(), outcome, work, after)
             .await
             .is_err()
         {
@@ -490,7 +487,7 @@ impl Actor {
     pub(super) async fn on_deadline(&mut self, thread_id: ThreadId, turn_id: TurnId, epoch: u64) {
         let is_current = matches!(
             self.threads.get(&thread_id).map(|thread| &thread.turn),
-            Some(Turn::Running { turn_id: running, stopping: false, deadline_epoch })
+            Some(Turn::Running { turn_id: running, stopping: false, deadline_epoch, .. })
                 if *running == turn_id && *deadline_epoch == epoch
         );
         if !is_current {

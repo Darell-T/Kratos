@@ -12,18 +12,17 @@ pub(super) struct ThreadState {
     pub folder: String,
     pub settings: ThreadSettings,
     /// The settings the current or last turn started with. Codex's requests during a turn are
-    /// decided by these, so a change applies from the next turn (D87).
+    /// decided by these, so a change applies from the next turn (D87). A request that arrives with
+    /// no turn is decided by the last turn's.
     pub turn_settings: ThreadSettings,
     pub link: Link,
     pub turn: Turn,
     /// Messages being steered into the running turn. The queue waits for their answers.
     pub steering: HashSet<MessageId>,
-    pub changes: ChangesRecorder,
-    /// The running turn's file changes by item id, for the approval Codex sends after the item
-    /// starts.
+    /// File changes by item id, for the approval Codex sends after the item starts. A turn's start
+    /// clears them, and so does recording its end. A request that arrives with no turn reads what
+    /// is left.
     pub file_items: HashMap<String, Vec<FileChange>>,
-    /// The latest context report of the running turn (D76).
-    pub context: Option<ContextUsage>,
     /// Discards that wait for Codex to load the thread, run again once it has.
     pub discards: Vec<(MessageId, Reply<Message>)>,
 }
@@ -37,9 +36,7 @@ impl ThreadState {
             link: Link::Detached,
             turn: Turn::Idle,
             steering: HashSet::new(),
-            changes: ChangesRecorder::default(),
             file_items: HashMap::new(),
-            context: None,
             discards: Vec::new(),
         }
     }
@@ -78,6 +75,15 @@ pub(super) enum Link {
     Failed,
 }
 
+/// What Codex reported during a turn, kept from its start, since reports can arrive before the
+/// start's answer, until its end is recorded.
+#[derive(Default)]
+pub(super) struct TurnWork {
+    pub changes: ChangesRecorder,
+    /// The latest context report (D76).
+    pub context: Option<ContextUsage>,
+}
+
 pub(super) enum Turn {
     Idle,
     /// `turn/start` is out for `message_id`. A completion that arrives before Codex answers is
@@ -88,6 +94,7 @@ pub(super) enum Turn {
         early_completion: Option<Box<types::Turn>>,
         /// Stops asked for before the turn's id was known; answered once it is.
         stop_waiters: Vec<super::actor::Reply<()>>,
+        work: TurnWork,
     },
     Running {
         turn_id: TurnId,
@@ -95,10 +102,31 @@ pub(super) enum Turn {
         stopping: bool,
         /// Changes whenever the deadline is set again, so an earlier deadline's timer is ignored.
         deadline_epoch: u64,
+        work: TurnWork,
     },
 }
 
 impl Turn {
+    /// What the starting or running turn has gathered. `None` when idle, where Codex's reports
+    /// belong to no turn and are not kept.
+    pub fn work_mut(&mut self) -> Option<&mut TurnWork> {
+        match self {
+            Turn::Starting { work, .. } | Turn::Running { work, .. } => Some(work),
+            Turn::Idle => None,
+        }
+    }
+
+    /// Ends a running turn, returning its id and what it gathered. Any other turn stays as it is.
+    pub fn end_running(&mut self) -> Option<(TurnId, TurnWork)> {
+        if !matches!(self, Turn::Running { .. }) {
+            return None;
+        }
+        let Turn::Running { turn_id, work, .. } = std::mem::replace(self, Turn::Idle) else {
+            unreachable!("matched a running turn above");
+        };
+        Some((turn_id, work))
+    }
+
     pub fn running_id(&self) -> Option<&TurnId> {
         match self {
             Turn::Running { turn_id, .. } => Some(turn_id),
