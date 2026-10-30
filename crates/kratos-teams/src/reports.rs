@@ -13,7 +13,6 @@
 //! `parse_report` is the only function that crosses from one to the other. It never fails. A reply that
 //! cannot be used becomes `Report::Invalid`, whose text tells the agent what to fix.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::str::FromStr;
@@ -892,28 +891,28 @@ fn strict_object(
 /// The JSON Schema a provider forces on the final reply of a turn of this kind. Derived once from the
 /// wire struct and checked by `strict_json_schema`.
 pub fn report_json_schema(kind: ReportKind) -> &'static Value {
-    static SCHEMAS: LazyLock<BTreeMap<ReportKind, Value>> = LazyLock::new(|| {
-        let derived = [
-            (ReportKind::Plan, strict_json_schema::<PlanWire>()),
-            (
-                ReportKind::Implementer,
-                strict_json_schema::<ImplementerWire>(),
-            ),
-            (ReportKind::Review, strict_json_schema::<ReviewWire>()),
-            (ReportKind::Answer, strict_json_schema::<AnswerWire>()),
-            (ReportKind::Rulings, strict_json_schema::<RulingsWire>()),
-        ];
-        derived
-            .into_iter()
-            .map(|(kind, schema)| {
-                let schema = schema.unwrap_or_else(|error| {
-                    // A wire struct outside the strict subset is a defect in this file. The
-                    // `report_schemas` test fails on it first, so no live turn meets this panic.
-                    panic!("the {kind:?} report schema is outside the strict subset: {error}")
-                });
-                (kind, schema)
-            })
-            .collect()
-    });
-    SCHEMAS.get(&kind).unwrap_or(&Value::Null)
+    static PLAN: LazyLock<Value> = LazyLock::new(|| wire_schema::<PlanWire>(ReportKind::Plan));
+    static IMPLEMENTER: LazyLock<Value> =
+        LazyLock::new(|| wire_schema::<ImplementerWire>(ReportKind::Implementer));
+    static REVIEW: LazyLock<Value> =
+        LazyLock::new(|| wire_schema::<ReviewWire>(ReportKind::Review));
+    static ANSWER: LazyLock<Value> =
+        LazyLock::new(|| wire_schema::<AnswerWire>(ReportKind::Answer));
+    static RULINGS: LazyLock<Value> =
+        LazyLock::new(|| wire_schema::<RulingsWire>(ReportKind::Rulings));
+    match kind {
+        ReportKind::Plan => &PLAN,
+        ReportKind::Implementer => &IMPLEMENTER,
+        ReportKind::Review => &REVIEW,
+        ReportKind::Answer => &ANSWER,
+        ReportKind::Rulings => &RULINGS,
+    }
+}
+
+fn wire_schema<T: JsonSchema>(kind: ReportKind) -> Value {
+    strict_json_schema::<T>().unwrap_or_else(|error| {
+        // A wire struct outside the strict subset is a defect in this file. The report_formats
+        // tests fail on it first, so no live turn meets this panic.
+        panic!("the {kind:?} report schema is outside the strict subset: {error}")
+    })
 }

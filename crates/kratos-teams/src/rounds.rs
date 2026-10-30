@@ -283,7 +283,7 @@ impl TaskView {
         let (mut view, Checking { turn, job, report }) = self.take_checking()?;
         let judged = view.judge(&job, &report, &checked)?;
         let accepted = agrees(report.verdict, judged.blocking.len());
-        view.record_review(&job, &report, &checked, accepted);
+        view.record_review(&job, &report, &checked, accepted)?;
         if !accepted {
             view.merge_probes(&checked, &[]);
             let note = Note::VerdictMismatch {
@@ -360,9 +360,11 @@ impl TaskView {
         report: &ReviewDone,
         checked: &EvidenceChecked,
         accepted: bool,
-    ) {
+    ) -> Result<(), Rejection> {
         let Some(last) = self.rounds.last_mut() else {
-            return;
+            return Err(Rejection::InvalidFact(
+                "evidence_checked has no round to record its review in".to_owned(),
+            ));
         };
         last.reviews.push(Review {
             pass: job.pass.kind(),
@@ -372,6 +374,7 @@ impl TaskView {
             rechecks: checked.rechecks.clone(),
             hits: checked.security_hits.clone(),
         });
+        Ok(())
     }
 
     fn finish_pass(&mut self, job: &ReviewJob) {

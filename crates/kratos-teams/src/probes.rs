@@ -70,9 +70,13 @@ impl TaskView {
                 )));
             };
             let status = self.judge_added_probe(probe, run);
-            if let Some(entry) = self.probes.iter_mut().find(|p| p.path == probe.from) {
-                entry.status = status;
-            }
+            let Some(entry) = self.probes.iter_mut().find(|p| p.path == probe.from) else {
+                return Err(Rejection::InvalidFact(format!(
+                    "committed names {}, which is not a probe the reviewer left",
+                    probe.from
+                )));
+            };
+            entry.status = status;
         }
         Ok(())
     }
