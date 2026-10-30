@@ -16,6 +16,7 @@ use kratos_protocol::{
 use kratos_store::{Settle, StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
 
+use super::queue;
 use super::requests::Requests;
 use super::threads::ThreadState;
 use super::turns::{After, Delivery, Stopper};
@@ -377,11 +378,7 @@ impl Actor {
             write.complete_turn(turn_id, outcome, changes, context)?;
             match after {
                 After::Continue => {}
-                After::PauseIfWaiting(reason) => {
-                    if !write.pending_messages()?.is_empty() {
-                        write.pause(reason)?;
-                    }
-                }
+                After::PauseIfWaiting(reason) => queue::pause_if_waiting(write, reason)?,
                 After::Pause(reason) => {
                     write.pause(reason)?;
                 }

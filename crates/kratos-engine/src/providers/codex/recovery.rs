@@ -13,10 +13,10 @@ use kratos_protocol::{
 use kratos_store::{Settle, Store, StoreError, ThreadWrite};
 use tokio::sync::mpsc;
 
-use super::CodexSettings;
 use super::actor::{Actor, Server};
 use super::requests::Requests;
 use super::wire::ChangesRecorder;
+use super::{CodexSettings, queue};
 use crate::hub::{Hub, PAGE_BYTES};
 use crate::store_thread::StoreThread;
 use crate::usage::LimitStop;
@@ -99,9 +99,7 @@ fn settle(write: &mut ThreadWrite<'_>, work: Unfinished) -> Result<(), StoreErro
     close_requests(write, &work)?;
     if let Some((turn_id, changes)) = work.running_turn {
         write.complete_turn(turn_id, TurnOutcome::Interrupted, changes, None)?;
-        if !write.pending_messages()?.is_empty() {
-            write.pause(PauseReason::Interrupted)?;
-        }
+        queue::pause_if_waiting(write, PauseReason::Interrupted)?;
     }
     for message_id in work.sending {
         let error = UNCONFIRMED.to_owned();

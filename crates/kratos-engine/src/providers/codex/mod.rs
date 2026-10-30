@@ -16,6 +16,7 @@ mod connection;
 mod incoming;
 pub mod policy;
 pub mod profiles;
+mod queue;
 mod recovery;
 mod requests;
 #[cfg(windows)]

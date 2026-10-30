@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 use super::actor::{Actor, Done, Opened, Server, settle_closed};
 use super::profiles::Profile;
 use super::threads::{Link, ThreadState, Turn};
-use super::{CodexSettings, ProviderError, policy, wire};
+use super::{CodexSettings, ProviderError, policy, queue, wire};
 use crate::mcp::{self, McpServer};
 
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(1);
@@ -443,10 +443,7 @@ impl Actor {
     pub(super) async fn pause_if_waiting(&mut self, thread_id: &ThreadId, reason: PauseReason) {
         let _ = self
             .write(thread_id, move |write| {
-                if !write.pending_messages()?.is_empty() {
-                    write.pause(reason)?;
-                }
-                Ok(())
+                queue::pause_if_waiting(write, reason)
             })
             .await;
     }
