@@ -4,7 +4,7 @@ use kratos_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::json::{required_column, to_column};
+use crate::columns::{required_column, to_column, unreadable};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// Where a new message joins a thread's queue.
@@ -228,10 +228,8 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         id: MessageId::new(row.get(0)?),
         input: required_column(row, 1)?,
         origin: required_column(row, 2)?,
-        status: status_from_columns(&status, turn_id, error).ok_or_else(|| {
-            let reason = format!("message status {status} without its details");
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, reason.into())
-        })?,
+        status: status_from_columns(&status, turn_id, error)
+            .ok_or_else(|| unreadable(3, format!("message status {status} without its details")))?,
         queued_at: Timestamp::from_stored(row.get(6)?),
     })
 }

@@ -353,6 +353,31 @@ fn lists_only_a_workspace_own_threads_oldest_first() {
 }
 
 #[test]
+fn refuses_a_thread_whose_stored_provider_it_does_not_know() {
+    // Catches a provider name this build does not know read back as some provider it does.
+    let home = home();
+    let store = Store::open(home.path()).unwrap();
+    let thread = seed_thread(&store, "from a later build");
+    let connection = Connection::open(live_database(home.path())).unwrap();
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE threads SET provider = 'gemini' WHERE id = ?1",
+            [thread.id.as_str()],
+        )
+        .unwrap();
+
+    let error = store.list_threads(&thread.workspace_id).unwrap_err();
+    assert!(matches!(error, StoreError::Sqlite(_)), "{error:?}");
+    assert!(
+        error.to_string().ends_with("unknown provider gemini"),
+        "{error}"
+    );
+}
+
+#[test]
 fn reports_an_unknown_workspace_when_listing_or_creating_threads() {
     // Catches an empty list where the API must answer 404, and a thread created in a missing
     // workspace.

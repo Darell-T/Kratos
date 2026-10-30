@@ -8,10 +8,9 @@ use kratos_protocol::{
     Continuation, ContinuationId, ContinuationState, MessageId, MessageInput, MessageOrigin,
     PauseReason, Provider, ThreadEventBody, ThreadId, Timestamp, TurnId,
 };
-use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::json::{from_column, required_column, to_column};
+use crate::columns::{PROVIDERS, from_column, required_column, stored_name, to_column, unreadable};
 use crate::{Enqueued, QueuePlace, Store, StoreError, ThreadWrite};
 
 impl ThreadWrite<'_> {
@@ -131,7 +130,7 @@ impl Store {
             "SELECT id, paused FROM threads
              WHERE provider = ?1 AND paused IS NOT NULL AND running_turn IS NULL ORDER BY rowid",
         )?;
-        let rows = statement.query_map([provider.as_str()], |row| {
+        let rows = statement.query_map([stored_name(&PROVIDERS, provider)], |row| {
             let pause: Option<PauseReason> = from_column(row, 1)?;
             Ok(match pause {
                 Some(PauseReason::UsageLimit { turn_id, .. }) => {
@@ -222,10 +221,8 @@ fn continuation_from_row(row: &Row<'_>) -> rusqlite::Result<(ThreadId, Continuat
     let state: String = row.get(5)?;
     let detail: Option<String> = row.get(6)?;
     let message_id: Option<String> = row.get(7)?;
-    let state = state_from_columns(&state, detail, message_id).ok_or_else(|| {
-        let reason = format!("continuation state {state} without its details");
-        rusqlite::Error::FromSqlConversionFailure(5, Type::Text, reason.into())
-    })?;
+    let state = state_from_columns(&state, detail, message_id)
+        .ok_or_else(|| unreadable(5, format!("continuation state {state} without its details")))?;
     Ok((
         ThreadId::new(row.get(0)?),
         Continuation {

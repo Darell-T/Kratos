@@ -132,9 +132,7 @@ fn agent_types_match_the_typescript_json() {
 
     for provider in [Provider::Codex, Provider::Claude] {
         assert_eq!(json(&provider), format!("\"{}\"", provider.as_str()));
-        assert_eq!(Provider::from_name(provider.as_str()), Some(provider));
     }
-    assert_eq!(Provider::from_name("gemini"), None);
 }
 
 #[test]

@@ -1,21 +1,15 @@
 use kratos_protocol::{
-    ContextUsage, CreateThread, PauseReason, Permission, Provider, Thread, ThreadDetails,
-    ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, Timestamp, TurnChanges, TurnId,
-    TurnOutcome, WorkspaceId,
+    ContextUsage, CreateThread, PauseReason, Provider, Thread, ThreadDetails, ThreadEventBody,
+    ThreadId, ThreadSandbox, ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOutcome,
+    WorkspaceId,
 };
-use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::json::{from_column, to_column};
+use crate::columns::{
+    PERMISSIONS, PROVIDERS, from_column, from_stored_name, stored_name, to_column,
+};
 use crate::{Store, StoreError, ThreadWrite};
-
-/// The names the `permission` column stores.
-const PERMISSIONS: [(Permission, &str); 3] = [
-    (Permission::AskMe, "askMe"),
-    (Permission::ApproveForMe, "approveForMe"),
-    (Permission::FullAccess, "fullAccess"),
-];
 
 /// What a provider needs to run a thread's turns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,11 +51,11 @@ impl Store {
                 thread.id.as_str(),
                 thread.workspace_id.as_str(),
                 thread.title,
-                thread.provider.as_str(),
+                stored_name(&PROVIDERS, thread.provider),
                 thread.created_at.as_str(),
                 thread.updated_at.as_str(),
                 settings.model,
-                permission_name(settings.permission),
+                stored_name(&PERMISSIONS, settings.permission),
                 settings.plan_mode,
                 settings.context_limit_tokens,
             ],
@@ -138,7 +132,7 @@ impl ThreadWrite<'_> {
              WHERE id = ?5",
             params![
                 settings.model,
-                permission_name(settings.permission),
+                stored_name(&PERMISSIONS, settings.permission),
                 settings.plan_mode,
                 settings.context_limit_tokens,
                 self.thread_id().as_str(),
@@ -227,7 +221,7 @@ impl ThreadWrite<'_> {
             params![
                 Uuid::new_v4().to_string(),
                 self.thread_id().as_str(),
-                provider.as_str(),
+                stored_name(&PROVIDERS, provider),
                 native_id,
                 now,
                 plan,
@@ -275,25 +269,12 @@ fn provider_thread_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderThread> {
 /// Columns 7 to 10: `model, permission, plan_mode, context_limit_tokens`.
 fn settings_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadSettings> {
     let permission: String = row.get(8)?;
-    let permission = PERMISSIONS
-        .iter()
-        .find(|(_, name)| *name == permission)
-        .map(|(permission, _)| *permission)
-        .ok_or_else(|| unknown_value(8, "permission", &permission))?;
     Ok(ThreadSettings {
         model: row.get(7)?,
-        permission,
+        permission: from_stored_name(&PERMISSIONS, &permission, 8, "permission")?,
         plan_mode: row.get(9)?,
         context_limit_tokens: row.get(10)?,
     })
-}
-
-fn permission_name(permission: Permission) -> &'static str {
-    PERMISSIONS
-        .iter()
-        .find(|(known, _)| *known == permission)
-        .map(|(_, name)| *name)
-        .expect("every permission has a stored name")
 }
 
 /// A row whose first six columns are `id, workspace_id, title, provider, created_at, updated_at`.
@@ -303,14 +284,8 @@ fn thread_from_row(row: &Row<'_>) -> rusqlite::Result<Thread> {
         id: ThreadId::new(row.get(0)?),
         workspace_id: WorkspaceId::new(row.get(1)?),
         title: row.get(2)?,
-        provider: Provider::from_name(&provider)
-            .ok_or_else(|| unknown_value(3, "provider", &provider))?,
+        provider: from_stored_name(&PROVIDERS, &provider, 3, "provider")?,
         created_at: Timestamp::from_stored(row.get(4)?),
         updated_at: Timestamp::from_stored(row.get(5)?),
     })
-}
-
-fn unknown_value(column: usize, what: &str, value: &str) -> rusqlite::Error {
-    let reason = format!("unknown {what} {value}");
-    rusqlite::Error::FromSqlConversionFailure(column, Type::Text, reason.into())
 }

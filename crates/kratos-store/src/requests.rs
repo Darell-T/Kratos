@@ -8,10 +8,9 @@ use kratos_protocol::{
     Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, Question, QuestionId, QuestionOutcome,
     ThreadEventBody, ThreadId,
 };
-use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::json::{required_column, to_column};
+use crate::columns::{DECISIONS, from_stored_name, required_column, stored_name, to_column};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// How a waiting request is settled.
@@ -37,13 +36,6 @@ pub struct StoredQuestion {
     pub outcome: QuestionOutcome,
 }
 
-const DECISIONS: [(ApprovalDecision, &str); 4] = [
-    (ApprovalDecision::Accept, "accept"),
-    (ApprovalDecision::AcceptForSession, "acceptForSession"),
-    (ApprovalDecision::Decline, "decline"),
-    (ApprovalDecision::Cancel, "cancel"),
-];
-
 impl ThreadWrite<'_> {
     pub fn request_approval(&mut self, approval: Approval) -> Result<(), StoreError> {
         self.transaction.execute(
@@ -68,7 +60,7 @@ impl ThreadWrite<'_> {
         settle: Settle<ApprovalDecision>,
     ) -> Result<ApprovalOutcome, StoreError> {
         let (decision, closed_reason) = match &settle {
-            Settle::Decide(decision) => (Some(decision_name(*decision)), None),
+            Settle::Decide(decision) => (Some(stored_name(&DECISIONS, *decision)), None),
             Settle::Close(reason) => (None, Some(reason.as_str())),
         };
         let settled = self.transaction.execute(
@@ -228,17 +220,9 @@ fn approval_from_row(row: &Row<'_>) -> rusqlite::Result<StoredApproval> {
     let decision: Option<String> = row.get(2)?;
     let closed_reason: Option<String> = row.get(3)?;
     let outcome = match (decision, closed_reason) {
-        (Some(name), _) => {
-            let decision = DECISIONS
-                .iter()
-                .find(|(_, known)| *known == name)
-                .map(|(decision, _)| *decision)
-                .ok_or_else(|| {
-                    let reason = format!("unknown decision {name}");
-                    rusqlite::Error::FromSqlConversionFailure(2, Type::Text, reason.into())
-                })?;
-            ApprovalOutcome::Decided { decision }
-        }
+        (Some(name), _) => ApprovalOutcome::Decided {
+            decision: from_stored_name(&DECISIONS, &name, 2, "decision")?,
+        },
         (None, Some(reason)) => ApprovalOutcome::Closed { reason },
         (None, None) => ApprovalOutcome::Waiting,
     };
@@ -274,12 +258,4 @@ fn stored_question(
         )
         .optional()?;
     Ok(stored)
-}
-
-fn decision_name(decision: ApprovalDecision) -> &'static str {
-    DECISIONS
-        .iter()
-        .find(|(known, _)| *known == decision)
-        .map(|(_, name)| *name)
-        .expect("every decision has a stored name")
 }

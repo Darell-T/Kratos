@@ -14,19 +14,12 @@ pub enum Provider {
 }
 
 impl Provider {
-    /// The name in JSON and in the `provider` column.
+    /// The name in JSON.
     pub fn as_str(self) -> &'static str {
         match self {
             Provider::Codex => "codex",
             Provider::Claude => "claude",
         }
-    }
-
-    /// The provider that [`Provider::as_str`] names `name`, for text read back from the records.
-    pub fn from_name(name: &str) -> Option<Provider> {
-        [Provider::Codex, Provider::Claude]
-            .into_iter()
-            .find(|provider| provider.as_str() == name)
     }
 }
 

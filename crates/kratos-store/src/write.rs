@@ -1,8 +1,8 @@
 use kratos_protocol::{Seq, ThreadEvent, ThreadEventBody, ThreadId, Timestamp};
 use rusqlite::{Transaction, TransactionBehavior, params};
 
+use crate::columns::to_column;
 use crate::events::last_seq_of;
-use crate::json::to_column;
 use crate::{Store, StoreError};
 
 /// One `BEGIN IMMEDIATE` transaction over one thread's records: its events, queue, approvals,
