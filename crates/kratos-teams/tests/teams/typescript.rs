@@ -6,7 +6,7 @@
 //! and Rust replaced on purpose, such as `needsUser`, is refused.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kratos_teams::facts::{Fact, FactSeq, StoredFact};
 use kratos_teams::fold::fold;
@@ -35,6 +35,34 @@ impl Reference {
         }
         expected
     }
+
+    /// The facts after which the Rust view differs from the one the TypeScript recorded.
+    pub fn differing_facts(&self, folded: &[Folded]) -> Vec<usize> {
+        folded
+            .iter()
+            .zip(&self.expected)
+            .filter(|(ours, theirs)| &ours.observed != *theirs)
+            .map(|(ours, _)| ours.fact)
+            .collect()
+    }
+}
+
+/// Every reference log in `tests/fixtures/reference/`, in file name order.
+pub fn read_every_reference() -> Result<Vec<Reference>, String> {
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference");
+    let unreadable = |error: std::io::Error| format!("{}: {error}", folder.display());
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&folder).map_err(unreadable)? {
+        let path = entry.map_err(unreadable)?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files.iter().map(|path| read_reference(path)).collect()
 }
 
 pub fn read_reference(path: &Path) -> Result<Reference, String> {
