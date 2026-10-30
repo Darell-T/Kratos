@@ -46,35 +46,36 @@ impl TaskView {
 
     /// `None` when the responses answer every open finding exactly once, and each dispute has a reason.
     pub(crate) fn responses_problem(&self, responses: &[Response]) -> Option<String> {
-        let answers = |finding: &Finding| {
-            let id = finding.id;
-            responses.iter().filter(move |r| r.finding == id)
-        };
-        let open: Vec<&Finding> = self.open_findings().collect();
-        let ids_where = |wanted: &dyn Fn(&Finding) -> bool| -> String {
-            let ids: Vec<String> = open
-                .iter()
-                .filter(|finding| wanted(finding))
-                .map(|finding| finding.id.to_string())
-                .collect();
-            ids.join(", ")
-        };
+        let open: Vec<FindingId> = self.open_findings().map(|finding| finding.id).collect();
+        let Coverage {
+            missing, repeated, ..
+        } = coverage(&open, responses.iter().map(|r| r.finding));
         let is_blank_dispute = |response: &Response| matches!(&response.outcome, ResponseOutcome::Disputed { reason } if reason.trim().is_empty());
-        let missing = ids_where(&|f| answers(f).count() == 0);
-        let repeated = ids_where(&|f| answers(f).count() > 1);
-        let unexplained = ids_where(&|f| answers(f).any(is_blank_dispute));
-        let problems: Vec<String> = [
-            (!missing.is_empty())
-                .then(|| format!("Answer every open finding in responses. Missing: {missing}.")),
-            (!repeated.is_empty())
-                .then(|| format!("Answer each finding once. Answered more than once: {repeated}.")),
+        let unexplained: Vec<FindingId> = open
+            .iter()
+            .filter(|id| {
+                responses
+                    .iter()
+                    .any(|r| r.finding == **id && is_blank_dispute(r))
+            })
+            .copied()
+            .collect();
+        problems([
+            (!missing.is_empty()).then(|| {
+                format!(
+                    "Answer every open finding in responses. Missing: {}.",
+                    id_list(&missing)
+                )
+            }),
+            (!repeated.is_empty()).then(|| {
+                format!(
+                    "Answer each finding once. Answered more than once: {}.",
+                    id_list(&repeated)
+                )
+            }),
             (!unexplained.is_empty())
-                .then(|| format!("Give a reason for each dispute: {unexplained}.")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        (!problems.is_empty()).then(|| problems.join(" "))
+                .then(|| format!("Give a reason for each dispute: {}.", id_list(&unexplained))),
+        ])
     }
 
     /// `None` when the probes an implementer added are ones it may add, and name probes the reviewer
@@ -724,46 +725,75 @@ fn settle(finding: &Finding, report: &ReviewDone, rerun: Option<&Rerun>) -> Find
 
 /// `None` when the rulings cover every disputed finding exactly once and give a reason for each.
 fn rulings_problem(disputed: &[FindingId], done: &RulingsDone) -> Option<String> {
-    let mut counts: BTreeMap<FindingId, usize> = BTreeMap::new();
-    for ruling in &done.rulings {
-        *counts.entry(ruling.finding).or_default() += 1;
-    }
-    let ids = |select: &dyn Fn(&FindingId) -> bool| -> Vec<String> {
-        disputed
-            .iter()
-            .filter(|id| select(id))
-            .map(ToString::to_string)
-            .collect()
-    };
-    let missing = ids(&|id| !counts.contains_key(id));
-    let repeated = ids(&|id| counts.get(id).is_some_and(|n| *n > 1));
-    let strangers: Vec<String> = counts
-        .keys()
-        .filter(|id| !disputed.contains(id))
-        .map(ToString::to_string)
-        .collect();
-    let problems: Vec<String> = [
+    let Coverage {
+        missing,
+        repeated,
+        strangers,
+    } = coverage(disputed, done.rulings.iter().map(|ruling| ruling.finding));
+    problems([
         (!missing.is_empty()).then(|| {
             format!(
                 "Rule on every disputed finding. Missing: {}.",
-                missing.join(", ")
+                id_list(&missing)
             )
         }),
         (!repeated.is_empty()).then(|| {
             format!(
                 "Rule on each finding once. Ruled more than once: {}.",
-                repeated.join(", ")
+                id_list(&repeated)
             )
         }),
         (!strangers.is_empty()).then(|| {
             format!(
                 "Rule only on the disputed findings. Not disputed: {}.",
-                strangers.join(", ")
+                id_list(&strangers)
             )
         }),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    (!problems.is_empty()).then(|| problems.join(" "))
+    ])
+}
+
+/// How an agent's per-finding list covers the findings it must speak to.
+struct Coverage {
+    /// Expected findings the list leaves out, in the expected order.
+    missing: Vec<FindingId>,
+    /// Expected findings the list names more than once, in the expected order.
+    repeated: Vec<FindingId>,
+    /// Findings the list names that were not expected, in id order.
+    strangers: Vec<FindingId>,
+}
+
+fn coverage(expected: &[FindingId], given: impl IntoIterator<Item = FindingId>) -> Coverage {
+    let mut counts: BTreeMap<FindingId, usize> = BTreeMap::new();
+    for id in given {
+        *counts.entry(id).or_default() += 1;
+    }
+    let count = |id: &FindingId| counts.get(id).copied().unwrap_or(0);
+    Coverage {
+        missing: expected
+            .iter()
+            .filter(|id| count(id) == 0)
+            .copied()
+            .collect(),
+        repeated: expected
+            .iter()
+            .filter(|id| count(id) > 1)
+            .copied()
+            .collect(),
+        strangers: counts
+            .keys()
+            .filter(|id| !expected.contains(id))
+            .copied()
+            .collect(),
+    }
+}
+
+fn id_list(ids: &[FindingId]) -> String {
+    let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+    ids.join(", ")
+}
+
+/// The problems found, joined, or `None` when there are none.
+fn problems(found: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let found: Vec<String> = found.into_iter().flatten().collect();
+    (!found.is_empty()).then(|| found.join(" "))
 }
