@@ -29,6 +29,8 @@ use kratos_teams::security_triggers::{Trigger, TriggerHit};
 use kratos_teams::task_plan::{PlanChangeRequest, ScopePattern, TaskPlan};
 use kratos_teams::view::{Activity, Phase, TaskView};
 
+use crate::observe::tag_of;
+
 /// No scenario needs more steps than this from one helper call, so more means the rules loop.
 const MAX_STEPS: usize = 300;
 
@@ -378,10 +380,7 @@ fn engine_turn(view: &TaskView) -> Option<MessageId> {
 }
 
 pub fn step_name(step: &Step) -> String {
-    serde_json::to_value(step).expect("steps serialize")["kind"]
-        .as_str()
-        .expect("tagged")
-        .to_owned()
+    tag_of(step)
 }
 
 pub fn passes() -> CommandResult {

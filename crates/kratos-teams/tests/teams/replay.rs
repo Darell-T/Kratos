@@ -12,6 +12,7 @@ use kratos_teams::view::{
     Activity, ApprovedBy, Phase, ProbeStatus, Run, TaskView, Trouble, Turn, Waiting, Work,
 };
 
+use crate::observe::tag_of;
 use crate::support::{ScriptedTask, sha};
 
 /// The phase of an approved task.
@@ -61,14 +62,7 @@ pub fn runs(task: &ScriptedTask, role: Role) -> Vec<&Run> {
 /// The kinds of correction the messages carried, in order, with `None` for a message that was not one.
 pub fn notes(runs: &[&Run]) -> Vec<Option<String>> {
     runs.iter()
-        .map(|run| {
-            run.note.as_ref().map(|note| {
-                serde_json::to_value(note).expect("a note serializes")["kind"]
-                    .as_str()
-                    .expect("tagged")
-                    .to_owned()
-            })
-        })
+        .map(|run| run.note.as_ref().map(tag_of))
         .collect()
 }
 
