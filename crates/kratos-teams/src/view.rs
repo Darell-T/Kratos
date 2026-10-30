@@ -142,7 +142,6 @@ pub enum Activity {
     /// A reviewer's finished report, waiting for Kratos to check its evidence. The finished `turn` is
     /// kept so that a verdict mismatch can send a correction on the same step.
     Checking {
-        step: StepId,
         turn: Turn,
         job: ReviewJob,
         report: ReviewDone,

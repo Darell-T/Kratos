@@ -411,12 +411,7 @@ impl TaskView {
         job: ReviewJob,
         report: ReviewDone,
     ) -> Box<TaskView> {
-        self.active(Activity::Checking {
-            step: turn.step,
-            turn,
-            job,
-            report,
-        })
+        self.active(Activity::Checking { turn, job, report })
     }
 }
 

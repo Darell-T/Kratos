@@ -130,9 +130,7 @@ fn active_step(view: &TaskView, activity: &Activity) -> Step {
         Activity::Preparing { .. } => Step::Prepare,
         Activity::Turn { turn } => turn_step(view, turn),
         Activity::Committing { step, then } => commit_step(view, *step, then),
-        Activity::Checking {
-            step, job, report, ..
-        } => check_step(view, *step, job, report),
+        Activity::Checking { turn, job, report } => check_step(view, turn.step, job, report),
         Activity::Rebinding { to, .. } => Step::ApplyRoles {
             from: view.bindings.clone(),
             to: to.clone(),

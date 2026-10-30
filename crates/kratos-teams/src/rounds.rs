@@ -411,10 +411,7 @@ impl TaskView {
         );
         match phase {
             Phase::Active {
-                activity:
-                    Activity::Checking {
-                        turn, job, report, ..
-                    },
+                activity: Activity::Checking { turn, job, report },
             } => Ok((self, Checking { turn, job, report })),
             other => {
                 self.phase = other;
