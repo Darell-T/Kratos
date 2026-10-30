@@ -52,11 +52,6 @@ fn view_of(log: &[StoredFact]) -> TaskView {
     fold(log).expect("a lane log folds")
 }
 
-/// Every prefix of the log, folded.
-fn prefixes(log: &[StoredFact]) -> Vec<TaskView> {
-    (1..=log.len()).map(|n| view_of(&log[..n])).collect()
-}
-
 fn text_for(view: &TaskView) -> String {
     let Step::Run { run } = next_step(view) else {
         panic!("a run is next");
@@ -550,17 +545,17 @@ fn lane_6_the_planners_ruling_decides_a_dispute_and_with_no_planner_the_users_do
     let user_log = read_lane("r6-dispute-no-planner");
 
     assert!(
-        prefixes(&planner_log)
+        prefix_views(&planner_log)
             .iter()
             .all(|view| !matches!(waiting(view), Some(Waiting::Ruling { .. }))),
         "the user was never asked to rule"
     );
-    assert!(prefixes(&planner_log).iter().any(|view| matches!(
+    assert!(prefix_views(&planner_log).iter().any(|view| matches!(
         &view.phase,
         Phase::Active { activity: Activity::Turn { turn } } if matches!(turn.work, Work::Rule { .. })
     )));
     assert!(
-        prefixes(&user_log)
+        prefix_views(&user_log)
             .iter()
             .any(|view| matches!(waiting(view), Some(Waiting::Ruling { .. })))
     );
@@ -580,7 +575,7 @@ fn lane_6_the_planners_ruling_decides_a_dispute_and_with_no_planner_the_users_do
 fn lane_7_a_plan_change_pauses_for_the_user_and_the_implementers_next_brief_carries_the_instructions()
  {
     let log = read_lane("r6-plan-change");
-    let views = prefixes(&log);
+    let views = prefix_views(&log);
 
     assert!(
         views
@@ -605,7 +600,7 @@ fn lane_7_a_plan_change_pauses_for_the_user_and_the_implementers_next_brief_carr
 #[test]
 fn lane_8_the_next_review_package_lists_a_file_outside_the_plans_scope() {
     let log = read_lane("r6-scope");
-    let views = prefixes(&log);
+    let views = prefix_views(&log);
 
     let at_review = views
         .iter()
@@ -621,7 +616,7 @@ fn lane_8_the_next_review_package_lists_a_file_outside_the_plans_scope() {
 #[test]
 fn lane_9_a_usage_limit_completes_one_logical_step_once_with_a_distinct_continuation_message() {
     let log = read_lane("r6-limit");
-    let views = prefixes(&log);
+    let views = prefix_views(&log);
 
     let mut sent: Vec<_> = views
         .iter()
@@ -659,7 +654,7 @@ fn lane_9_a_usage_limit_completes_one_logical_step_once_with_a_distinct_continua
 #[test]
 fn lane_10_the_prefix_logs_cover_planning_steering_cancellation_roles_and_probes() {
     let off = view_of(&read_lane("r6-prefixes-planning-off"));
-    let on = prefixes(&read_lane("r6-prefixes-planning-on"));
+    let on = prefix_views(&read_lane("r6-prefixes-planning-on"));
     let steering = view_of(&read_lane("r6-prefixes-steering"));
     let cancelled = view_of(&read_lane("r6-prefixes-cancel"));
     let roles = view_of(&read_lane("r6-prefixes-roles"));
@@ -696,7 +691,7 @@ fn steering_keeps_the_active_execution_so_each_implementer_message_is_asked_for_
     let log = read_lane("r6-prefixes-steering");
 
     let mut sent = Vec::new();
-    for view in prefixes(&log) {
+    for view in prefix_views(&log) {
         if let Step::Run { run } = next_step(&view)
             && run.role == Role::Implementer
             && !sent.contains(&run.message)

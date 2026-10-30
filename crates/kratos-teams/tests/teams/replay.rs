@@ -174,14 +174,20 @@ pub fn swap_implementer_and_reviewer(bindings: &Bindings) -> Bindings {
     .expect("distinct members")
 }
 
+/// Every prefix of `log`, folded, shortest first.
+pub fn prefix_views(log: &[StoredFact]) -> Vec<TaskView> {
+    (1..=log.len())
+        .map(|n| fold(&log[..n]).expect("every prefix folds"))
+        .collect()
+}
+
 /// Every prefix of the record folds the same from a stored copy, plans the same step, accepts each
 /// decision it allows, and never waits again for a message whose result it already holds. A restart at
 /// any fact therefore continues the same way, and no completed step repeats.
 pub fn assert_log_replayable(log: &[StoredFact]) {
     let mut completed: Vec<MessageId> = Vec::new();
-    for n in 1..=log.len() {
+    for (n, view) in (1..).zip(prefix_views(log)) {
         let prefix = &log[..n];
-        let view = fold(prefix).expect("every prefix folds");
         let stored: Vec<StoredFact> = prefix
             .iter()
             .map(|fact| {
@@ -233,8 +239,8 @@ pub fn assert_replayable(task: &ScriptedTask) {
 
 /// The view as it was when the engine delivered `run`: the prefix of the log that waits for its message.
 pub fn view_when_sent(task: &ScriptedTask, run: &Run) -> TaskView {
-    (1..=task.log().len())
-        .map(|n| fold(&task.log()[..n]).expect("every prefix folds"))
+    prefix_views(task.log())
+        .into_iter()
         .find(|view| view.phase.waiting_message() == Some(&run.message))
         .unwrap_or_else(|| panic!("no prefix of the log waits for {:?}", run.message))
 }
