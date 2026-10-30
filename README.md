@@ -106,6 +106,23 @@ cargo run -p kratos-client -- approve <approval-id> accept
 cargo run -p kratos-client -- usage
 ```
 
+### Agent tools
+
+Every Codex thread gets a `kratos` MCP server. Codex starts
+`kratos-engine mcp` for the thread with its id, and the server calls the engine's API with the client token. An agent
+can list workspaces and threads, read a thread, create a thread, send another thread a message labelled with its own
+id, wait for a thread's turn, stop a turn, answer a question, and decide an approval.
+
+The server names the agent's thread in a `Kratos-Thread` header on every request, and the engine checks each one
+against that thread. A thread it creates gets at most its permission, only a Full access thread may decide another
+thread's approval, and no request acts on the agent's own thread. The server runs outside the agent's sandbox, so
+sandboxed commands still cannot read the token.
+
+A message from another thread runs in a turn of its own. When it starts, the receiving thread's settings drop to the
+narrower of the two threads' permissions, and to plan mode if either thread plans. They stay there after the turn,
+because the agent remembers the request, until the user raises them. Codex sees the message after a label that
+names the sender and its permission. Such a message cannot be steered into a running turn.
+
 ## Develop
 
 ```sh

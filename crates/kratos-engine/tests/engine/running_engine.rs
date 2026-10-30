@@ -200,6 +200,10 @@ impl RunningEngine {
             .unwrap()
     }
 
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
+
     pub fn client(&self) -> Client {
         Client::new(&format!("http://127.0.0.1:{}", self.port))
             .unwrap()

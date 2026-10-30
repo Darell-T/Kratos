@@ -1,3 +1,4 @@
+mod acting;
 mod agents;
 pub mod auth;
 mod json;
@@ -28,6 +29,7 @@ use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
 use crate::usage::scheduler::SchedulerHandle;
 
+pub use acting::ACTING_THREAD_HEADER;
 pub use auth::ClientToken;
 
 /// The largest request body a route reads. One byte more answers 413.
@@ -90,6 +92,7 @@ fn router(state: ServerState) -> Router {
             get(routes::list_threads).post(routes::create_thread),
         )
         .route("/api/threads/{id}", get(agents::thread_details))
+        .route("/api/threads/{id}/events", get(routes::thread_events))
         .route("/api/threads/{id}/messages", post(agents::post_message))
         .route(
             "/api/threads/{id}/messages/{message_id}",

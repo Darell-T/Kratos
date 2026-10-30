@@ -7,14 +7,16 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
-    AnswerQuestion, ApprovalId, ContinuationId, DecideApproval, MessageId, PostMessage, Provider,
-    QuestionId, QueueFull, SendMessage, ThreadEventBody, ThreadId, ThreadSettings, ThreadSkills,
+    AnswerQuestion, ApprovalId, ContinuationId, DecideApproval, MessageId, MessageOrigin,
+    PostMessage, Provider, QuestionId, QueueFull, SendMessage, ThreadEventBody, ThreadId,
+    ThreadSettings, ThreadSkills,
 };
 use uuid::Uuid;
 
+use super::acting::Acting;
 use super::json::read_json;
 use super::{ApiError, ServerState, json_reply};
 use crate::providers::codex::{CodexProvider, MAX_PENDING_MESSAGES, ProviderError, Sent};
@@ -68,6 +70,7 @@ impl From<ProviderError> for ApiError {
 /// reading or size-checking its body.
 pub(super) async fn post_message(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     id: ThreadPath,
     body: Body,
 ) -> Result<Response, ApiError> {
@@ -79,14 +82,36 @@ pub(super) async fn post_message(
         .await?
         .thread
         .provider;
-    if provider != Provider::Codex {
-        return log_message(&state, thread_id, body).await;
+    let acting = Acting::of(&state, &headers).await?;
+    match (provider, acting) {
+        (Provider::Codex, acting) => send_to_codex(&state, acting, thread_id, body).await,
+        (_, None) => log_message(&state, thread_id, body).await,
+        (_, Some(_)) => Err(ApiError::bad_request(
+            "Kratos runs no agent in this thread yet, so it takes no messages from other threads",
+        )),
     }
+}
+
+async fn send_to_codex(
+    state: &ServerState,
+    acting: Option<Acting>,
+    thread_id: ThreadId,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let origin = match acting {
+        None => MessageOrigin::User,
+        Some(acting) => {
+            acting.not_on_itself(&thread_id)?;
+            acting.origin()
+        }
+    };
     let codex = state.codex()?;
     let request: SendMessage = read_json(body).await?;
     let (message_id, input) = request.into_parts().map_err(ApiError::bad_request)?;
     let message_id = message_id.unwrap_or_else(|| MessageId::new(Uuid::new_v4().to_string()));
-    Ok(sent_reply(codex.send(thread_id, message_id, input).await?))
+    Ok(sent_reply(
+        codex.send(thread_id, message_id, input, origin).await?,
+    ))
 }
 
 /// R2's answer for a thread whose agent Kratos does not drive yet: the message only joins the log.
@@ -184,9 +209,13 @@ pub(super) async fn discard_message(
 /// turn's end arrives as an event.
 pub(super) async fn stop(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     id: ThreadPath,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
+    if let Some(acting) = Acting::of(&state, &headers).await? {
+        acting.not_on_itself(&thread_id)?;
+    }
     state.codex()?.stop(thread_id.clone()).await?;
     details(&state, thread_id).await
 }
@@ -234,10 +263,22 @@ pub(super) async fn skills(
 /// reaches Codex; a later one gets that outcome back (D83).
 pub(super) async fn decide(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     id: Result<Path<ApprovalId>, PathRejection>,
     body: Body,
 ) -> Result<Response, ApiError> {
     let approval_id = path(id)?;
+    if let Some(acting) = Acting::of(&state, &headers).await? {
+        acting.may_decide()?;
+        let lookup = approval_id.clone();
+        let stored = state
+            .store
+            .call(move |store| store.approval(&lookup))
+            .await?;
+        if let Some(stored) = stored {
+            acting.not_on_itself(&stored.thread_id)?;
+        }
+    }
     let codex = state.codex()?;
     let DecideApproval { decision } = read_json(body).await?;
     let outcome = codex.decide(approval_id, decision).await?;
@@ -248,10 +289,21 @@ pub(super) async fn decide(
 /// wins.
 pub(super) async fn answer(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     id: Result<Path<QuestionId>, PathRejection>,
     body: Body,
 ) -> Result<Response, ApiError> {
     let question_id = path(id)?;
+    if let Some(acting) = Acting::of(&state, &headers).await? {
+        let lookup = question_id.clone();
+        let stored = state
+            .store
+            .call(move |store| store.question(&lookup))
+            .await?;
+        if let Some(stored) = stored {
+            acting.not_on_itself(&stored.thread_id)?;
+        }
+    }
     let codex = state.codex()?;
     let AnswerQuestion { answers } = read_json(body).await?;
     let outcome = codex.answer(question_id, answers).await?;

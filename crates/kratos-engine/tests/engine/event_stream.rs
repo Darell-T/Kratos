@@ -3,7 +3,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use kratos_client::{bench_post, bench_turns};
-use kratos_protocol::{Seq, ThreadEventBody};
+use kratos_protocol::{Seq, ThreadEvent, ThreadEventBody};
+use serde_json::json;
 
 use crate::running_engine::{
     RunningEngine, WAIT, expect_silence, next_event, next_seqs, post, subscribed,
@@ -22,6 +23,42 @@ fn turn_benchmark_observes_200_completed_turns_across_ten_threads() {
     assert_eq!(report.completion.messages, 200);
     assert!(report.dispatch.p95_ms > 0.0);
     assert!(report.completion.p95_ms > 0.0);
+}
+
+#[test]
+fn the_events_route_returns_a_thread_s_log_after_a_seq() {
+    // Catches a client that can read a thread's history only over the socket, which the MCP tools
+    // cannot keep open, a page that ignores `after`, and details whose `lastSeq` leaves a gap or an
+    // overlap with the events that follow them.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let thread = engine.create_thread();
+    let posted: Vec<u64> = ["one", "two", "three"]
+        .into_iter()
+        .map(|text| post(&client, &thread, text).seq.get())
+        .collect();
+    let path = format!("/api/threads/{}/events", thread.id);
+    let seqs = |path: &str| -> Vec<u64> {
+        let events: Vec<ThreadEvent> = client.get(path).unwrap().parse().unwrap();
+        events.iter().map(|event| event.seq.get()).collect()
+    };
+
+    assert!(seqs(&path).ends_with(&posted), "{:?}", seqs(&path));
+    assert_eq!(seqs(&format!("{path}?after={}", posted[0])), posted[1..]);
+    let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
+    assert_eq!(details.body["lastSeq"], json!(posted[2]));
+    assert_eq!(
+        client
+            .get("/api/threads/no-such-thread/events")
+            .unwrap()
+            .status,
+        404
+    );
+    assert_eq!(
+        client.get(&format!("{path}?after=soon")).unwrap().status,
+        400
+    );
 }
 
 fn text_of(body: ThreadEventBody) -> String {

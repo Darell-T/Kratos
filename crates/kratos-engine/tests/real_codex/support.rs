@@ -104,6 +104,7 @@ impl Harness {
             stop_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
             platform: DangerousCommandPlatform::host(),
+            mcp: None,
         };
         let (provider, _stops) =
             codex::start(codex_settings, hub.clone(), store.clone(), usage.clone())

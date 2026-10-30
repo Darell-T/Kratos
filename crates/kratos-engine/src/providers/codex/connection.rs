@@ -21,7 +21,8 @@ use super::actor::{Actor, Done, Opened, Server, settle_closed};
 use super::profiles::Profile;
 use super::threads::{Link, ThreadState, Turn};
 use super::wire;
-use super::{CodexSettings, ProviderError};
+use super::{CodexSettings, McpServer, ProviderError};
+use crate::mcp;
 
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(1);
 const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);
@@ -69,6 +70,32 @@ impl Restarts {
             self.failed();
         }
     }
+}
+
+/// So a `wait_for_turn` answers `timedOut` itself before Codex gives up on the call.
+const MCP_TOOL_TIMEOUT_SECONDS: u64 = mcp::MAX_WAIT_SECONDS + 100;
+
+fn thread_config(
+    context_limit: Option<u64>,
+    mcp: Option<&McpServer>,
+    thread_id: &ThreadId,
+) -> Option<serde_json::Value> {
+    let mut config = serde_json::Map::new();
+    if let Some(tokens) = context_limit {
+        config.insert("model_context_window".to_owned(), json!(tokens));
+    }
+    if let Some(mcp) = mcp {
+        let kratos = json!({
+            "command": mcp.program,
+            "args": ["mcp"],
+            "env": { "KRATOS_HOME": mcp.home, "KRATOS_PORT": mcp.port.to_string(),
+                     (mcp::THREAD_ID_VAR): thread_id.as_str() },
+            "default_tools_approval_mode": "approve",
+            "tool_timeout_sec": MCP_TOOL_TIMEOUT_SECONDS,
+        });
+        config.insert("mcp_servers".to_owned(), json!({ "kratos": kratos }));
+    }
+    (!config.is_empty()).then_some(serde_json::Value::Object(config))
 }
 
 fn launch(settings: &CodexSettings) -> Launch {
@@ -233,10 +260,11 @@ impl Actor {
         let thread = self.threads.get_mut(thread_id).expect("loaded above");
         thread.link = Link::Attaching;
         let profile = Profile::for_settings(&stored.settings).id().to_owned();
-        let config = stored
-            .settings
-            .context_limit_tokens
-            .map(|tokens| json!({ "model_context_window": tokens }));
+        let config = thread_config(
+            stored.settings.context_limit_tokens,
+            self.settings.mcp.as_ref(),
+            thread_id,
+        );
         let (thread_id, generation) = (thread_id.clone(), self.generation);
         let context_limit = stored.settings.context_limit_tokens;
         self.spawn(async move {

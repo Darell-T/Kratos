@@ -1,5 +1,6 @@
 //! `kratos-engine` serves until Ctrl+C. `kratos-engine restore <backup-id>` makes a migration
 //! backup the live database again; it is refused while an engine runs on the same data directory.
+//! `kratos-engine mcp` is the MCP server Codex starts for each thread (see `kratos_engine::mcp`).
 //!
 //! Two threads. The main thread owns the store and runs its jobs (see `store_thread`). The server
 //! and its tokio runtime run on a second thread. So a panic in the store ends the process, and the
@@ -16,13 +17,16 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use kratos_client::Client;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
+use kratos_protocol::ThreadId;
 use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
 
 use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
-use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
+use kratos_engine::mcp;
+use kratos_engine::providers::codex::{self, CodexSettings, McpServer, ProtectedFolders};
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::UsageTracker;
@@ -53,9 +57,23 @@ fn run() -> Result<(), StartError> {
         .collect();
     match &arguments[..] {
         [] => serve(&config),
+        [command] if command == "mcp" => mcp(&config),
         [command, id] if command == "restore" => restore(&config, &id.parse()?),
         _ => Err(StartError::Usage),
     }
+}
+
+fn mcp(config: &Config) -> Result<(), StartError> {
+    let thread_id = std::env::var(mcp::THREAD_ID_VAR)
+        .ok()
+        .filter(|id| !id.is_empty())
+        .ok_or(StartError::McpThread)?;
+    let client = Client::new(&format!("http://127.0.0.1:{}", config.port))
+        .expect("a loopback address is valid")
+        .with_token_from(&config.home);
+    let caller = mcp::Caller::new(client, ThreadId::new(thread_id));
+    mcp::serve(&caller, io::stdin().lock(), io::stdout())?;
+    Ok(())
 }
 
 fn serve(config: &Config) -> Result<(), StartError> {
@@ -102,7 +120,8 @@ fn run_server(
         let listener = tokio::net::TcpListener::from_std(listener)?;
         let hub = Hub::new(store.clone());
         let usage = UsageTracker::default();
-        let (codex, scheduler) = match codex_settings(home) {
+        let port = listener.local_addr()?.port();
+        let (codex, scheduler) = match codex_settings(home, port) {
             Ok(settings) => {
                 let (provider, stops) =
                     codex::start(settings, hub.clone(), store.clone(), usage.clone()).await?;
@@ -140,7 +159,7 @@ fn run_server(
     })
 }
 
-fn codex_settings(home: &Path) -> Result<CodexSettings, CodexMissing> {
+fn codex_settings(home: &Path, port: u16) -> Result<CodexSettings, CodexMissing> {
     let program = locate_codex(
         std::env::var_os("CODEX_EXE").as_deref(),
         std::env::var_os("PATH").as_deref(),
@@ -163,6 +182,11 @@ fn codex_settings(home: &Path) -> Result<CodexSettings, CodexMissing> {
         stop_timeout: STOP_TIMEOUT,
         request_timeout: REQUEST_TIMEOUT,
         platform: DangerousCommandPlatform::host(),
+        mcp: Some(McpServer {
+            program: std::env::current_exe().map_err(CodexMissing::Engine)?,
+            home: home.to_path_buf(),
+            port,
+        }),
     })
 }
 
@@ -172,6 +196,8 @@ enum CodexMissing {
     Locate(#[from] LocateError),
     #[error("cannot create Codex's working folder: {0}")]
     ServerFolder(#[source] io::Error),
+    #[error("cannot find the engine's own binary for the MCP server: {0}")]
+    Engine(#[source] io::Error),
 }
 
 async fn shutdown_signal() {
@@ -220,6 +246,8 @@ enum StartError {
     Token(#[source] io::Error),
     #[error("cannot read what the last engine left unfinished: {0}")]
     Records(#[from] StoreError),
-    #[error("usage: kratos-engine [restore <backup-id>]")]
+    #[error("usage: kratos-engine [restore <backup-id> | mcp]")]
     Usage,
+    #[error("kratos-engine mcp needs KRATOS_THREAD_ID, the thread whose agent it serves")]
+    McpThread,
 }

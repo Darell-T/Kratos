@@ -1,5 +1,5 @@
 //! A client for the Kratos engine's local API, shared by the `kratos-client` command, the engine's
-//! tests, and the live verification lanes. It talks to the TypeScript engine and the Rust engine
+//! MCP server, its tests, and the live verification lanes. It talks to the TypeScript engine and the Rust engine
 //! alike. [`Client::send`] is raw on purpose: lanes and tests check the engine's refusals, so a
 //! foreign Host or an oversized body must reach it as written.
 
