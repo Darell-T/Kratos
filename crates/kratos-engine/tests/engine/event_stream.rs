@@ -15,7 +15,7 @@ fn turn_benchmark_observes_200_completed_turns_across_ten_threads() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
 
-    let report = bench_turns(&engine.client(), &home.path().join("fake-codex-control")).unwrap();
+    let report = bench_turns(&engine.client(), &engine.fake_codex_control_file()).unwrap();
 
     assert_eq!(report.threads, 10);
     assert_eq!(report.warmup_turns, 10);

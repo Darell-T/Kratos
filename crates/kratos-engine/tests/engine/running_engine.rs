@@ -114,10 +114,15 @@ impl RunningEngine {
         std::fs::read_to_string(self.home.join(CLIENT_TOKEN_FILE)).unwrap()
     }
 
+    /// Where the fake Codex this engine starts writes its control port.
+    pub fn fake_codex_control_file(&self) -> PathBuf {
+        self.home.join(FAKE_CODEX_CONTROL)
+    }
+
     /// A `test/*` request to the fake Codex this engine started, waiting for it to start. Panics
     /// on an error answer.
     pub fn fake_codex(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        let control = self.home.join(FAKE_CODEX_CONTROL);
+        let control = self.fake_codex_control_file();
         let deadline = Instant::now() + WAIT;
         let port = loop {
             if let Ok(port) = std::fs::read_to_string(&control) {
