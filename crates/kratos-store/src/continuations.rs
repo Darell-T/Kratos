@@ -53,9 +53,11 @@ impl ThreadWrite<'_> {
     ) -> Result<Option<Continuation>, StoreError> {
         let (name, detail, message_id) = state_columns(&state);
         let updated = self.transaction.execute(
-            "UPDATE continuations SET resets_at = ?1, state = ?2, detail = ?3, message_id = ?4,
-               updated_at = ?5
-             WHERE id = ?6 AND thread_id = ?7 AND state IN ('scheduled', 'awaitingUser')",
+            &format!(
+                "UPDATE continuations SET resets_at = ?1, state = ?2, detail = ?3, message_id = ?4,
+                   updated_at = ?5
+                 WHERE id = ?6 AND thread_id = ?7 AND state IN ({OPEN})"
+            ),
             params![
                 resets_at.as_ref().map(Timestamp::as_str),
                 name,
@@ -159,7 +161,7 @@ impl Store {
     /// Every open continuation, for re-arming the scheduler's timers after a restart (L6).
     pub fn open_continuations(&self) -> Result<Vec<(ThreadId, Continuation)>, StoreError> {
         let mut statement = self.connection.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM continuations WHERE state IN ('scheduled', 'awaitingUser')
+            "SELECT {COLUMNS} FROM continuations WHERE state IN ({OPEN})
              ORDER BY created_at, rowid"
         ))?;
         let rows = statement.query_map([], continuation_from_row)?;
@@ -168,6 +170,10 @@ impl Store {
 }
 
 const COLUMNS: &str = "thread_id, id, turn_id, waits_on, resets_at, state, detail, message_id";
+
+/// The states of an open continuation. [`is_open`] and the `open_continuation_per_thread` index in
+/// migration 5, which has shipped and cannot change, name the same states.
+const OPEN: &str = "'scheduled', 'awaitingUser'";
 
 fn has_continuation(
     connection: &Connection,
@@ -203,7 +209,7 @@ fn open_continuation(
         .query_row(
             &format!(
                 "SELECT {COLUMNS} FROM continuations
-                 WHERE thread_id = ?1 AND state IN ('scheduled', 'awaitingUser')"
+                 WHERE thread_id = ?1 AND state IN ({OPEN})"
             ),
             [thread_id.as_str()],
             continuation_from_row,
