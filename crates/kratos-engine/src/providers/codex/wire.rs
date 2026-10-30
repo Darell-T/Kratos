@@ -58,7 +58,10 @@ fn sender_label(thread_id: &ThreadId, limit: AccessLimit) -> String {
         (false, Permission::FullAccess) => "Full access",
     };
     format!(
-        "[Message from Kratos thread {}. From this turn on, this thread runs with no more than that          thread's permission, {access}, until the user raises it. If that stops you from doing          something, say so in your reply instead of working around it. Answer in your reply, which          that thread reads. Message it back only if it asks you to.]",
+        "[Message from Kratos thread {}. From this turn on, this thread runs with no more than that \
+         thread's permission, {access}, until the user raises it. If that stops you from doing \
+         something, say so in your reply instead of working around it. Answer in your reply, which \
+         that thread reads. Message it back only if it asks you to.]",
         thread_id.as_str()
     )
 }

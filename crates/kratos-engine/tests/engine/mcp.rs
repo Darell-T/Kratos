@@ -237,9 +237,10 @@ fn a_long_wait_holds_up_no_other_call_and_ends_when_codex_cancels_it() {
 
 #[test]
 fn an_agent_messages_another_thread_under_its_own_name_but_never_itself() {
-    // Catches a message the receiving agent cannot trace to its sender, one that records the
-    // receiver's permission as its limit instead of the sender's, a label stored as if the sender
-    // had written it, and an agent that queues work for itself, which would loop.
+    // Catches a label whose wording reaches Codex mangled, a message the receiving agent cannot
+    // trace to its sender, one that records the receiver's permission as its limit instead of the
+    // sender's, a label stored as if the sender had written it, and an agent that queues work for
+    // itself, which would loop.
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let workspace = workspace(&engine);
@@ -266,14 +267,16 @@ fn an_agent_messages_another_thread_under_its_own_name_but_never_itself() {
         json!([{ "type": "text", "text": "Please review src/lib.rs." }])
     );
     let started = &engine.fake_codex_held("turn/start", 1)[0]["params"]["input"];
-    let label = started[0]["text"].as_str().unwrap();
-    assert!(
-        label.starts_with(&format!("[Message from Kratos thread {}.", sender.id)),
-        "{label}"
-    );
-    assert!(
-        label.contains("no more than") && label.contains("Approve for me"),
-        "the receiving agent learns why it may be able to do less: {label}"
+    assert_eq!(
+        started[0]["text"],
+        format!(
+            "[Message from Kratos thread {}. From this turn on, this thread runs with no more than \
+             that thread's permission, Approve for me, until the user raises it. If that stops you \
+             from doing something, say so in your reply instead of working around it. Answer in \
+             your reply, which that thread reads. Message it back only if it asks you to.]",
+            sender.id
+        ),
+        "the receiving agent learns who sent the message and why it may be able to do less"
     );
     assert_eq!(started[1]["text"], "Please review src/lib.rs.");
     let (read, _) = mcp.tool("read_thread", json!({ "threadId": receiver.id }));
