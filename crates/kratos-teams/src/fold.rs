@@ -347,10 +347,8 @@ impl TaskView {
         let activity = match activity {
             Activity::Turn { mut turn } => {
                 turn.retries.clear();
-                turn.follows = None;
                 turn.hold = None;
-                turn.message = MessageId::due_at(seq);
-                turn.due = seq;
+                turn.resend(seq, None);
                 Activity::Turn { turn }
             }
             other => other,

@@ -153,10 +153,9 @@ impl TaskView {
             return self.pause_turn(cause.into(), turn, detail);
         }
         turn.retries.push(cause);
-        turn.follows = (cause != Retry::Lost).then(|| turn.message.clone());
+        let follows = (cause != Retry::Lost).then(|| turn.message.clone());
+        turn.resend(seq, follows);
         turn.note = Some(note);
-        turn.message = MessageId::due_at(seq);
-        turn.due = seq;
         self.active(Activity::Turn { turn })
     }
 
@@ -262,11 +261,7 @@ impl TaskView {
             return Err(self.misfit("account_handoff"));
         };
         match outcome {
-            HandoffOutcome::HandedOff => {
-                turn.message = MessageId::due_at(seq);
-                turn.due = seq;
-                turn.follows = None;
-            }
+            HandoffOutcome::HandedOff => turn.resend(seq, None),
             HandoffOutcome::Unavailable { .. } => turn.hold = Some(Hold::ToScheduler { stop }),
         }
         Ok(self.active(Activity::Turn { turn }))
@@ -333,9 +328,8 @@ impl TaskView {
             return Err(self.misfit("an answer"));
         };
         turn.resolutions.push(resolution);
-        turn.follows = Some(turn.message.clone());
-        turn.message = MessageId::due_at(seq);
-        turn.due = seq;
+        let follows = Some(turn.message.clone());
+        turn.resend(seq, follows);
         turn.note = None;
         turn.hold = None;
         Ok(self.active(Activity::Turn { turn }))

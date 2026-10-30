@@ -509,6 +509,15 @@ impl Turn {
     pub fn is_awaiting_result(&self) -> bool {
         matches!(self.hold, None | Some(Hold::Scheduled { .. }))
     }
+
+    /// Makes the step's next message due at `seq`, under a new message id. `follows` names the message
+    /// it continues in the same session, or `None` for a fresh session. `due` decides which queued user
+    /// messages ride along, so it always moves with the message.
+    pub(crate) fn resend(&mut self, seq: FactSeq, follows: Option<MessageId>) {
+        self.message = MessageId::due_at(seq);
+        self.due = seq;
+        self.follows = follows;
+    }
 }
 
 /// Everything the engine needs to deliver one message. It is a projection of a `Turn`, so the interface
