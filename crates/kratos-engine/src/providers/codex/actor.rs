@@ -10,8 +10,8 @@ use std::time::Duration;
 use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
-    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, Skill, ThreadId,
-    ThreadSettings,
+    MessageId, MessageInput, MessageOrigin, MessageStatus, QuestionId, QuestionOutcome, Skill,
+    ThreadId, ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -343,6 +343,19 @@ impl Actor {
                 reply,
             } => self.on_usage_read(tracker_generation, result, reply),
         }
+    }
+
+    pub(super) async fn set_message_status(
+        &mut self,
+        thread_id: &ThreadId,
+        message_id: &MessageId,
+        status: MessageStatus,
+    ) -> Result<Message, ProviderError> {
+        let message_id = message_id.clone();
+        self.write(thread_id, move |write| {
+            write.set_message_status(&message_id, status)
+        })
+        .await
     }
 
     /// Runs `job` as one write to the thread's records. A write that fails stops Codex rather
