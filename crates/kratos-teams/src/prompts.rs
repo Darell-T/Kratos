@@ -223,6 +223,12 @@ fn finding_line(finding: &Finding) -> String {
 
 fn finding_text(finding: &Finding) -> String {
     let report = &finding.report;
+    let kind = match report.kind {
+        Kind::Bug => "bug",
+        Kind::Constraint => "constraint",
+        Kind::Requirement => "requirement",
+        Kind::Design => "design",
+    };
     let evidence = if report.kind == Kind::Bug {
         format!(
             "Evidence, a command that exits non-zero on the reviewed commit: {}",
@@ -232,12 +238,7 @@ fn finding_text(finding: &Finding) -> String {
         format!("Evidence, the rule it breaks: \"{}\"", report.evidence)
     };
     [
-        format!(
-            "## {}: {} ({})",
-            finding.id,
-            report.class,
-            kind_name(report.kind)
-        ),
+        format!("## {}: {} ({})", finding.id, report.class, kind),
         format!(
             "Location: {}:{}",
             report.location.path, report.location.line
@@ -247,15 +248,6 @@ fn finding_text(finding: &Finding) -> String {
         format!("Fixed when: {}", report.fixed_when),
     ]
     .join("\n")
-}
-
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Bug => "bug",
-        Kind::Constraint => "constraint",
-        Kind::Requirement => "requirement",
-        Kind::Design => "design",
-    }
 }
 
 fn outcome(status: &FindingStatus) -> String {

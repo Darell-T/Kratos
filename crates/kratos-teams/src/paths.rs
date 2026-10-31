@@ -21,27 +21,19 @@ pub(crate) enum PathProblem {
 
 pub(crate) fn parse_repo_path(raw: &str) -> Result<String, PathProblem> {
     let path = repo_path(raw);
-    if is_rooted(&path) {
-        return Err(PathProblem::Rooted);
-    }
-    if climbs(&path) {
-        return Err(PathProblem::Climbs);
-    }
-    Ok(path)
-}
-
-/// Whether a path that went through `repo_path` has no place to start from. That means it is empty,
-/// begins at the root, or begins at a drive.
-fn is_rooted(path: &str) -> bool {
     let bytes = path.as_bytes();
     let has_drive =
         bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
-    path.is_empty() || path.starts_with('/') || has_drive
-}
-
-/// Whether a path that went through `repo_path` climbs out of its folder with a `..`.
-fn climbs(path: &str) -> bool {
-    path.split('/').any(|part| part == "..")
+    // A path that went through repo_path has no place to start when it is empty, begins at the root,
+    // or begins at a drive.
+    if path.is_empty() || path.starts_with('/') || has_drive {
+        return Err(PathProblem::Rooted);
+    }
+    // A path that went through repo_path climbs out of its folder with a `..`.
+    if path.split('/').any(|part| part == "..") {
+        return Err(PathProblem::Climbs);
+    }
+    Ok(path)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

@@ -260,7 +260,11 @@ fn hit(trigger: &Compiled, file: &DiffFile) -> Option<TriggerHit> {
             })
         }
         Compiled::Code { pattern, regex } => {
-            let line = file.added.iter().find(|added| matches_line(regex, added))?;
+            // An error here is the backtracking budget running out, which counts as a match.
+            let line = file
+                .added
+                .iter()
+                .find(|added| regex.is_match(added).unwrap_or(true))?;
             Some(TriggerHit::Code {
                 pattern: pattern.clone(),
                 path: file.path.clone(),
@@ -268,9 +272,4 @@ fn hit(trigger: &Compiled, file: &DiffFile) -> Option<TriggerHit> {
             })
         }
     }
-}
-
-/// An error here is the backtracking budget running out, which counts as a match.
-fn matches_line(regex: &fancy_regex::Regex, line: &str) -> bool {
-    regex.is_match(line).unwrap_or(true)
 }

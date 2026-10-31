@@ -281,7 +281,10 @@ impl TaskView {
     ) -> Result<Box<TaskView>, Rejection> {
         let (mut view, Checking { turn, job, report }) = self.take_checking()?;
         let judged = view.judge(&job, &report, &checked)?;
-        let accepted = agrees(report.verdict, judged.blocking.len());
+        let accepted = match report.verdict {
+            Verdict::Approve => judged.blocking.is_empty(),
+            Verdict::ChangesRequested => !judged.blocking.is_empty(),
+        };
         view.record_review(&job, &report, &checked, accepted)?;
         if !accepted {
             view.merge_probes(&checked, &[]);
@@ -502,13 +505,6 @@ fn record_attempts(findings: &mut [Finding], report: &ImplementerDone) {
         if matches!(response, Some(ResponseOutcome::Fixed)) {
             *attempts += 1;
         }
-    }
-}
-
-fn agrees(verdict: Verdict, blocking: usize) -> bool {
-    match verdict {
-        Verdict::Approve => blocking == 0,
-        Verdict::ChangesRequested => blocking > 0,
     }
 }
 

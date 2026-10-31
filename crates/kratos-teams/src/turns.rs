@@ -12,12 +12,12 @@ use crate::facts::{
 };
 use crate::fold::Rejection;
 use crate::members::Role;
-use crate::reports::{AnswerDone, ImplementerDone, Report, Reported, ReviewDone};
+use crate::reports::{AnswerDone, ImplementerDone, Report, Reported};
 use crate::task_plan::{PlanChangeRequest, TaskPlan};
 use crate::view::{
     Activity, AfterCommit, Answerer, Hold, MAX_QUESTIONS_PER_STEP, Note, Pending, Phase, PlanState,
-    Question, Resolution, Retry, ReviewJob, Stop, Suspended, TaskView, Trouble, Turn,
-    UsageLimitAsk, Waiting, Work,
+    Question, Resolution, Retry, Stop, Suspended, TaskView, Trouble, Turn, UsageLimitAsk, Waiting,
+    Work,
 };
 
 impl TaskView {
@@ -80,7 +80,12 @@ impl TaskView {
             (Work::Review { job }, Reported::Review { report }) => {
                 let job = job.clone();
                 self.settle(seq, turn, report, |view, _, turn, done| {
-                    Ok(view.on_review_done(turn, job, done))
+                    // The reviewer finished. Evidence is checked before anything is believed.
+                    Ok(view.active(Activity::Checking {
+                        turn,
+                        job,
+                        report: done,
+                    }))
                 })
             }
             (Work::Answer { question }, Reported::Answer { report }) => {
@@ -392,16 +397,6 @@ impl TaskView {
             step: turn.step,
             then: AfterCommit::Review { report: done },
         }))
-    }
-
-    /// The reviewer finished. Evidence is checked before anything is believed.
-    fn on_review_done(
-        self: Box<Self>,
-        turn: Turn,
-        job: ReviewJob,
-        report: ReviewDone,
-    ) -> Box<TaskView> {
-        self.active(Activity::Checking { turn, job, report })
     }
 }
 
