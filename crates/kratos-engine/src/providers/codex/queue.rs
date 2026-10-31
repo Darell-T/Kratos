@@ -12,7 +12,7 @@ use kratos_store::{Enqueued, QueuePlace, StoreError, ThreadWrite};
 use uuid::Uuid;
 
 use super::actor::{Actor, Deferred, Done, Reply};
-use super::threads::Link;
+use super::threads::{Link, Turn};
 use super::turns::read_history;
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
 
@@ -208,7 +208,7 @@ impl Actor {
             ));
         }
         let thread = &self.threads[thread_id];
-        if !thread.turn.is_idle() || !thread.steering.is_empty() {
+        if !matches!(thread.turn, Turn::Idle) || !thread.steering.is_empty() {
             return Err(ProviderError::Conflict(
                 "Stop the turn before discarding a message".into(),
             ));

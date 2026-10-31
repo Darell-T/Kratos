@@ -132,8 +132,4 @@ impl Turn {
             Turn::Idle | Turn::Starting { .. } => None,
         }
     }
-
-    pub fn is_idle(&self) -> bool {
-        matches!(self, Turn::Idle)
-    }
 }
