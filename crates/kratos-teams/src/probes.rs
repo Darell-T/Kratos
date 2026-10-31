@@ -1,7 +1,7 @@
-//! The reviewer's probe tests (D78). A probe is a test file a reviewer wrote to show a bug. Only the
-//! implementer adds one to the project, and only when the user chose it or delegated the choice. This
-//! file decides which probes an implementer may add, what becomes of each one it added, and what the
-//! record keeps of each one the reviewer left.
+//! The reviewer's probe tests (D78). A probe is a test file a reviewer wrote to show a bug. Only
+//! the implementer adds one to the project, and only when the user chose it or delegated the
+//! choice. This file decides which probes an implementer may add, what becomes of each one it
+//! added, and what the record keeps of each one the reviewer left.
 
 use crate::evidence::EvidenceCheck;
 use crate::facts::{EvidenceChecked, ProbePolicy, ProbeRun};
@@ -12,9 +12,9 @@ use crate::task_plan::{ProbeConstraints, Scope};
 use crate::view::{Brief, Finding, Probe, ProbeRejection, ProbeStatus, TaskView, Work};
 
 impl TaskView {
-    /// `None` when the probes an implementer added are ones it may add, and name probes the reviewer
-    /// left. Only the implementer adds a probe to the project, and only when the user chose it or
-    /// delegated the choice (D78).
+    /// `None` when the probes an implementer added are ones it may add, and name probes the
+    /// reviewer left. Only the implementer adds a probe to the project, and only when the user
+    /// chose it or delegated the choice (D78).
     pub(crate) fn probes_problem(&self, work: &Work, done: &ImplementerDone) -> Option<String> {
         let picks = match work {
             Work::Implement {
@@ -61,9 +61,9 @@ impl TaskView {
         }
     }
 
-    /// Decides the fate of each probe the implementer added. Git showed whether it fails before the fix
-    /// and passes after it. The constraints are the user's, and the rules apply them here, so the
-    /// engine cannot keep a probe the user refused.
+    /// Decides the fate of each probe the implementer added. Git showed whether it fails before the
+    /// fix and passes after it. The constraints are the user's, and the rules apply them here, so
+    /// the engine cannot keep a probe the user refused.
     pub(crate) fn apply_probe_runs(
         &mut self,
         added: &[AddedProbe],
@@ -152,9 +152,9 @@ impl TaskView {
 }
 
 /// Whether the implementer may keep a probe at `to`: under one of the user's test paths and inside
-/// the agreed scope. A pure path rule, so the engine cannot apply it more loosely than the user wrote
-/// it. The git half of the check, that the probe fails before the fix and passes after, is the
-/// engine's.
+/// the agreed scope. A pure path rule, so the engine cannot apply it more loosely than the user
+/// wrote it. The git half of the check, that the probe fails before the fix and passes after, is
+/// the engine's.
 fn probe_copy_problem(
     constraints: &ProbeConstraints,
     scope: &Scope,

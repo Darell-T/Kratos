@@ -4,7 +4,8 @@
 //! prototype left four. [`OwnedChild::spawn`] starts the child so that dropping the [`OwnedChild`]
 //! ends every process the child started too.
 //!
-//! - Windows: the child starts suspended, joins a new job object marked kill-on-close, and only then
+//! - Windows: the child starts suspended, joins a new job object marked kill-on-close, and only
+//!   then
 //!   runs, so even its first grandchild is in the job. The job forbids breaking away. Closing the
 //!   job's handle ends every process in it, and Windows closes a process's handles when it dies, so
 //!   the tree also ends when the engine crashes.
@@ -36,8 +37,8 @@ pub struct OwnedChild {
 }
 
 impl OwnedChild {
-    /// Starts `command`. On Windows this sets the command's creation flags to start it suspended and
-    /// without a console window, replacing any flags the caller set.
+    /// Starts `command`. On Windows this sets the command's creation flags to start it suspended
+    /// and without a console window, replacing any flags the caller set.
     pub fn spawn(mut command: Command) -> io::Result<OwnedChild> {
         let (tree, child) = Tree::spawn(&mut command)?;
         Ok(OwnedChild { tree, child })
@@ -62,7 +63,8 @@ impl OwnedChild {
 
 impl Drop for OwnedChild {
     fn drop(&mut self) {
-        // Nothing can report an error from a drop, and a tree that already ended is the common case.
+        // Nothing can report an error from a drop, and a tree that already ended is the common
+        // case.
         let _ = self.tree.end();
     }
 }

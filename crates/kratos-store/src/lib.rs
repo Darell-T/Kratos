@@ -1,9 +1,9 @@
 //! The engine's SQLite records.
 //!
 //! [`Store::open`] locks the data directory, backs up a database that has an older schema, and runs
-//! the migrations. Migrations 1 to 4 are the TypeScript engine's, so the Rust engine opens what that
-//! engine wrote; from migration 5 on the schema is the Rust engine's own. The store is synchronous
-//! and owns one connection. Everything that appends to a thread's log goes through a
+//! the migrations. Migrations 1 to 4 are the TypeScript engine's, so the Rust engine opens what
+//! that engine wrote; from migration 5 on the schema is the Rust engine's own. The store is
+//! synchronous and owns one connection. Everything that appends to a thread's log goes through a
 //! [`ThreadWrite`].
 
 mod backups;

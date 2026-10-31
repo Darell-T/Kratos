@@ -1,6 +1,6 @@
-//! A Codex provider over a real store and hub, driving `fake-codex`, which a test steers through its
-//! control port: it settles held turn requests, emits notifications, asks the provider questions,
-//! and reads back what the provider sent.
+//! A Codex provider over a real store and hub, driving `fake-codex`, which a test steers through
+//! its control port: it settles held turn requests, emits notifications, asks the provider
+//! questions, and reads back what the provider sent.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

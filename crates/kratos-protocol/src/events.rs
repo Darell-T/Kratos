@@ -99,8 +99,8 @@ pub enum ThreadEventBody {
         message: String,
         will_retry: bool,
     },
-    /// The scheduler planned, changed, or dropped the continuation of a turn that stopped at a usage
-    /// limit (D39).
+    /// The scheduler planned, changed, or dropped the continuation of a turn that stopped at a
+    /// usage limit (D39).
     #[serde(rename = "continuation.changed")]
     ContinuationChanged { continuation: Continuation },
     /// A provider session began serving the thread, and the plan that pays for it (D24).

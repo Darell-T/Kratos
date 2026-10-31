@@ -47,10 +47,10 @@ pub enum MessageInput {
     },
 }
 
-/// Who wrote a message. A continuation is the message Kratos sends to resume a turn that stopped at a
-/// usage limit (D39), so the record shows it was not the user. A message from another thread is one
-/// that thread's agent sent with Kratos's tools, and `limit` is that thread's settings when it sent
-/// the message.
+/// Who wrote a message. A continuation is the message Kratos sends to resume a turn that stopped at
+/// a usage limit (D39), so the record shows it was not the user. A message from another thread is
+/// one that thread's agent sent with Kratos's tools, and `limit` is that thread's settings when it
+/// sent the message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum MessageOrigin {

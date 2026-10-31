@@ -1,9 +1,9 @@
-//! How a turn ends, written once for every role: a lost turn, a usage-limit stop, and a report that is
-//! invalid, blocked, a question, a plan-change request, or finished.
+//! How a turn ends, written once for every role: a lost turn, a usage-limit stop, and a report that
+//! is invalid, blocked, a question, a plan-change request, or finished.
 //!
 //! A turn is one logical step of agent work. Its `StepId` stays the same through a correction, a
-//! question and its answer, and a usage-limit stop and its continuation. Only its `MessageId` changes,
-//! because each message is sent once.
+//! question and its answer, and a usage-limit stop and its continuation. Only its `MessageId`
+//! changes, because each message is sent once.
 
 use kratos_protocol::TurnChanges;
 
@@ -21,9 +21,9 @@ use crate::view::{
 };
 
 impl TaskView {
-    /// Takes the turn a result is for out of the view, or refuses the result as stale. A turn held for
-    /// the scheduler or for a handoff waits for the engine and not for a result, so a late result for
-    /// the message that was stopped is stale too.
+    /// Takes the turn a result is for out of the view, or refuses the result as stale. A turn held
+    /// for the scheduler or for a handoff waits for the engine and not for a result, so a late
+    /// result for the message that was stopped is stale too.
     pub(crate) fn take_waiting_turn(
         mut self: Box<Self>,
         message: &MessageId,
@@ -73,7 +73,8 @@ impl TaskView {
                 self.settle(seq, turn, report, TaskView::on_plan_done)
             }
             (Work::Implement { .. }, Reported::Implementer { report, changes }) => {
-                // Every outcome of an implementer turn changes what Kratos knows about unchecked edits.
+                // Every outcome of an implementer turn changes what Kratos knows about unchecked
+                // edits.
                 self.dirty = fold_dirty(self.dirty, &changes);
                 self.settle(seq, turn, report, TaskView::on_implementer_done)
             }
@@ -107,8 +108,8 @@ impl TaskView {
         }
     }
 
-    /// The outcomes every kind of work shares. Only a finished report is the work's own business, and
-    /// `finished` is what that kind of work does with it.
+    /// The outcomes every kind of work shares. Only a finished report is the work's own business,
+    /// and `finished` is what that kind of work does with it.
     fn settle<T>(
         self: Box<Self>,
         seq: FactSeq,
@@ -130,12 +131,10 @@ impl TaskView {
         }
     }
 
-    // -----------------------------------------------------------------------------------------
     // Corrections and trouble.
-    // -----------------------------------------------------------------------------------------
 
-    /// Sends the step's next message with the same step, a new message id, and a correction note. The
-    /// first time a cause occurs it is retried, and the second time the task pauses.
+    /// Sends the step's next message with the same step, a new message id, and a correction note.
+    /// The first time a cause occurs it is retried, and the second time the task pauses.
     pub(crate) fn retry_turn(
         self: Box<Self>,
         mut turn: Turn,
@@ -153,9 +152,9 @@ impl TaskView {
         let follows = (cause != Retry::Lost).then(|| turn.message.clone());
         let hold = turn.hold.take();
         turn.resend(seq, follows);
-        // FIXME: a kept `Hold::Scheduled` names a continuation that will never carry this correction,
-        // so `next_step` waits on the engine and the step stalls. Dropping the hold changes behavior,
-        // so it goes with the fix that moves the hold onto `Activity::Turn`.
+        // FIXME: a kept `Hold::Scheduled` names a continuation that will never carry this
+        // correction, so `next_step` waits on the engine and the step stalls. Dropping the hold
+        // changes behavior, so it goes with the fix that moves the hold onto `Activity::Turn`.
         turn.hold = hold;
         turn.note = Some(note);
         self.active(Activity::Turn { turn })
@@ -180,12 +179,10 @@ impl TaskView {
         self.retry_turn(turn, Note::Lost { reason }, seq)
     }
 
-    // -----------------------------------------------------------------------------------------
     // Usage limits (D39 to D41). The rules never resend a message and never run a timer.
-    // -----------------------------------------------------------------------------------------
 
-    /// The provider stopped the turn at a usage limit. The step keeps its identity and goes to the one
-    /// scheduler. With account handoff on, the user is asked first, every time (D40).
+    /// The provider stopped the turn at a usage limit. The step keeps its identity and goes to the
+    /// one scheduler. With account handoff on, the user is asked first, every time (D40).
     fn hold_turn(self: Box<Self>, mut turn: Turn, delivered: bool) -> Box<TaskView> {
         let stop = Stop {
             message: turn.message.clone(),
@@ -201,7 +198,8 @@ impl TaskView {
         self.active(Activity::Turn { turn })
     }
 
-    /// The active turn with this step id. The caller checks that the turn has the hold the fact needs.
+    /// The active turn with this step id. The caller checks that the turn has the hold the fact
+    /// needs.
     fn held_turn(&self, step: StepId, fact: &'static str) -> Result<Turn, Rejection> {
         match &self.phase {
             Phase::Active {
@@ -269,9 +267,7 @@ impl TaskView {
         Ok(self.active(Activity::Turn { turn }))
     }
 
-    // -----------------------------------------------------------------------------------------
     // Questions (D31, D90, D91) and plan-change requests (D32).
-    // -----------------------------------------------------------------------------------------
 
     /// Suspends `turn` on a question and routes it. An implementer or reviewer question goes to the
     /// planner, or to the user when there is no planner or the step used its questions.
@@ -319,8 +315,9 @@ impl TaskView {
         self.waiting(Waiting::PlanChange)
     }
 
-    /// Pops the top suspended step and sends it its next message with `resolution` attached. The step
-    /// keeps its `StepId`, gets a new message id, and carries no note. It does not pass through the role-change checkpoint.
+    /// Pops the top suspended step and sends it its next message with `resolution` attached. The
+    /// step keeps its `StepId`, gets a new message id, and carries no note. It does not pass
+    /// through the role-change checkpoint.
     pub(crate) fn resume_step(
         mut self: Box<Self>,
         resolution: Resolution,
@@ -351,9 +348,7 @@ impl TaskView {
         self.resume_step(resolution, seq)
     }
 
-    // -----------------------------------------------------------------------------------------
     // Finished work that is not a review or a commit.
-    // -----------------------------------------------------------------------------------------
 
     /// The plan is written and waits for the user's approval (D37).
     fn on_plan_done(
@@ -377,7 +372,8 @@ impl TaskView {
     }
 
     /// The handoff check runs in this order. The responses cover the open findings, the probes are
-    /// allowed, and no file changed after the last command. A problem goes back once and then pauses.
+    /// allowed, and no file changed after the last command. A problem goes back once and then
+    /// pauses.
     fn on_implementer_done(
         self: Box<Self>,
         seq: FactSeq,

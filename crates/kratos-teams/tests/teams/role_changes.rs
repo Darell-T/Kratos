@@ -1,6 +1,6 @@
 //! Role changes (D77). The user can move roles between the Team's own members without losing either
-//! member's thread or history. The change becomes pending, the running step finishes, and the change
-//! applies right before the next new step. Nothing finished is repeated.
+//! member's thread or history. The change becomes pending, the running step finishes, and the
+//! change applies right before the next new step. Nothing finished is repeated.
 
 use kratos_teams::decisions::{Decision, DecisionKind, allowed_decisions};
 use kratos_teams::facts::Fact;

@@ -1,9 +1,9 @@
 //! Reads a fact log the TypeScript rules wrote (`teams-core`, commit 6741f16) as Rust facts.
 //!
-//! The two implementations record different facts: the TypeScript names the thread and the report in
-//! separate facts, and the Rust names the message a result answers. This turns one into the other, so
-//! the same log can run through both `fold`s and the views can be compared. A fact the TypeScript had
-//! and Rust replaced on purpose, such as `needsUser`, is refused.
+//! The two implementations record different facts: the TypeScript names the thread and the report
+//! in separate facts, and the Rust names the message a result answers. This turns one into the
+//! other, so the same log can run through both `fold`s and the views can be compared. A fact the
+//! TypeScript had and Rust replaced on purpose, such as `needsUser`, is refused.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -80,8 +80,8 @@ pub fn read_reference(path: &Path) -> Result<Reference, String> {
     })
 }
 
-/// The two members every reference log ran with. The TypeScript Team has an implementer on Codex and a
-/// reviewer on Claude.
+/// The two members every reference log ran with. The TypeScript Team has an implementer on Codex
+/// and a reviewer on Claude.
 fn two_members() -> Value {
     json!({
         "planner": null,
@@ -90,8 +90,8 @@ fn two_members() -> Value {
     })
 }
 
-/// One fact of a reference log run through the Rust fold: what the TypeScript recorded, what Rust makes
-/// of it, and the Rust view behind it.
+/// One fact of a reference log run through the Rust fold: what the TypeScript recorded, what Rust
+/// makes of it, and the Rust view behind it.
 pub struct Folded {
     pub fact: usize,
     pub kind: String,
@@ -311,8 +311,8 @@ fn task_started(fact: &Value, two_members: Value) -> Result<Value, String> {
     }}))
 }
 
-/// One TypeScript fact as the JSON of a Rust fact, or `None` when Rust has no counterpart for it. The
-/// view is the Rust view before the fact, which knows the message each result answers.
+/// One TypeScript fact as the JSON of a Rust fact, or `None` when Rust has no counterpart for it.
+/// The view is the Rust view before the fact, which knows the message each result answers.
 type Translator = fn(&Value, &TaskView) -> Result<Option<Value>, String>;
 
 const TRANSLATORS: [(&str, Translator); 10] = [

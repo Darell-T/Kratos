@@ -27,7 +27,8 @@ impl Tree {
     /// unrelated group, which is why the owner ends the tree as soon as it stops needing it.
     pub fn end(&mut self) -> io::Result<()> {
         #[allow(unsafe_code, reason = "killpg has no safe wrapper in std")]
-        // SAFETY: killpg only reads its two integer arguments; it touches no memory of this process.
+        // SAFETY: killpg only reads its two integer arguments; it touches no memory of this
+        // process.
         let result = unsafe { libc::killpg(self.group, libc::SIGKILL) };
         if result == 0 {
             return Ok(());

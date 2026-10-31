@@ -1,6 +1,6 @@
-//! Review depth and ranking (D94). A small change gets one pass. A large change also gets a security
-//! pass and a regressions pass, each once per task and each from a fresh reviewer session. Findings reach
-//! the user ranked by severity.
+//! Review depth and ranking (D94). A small change gets one pass. A large change also gets a
+//! security pass and a regressions pass, each once per task and each from a fresh reviewer session.
+//! Findings reach the user ranked by severity.
 
 use kratos_teams::decisions::{Decision, approval_report};
 use kratos_teams::facts::{ChangeSize, Depth};

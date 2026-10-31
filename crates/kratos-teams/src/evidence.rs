@@ -1,14 +1,14 @@
 //! The evidence rules. They decide which findings Kratos believes before the implementer sees them.
 //!
-//! A reviewer's word is not evidence. A bug counts only when its command ran in the reviewer's worktree
-//! and exited non-zero. A requirement or constraint counts only when its quote appears in a source the
-//! task owns. A location counts only when it names a line that exists. Everything here is a pure
-//! function of what the engine observed, and the engine does the reading and the running.
+//! A reviewer's word is not evidence. A bug counts only when its command ran in the reviewer's
+//! worktree and exited non-zero. A requirement or constraint counts only when its quote appears in
+//! a source the task owns. A location counts only when it names a line that exists. Everything here
+//! is a pure function of what the engine observed, and the engine does the reading and the running.
 //!
 //! The order of those rules is itself a rule, because a command must never run for a finding whose
 //! location is made up. So the order is written once, here, as a two-call protocol: `start_check`
-//! answers from what is already known or asks for one command, and `finish_check` judges that command's
-//! result.
+//! answers from what is already known or asks for one command, and `finish_check` judges that
+//! command's result.
 
 use std::time::Duration;
 
@@ -28,9 +28,7 @@ pub const MIN_QUOTE_LEN: usize = 12;
 /// The tail of a command's output that the record keeps.
 const OUTPUT_TAIL_CHARS: usize = 4000;
 
-// ---------------------------------------------------------------------------------------------
 // Location, quote, and command rules.
-// ---------------------------------------------------------------------------------------------
 
 /// Why a finding's location is refused. The text is written for the reviewer.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -45,8 +43,8 @@ pub enum LocationProblem {
     NoSuchLine { path: String, line: u32, lines: u32 },
 }
 
-/// `None` when the location names a real line of a file in the reviewed commit. `file_text` is the file
-/// at that commit, or `None` if it does not exist there.
+/// `None` when the location names a real line of a file in the reviewed commit. `file_text` is the
+/// file at that commit, or `None` if it does not exist there.
 pub fn location_problem(location: &Location, file_text: Option<&str>) -> Option<LocationProblem> {
     let path = match parse_repo_path(&location.path) {
         Ok(path) => path,
@@ -79,8 +77,8 @@ fn line_count(text: &str) -> u32 {
     u32::try_from(lines).unwrap_or(u32::MAX)
 }
 
-/// Whether `quote` is long enough to mean something and appears in a source, ignoring how whitespace
-/// wraps. Case matters.
+/// Whether `quote` is long enough to mean something and appears in a source, ignoring how
+/// whitespace wraps. Case matters.
 pub fn quote_appears(quote: &str, sources: &[&str]) -> bool {
     let wanted = collapse_whitespace(quote);
     wanted.chars().count() >= MIN_QUOTE_LEN
@@ -145,9 +143,7 @@ fn tail(text: &str) -> String {
     text.chars().skip(skipped).collect()
 }
 
-// ---------------------------------------------------------------------------------------------
 // What Kratos records about each finding.
-// ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -183,9 +179,9 @@ pub struct DropReason {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EvidenceCheck {
-    /// `inside_new_diff` is false for a real problem in lines this round did not change. It was missed
-    /// earlier, so the user reads it and no round starts for it. `output` is the failing command's
-    /// tail, which becomes the probe's "output that showed the bug".
+    /// `inside_new_diff` is false for a real problem in lines this round did not change. It was
+    /// missed earlier, so the user reads it and no round starts for it. `output` is the failing
+    /// command's tail, which becomes the probe's "output that showed the bug".
     Confirmed {
         inside_new_diff: bool,
         output: Option<String>,
@@ -230,19 +226,18 @@ pub struct ProbeCapture {
     pub truncated: bool,
 }
 
-// ---------------------------------------------------------------------------------------------
 // The check protocol.
-// ---------------------------------------------------------------------------------------------
 
 /// What the engine has already observed for one finding.
 pub struct Seen<'a> {
     /// The cited file at the reviewed commit, or `None` if it does not exist there.
     pub file_text: Option<&'a str>,
-    /// Every text a requirement quote may come from. `CheckStep::sources` supplies them. They are the
-    /// task, the user's constraints and directions, the approved plan, and the three rules files.
+    /// Every text a requirement quote may come from. `CheckStep::sources` supplies them. They are
+    /// the task, the user's constraints and directions, the approved plan, and the three rules
+    /// files.
     pub sources: &'a [&'a str],
-    /// The diff since the last standard review. `None` in the first standard review and in the other
-    /// passes, where every confirmed finding counts as inside the diff.
+    /// The diff since the last standard review. `None` in the first standard review and in the
+    /// other passes, where every confirmed finding counts as inside the diff.
     pub diff: Option<&'a Diff>,
 }
 
@@ -293,8 +288,8 @@ pub fn start_check(finding: &FindingReport, seen: &Seen<'_>) -> Start {
     })
 }
 
-/// The second half. A command that exited non-zero confirms the bug. A pass, a timeout, or a refusal
-/// drops the finding with that reason.
+/// The second half. A command that exited non-zero confirms the bug. A pass, a timeout, or a
+/// refusal drops the finding with that reason.
 pub fn finish_check(
     finding: &FindingReport,
     result: &CommandResult,

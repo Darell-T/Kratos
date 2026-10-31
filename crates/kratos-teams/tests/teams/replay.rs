@@ -59,7 +59,8 @@ pub fn runs(task: &ScriptedTask, role: Role) -> Vec<&Run> {
         .collect()
 }
 
-/// The kinds of correction the messages carried, in order, with `None` for a message that was not one.
+/// The kinds of correction the messages carried, in order, with `None` for a message that was not
+/// one.
 pub fn notes(runs: &[&Run]) -> Vec<Option<String>> {
     runs.iter()
         .map(|run| run.note.as_ref().map(tag_of))
@@ -195,8 +196,8 @@ pub fn assert_decisions_match(view: &TaskView) {
 }
 
 /// Every prefix of the record folds the same from a stored copy, plans the same step, accepts each
-/// decision it allows, and never waits again for a message whose result it already holds. A restart at
-/// any fact therefore continues the same way, and no completed step repeats.
+/// decision it allows, and never waits again for a message whose result it already holds. A restart
+/// at any fact therefore continues the same way, and no completed step repeats.
 pub fn assert_log_replayable(log: &[StoredFact]) {
     let mut completed: Vec<MessageId> = Vec::new();
     for (n, view) in (1..).zip(prefix_views(log)) {
@@ -244,7 +245,8 @@ pub fn assert_replayable(task: &ScriptedTask) {
     assert_log_replayable(task.log());
 }
 
-/// The view as it was when the engine delivered `run`: the prefix of the log that waits for its message.
+/// The view as it was when the engine delivered `run`: the prefix of the log that waits for its
+/// message.
 pub fn view_when_sent(task: &ScriptedTask, run: &Run) -> TaskView {
     prefix_views(task.log())
         .into_iter()

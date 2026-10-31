@@ -1,7 +1,8 @@
 //! The R3 event kinds and request bodies against literal JSON.
 //!
 //! Stored events outlive the build that wrote them, so a renamed field or kind leaves older rows
-//! unreadable. Round-trips between two builds of the same types would not notice; literal text does.
+//! unreadable. Round-trips between two builds of the same types would not notice; literal text
+//! does.
 
 use kratos_protocol::{
     AccessLimit, AgentItem, Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason,

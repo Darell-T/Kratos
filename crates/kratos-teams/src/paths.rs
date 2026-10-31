@@ -24,8 +24,8 @@ pub(crate) fn parse_repo_path(raw: &str) -> Result<String, PathProblem> {
     let bytes = path.as_bytes();
     let has_drive =
         bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
-    // A path that went through repo_path has no place to start when it is empty, begins at the root,
-    // or begins at a drive.
+    // A path that went through repo_path has no place to start when it is empty, begins at the
+    // root, or begins at a drive.
     if path.is_empty() || path.starts_with('/') || has_drive {
         return Err(PathProblem::Rooted);
     }

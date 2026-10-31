@@ -1,7 +1,7 @@
-//! Probe tests (D78). The reviewer can leave probe tests while it proves a bug. The user decides which
-//! become permanent tests, or hands the choice to the implementer inside recorded constraints. Only the
-//! implementer adds a probe to the project, and the approval report always lists what was kept and what
-//! was not, with the output that showed each bug.
+//! Probe tests (D78). The reviewer can leave probe tests while it proves a bug. The user decides
+//! which become permanent tests, or hands the choice to the implementer inside recorded
+//! constraints. Only the implementer adds a probe to the project, and the approval report always
+//! lists what was kept and what was not, with the output that showed each bug.
 
 use kratos_teams::decisions::{Decision, DecisionKind, approval_report};
 use kratos_teams::evidence::ProbeCapture;
@@ -40,7 +40,8 @@ fn implements_adding(from: &str, to: &str) -> Ended {
     )
 }
 
-/// Round 1 finds a bug and leaves a probe. Round 2 fixes it, and `implementer` is what the fix does.
+/// Round 1 finds a bug and leaves a probe. Round 2 fixes it, and `implementer` is what the fix
+/// does.
 fn script_with_probe(implementer: Ended, reviewer_after: Vec<Ended>) -> Script {
     let mut reviewer = vec![requests_changes(vec![with_probes(
         bug("null-deref", "cmd1"),

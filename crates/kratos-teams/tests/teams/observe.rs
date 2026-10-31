@@ -1,8 +1,8 @@
 //! The part of a task view the TypeScript rules also had, in the TypeScript's names.
 //!
-//! The reference comparison needs one shape that both implementations print for a fact log: the phase,
-//! the findings, the rounds, and the next step. Rust's view holds more (questions, rulings, probes, the
-//! planner), so this keeps only what the TypeScript `fold` and `plan` can answer too.
+//! The reference comparison needs one shape that both implementations print for a fact log: the
+//! phase, the findings, the rounds, and the next step. Rust's view holds more (questions, rulings,
+//! probes, the planner), so this keeps only what the TypeScript `fold` and `plan` can answer too.
 
 use kratos_teams::decisions::{DecisionKind, allowed_decisions};
 use kratos_teams::members::Role;

@@ -1,13 +1,15 @@
-//! Facts in, view out. `fold` replays a task's log into a `TaskView`. `TaskView::apply` adds one fact,
-//! and `TaskView::accepts` asks whether a fact would apply without keeping the result.
+//! Facts in, view out. `fold` replays a task's log into a `TaskView`. `TaskView::apply` adds one
+//! fact, and `TaskView::accepts` asks whether a fact would apply without keeping the result.
 //!
 //! Three ideas hold the folding together.
 //!
-//! 1. One `Turn` for every piece of agent work. Planning, implementing, answering a question, ruling on
+//! 1. One `Turn` for every piece of agent work. Planning, implementing, answering a question,
+//!    ruling on
 //!    a dispute, and reviewing all send a message, wait for one result, and can end with a finished
 //!    report, an invalid one, a question, a blocked stop, a plan-change request, a lost turn, or a
 //!    usage-limit stop. `turns.rs` handles those endings once for every role.
-//! 2. Only `Waiting` needs the user. Every other phase has a next step that Kratos or an agent can take
+//! 2. Only `Waiting` needs the user. Every other phase has a next step that Kratos or an agent can
+//!    take
 //!    alone.
 //! 3. A result is accepted only for the message the task is waiting on. That one check makes a
 //!    duplicate, a late result after a cancel, and a result from a replaced step harmless.
@@ -37,8 +39,8 @@ use crate::view::{
     Waiting, Work,
 };
 
-/// Why a fact does not apply to the task as it stands. In the engine's short transaction this is how a
-/// stale result is recognized and dropped. In a stored log it means the record is damaged.
+/// Why a fact does not apply to the task as it stands. In the engine's short transaction this is
+/// how a stale result is recognized and dropped. In a stored log it means the record is damaged.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Rejection {
     #[error("a task's log is empty")]
@@ -137,8 +139,8 @@ impl TaskView {
         Box::new(self).apply_boxed(stored).map(|view| *view)
     }
 
-    /// `apply` for a view that is already on the heap. The reducers pass the box along, so a view of
-    /// well over a kilobyte is not copied at every step of a fold.
+    /// `apply` for a view that is already on the heap. The reducers pass the box along, so a view
+    /// of well over a kilobyte is not copied at every step of a fold.
     fn apply_boxed(mut self: Box<Self>, stored: StoredFact) -> Result<Box<TaskView>, FoldError> {
         let StoredFact { seq, fact } = stored;
         if seq <= self.seq {
@@ -156,8 +158,9 @@ impl TaskView {
     }
 
     /// Whether `fact` would apply right now. This is the engine's short-transaction check. It folds
-    /// the latest facts, asks this, and appends the result only on `Ok`. `Rejection::Stale` means the
-    /// execution was replaced or cancelled, or the result is a duplicate, and the engine drops it.
+    /// the latest facts, asks this, and appends the result only on `Ok`. `Rejection::Stale` means
+    /// the execution was replaced or cancelled, or the result is a duplicate, and the engine drops
+    /// it.
     pub fn accepts(&self, fact: &Fact) -> Result<(), Rejection> {
         let mut view = Box::new(self.clone());
         let seq = self.seq.next();
@@ -333,8 +336,8 @@ impl TaskView {
         }
     }
 
-    /// A cancel ends the task. Late results become stale because no turn waits, and the pending role
-    /// change and the messages nobody received go with it.
+    /// A cancel ends the task. Late results become stale because no turn waits, and the pending
+    /// role change and the messages nobody received go with it.
     pub(crate) fn close(mut self: Box<Self>, outcome: Outcome) -> Box<TaskView> {
         self.suspended.clear();
         self.pending_roles = None;
@@ -395,8 +398,8 @@ impl TaskView {
     }
 
     /// Starts a new logical step. This is the role-change checkpoint. With a change pending and
-    /// nothing suspended, the step waits behind `Activity::Rebinding`. Otherwise it becomes a `Turn`
-    /// held by the role's current member.
+    /// nothing suspended, the step waits behind `Activity::Rebinding`. Otherwise it becomes a
+    /// `Turn` held by the role's current member.
     pub(crate) fn begin_step(
         self: Box<Self>,
         work: Work,
@@ -412,8 +415,8 @@ impl TaskView {
         }
     }
 
-    /// Hands `work` to the member who holds its role. The message is due at `seq`, and `step` names the
-    /// logical step, which is older than `seq` when a role change held the step back.
+    /// Hands `work` to the member who holds its role. The message is due at `seq`, and `step` names
+    /// the logical step, which is older than `seq` when a role change held the step back.
     pub(crate) fn start_turn(
         self: Box<Self>,
         work: Work,
@@ -443,8 +446,8 @@ impl TaskView {
         Ok(self.active(Activity::Turn { turn }))
     }
 
-    /// `bindings = to`, and the deferred step starts under the new roles. The new holder gets fresh fix
-    /// attempts. Rounds, findings, probes, messages, and finished evidence all stay.
+    /// `bindings = to`, and the deferred step starts under the new roles. The new holder gets fresh
+    /// fix attempts. Rounds, findings, probes, messages, and finished evidence all stay.
     fn on_roles_reassigned(mut self: Box<Self>, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
         let Phase::Active {
             activity: Activity::Rebinding { to, then, step },

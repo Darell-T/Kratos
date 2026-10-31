@@ -1,11 +1,11 @@
-//! The recorded fact logs that `cargo run -p kratos-teams --example replay -- <log>` replays. Each one
-//! shows one rule at work, and the verification lanes of the migration plan read them. A log is JSON
-//! lines, one `StoredFact` per line, in `tests/fixtures/lanes/`.
+//! The recorded fact logs that `cargo run -p kratos-teams --example replay -- <log>` replays. Each
+//! one shows one rule at work, and the verification lanes of the migration plan read them. A log is
+//! JSON lines, one `StoredFact` per line, in `tests/fixtures/lanes/`.
 //!
-//! These tests keep the files honest in two ways. A file must equal what its scenario records now, so a
-//! change to the rules that changes a log shows up in the diff. And the file itself, read back and
-//! folded, must satisfy what its lane asks for. Set `KRATOS_TEAMS_RECORD_LANES=1` to write the files
-//! again after a deliberate change.
+//! These tests keep the files honest in two ways. A file must equal what its scenario records now,
+//! so a change to the rules that changes a log shows up in the diff. And the file itself, read back
+//! and folded, must satisfy what its lane asks for. Set `KRATOS_TEAMS_RECORD_LANES=1` to write the
+//! files again after a deliberate change.
 
 use std::fs;
 use std::path::PathBuf;
@@ -64,9 +64,7 @@ fn text_for(view: &TaskView) -> String {
     message(view, &run, &context)
 }
 
-// ---------------------------------------------------------------------------------------------
 // The scenarios.
-// ---------------------------------------------------------------------------------------------
 
 fn invalid_report() -> ScriptedTask {
     let mut task = Task::two().script(script(
@@ -402,9 +400,7 @@ fn every_lane_file_replays_with_each_next_action_valid_and_no_finished_step_repe
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // What each lane asks for, checked against the file.
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn lane_2_a_report_that_is_invalid_twice_pauses_the_task_for_the_user_after_the_second() {
@@ -457,7 +453,8 @@ fn lane_4_three_rounds_that_end_with_blocking_findings_pause_at_the_cap() {
     ));
 }
 
-/// For each question in the log: who it went to, and whether the asking step went on with its own id.
+/// For each question in the log: who it went to, and whether the asking step went on with its own
+/// id.
 fn question_routes(log: &[StoredFact]) -> Vec<(Role, &'static str, bool)> {
     let mut routes = Vec::new();
     for (index, stored) in log.iter().enumerate() {

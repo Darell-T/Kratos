@@ -1,12 +1,12 @@
-//! The task plan is the one document a planner writes (or the implementer, in a two-member Team with
-//! planning on), the user approves, and the reviewer judges the work against.
+//! The task plan is the one document a planner writes (or the implementer, in a two-member Team
+//! with planning on), the user approves, and the reviewer judges the work against.
 //!
 //! "Plan" means only this document. The function that picks what happens next is `next_step`.
 //!
 //! The plan fixes the agreed scope of the work. Scope is advice to the reviewer, not a wall: Kratos
 //! lists the changed files outside it in the review package, because lockfiles and generated files
-//! change as side effects, and the reviewer judges them. An implementer who needs more scope asks the
-//! user with a plan-change request (D30, D32).
+//! change as side effects, and the reviewer judges them. An implementer who needs more scope asks
+//! the user with a plan-change request (D30, D32).
 
 use std::fmt;
 
@@ -16,11 +16,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::paths::{PatternError, compile, parse_repo_path, repo_path};
 
 /// A glob relative to the repository root that names files a task may change: `src/auth/**`,
-/// `docs/*.md`, `Cargo.toml`. A folder needs an explicit `/**`, because Kratos cannot tell a file from a
-/// folder without reading the disk. `*` stays inside one folder and `**` crosses folders.
+/// `docs/*.md`, `Cargo.toml`. A folder needs an explicit `/**`, because Kratos cannot tell a file
+/// from a folder without reading the disk. `*` stays inside one folder and `**` crosses folders.
 ///
-/// Checked when parsed, so every `ScopePattern` in a fact or a view is a valid glob that stays inside
-/// the repository.
+/// Checked when parsed, so every `ScopePattern` in a fact or a view is a valid glob that stays
+/// inside the repository.
 #[derive(Clone)]
 pub struct ScopePattern {
     text: String,
@@ -169,8 +169,8 @@ pub enum ScopeSource {
 
 /// The scope in force right now.
 ///
-/// With an approved plan it is the plan's scope plus every amendment. Without one it is the scope the
-/// user gave at the start. If the user gave none, the whole worktree is in scope, so nothing is
+/// With an approved plan it is the plan's scope plus every amendment. Without one it is the scope
+/// the user gave at the start. If the user gave none, the whole worktree is in scope, so nothing is
 /// reported as outside it. A missing plan is neither unlimited authority nor a reason to reject
 /// every change.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

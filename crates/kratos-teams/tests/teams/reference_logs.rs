@@ -1,11 +1,12 @@
-//! The Rust fold against the TypeScript fold. `tests/fixtures/reference/` holds 32 two-member fact logs
-//! that the TypeScript Teams rules (`teams-core`, commit 6741f16) recorded, each with the TypeScript's
-//! view and next step after every fact. Each log runs through the Rust `fold` here, and the views and
-//! next steps must match, except for the explicitly corrected pending-security checkpoint in log 26.
+//! The Rust fold against the TypeScript fold. `tests/fixtures/reference/` holds 32 two-member fact
+//! logs that the TypeScript Teams rules (`teams-core`, commit 6741f16) recorded, each with the
+//! TypeScript's view and next step after every fact. Each log runs through the Rust `fold` here,
+//! and the views and next steps must match, except for the explicitly corrected pending-security
+//! checkpoint in log 26.
 //!
 //! These logs cover the behavior the Rust rules kept. Behavior that changed on purpose (questions
-//! instead of `needsUser`, a blocked review skipping the evidence check, and a round count that only the
-//! user's explicit requests restart) has its own tests and no reference log.
+//! instead of `needsUser`, a blocked review skipping the evidence check, and a round count that
+//! only the user's explicit requests restart) has its own tests and no reference log.
 
 use kratos_teams::fold::fold;
 use kratos_teams::next_step::{Step, next_step};

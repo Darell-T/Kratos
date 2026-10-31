@@ -1,7 +1,7 @@
 //! What a test sends `fake-codex` to steer it, and the file where the fake writes its control port.
 //!
-//! A test sends `test/*` requests as JSON-RPC lines, on the fake's stdin or on the localhost port the
-//! fake writes to its `--control-file`. Each builder below returns its method with the params
+//! A test sends `test/*` requests as JSON-RPC lines, on the fake's stdin or on the localhost port
+//! the fake writes to its `--control-file`. Each builder below returns its method with the params
 //! `fake-codex` reads for it, and the fake dispatches on the same method names, so the tests that
 //! send them spell neither again.
 

@@ -1,10 +1,11 @@
-//! The recorded vocabulary. It holds the ids, settings, and facts the engine appends to a task's log.
+//! The recorded vocabulary. It holds the ids, settings, and facts the engine appends to a task's
+//! log.
 //!
 //! A fact says what happened. It never says what to do next. `fold` turns facts into a view, and
-//! `next_step` turns the view into the one thing that must happen next. Every id, time, and outcome the
-//! rules use arrives inside a fact, so replaying a log gives the same answer on any machine on any day.
-//! No fact carries a time the rules compare. The one time a fact carries, `resumes_at`, is only shown
-//! to the user.
+//! `next_step` turns the view into the one thing that must happen next. Every id, time, and outcome
+//! the rules use arrives inside a fact, so replaying a log gives the same answer on any machine on
+//! any day. No fact carries a time the rules compare. The one time a fact carries, `resumes_at`, is
+//! only shown to the user.
 //!
 //! Serde conventions for the whole crate. Enums with data are internally tagged with `kind` and use
 //! struct variants, so a log line reads as one flat object per level and two tags never collide.
@@ -23,9 +24,7 @@ use crate::reports::{FindingId, Reported};
 use crate::security_triggers::{Trigger, TriggerHit};
 use crate::task_plan::{ProbeConstraints, ScopePattern};
 
-// ---------------------------------------------------------------------------------------------
 // Ids. Each is its own type, so a message id cannot go where a step id is wanted.
-// ---------------------------------------------------------------------------------------------
 
 /// A fact's position in its task's log. The engine's database assigns it, counting up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -38,13 +37,14 @@ impl FactSeq {
     }
 }
 
-/// One logical unit of work: "plan", "implement round 2", "review this commit", "answer this question".
+/// One logical unit of work: "plan", "implement round 2", "review this commit", "answer this
+/// question".
 ///
-/// It is derived and never allocated. It is the position of the fact that opened the step, so the same
-/// log always yields the same ids. It survives everything that happens inside the step: a correction, a
-/// question and its answer, a usage-limit stop and its continuation. It changes only when the step is
-/// replaced on purpose, by a resume, a direction, or a step-back, and that is also what makes a late
-/// result from the replaced step recognizable.
+/// It is derived and never allocated. It is the position of the fact that opened the step, so the
+/// same log always yields the same ids. It survives everything that happens inside the step: a
+/// correction, a question and its answer, a usage-limit stop and its continuation. It changes only
+/// when the step is replaced on purpose, by a resume, a direction, or a step-back, and that is also
+/// what makes a late result from the replaced step recognizable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct StepId(pub FactSeq);
@@ -52,8 +52,9 @@ pub struct StepId(pub FactSeq);
 /// Names one message to one member, and so one expected result. The engine derives the provider's
 /// message id from it and never sends the same `MessageId` twice.
 ///
-/// A message the rules make looks like `m12`, the position of the fact that made it due. A continuation
-/// after a usage limit carries the id the usage scheduler chose, which arrives in a fact.
+/// A message the rules make looks like `m12`, the position of the fact that made it due. A
+/// continuation after a usage limit carries the id the usage scheduler chose, which arrives in a
+/// fact.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MessageId(String);
@@ -83,8 +84,8 @@ impl DeliveryId {
     }
 }
 
-/// Names one automatic continuation of a stopped turn. The usage scheduler chooses it, and the rules
-/// only record it.
+/// Names one automatic continuation of a stopped turn. The usage scheduler chooses it, and the
+/// rules only record it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ContinuationId(String);
@@ -147,13 +148,11 @@ impl fmt::Display for Sha {
 #[serde(transparent)]
 pub struct UnixMillis(pub u64);
 
-// ---------------------------------------------------------------------------------------------
 // The task's frozen starting point.
-// ---------------------------------------------------------------------------------------------
 
-/// `AGENTS.md`, `CLAUDE.md`, and `REVIEW.md` as they were in the Team's folder when the task started.
-/// The review package, the quote check, and the security triggers all read this copy, so the
-/// implementer cannot weaken the standard it is judged by.
+/// `AGENTS.md`, `CLAUDE.md`, and `REVIEW.md` as they were in the Team's folder when the task
+/// started. The review package, the quote check, and the security triggers all read this copy, so
+/// the implementer cannot weaken the standard it is judged by.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulesSnapshot {
     pub agents_md: Option<String>,
@@ -169,8 +168,8 @@ impl RulesSnapshot {
         ]
     }
 
-    /// Every rules file, by name. The reviewer reads all of them, and a quote may come from any of them.
-    /// `REVIEW.md` is for the reviewer alone.
+    /// Every rules file, by name. The reviewer reads all of them, and a quote may come from any of
+    /// them. `REVIEW.md` is for the reviewer alone.
     pub fn files(&self) -> [(&'static str, Option<&str>); 3] {
         let [agents, claude] = self.instruction_files();
         [agents, claude, ("REVIEW.md", self.review_md.as_deref())]
@@ -263,16 +262,16 @@ fn is_true() -> bool {
 /// cannot alter a task in flight.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskPolicy {
-    /// Two-member Teams only, and off by default. A Team with a planner always plans first, whatever
-    /// this says. Use `TaskView::plans_first`, never this field alone.
+    /// Two-member Teams only, and off by default. A Team with a planner always plans first,
+    /// whatever this says. Use `TaskView::plans_first`, never this field alone.
     #[serde(default)]
     pub plan_first: bool,
     #[serde(default = "is_true")]
     pub security_pass: bool,
     #[serde(default)]
     pub probes: ProbePolicy,
-    /// D40. Off by default. A usage limit never offers to move a role to another account unless this
-    /// is true, and even then each handoff needs the user's approval.
+    /// D40. Off by default. A usage limit never offers to move a role to another account unless
+    /// this is true, and even then each handoff needs the user's approval.
     #[serde(default)]
     pub account_handoff: bool,
     #[serde(default)]
@@ -283,8 +282,9 @@ pub struct TaskPolicy {
     pub permission: Permission,
 }
 
-/// Everything that is true when a task starts. The engine builds it once the folder, identity, sign-ins,
-/// and sandbox are checked, and a bad `kratos-security` block has already refused the task.
+/// Everything that is true when a task starts. The engine builds it once the folder, identity,
+/// sign-ins, and sandbox are checked, and a bad `kratos-security` block has already refused the
+/// task.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskStarted {
     /// The user's task text. The reviewer checks the work against it.
@@ -293,8 +293,8 @@ pub struct TaskStarted {
     pub constraints: Vec<String>,
     /// The files the user said the task may touch. Empty means the whole worktree.
     pub scope: Vec<ScopePattern>,
-    /// The first line of the request, from `naming::task_title`. It is stored and not derived again, so
-    /// a later version of that function cannot rename the commits of a task in flight.
+    /// The first line of the request, from `naming::task_title`. It is stored and not derived
+    /// again, so a later version of that function cannot rename the commits of a task in flight.
     pub title: String,
     /// From `naming::branch_name`, which starts it with the implementer's provider (D36).
     pub branch: String,
@@ -307,9 +307,7 @@ pub struct TaskStarted {
     pub bindings: Bindings,
 }
 
-// ---------------------------------------------------------------------------------------------
 // Facts.
-// ---------------------------------------------------------------------------------------------
 
 /// A fact with the position the engine's database gave it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -320,9 +318,9 @@ pub struct StoredFact {
 
 /// Everything that can happen to a task. The first fact of a log is always `TaskStarted`.
 ///
-/// A result fact names the message it answers. The rules accept a result only for the message the task
-/// is waiting on, so a duplicate, a late result after a cancel, and a result from a replaced step are
-/// all recognized and dropped, and no lock is held across the turn.
+/// A result fact names the message it answers. The rules accept a result only for the message the
+/// task is waiting on, so a duplicate, a late result after a cancel, and a result from a replaced
+/// step are all recognized and dropped, and no lock is held across the turn.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Fact {
@@ -336,17 +334,18 @@ pub enum Fact {
         message: MessageId,
         ended: Box<Ended>,
     },
-    /// Kratos committed the work. `files` are the paths this commit changed since the previous round's
-    /// commit, or since the base, from `git diff --name-only`. `size` measures what the commit's
-    /// standard review reads, from `CommitStep::review_base`. `probe_runs` has one entry for each probe
-    /// the implementer's report added.
+    /// Kratos committed the work. `files` are the paths this commit changed since the previous
+    /// round's commit, or since the base, from `git diff --name-only`. `size` measures what the
+    /// commit's standard review reads, from `CommitStep::review_base`. `probe_runs` has one entry
+    /// for each probe the implementer's report added.
     Committed {
         commit: Sha,
         files: Vec<String>,
         size: ChangeSize,
         probe_runs: Vec<ProbeRun>,
     },
-    /// Kratos finished checking a review's findings, rerunning open bugs, and scanning for triggers.
+    /// Kratos finished checking a review's findings, rerunning open bugs, and scanning for
+    /// triggers.
     EvidenceChecked {
         checked: Box<EvidenceChecked>,
     },
@@ -361,7 +360,8 @@ pub enum Fact {
         member: MemberId,
         text: String,
     },
-    /// What the engine did with a user message. It either reached the active turn or is kept for the next one.
+    /// What the engine did with a user message. It either reached the active turn or is kept for
+    /// the next one.
     MessageDisposed {
         delivery: DeliveryId,
         how: Disposition,
@@ -378,7 +378,8 @@ pub enum Fact {
         step: StepId,
         why: Declined,
     },
-    /// The engine tried to hand the stopped role to another account, after the user approved it (D40).
+    /// The engine tried to hand the stopped role to another account, after the user approved it
+    /// (D40).
     AccountHandoff {
         step: StepId,
         outcome: HandoffOutcome,
@@ -398,26 +399,27 @@ pub enum Fact {
     },
 }
 
-/// How a turn ended. A turn that produced a report, one that produced nothing, and one that hit a usage
-/// limit are three kinds of trouble with three remedies.
+/// How a turn ended. A turn that produced a report, one that produced nothing, and one that hit a
+/// usage limit are three kinds of trouble with three remedies.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Ended {
     /// A final reply, parsed at the boundary into a typed report or an actionable error.
     Reported { reported: Reported },
-    /// The turn produced nothing because the process exited, the deadline passed, or a restart cut it off.
+    /// The turn produced nothing because the process exited, the deadline passed, or a restart cut
+    /// it off.
     Lost { reason: String },
     /// The provider stopped the turn at a usage limit. `delivered` says whether the message had
-    /// already reached the provider, which decides what the scheduler may send again. The rules never
-    /// resend a message and never start a timer.
+    /// already reached the provider, which decides what the scheduler may send again. The rules
+    /// never resend a message and never start a timer.
     QuotaLimit { delivered: bool },
 }
 
 /// Kratos's checks of one review, recorded as one fact so a restart never repeats half of them.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceChecked {
-    /// One entry for each finding that could block. Nits, pre-existing bugs, and design opinions are
-    /// listed without a check.
+    /// One entry for each finding that could block. Nits, pre-existing bugs, and design opinions
+    /// are listed without a check.
     pub checks: BTreeMap<FindingId, EvidenceCheck>,
     /// Kratos's rerun of each open bug's command on the new commit.
     pub rechecks: BTreeMap<FindingId, Rerun>,
@@ -427,8 +429,8 @@ pub struct EvidenceChecked {
     pub security_hits: Option<Vec<TriggerHit>>,
 }
 
-/// What git showed about one probe the implementer added (D78). The rules decide from it whether the
-/// probe stays, so the engine cannot keep one the user's constraints refuse.
+/// What git showed about one probe the implementer added (D78). The rules decide from it whether
+/// the probe stays, so the engine cannot keep one the user's constraints refuse.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProbeRun {
     /// The reviewer's file, as `AddedProbe::from` names it.

@@ -1,6 +1,6 @@
 //! Planning, and the planner. A two-member Team plans only when the user turns it on, and then the
-//! implementer writes the plan. A three-member Team always plans first, and the planner writes the plan.
-//! The user approves any plan before an implementer starts (D28, D37).
+//! implementer writes the plan. A three-member Team always plans first, and the planner writes the
+//! plan. The user approves any plan before an implementer starts (D28, D37).
 
 use kratos_teams::decisions::{Decision, DecisionKind};
 use kratos_teams::members::Role;
@@ -112,7 +112,8 @@ fn a_three_member_team_always_plans_first_and_the_planner_writes_the_plan() {
 
 #[test]
 fn the_plan_first_setting_does_not_apply_to_a_team_with_a_planner() {
-    // The setting is false here and the planner still plans, because a planner means planning first.
+    // The setting is false here and the planner still plans, because a planner means planning
+    // first.
     let task = Task::three().script(Script {
         planner: vec![plan_ready()].into(),
         ..Script::default()

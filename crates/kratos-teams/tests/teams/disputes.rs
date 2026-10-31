@@ -1,6 +1,7 @@
-//! Disputes (D31). The implementer can answer a finding with "disputed" and a reason. With a planner,
-//! the planner rules on every disputed finding. With none, the user rules. The reviewer never rules on
-//! its own finding. A planner's ruling takes effect at once, and its reasons stay in the record.
+//! Disputes (D31). The implementer can answer a finding with "disputed" and a reason. With a
+//! planner, the planner rules on every disputed finding. With none, the user rules. The reviewer
+//! never rules on its own finding. A planner's ruling takes effect at once, and its reasons stay in
+//! the record.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
 use kratos_teams::facts::{Ended, Fact};

@@ -248,8 +248,8 @@ fn a_confirmed_finding_is_inside_the_diff_only_when_a_changed_line_covers_it() {
     assert!(!inside(&elsewhere));
 }
 
-/// Real `git diff -U0` output: a deletion-only hunk, a new file whose first line starts with "++", a
-/// deleted file, and a name with a space, which git ends with a tab.
+/// Real `git diff -U0` output: a deletion-only hunk, a new file whose first line starts with "++",
+/// a deleted file, and a name with a space, which git ends with a tab.
 const UNIFIED_ZERO: &str = "diff --git a/a.ts b/a.ts
 index b2f931a..16beaec 100644
 --- a/a.ts
@@ -379,8 +379,8 @@ fn the_no_newline_marker_belongs_to_its_line_and_counts_for_nothing() {
 
 #[test]
 fn a_quoted_path_with_non_ascii_bytes_decodes_as_one_name() {
-    // `core.quotePath=true` writes each byte of "é.rs" as an octal escape. The diff arguments turn that
-    // off, and the parser still reads the escapes if a caller forgot.
+    // `core.quotePath=true` writes each byte of "é.rs" as an octal escape. The diff arguments turn
+    // that off, and the parser still reads the escapes if a caller forgot.
     let diff = Diff::parse("+++ \"b/\\303\\251.rs\"\n@@ -0,0 +1 @@\n+x\n");
 
     assert_eq!(diff.files[0].path, "é.rs");
