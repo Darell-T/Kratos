@@ -19,7 +19,7 @@ use crate::reports::{FindingId, RulingVerdict};
 use crate::task_plan::Amendment;
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, Finding, FindingStatus, Hold, Phase,
-    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, Stop, TaskView, Turn,
+    PlanState, Probe, ProbeRejection, Resolution, RulingRecord, Stop, TaskView, Turn,
     UsageLimitAsk, Waiting, Work,
 };
 
@@ -246,11 +246,7 @@ fn trouble_decisions(left: &Activity) -> Vec<DecisionKind> {
 
 /// `KeepProbes` is offered only while the user decides and a probe still waits for a choice.
 fn probes_offered(view: &TaskView) -> bool {
-    view.is_user_decides_probes()
-        && view
-            .probes
-            .iter()
-            .any(|probe| probe.status == ProbeStatus::Offered)
+    view.is_user_decides_probes() && view.has_offered_probes()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -550,13 +546,7 @@ fn keep_probes(
     if let Some(stranger) = keep.iter().find(|path| !view.offers_probe(path)) {
         return Err(invalid(&format!("{stranger} is not an offered probe")));
     }
-    for probe in &mut view.probes {
-        if probe.status == ProbeStatus::Offered && !keep.contains(&probe.path) {
-            probe.status = ProbeStatus::Rejected {
-                reason: ProbeRejection::UserDeclined,
-            };
-        }
-    }
+    view.reject_offered_probes(keep, ProbeRejection::UserDeclined);
     if keep.is_empty() {
         return Ok(view);
     }

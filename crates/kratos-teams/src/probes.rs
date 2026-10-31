@@ -54,6 +54,22 @@ impl TaskView {
             .any(|probe| probe.path == path && probe.status == ProbeStatus::Offered)
     }
 
+    /// Whether any probe the reviewer left still waits for a choice.
+    pub(crate) fn has_offered_probes(&self) -> bool {
+        self.probes
+            .iter()
+            .any(|probe| probe.status == ProbeStatus::Offered)
+    }
+
+    /// Rejects for `reason` every probe that still waits for a choice, apart from those in `except`.
+    pub(crate) fn reject_offered_probes(&mut self, except: &[String], reason: ProbeRejection) {
+        for probe in &mut self.probes {
+            if probe.status == ProbeStatus::Offered && !except.contains(&probe.path) {
+                probe.status = ProbeStatus::Rejected { reason };
+            }
+        }
+    }
+
     /// Decides the fate of each probe the implementer added. Git showed whether it fails before the fix
     /// and passes after it. The constraints are the user's, and the rules apply them here, so the
     /// engine cannot keep a probe the user refused.
@@ -115,13 +131,7 @@ impl TaskView {
     /// approval always lists what was kept and what was not.
     pub(crate) fn reject_unadded_probes(&mut self) {
         if matches!(self.policy.probes, ProbePolicy::Delegated { .. }) {
-            for probe in &mut self.probes {
-                if probe.status == ProbeStatus::Offered {
-                    probe.status = ProbeStatus::Rejected {
-                        reason: ProbeRejection::NotAdded,
-                    };
-                }
-            }
+            self.reject_offered_probes(&[], ProbeRejection::NotAdded);
         }
     }
 
