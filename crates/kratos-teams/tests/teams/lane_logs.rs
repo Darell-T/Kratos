@@ -10,7 +10,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use kratos_teams::decisions::{Decision, PlanChangeResponse};
+use kratos_teams::decisions::{Decision, DecisionKind, PlanChangeResponse, allowed_decisions};
 use kratos_teams::evidence::ProbeCapture;
 use kratos_teams::facts::{Disposition, Ended, Fact, HandoffOutcome, ProbePolicy, StoredFact};
 use kratos_teams::fold::fold;
@@ -705,4 +705,30 @@ fn steering_keeps_the_active_execution_so_each_implementer_message_is_asked_for_
         2,
         "the first turn, and the fix after the review"
     );
+}
+
+#[test]
+fn recorded_waits_accept_each_offered_decision_and_refuse_every_other_kind() {
+    // Catches a choice the task offers but cannot apply, or one it accepts while hidden.
+    let mut offered = std::collections::BTreeSet::new();
+    for name in [
+        "r6-prefixes-planning-on",
+        "r6-question-no-planner",
+        "r6-dispute-no-planner",
+        "r6-plan-change",
+    ] {
+        for view in prefix_views(&read_lane(name)) {
+            assert_decisions_match(&view);
+            offered.extend(allowed_decisions(&view));
+        }
+    }
+    for kind in [
+        DecisionKind::ApprovePlan,
+        DecisionKind::RevisePlan,
+        DecisionKind::Answer,
+        DecisionKind::Rule,
+        DecisionKind::PlanChange,
+    ] {
+        assert!(offered.contains(&kind), "no recorded wait offers {kind}");
+    }
 }

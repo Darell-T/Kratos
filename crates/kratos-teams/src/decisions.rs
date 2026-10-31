@@ -343,7 +343,7 @@ fn approve_plan(
         revision,
     } = view.plan.clone()
     else {
-        return Err(not_allowed(&view, DecisionKind::ApprovePlan));
+        unreachable!("plan approval waits for a drafted plan");
     };
     view.plan = PlanState::Approved {
         plan,
@@ -367,7 +367,7 @@ fn revise_plan(
 ) -> Result<Box<TaskView>, Rejection> {
     not_blank(&feedback, "the feedback", invalid)?;
     let PlanState::Drafted { author, .. } = &view.plan else {
-        return Err(not_allowed(&view, DecisionKind::RevisePlan));
+        unreachable!("plan revision waits for a drafted plan");
     };
     let work = Work::Plan {
         author: *author,
@@ -386,7 +386,7 @@ fn answer(
 ) -> Result<Box<TaskView>, Rejection> {
     not_blank(&text, "the answer", invalid)?;
     let Some(question) = view.pending_question() else {
-        return Err(not_allowed(&view, DecisionKind::Answer));
+        unreachable!("Answer is allowed only while a question is pending");
     };
     let resolution = Resolution::Answered {
         question: question.text.clone(),
@@ -404,25 +404,21 @@ fn rule(
     seq: FactSeq,
     invalid: Invalid<'_>,
 ) -> Result<Box<TaskView>, Rejection> {
-    let (disputed, commit) = match &view.phase {
-        Phase::Waiting {
-            waiting: Waiting::Ruling { disputed, commit },
-        } => (disputed.clone(), commit.clone()),
-        Phase::Waiting {
-            waiting:
-                Waiting::Trouble {
-                    left:
-                        Activity::Turn {
-                            turn:
-                                Turn {
-                                    work: Work::Rule { disputed, commit },
-                                    ..
-                                },
-                        },
-                    ..
-                },
-        } => (disputed.clone(), commit.clone()),
-        _ => return Err(not_allowed(&view, DecisionKind::Rule)),
+    let Phase::Waiting { waiting } = &view.phase else {
+        unreachable!("Rule is allowed only while waiting for a ruling");
+    };
+    let (disputed, commit) = match waiting {
+        Waiting::Ruling { disputed, commit } => (disputed.clone(), commit.clone()),
+        Waiting::Trouble {
+            left: Activity::Turn { turn },
+            ..
+        } => {
+            let Work::Rule { disputed, commit } = &turn.work else {
+                unreachable!("Rule is allowed in trouble only after a ruling step");
+            };
+            (disputed.clone(), commit.clone())
+        }
+        _ => unreachable!("Rule is allowed only for a pending or failed ruling"),
     };
     if let Some(stranger) = not_bug.iter().find(|id| !disputed.contains(id)) {
         return Err(invalid(&format!("{stranger} is not a disputed finding")));
@@ -450,7 +446,7 @@ fn plan_change(
     seq: FactSeq,
 ) -> Result<Box<TaskView>, Rejection> {
     let Some(request) = view.pending_plan_change().cloned() else {
-        return Err(not_allowed(&view, DecisionKind::PlanChange));
+        unreachable!("PlanChange is allowed only while a plan change is pending");
     };
     if response == PlanChangeResponse::Replan {
         return replan(view, &request.reason, instructions, seq);
