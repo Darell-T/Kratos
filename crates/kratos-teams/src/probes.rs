@@ -53,12 +53,6 @@ impl TaskView {
             .any(|probe| probe.path == path && probe.status == ProbeStatus::Offered)
     }
 
-    pub(crate) fn has_offered_probes(&self) -> bool {
-        self.probes
-            .iter()
-            .any(|probe| probe.status == ProbeStatus::Offered)
-    }
-
     pub(crate) fn reject_offered_probes(&mut self, except: &[String], reason: ProbeRejection) {
         for probe in &mut self.probes {
             if probe.status == ProbeStatus::Offered && !except.contains(&probe.path) {

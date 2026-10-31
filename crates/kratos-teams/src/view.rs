@@ -15,7 +15,7 @@ use serde::Serialize;
 use crate::evidence::{DropReason, EvidenceCheck, Rerun};
 use crate::facts::{
     ChangeSize, ContinuationId, Declined, DeliveryId, Depth, FactSeq, MessageId, Outcome,
-    ProbePolicy, RulesSnapshot, Sha, StepId, TaskPolicy, UnixMillis,
+    RulesSnapshot, Sha, StepId, TaskPolicy, UnixMillis,
 };
 use crate::members::{Bindings, MemberId, Role};
 use crate::reports::{
@@ -883,10 +883,6 @@ impl TaskView {
     /// the base. The engine measures the change from here, so review depth matches what the reviewer reads.
     pub fn standard_review_base(&self) -> &Sha {
         self.last_reviewed.as_ref().unwrap_or(&self.base)
-    }
-
-    pub fn is_user_decides_probes(&self) -> bool {
-        matches!(self.policy.probes, ProbePolicy::UserDecides)
     }
 }
 

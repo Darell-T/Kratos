@@ -12,14 +12,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::facts::{FactSeq, Outcome, Sha, StepId};
+use crate::facts::{FactSeq, Outcome, ProbePolicy, Sha, StepId};
 use crate::fold::Rejection;
 use crate::members::Bindings;
 use crate::reports::{FindingId, RulingVerdict};
 use crate::task_plan::Amendment;
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, Finding, FindingStatus, Hold, Phase,
-    PlanState, Probe, ProbeRejection, Resolution, RulingRecord, Stop, TaskView, Turn,
+    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, Stop, TaskView, Turn,
     UsageLimitAsk, Waiting, Work,
 };
 
@@ -246,7 +246,11 @@ fn trouble_decisions(left: &Activity) -> Vec<DecisionKind> {
 
 /// `KeepProbes` is offered only while the user decides and a probe still waits for a choice.
 fn probes_offered(view: &TaskView) -> bool {
-    view.is_user_decides_probes() && view.has_offered_probes()
+    matches!(view.policy.probes, ProbePolicy::UserDecides)
+        && view
+            .probes
+            .iter()
+            .any(|probe| probe.status == ProbeStatus::Offered)
 }
 
 // ---------------------------------------------------------------------------------------------
