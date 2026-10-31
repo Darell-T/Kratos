@@ -16,7 +16,7 @@ use kratos_protocol::CommandResult;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::Diff;
-use crate::paths::{PathProblem, RepoPath};
+use crate::paths::{PathProblem, RepoPath, repo_path};
 use crate::reports::{FindingReport, Kind, Location};
 
 /// How long the engine lets an evidence command run. A timeout proves nothing.
@@ -268,7 +268,7 @@ fn dropped(why: DropWhy, detail: impl Into<String>) -> EvidenceCheck {
 }
 
 fn inside_new_diff(location: &Location, diff: Option<&Diff>) -> bool {
-    diff.is_none_or(|diff| diff.touches(location))
+    diff.is_none_or(|diff| diff.touches(&repo_path(&location.path), location.line))
 }
 
 /// Applies the location rule, then the quote rule for a requirement or constraint, or asks for the

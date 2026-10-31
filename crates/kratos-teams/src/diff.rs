@@ -4,9 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::paths::repo_path;
-use crate::reports::Location;
-
 /// The git arguments for every diff the engine makes for the rules, followed by the revision range.
 /// That covers each diff a check or a scan parses and the one `Committed::size` measures.
 ///
@@ -67,14 +64,13 @@ impl Diff {
         walker.finish()
     }
 
-    /// Whether the line a finding cites was added or changed in this diff.
-    pub fn touches(&self, location: &Location) -> bool {
-        let path = repo_path(&location.path);
+    /// Whether `line` of `path`, spelled the way git spells it, was added or changed in this diff.
+    pub fn touches(&self, path: &str, line: u32) -> bool {
         self.files
             .iter()
             .filter(|file| file.path == path)
             .flat_map(|file| &file.ranges)
-            .any(|range| (range.first..=range.last).contains(&location.line))
+            .any(|range| (range.first..=range.last).contains(&line))
     }
 }
 

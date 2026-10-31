@@ -316,9 +316,9 @@ fn the_diff_parser_reads_changed_ranges_and_added_lines_from_git_diff_u0() {
         diff.files.iter().all(|file| file.path != "old.ts"),
         "a deleted file has no new side"
     );
-    assert!(diff.touches(&location("a.ts", 4)));
-    assert!(!diff.touches(&location("./a.ts", 1)));
-    assert!(!diff.touches(&location("other.ts", 1)));
+    assert!(diff.touches("a.ts", 4));
+    assert!(!diff.touches("./a.ts", 1));
+    assert!(!diff.touches("other.ts", 1));
 }
 
 #[test]
