@@ -51,18 +51,19 @@ fn flatten(text: &str) -> Value {
 /// A property schema of `true` accepts any value, as `{}` does. Typify only merges the object
 /// form: on `McpServerElicitationRequestParams` the `true` form makes it panic.
 fn objects_for_true(node: &mut Value) {
-    match node {
-        Value::Object(map) => {
-            if let Some(Value::Object(properties)) = map.get_mut("properties") {
-                for property in properties.values_mut() {
-                    if *property == Value::Bool(true) {
-                        *property = json!({});
-                    }
-                }
-            }
-            map.values_mut().for_each(objects_for_true);
+    let Value::Object(map) = node else {
+        if let Value::Array(items) = node {
+            items.iter_mut().for_each(objects_for_true);
         }
-        Value::Array(items) => items.iter_mut().for_each(objects_for_true),
-        _ => {}
+        return;
+    };
+    if let Some(Value::Object(properties)) = map.get_mut("properties") {
+        for property in properties.values_mut() {
+            if *property != Value::Bool(true) {
+                continue;
+            }
+            *property = json!({});
+        }
     }
+    map.values_mut().for_each(objects_for_true);
 }
