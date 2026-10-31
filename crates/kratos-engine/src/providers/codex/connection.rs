@@ -178,7 +178,7 @@ impl Actor {
                 };
                 self.read_account(generation, codex);
                 for deferred in std::mem::take(&mut self.deferred) {
-                    self.on_command(deferred.into_command()).await;
+                    self.on_command(deferred).await;
                 }
                 self.reconcile_waiting().await;
                 let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
@@ -191,7 +191,7 @@ impl Actor {
                 self.server = Server::Down;
                 let message = error.to_string();
                 for deferred in std::mem::take(&mut self.deferred) {
-                    deferred.fail(ProviderError::Unavailable(message.clone()));
+                    deferred.fail_deferred(ProviderError::Unavailable(message.clone()));
                 }
                 let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
                 for thread_id in threads {

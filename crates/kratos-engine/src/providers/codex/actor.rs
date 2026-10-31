@@ -109,61 +109,16 @@ pub(super) enum Command {
     },
 }
 
-pub(super) enum Deferred {
-    Discard {
-        thread_id: ThreadId,
-        message_id: MessageId,
-        reply: Reply<Message>,
-    },
-    RefreshUsage {
-        reply: Reply<()>,
-    },
-    Skills {
-        thread_id: ThreadId,
-        reply: Reply<Vec<Skill>>,
-    },
-    Run {
-        thread_id: ThreadId,
-        command: Vec<String>,
-        timeout: Duration,
-        reply: Reply<CommandResult>,
-    },
-}
-
-impl Deferred {
-    pub(super) fn fail(self, error: ProviderError) {
+impl Command {
+    pub(super) fn fail_deferred(self, error: ProviderError) {
         match self {
-            Deferred::Discard { reply, .. } => drop(reply.send(Err(error))),
-            Deferred::RefreshUsage { reply } => drop(reply.send(Err(error))),
-            Deferred::Skills { reply, .. } => drop(reply.send(Err(error))),
-            Deferred::Run { reply, .. } => drop(reply.send(Err(error))),
-        }
-    }
-
-    pub(super) fn into_command(self) -> Command {
-        match self {
-            Deferred::Discard {
-                thread_id,
-                message_id,
-                reply,
-            } => Command::Discard {
-                thread_id,
-                message_id,
-                reply,
-            },
-            Deferred::RefreshUsage { reply } => Command::RefreshUsage { reply },
-            Deferred::Skills { thread_id, reply } => Command::Skills { thread_id, reply },
-            Deferred::Run {
-                thread_id,
-                command,
-                timeout,
-                reply,
-            } => Command::Run {
-                thread_id,
-                command,
-                timeout,
-                reply,
-            },
+            Command::Discard { reply, .. } => drop(reply.send(Err(error))),
+            Command::RefreshUsage { reply } => drop(reply.send(Err(error))),
+            Command::Skills { reply, .. } => drop(reply.send(Err(error))),
+            Command::Run { reply, .. } => drop(reply.send(Err(error))),
+            _ => {
+                unreachable!("only discard, refresh usage, skills and run commands wait for Codex")
+            }
         }
     }
 }
@@ -270,7 +225,7 @@ pub(crate) struct Actor {
     /// Threads waiting for a start slot, oldest first.
     pub(super) ready: VecDeque<ThreadId>,
     pub(super) next_attempt: u64,
-    pub(super) deferred: Vec<Deferred>,
+    pub(super) deferred: Vec<Command>,
     /// Threads to load once the app-server is up, so its history settles their uncertain messages.
     pub(super) reconcile: Vec<ThreadId>,
     pub(super) done: mpsc::UnboundedSender<Done>,

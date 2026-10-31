@@ -8,7 +8,7 @@ use kratos_codex_client::{Codex, methods, types};
 use kratos_protocol::{CommandResult, Skill, ThreadId};
 use serde_json::json;
 
-use super::actor::{Actor, Command, Deferred, Reply};
+use super::actor::{Actor, Command, Reply};
 use super::profiles::Profile;
 use super::{ProviderError, wire};
 
@@ -120,7 +120,7 @@ impl Actor {
         let codex = match self.connection() {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Deferred::Skills { thread_id, reply });
+                self.deferred.push(Command::Skills { thread_id, reply });
                 return;
             }
             Err(error) => {
@@ -148,7 +148,7 @@ impl Actor {
         let codex = match self.connection() {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Deferred::Run {
+                self.deferred.push(Command::Run {
                     thread_id,
                     command,
                     timeout,

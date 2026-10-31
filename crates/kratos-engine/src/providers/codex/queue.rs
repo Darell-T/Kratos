@@ -11,7 +11,7 @@ use kratos_protocol::{
 use kratos_store::{Enqueued, QueuePlace, StoreError, ThreadWrite};
 use uuid::Uuid;
 
-use super::actor::{Actor, Deferred, Done, Reply};
+use super::actor::{Actor, Command, Done, Reply};
 use super::threads::{Link, Turn};
 use super::turns::read_history;
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
@@ -166,7 +166,7 @@ impl Actor {
                 if matches!(thread.link, Link::Attaching) {
                     thread.discards.push((message_id, reply));
                 } else {
-                    self.deferred.push(Deferred::Discard {
+                    self.deferred.push(Command::Discard {
                         thread_id,
                         message_id,
                         reply,
