@@ -123,7 +123,6 @@ enum Out {
     Caller(Value),
 }
 
-/// How the fake answers `initialize`.
 #[derive(Default)]
 enum InitializeMode {
     #[default]

@@ -41,7 +41,6 @@ impl ApiRequest {
         self
     }
 
-    /// A request carrying `body` as JSON.
     pub fn json<T: Serialize>(method: &str, path: &str, body: &T) -> ApiRequest {
         let body = serde_json::to_vec(body).expect("a request body serializes");
         ApiRequest::new(method, path)

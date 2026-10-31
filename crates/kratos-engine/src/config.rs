@@ -8,7 +8,6 @@ use kratos_protocol::{DEFAULT_PORT, HOME_VAR, ThreadId, engine_home};
 
 /// The variable naming the port the engine listens on. Empty counts as unset.
 pub const PORT_VAR: &str = "KRATOS_PORT";
-/// The variable naming the thread whose agent the `mcp` subcommand serves.
 pub const THREAD_ID_VAR: &str = "KRATOS_THREAD_ID";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,15 +16,11 @@ pub struct Config {
     pub home: PathBuf,
     /// 0 asks the system for a free port; the listening line then names the real one.
     pub port: u16,
-    /// The user's home folder, when the system knows it.
     pub user_home: Option<PathBuf>,
-    /// `CODEX_EXE`, the Codex to run instead of the one on `PATH` (D2).
     pub codex_exe: Option<OsString>,
-    /// `PATH`, searched for Codex.
     pub path: Option<OsString>,
     /// Codex's data folder: `CODEX_HOME`, else `.codex` in the user's home folder, made absolute.
     pub codex_home: Option<PathBuf>,
-    /// The thread the `mcp` subcommand serves.
     pub mcp_thread: Option<ThreadId>,
 }
 

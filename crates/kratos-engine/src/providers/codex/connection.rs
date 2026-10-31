@@ -29,7 +29,6 @@ const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);
 const SETTLED_AFTER: Duration = Duration::from_secs(60);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Why the app-server did not come up.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum StartError {
     #[error(transparent)]

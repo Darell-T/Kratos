@@ -36,7 +36,6 @@ impl Reference {
         expected
     }
 
-    /// The facts after which the Rust view differs from the one the TypeScript recorded.
     pub fn differing_facts(&self, folded: &[Folded]) -> Vec<usize> {
         folded
             .iter()
@@ -47,7 +46,6 @@ impl Reference {
     }
 }
 
-/// Every reference log in `tests/fixtures/reference/`, in file name order.
 pub fn read_every_reference() -> Result<Vec<Reference>, String> {
     let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference");
     let unreadable = |error: std::io::Error| format!("{}: {error}", folder.display());

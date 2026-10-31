@@ -162,7 +162,6 @@ pub struct RulesSnapshot {
 }
 
 impl RulesSnapshot {
-    /// The files every member reads as project instructions, by name.
     pub fn instruction_files(&self) -> [(&'static str, Option<&str>); 2] {
         [
             ("AGENTS.md", self.agents_md.as_deref()),

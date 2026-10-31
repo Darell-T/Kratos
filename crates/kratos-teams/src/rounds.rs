@@ -182,7 +182,6 @@ impl TaskView {
         self.begin_step(Work::Review { job }, seq)
     }
 
-    /// Approval covers one commit.
     pub(crate) fn enter_approved(
         mut self: Box<Self>,
         commit: Sha,
@@ -605,13 +604,9 @@ fn rulings_problem(disputed: &[FindingId], done: &RulingsDone) -> Option<String>
     ])
 }
 
-/// How an agent's per-finding list covers the findings it must speak to.
 struct Coverage {
-    /// Expected findings the list leaves out, in the expected order.
     missing: Vec<FindingId>,
-    /// Expected findings the list names more than once, in the expected order.
     repeated: Vec<FindingId>,
-    /// Findings the list names that were not expected, in id order.
     strangers: Vec<FindingId>,
 }
 
@@ -645,7 +640,6 @@ fn id_list(ids: &[FindingId]) -> String {
     ids.join(", ")
 }
 
-/// The problems found, joined, or `None` when there are none.
 fn problems(found: impl IntoIterator<Item = Option<String>>) -> Option<String> {
     let found: Vec<String> = found.into_iter().flatten().collect();
     (!found.is_empty()).then(|| found.join(" "))

@@ -15,7 +15,6 @@ use super::{Call, transcript};
 /// How often a wait checks whether Codex cancelled the call.
 const CANCEL_CHECK: Duration = Duration::from_secs(1);
 
-/// How a wait ended, as the tool answers it.
 #[derive(Serialize)]
 #[serde(
     tag = "state",

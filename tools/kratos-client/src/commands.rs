@@ -315,12 +315,10 @@ fn thread_details(session: &mut Session, args: &Args) -> Result<(), Failure> {
     session.get(&routes::thread(&thread_id(args)))
 }
 
-/// The thread id a command names first.
 fn thread_id(args: &Args) -> ThreadId {
     ThreadId::new(args.positional[0].clone())
 }
 
-/// The message id a message command names after its thread.
 fn message_id(args: &Args) -> MessageId {
     MessageId::new(args.positional[1].clone())
 }
@@ -392,7 +390,6 @@ fn json_argument(text: &str, name: &str) -> Result<Value, Failure> {
     serde_json::from_str(text).or_else(|_| usage(format!("{name} must be JSON, got {text:?}")))
 }
 
-/// `client` with the token of the engine on the data folder [`engine_home`] names, if any.
 fn with_token(client: Client) -> Client {
     match engine_home(std::env::var_os(HOME_VAR), std::env::home_dir().as_deref()) {
         Some(home) => client.with_token_from(&home),

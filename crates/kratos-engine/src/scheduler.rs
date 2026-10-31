@@ -37,7 +37,6 @@ const MAX_UNANSWERED_CHECKS: u32 = 3;
 pub enum SchedulerError {
     #[error("Unknown continuation {0}")]
     UnknownContinuation(ContinuationId),
-    /// The continuation's state does not allow the request. The text says why.
     #[error("{0}")]
     Conflict(String),
     /// The scheduler has stopped, as it does when the engine shuts down. The text is the one the

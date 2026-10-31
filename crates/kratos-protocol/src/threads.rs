@@ -65,7 +65,6 @@ pub struct CreateThread {
 }
 
 impl CreateThread {
-    /// The settings the new thread gets.
     pub fn settings_or_default(&self) -> ThreadSettings {
         self.settings.clone().unwrap_or_default()
     }

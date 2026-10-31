@@ -1,5 +1,5 @@
 //! Codex's generated protocol types in Kratos's terms, and back. Nothing else in the engine reads a
-//! Codex item or writes a Codex request or answer by hand.
+//! Codex item or answers a Codex request by hand.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -288,7 +288,6 @@ pub fn permissions_decision(
     }
 }
 
-/// The answer to a request Kratos will not put to the user: the refusal of its kind.
 pub fn refusal(request: &ServerRequest) -> ServerResponse {
     match request {
         ServerRequest::CommandApproval(_) => {
@@ -305,7 +304,6 @@ pub fn refusal(request: &ServerRequest) -> ServerResponse {
         ServerRequest::McpElicitation(_) => {
             ServerResponse::McpElicitation(types::McpServerElicitationRequestResponse {
                 action: types::McpServerElicitationAction::Cancel,
-                // Codex has always been sent both keys as explicit nulls.
                 content: Some(Value::Null),
                 meta: Some(Value::Null),
             })

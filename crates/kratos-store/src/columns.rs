@@ -7,7 +7,6 @@ use rusqlite::types::Type;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-/// The name the `provider` columns store.
 pub(crate) fn provider_name(provider: Provider) -> &'static str {
     match provider {
         Provider::Codex => "codex",
@@ -15,7 +14,6 @@ pub(crate) fn provider_name(provider: Provider) -> &'static str {
     }
 }
 
-/// The name the `permission` column stores.
 pub(crate) fn permission_name(permission: Permission) -> &'static str {
     match permission {
         Permission::AskMe => "askMe",
@@ -24,7 +22,6 @@ pub(crate) fn permission_name(permission: Permission) -> &'static str {
     }
 }
 
-/// The name the `decision` column stores.
 pub(crate) fn decision_name(decision: ApprovalDecision) -> &'static str {
     match decision {
         ApprovalDecision::Accept => "accept",
@@ -34,8 +31,6 @@ pub(crate) fn decision_name(decision: ApprovalDecision) -> &'static str {
     }
 }
 
-/// The value in `all` that `name_of` stores as `name`, read from column `index`. `what` names the
-/// value in the error for a name this build does not know.
 pub(crate) fn from_stored_name<T: Copy>(
     all: impl IntoIterator<Item = T>,
     name_of: fn(T) -> &'static str,
@@ -48,7 +43,6 @@ pub(crate) fn from_stored_name<T: Copy>(
         .ok_or_else(|| unreadable(index, format!("unknown {what} {name}")))
 }
 
-/// The error for text in column `index` that this build cannot read, saying why.
 pub(crate) fn unreadable(index: usize, reason: String) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(index, Type::Text, reason.into())
 }

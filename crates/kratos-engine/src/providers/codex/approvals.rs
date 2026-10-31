@@ -35,7 +35,6 @@ pub(super) enum ApprovalAnswer {
 }
 
 impl ApprovalAnswer {
-    /// Codex's answer once `decision` is made.
     pub fn response(&self, decision: ApprovalDecision) -> ServerResponse {
         match self {
             ApprovalAnswer::Command => {
@@ -65,7 +64,6 @@ pub(super) struct Closed {
 }
 
 impl Requests {
-    /// Removes the thread's requests whose turn `in_turn` selects.
     pub fn close(&mut self, thread_id: &ThreadId, in_turn: impl Fn(&TurnId) -> bool) -> Closed {
         let selected = |waiting_thread: &ThreadId, waiting_turn: &TurnId| {
             waiting_thread == thread_id && in_turn(waiting_turn)

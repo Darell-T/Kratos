@@ -109,7 +109,6 @@ pub(super) enum Command {
     },
 }
 
-/// A command that waits for the app-server to come up, then runs again from the start.
 pub(super) enum Deferred {
     Discard {
         thread_id: ThreadId,
@@ -132,7 +131,6 @@ pub(super) enum Deferred {
 }
 
 impl Deferred {
-    /// Answers the command with `error`, for an app-server that did not come up.
     pub(super) fn fail(self, error: ProviderError) {
         match self {
             Deferred::Discard { reply, .. } => drop(reply.send(Err(error))),

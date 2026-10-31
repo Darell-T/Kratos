@@ -62,7 +62,6 @@ fn message(text: &str) -> ThreadEventBody {
     }
 }
 
-/// Appends `body` as the thread's next event in a write of its own.
 fn append(
     store: &mut Store,
     thread_id: &ThreadId,

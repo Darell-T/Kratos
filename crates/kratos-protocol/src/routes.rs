@@ -4,7 +4,6 @@
 use crate::{ApprovalId, ContinuationId, MessageId, QuestionId, Seq, ThreadId, WorkspaceId};
 
 pub const HEALTH: &str = "/api/health";
-/// The event socket.
 pub const EVENTS: &str = "/api/events";
 pub const USAGE: &str = "/api/usage";
 pub const WORKSPACES: &str = "/api/workspaces";
@@ -24,7 +23,6 @@ pub const APPROVAL: &str = "/api/approvals/{id}";
 pub const QUESTION: &str = "/api/questions/{id}";
 pub const CONTINUATION_SCHEDULE: &str = "/api/continuations/{id}/schedule";
 
-/// [`THREADS`] listing one workspace's threads.
 pub fn threads_in(workspace_id: &WorkspaceId) -> String {
     format!("{THREADS}?workspaceId={}", encode(workspace_id.as_str()))
 }
@@ -33,7 +31,6 @@ pub fn thread(id: &ThreadId) -> String {
     fill(THREAD, &[id.as_str()])
 }
 
-/// [`THREAD_EVENTS`], the page after `after`.
 pub fn thread_events_after(id: &ThreadId, after: Seq) -> String {
     format!(
         "{}?after={}",

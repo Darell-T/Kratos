@@ -412,7 +412,6 @@ impl Note {
         role != Role::Reviewer
     }
 
-    /// The cause whose retry this correction spends.
     pub(crate) fn cause(&self) -> Retry {
         match self {
             Note::InvalidReport { .. } => Retry::InvalidReport,

@@ -10,18 +10,14 @@ use kratos_codex_client::{Codex, Incoming, Notification, RequestError, methods, 
 const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
 const MODE: types::WindowsSandboxSetupMode = types::WindowsSandboxSetupMode::Elevated;
 
-/// The `-c` arguments that make the app-server run commands in [`MODE`].
 pub(super) fn launch_arguments() -> [OsString; 2] {
     ["-c".into(), format!("windows.sandbox=\"{MODE}\"").into()]
 }
 
-/// Why the sandbox is not ready, so no thread may start.
 #[derive(Debug, thiserror::Error)]
 pub(super) enum SandboxError {
-    /// A readiness or setup request to Codex failed.
     #[error(transparent)]
     Request(#[from] RequestError),
-    /// Codex answered, and Kratos's own checks refused what it reported.
     #[error("Windows sandbox is unavailable: {0}. No agent commands were started")]
     Unavailable(String),
 }

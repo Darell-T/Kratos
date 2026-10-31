@@ -70,7 +70,6 @@ pub struct Script {
     pub files: Vec<String>,
 }
 
-/// How many times each evidence command ran, by command text.
 type CommandsRan = BTreeMap<String, usize>;
 
 impl Script {
@@ -286,7 +285,6 @@ impl ScriptedTask {
         }
     }
 
-    /// The user decides. `append` runs the same check the engine runs and records the fact, then the loop runs.
     pub fn decide(&mut self, decision: Decision) -> Vec<String> {
         let view = self.view();
         assert!(
@@ -862,7 +860,6 @@ pub fn reviewer_asks(question: &str) -> Ended {
     })
 }
 
-/// What a report of any kind is when the reply could not be used.
 fn invalid_report<T>(error: &str) -> Report<T> {
     Report::Invalid {
         error: error.to_owned(),
@@ -870,7 +867,6 @@ fn invalid_report<T>(error: &str) -> Report<T> {
     }
 }
 
-/// A report of any kind that stops short to ask `question`.
 fn question_report<T>(summary: &str, question: &str) -> Report<T> {
     Report::Question {
         summary: summary.to_owned(),
@@ -933,7 +929,6 @@ pub fn delivery(id: &str) -> DeliveryId {
     DeliveryId::new(id)
 }
 
-/// A two-member task's agents: the implementer's turns and the reviewer's, in order.
 pub fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
     Script {
         implementer: implementer.into(),
@@ -942,7 +937,6 @@ pub fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
     }
 }
 
-/// An implementer turn that fixes F1.
 pub fn fix_f1() -> Ended {
     implements_answering(vec![fixed(1)])
 }

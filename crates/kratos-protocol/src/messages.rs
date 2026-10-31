@@ -125,7 +125,6 @@ pub struct PostMessage {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", try_from = "SendMessageBody")]
 pub struct SendMessage {
-    /// The id the client chose.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<MessageId>,
     /// Never empty.

@@ -28,7 +28,6 @@ pub(super) fn holds_queue(status: &MessageStatus) -> bool {
     )
 }
 
-/// The first waiting message that holds the queue.
 pub(super) fn held_message(write: &ThreadWrite<'_>) -> Result<Option<Message>, StoreError> {
     Ok(write
         .pending_messages()?
@@ -36,7 +35,6 @@ pub(super) fn held_message(write: &ThreadWrite<'_>) -> Result<Option<Message>, S
         .find(|message| holds_queue(&message.status)))
 }
 
-/// Pauses the queue for `reason` only when messages wait in it.
 pub(super) fn pause_if_waiting(
     write: &mut ThreadWrite<'_>,
     reason: PauseReason,

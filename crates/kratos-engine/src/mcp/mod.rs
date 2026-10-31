@@ -25,7 +25,6 @@ use serde_json::{Value, json};
 use crate::config::{PORT_VAR, THREAD_ID_VAR};
 
 pub const MAX_WAIT_SECONDS: u64 = 1800;
-/// The `kratos-engine` subcommand that runs this server.
 pub const SUBCOMMAND: &str = "mcp";
 
 const PROTOCOL_VERSION: &str = "2025-06-18";

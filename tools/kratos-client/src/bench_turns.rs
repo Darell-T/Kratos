@@ -111,7 +111,6 @@ fn measure_turn(
     ))
 }
 
-/// The Codex thread of `request`, which must be the `turn/start` of message `message_id`.
 fn started_thread<'a>(request: &'a Value, message_id: &str) -> Result<&'a str, BenchError> {
     let expected =
         request["method"] == "turn/start" && request["params"]["input"][0]["text"] == message_id;

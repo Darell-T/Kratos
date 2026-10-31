@@ -65,7 +65,6 @@ pub fn list() -> Vec<Value> {
         .collect()
 }
 
-/// The params of a `tools/call` request.
 #[derive(Deserialize)]
 pub struct ToolCall {
     name: String,
@@ -376,7 +375,6 @@ fn decide_input() -> Value {
 mod tests {
     use super::*;
 
-    /// `arguments` through the struct the tool named `tool` parses them with.
     fn parse_for(tool: &str, arguments: Value) -> Result<(), String> {
         match tool {
             "whoami" | "list_workspaces" => parse_arguments::<NoArguments>(arguments).map(drop),
@@ -392,7 +390,6 @@ mod tests {
         }
     }
 
-    /// Values the property `schema` admits: each enum value, else one of its type.
     fn samples(schema: &Value) -> Vec<Value> {
         if let Some(values) = schema["enum"].as_array() {
             return values.clone();

@@ -177,7 +177,6 @@ impl Responder {
     }
 }
 
-/// JSON-RPC's reply that request `id` failed with `code`.
 fn error_reply(id: &RequestId, code: i64, message: &str) -> Value {
     json!({ "id": id, "error": { "code": code, "message": message } })
 }

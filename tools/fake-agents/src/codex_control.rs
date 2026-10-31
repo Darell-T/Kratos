@@ -14,7 +14,6 @@ pub const SETTLE_TURN: &str = "test/settleTurn";
 pub const ASK: &str = "test/ask";
 pub const EMIT: &str = "test/emit";
 
-/// One `test/*` request to the fake.
 pub struct ControlRequest {
     pub method: &'static str,
     pub params: Value,

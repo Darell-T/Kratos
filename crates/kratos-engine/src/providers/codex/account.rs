@@ -30,7 +30,6 @@ impl Actor {
         }
     }
 
-    /// Reads the account's usage for a user who asked, once Codex is up.
     pub(super) fn refresh_usage(&mut self, reply: Reply<()>) {
         match self.connection() {
             Ok(Some(codex)) => self.read_usage(codex, Some(reply)),

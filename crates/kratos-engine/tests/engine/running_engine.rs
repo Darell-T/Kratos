@@ -116,7 +116,6 @@ impl RunningEngine {
         std::fs::read_to_string(self.home.join(CLIENT_TOKEN_FILE)).unwrap()
     }
 
-    /// Where the fake Codex this engine starts writes its control port.
     pub fn fake_codex_control_file(&self) -> PathBuf {
         self.home.join(FAKE_CODEX_CONTROL)
     }
@@ -147,7 +146,6 @@ impl RunningEngine {
         answer["result"].clone()
     }
 
-    /// Sends the fake Codex a request that a `codex_control` builder made.
     pub fn fake_codex_request(&self, request: ControlRequest) {
         self.fake_codex(request.method, request.params);
     }
@@ -176,7 +174,6 @@ impl RunningEngine {
         }
     }
 
-    /// Settles the turn the fake Codex holds for the message just sent as `turn-1`, now running.
     pub fn start_turn(&self) {
         self.fake_codex_held("turn/start", 1);
         self.fake_codex_request(codex_control::settle_start("turn-1", "inProgress", None));
@@ -201,7 +198,6 @@ impl RunningEngine {
         }
     }
 
-    /// Registers the engine's home, an existing absolute folder, as the workspace "repo".
     pub fn create_workspace(&self) -> Workspace {
         let request = CreateWorkspace {
             name: RequiredText::new("repo").unwrap(),

@@ -59,7 +59,6 @@ fn with_limit(limit: u64) -> ThreadSettings {
     }
 }
 
-/// Runs turn-1 with Codex reporting `window` as the model's context window, and ends it.
 async fn learn_the_window(harness: &mut Harness, window: i64) {
     harness.running_turn("a", "turn-1").await;
     let breakdown = json!({ "cachedInputTokens": 0, "inputTokens": 10, "outputTokens": 1,

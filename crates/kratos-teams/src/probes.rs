@@ -47,21 +47,18 @@ impl TaskView {
         })
     }
 
-    /// Whether `path` is a probe the reviewer left that still waits for a choice.
     pub(crate) fn offers_probe(&self, path: &str) -> bool {
         self.probes
             .iter()
             .any(|probe| probe.path == path && probe.status == ProbeStatus::Offered)
     }
 
-    /// Whether any probe the reviewer left still waits for a choice.
     pub(crate) fn has_offered_probes(&self) -> bool {
         self.probes
             .iter()
             .any(|probe| probe.status == ProbeStatus::Offered)
     }
 
-    /// Rejects for `reason` every probe that still waits for a choice, apart from those in `except`.
     pub(crate) fn reject_offered_probes(&mut self, except: &[String], reason: ProbeRejection) {
         for probe in &mut self.probes {
             if probe.status == ProbeStatus::Offered && !except.contains(&probe.path) {

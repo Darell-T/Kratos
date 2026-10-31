@@ -787,7 +787,6 @@ fn fresh() -> PromptContext<'static> {
     }
 }
 
-/// From the `# Your report` heading to the next top-level heading.
 fn report_section(text: &str) -> &str {
     let start = text.find("# Your report").expect("a report section");
     let rest = &text[start..];
@@ -801,7 +800,6 @@ fn snake_case_words(text: &str) -> BTreeSet<&str> {
         .collect()
 }
 
-/// Every property name and every enum value anywhere in a schema.
 fn schema_names(schema: &Value, names: &mut BTreeSet<String>) {
     match schema {
         Value::Object(object) => {
@@ -818,7 +816,6 @@ fn schema_names(schema: &Value, names: &mut BTreeSet<String>) {
     }
 }
 
-/// A reply the schema accepts, with every list empty and every enum at its first value.
 fn sample_reply(schema: &Value) -> Value {
     match schema["type"].as_str() {
         Some("object") => Value::Object(

@@ -240,7 +240,6 @@ fn may_move(from: &MessageStatus, to: &MessageStatus) -> bool {
     }
 }
 
-/// The name the `status` column stores.
 pub(crate) fn status_name(status: &MessageStatus) -> &'static str {
     match status {
         MessageStatus::Queued => "queued",

@@ -46,7 +46,6 @@ impl ChangesRecorder {
         self.edited_since_command = true;
     }
 
-    /// What the turn changed.
     pub fn finish(self) -> TurnChanges {
         TurnChanges {
             files: self.files,

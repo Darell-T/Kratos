@@ -16,7 +16,6 @@ pub use normalize::Normalizer;
 pub enum BenchError {
     #[error(transparent)]
     Client(#[from] ClientError),
-    /// A failure of the benchmark's own, such as an event that came out of order or never came.
     #[error("{0}")]
     Failed(String),
 }

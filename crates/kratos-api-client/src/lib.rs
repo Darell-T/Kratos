@@ -33,8 +33,6 @@ pub struct Client {
     /// The file holding the engine's client token, sent as `Authorization: Bearer` unless a
     /// request names its own.
     token_file: Option<PathBuf>,
-    /// The thread named in the `Kratos-Thread` header of every HTTP request, unless a request
-    /// names its own.
     acting_for: Option<ThreadId>,
 }
 

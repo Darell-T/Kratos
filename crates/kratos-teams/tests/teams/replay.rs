@@ -168,7 +168,6 @@ pub fn swap_implementer_and_reviewer(bindings: &Bindings) -> Bindings {
     .expect("distinct members")
 }
 
-/// Every prefix of `log`, folded, shortest first.
 pub fn prefix_views(log: &[StoredFact]) -> Vec<TaskView> {
     (1..=log.len())
         .map(|n| fold(&log[..n]).expect("every prefix folds"))

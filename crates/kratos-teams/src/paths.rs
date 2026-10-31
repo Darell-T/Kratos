@@ -12,16 +12,13 @@ pub fn repo_path(raw: &str) -> String {
     path
 }
 
-/// Why a path cannot name a file in the repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PathProblem {
     /// It is empty, or it starts at the root or at a drive.
     Rooted,
-    /// It climbs out of its folder with a `..`.
     Climbs,
 }
 
-/// `raw` spelled the way git spells it, when it is relative to the repository root and stays inside it.
 pub(crate) fn parse_repo_path(raw: &str) -> Result<String, PathProblem> {
     let path = repo_path(raw);
     if is_rooted(&path) {

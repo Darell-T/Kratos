@@ -13,7 +13,6 @@ use kratos_teams::view::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-/// The serde name of an enum value: a unit variant's string, or the `kind` tag of a variant with data.
 pub fn tag_of(value: &impl Serialize) -> String {
     let value = serde_json::to_value(value).expect("a value serializes");
     let tag = value.as_str().or_else(|| value["kind"].as_str());

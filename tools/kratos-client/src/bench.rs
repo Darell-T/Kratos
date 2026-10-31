@@ -62,7 +62,6 @@ fn create_thread(client: &Client) -> Result<ThreadId, BenchError> {
     Ok(thread.id)
 }
 
-/// A workspace named `name` on the system's temporary folder.
 pub(crate) fn temp_workspace(name: &str) -> CreateWorkspace {
     CreateWorkspace {
         name: RequiredText::new(name).expect("the name is not blank"),

@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 /// The variable naming the engine's data folder. Empty counts as unset.
 pub const HOME_VAR: &str = "KRATOS_HOME";
-/// The port the engine listens on unless told another.
 pub const DEFAULT_PORT: u16 = 4200;
 /// The file in the data folder that holds the engine's client token.
 pub const CLIENT_TOKEN_FILE: &str = "client-token";
