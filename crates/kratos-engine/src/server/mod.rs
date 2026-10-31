@@ -3,7 +3,6 @@ mod agents;
 pub mod auth;
 mod json;
 mod local_only;
-mod paths;
 mod socket;
 mod threads;
 mod workspaces;
@@ -13,11 +12,11 @@ use std::io;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::Path;
 use axum::extract::rejection::PathRejection;
-use axum::http::StatusCode;
+use axum::extract::{Path, Request};
 use axum::http::header::CONTENT_TYPE;
-use axum::middleware;
+use axum::http::{StatusCode, Uri};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use kratos_protocol::routes::{
@@ -123,9 +122,39 @@ fn router(state: ServerState) -> Router {
             token,
             auth::require_client_token,
         ))
-        .layer(middleware::from_fn(paths::normalize_http_api_path))
+        .layer(middleware::from_fn(normalize_http_api_path))
         // Added last, so the Host and Origin checks run before normalization and every route.
         .layer(middleware::from_fn(local_only::refuse_other_hosts))
+}
+
+/// TypeScript HTTP routes ignore empty segments after checking the `/api/` prefix. Its socket
+/// upgrade handler requires exactly `/api/events`, so that endpoint keeps its original spelling.
+async fn normalize_http_api_path(mut request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    if path.starts_with("/api/") && (path.ends_with('/') || path.contains("//")) {
+        let normalized = format!(
+            "/{}",
+            path.split('/')
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        if normalized != EVENTS {
+            let path_and_query = match request.uri().query() {
+                Some(query) => format!("{normalized}?{query}"),
+                None => normalized,
+            };
+            let mut parts = request.uri().clone().into_parts();
+            parts.path_and_query = Some(
+                path_and_query
+                    .parse()
+                    .expect("removing path separators preserves a valid URI"),
+            );
+            *request.uri_mut() =
+                Uri::from_parts(parts).expect("the URI's scheme and authority are unchanged");
+        }
+    }
+    next.run(request).await
 }
 
 /// The routes Kratos's tools call for a thread's agent, and the only ones a request naming a
