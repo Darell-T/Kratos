@@ -698,6 +698,7 @@ pub enum ProbeStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeRejection {
+    /// The path is not inside the repository, or not under one of the user's test paths.
     OutsideAllowedPaths,
     OutsideScope,
     /// It passed on the commit before the fix, so it proves nothing.

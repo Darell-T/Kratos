@@ -12,10 +12,6 @@ pub fn repo_path(raw: &str) -> String {
     path
 }
 
-/// A path relative to the repository root that stays inside it, spelled the way git spells it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RepoPath(String);
-
 /// Why a path cannot name a file in the repository.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PathProblem {
@@ -25,25 +21,16 @@ pub(crate) enum PathProblem {
     Climbs,
 }
 
-impl RepoPath {
-    pub(crate) fn parse(raw: &str) -> Result<RepoPath, PathProblem> {
-        let path = repo_path(raw);
-        if is_rooted(&path) {
-            return Err(PathProblem::Rooted);
-        }
-        if climbs(&path) {
-            return Err(PathProblem::Climbs);
-        }
-        Ok(RepoPath(path))
+/// `raw` spelled the way git spells it, when it is relative to the repository root and stays inside it.
+pub(crate) fn parse_repo_path(raw: &str) -> Result<String, PathProblem> {
+    let path = repo_path(raw);
+    if is_rooted(&path) {
+        return Err(PathProblem::Rooted);
     }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
+    if climbs(&path) {
+        return Err(PathProblem::Climbs);
     }
-
-    pub(crate) fn into_string(self) -> String {
-        self.0
-    }
+    Ok(path)
 }
 
 /// Whether a path that went through `repo_path` has no place to start from. That means it is empty,

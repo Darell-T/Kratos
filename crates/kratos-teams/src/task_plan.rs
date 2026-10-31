@@ -13,7 +13,7 @@ use std::fmt;
 use globset::GlobMatcher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::paths::{PatternError, RepoPath, compile, repo_path};
+use crate::paths::{PatternError, compile, parse_repo_path, repo_path};
 
 /// A glob relative to the repository root that names files a task may change: `src/auth/**`,
 /// `docs/*.md`, `Cargo.toml`. A folder needs an explicit `/**`, because Kratos cannot tell a file from a
@@ -29,11 +29,9 @@ pub struct ScopePattern {
 
 impl ScopePattern {
     pub fn new(glob: &str) -> Result<ScopePattern, PatternError> {
-        let text = RepoPath::parse(glob.trim())
-            .map_err(|_| PatternError::OutsideRepository {
-                pattern: glob.to_owned(),
-            })?
-            .into_string();
+        let text = parse_repo_path(glob.trim()).map_err(|_| PatternError::OutsideRepository {
+            pattern: glob.to_owned(),
+        })?;
         let matcher = compile(&text)?.compile_matcher();
         Ok(ScopePattern { text, matcher })
     }

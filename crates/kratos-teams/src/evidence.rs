@@ -16,7 +16,7 @@ use kratos_protocol::CommandResult;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::Diff;
-use crate::paths::{PathProblem, RepoPath, repo_path};
+use crate::paths::{PathProblem, parse_repo_path, repo_path};
 use crate::reports::{FindingReport, Kind, Location};
 
 /// How long the engine lets an evidence command run. A timeout proves nothing.
@@ -48,8 +48,8 @@ pub enum LocationProblem {
 /// `None` when the location names a real line of a file in the reviewed commit. `file_text` is the file
 /// at that commit, or `None` if it does not exist there.
 pub fn location_problem(location: &Location, file_text: Option<&str>) -> Option<LocationProblem> {
-    let path = match RepoPath::parse(&location.path) {
-        Ok(path) => path.into_string(),
+    let path = match parse_repo_path(&location.path) {
+        Ok(path) => path,
         Err(PathProblem::Rooted) => {
             return Some(LocationProblem::NotRelative(location.path.clone()));
         }

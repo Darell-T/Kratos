@@ -6,7 +6,7 @@
 use crate::evidence::EvidenceCheck;
 use crate::facts::{EvidenceChecked, ProbePolicy, ProbeRun};
 use crate::fold::Rejection;
-use crate::paths::RepoPath;
+use crate::paths::parse_repo_path;
 use crate::reports::{AddedProbe, ImplementerDone};
 use crate::task_plan::{ProbeConstraints, Scope};
 use crate::view::{Brief, Finding, Probe, ProbeRejection, ProbeStatus, TaskView, Work};
@@ -102,12 +102,7 @@ impl TaskView {
             return Self::probe_by_run(probe, run);
         };
         match probe_copy_problem(constraints, &self.scope(), &probe.to) {
-            Some(CopyProblem::OutsideAllowedPaths) => ProbeStatus::Rejected {
-                reason: ProbeRejection::OutsideAllowedPaths,
-            },
-            Some(CopyProblem::OutsideScope) => ProbeStatus::Rejected {
-                reason: ProbeRejection::OutsideScope,
-            },
+            Some(reason) => ProbeStatus::Rejected { reason },
             None => Self::probe_by_run(probe, run),
         }
     }
@@ -165,31 +160,24 @@ impl TaskView {
     }
 }
 
-/// Why a probe copy breaks the user's constraints. The git half of the check, that the probe fails
-/// before the fix and passes after, is the engine's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CopyProblem {
-    /// The path is not inside the repository, or not under one of the user's test paths.
-    OutsideAllowedPaths,
-    OutsideScope,
-}
-
 /// Whether the implementer may keep a probe at `to`: under one of the user's test paths and inside
-/// the agreed scope. A pure path rule, so the engine cannot apply it more loosely than the user wrote it.
+/// the agreed scope. A pure path rule, so the engine cannot apply it more loosely than the user wrote
+/// it. The git half of the check, that the probe fails before the fix and passes after, is the
+/// engine's.
 fn probe_copy_problem(
     constraints: &ProbeConstraints,
     scope: &Scope,
     to: &str,
-) -> Option<CopyProblem> {
+) -> Option<ProbeRejection> {
     // A glob matches text, so `tests/../../x` would match `tests/**` without this check.
-    let allowed = RepoPath::parse(to).is_ok_and(|path| {
+    let allowed = parse_repo_path(to).is_ok_and(|path| {
         constraints
             .test_paths
             .iter()
-            .any(|pattern| pattern.covers(path.as_str()))
+            .any(|pattern| pattern.covers(&path))
     });
     if !allowed {
-        return Some(CopyProblem::OutsideAllowedPaths);
+        return Some(ProbeRejection::OutsideAllowedPaths);
     }
-    (!scope.covers(to)).then_some(CopyProblem::OutsideScope)
+    (!scope.covers(to)).then_some(ProbeRejection::OutsideScope)
 }
