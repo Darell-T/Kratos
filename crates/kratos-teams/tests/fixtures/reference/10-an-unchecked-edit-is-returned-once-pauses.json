@@ -1,0 +1,22 @@
+{"name":"an unchecked edit is returned once, pauses on the second, and resume asks again",
+"facts":[
+{"taskId":"0a1b2c3d","seq":1,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"task.started","teamId":"team-1","text":"# Add a login page\n\nUse the existing session helper.","title":"Add a login page","branch":"codex/add-a-login-page","base":"000000000000000000000000000000000000ba5e","rules":{"agentsMd":"Every public function needs a test.","claudeMd":null,"reviewMd":"Check the goal first."},"triggers":[{"kind":"code","pattern":"spawn"}],"policy":{"planFirst":false,"securityPass":false}}},
+{"taskId":"0a1b2c3d","seq":2,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"implementer.opened","thread":{"provider":"codex","threadId":"implementer-1"},"fresh":true}},
+{"taskId":"0a1b2c3d","seq":3,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"implementer.reported","report":{"ok":true,"value":{"status":"done","summary":"Added the login page.","checks":[{"command":"npm test","exitCode":0}],"responses":[]}},"changes":{"files":["src/a.ts"],"editedSinceCommand":true,"ranCommand":true}}},
+{"taskId":"0a1b2c3d","seq":4,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"implementer.reported","report":{"ok":true,"value":{"status":"done","summary":"Added the login page.","checks":[{"command":"npm test","exitCode":0}],"responses":[]}},"changes":{"files":["src/a.ts"],"editedSinceCommand":true,"ranCommand":true}}},
+{"taskId":"0a1b2c3d","seq":5,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"user.decided","decision":{"kind":"resume"}}},
+{"taskId":"0a1b2c3d","seq":6,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"implementer.reported","report":{"ok":true,"value":{"status":"done","summary":"Added the login page.","checks":[{"command":"npm test","exitCode":0}],"responses":[]}},"changes":{"files":["src/a.ts"],"editedSinceCommand":false,"ranCommand":true}}},
+{"taskId":"0a1b2c3d","seq":7,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"committed","commit":"0000000000000000000000000000000000000001"}},
+{"taskId":"0a1b2c3d","seq":8,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"reviewer.reported","flavor":"standard","thread":{"provider":"codex","threadId":"reviewer-2"},"report":{"ok":true,"value":{"verdict":"approve","summary":"0 findings.","findings":[],"stillOpen":[]}}}},
+{"taskId":"0a1b2c3d","seq":9,"at":"2026-10-17T12:00:00.000Z","fact":{"kind":"evidence.checked","checks":{},"rechecks":{},"probes":[],"securityHits":null}}
+],"expected":[
+{"phase":"preparing","pause":null,"commit":null,"rounds":[],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"prepare","allowed":["cancel"]},
+{"phase":"implementing","pause":null,"commit":null,"rounds":[],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"askImplementer","allowed":["cancel"]},
+{"phase":"implementing","pause":null,"commit":null,"rounds":[],"findings":[],"dirty":true,"lastReviewed":null,"securityDone":false,"next":"askImplementer","allowed":["cancel"]},
+{"phase":"paused","pause":"trouble:uncheckedEdits","commit":null,"rounds":[],"findings":[],"dirty":true,"lastReviewed":null,"securityDone":false,"next":"wait","allowed":["resume","direct","stepBack","accept","cancel"]},
+{"phase":"implementing","pause":null,"commit":null,"rounds":[],"findings":[],"dirty":true,"lastReviewed":null,"securityDone":false,"next":"askImplementer","allowed":["cancel"]},
+{"phase":"committing","pause":null,"commit":null,"rounds":[],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"commit","allowed":["cancel"]},
+{"phase":"reviewing","pause":null,"commit":null,"rounds":[{"n":1,"commit":"0000000000000000000000000000000000000001","answered":true,"reviews":[]}],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"askReviewer","allowed":["cancel"]},
+{"phase":"checking","pause":null,"commit":null,"rounds":[{"n":1,"commit":"0000000000000000000000000000000000000001","answered":true,"reviews":[]}],"findings":[],"dirty":false,"lastReviewed":null,"securityDone":false,"next":"check","allowed":["cancel"]},
+{"phase":"approved","pause":null,"commit":"0000000000000000000000000000000000000001","rounds":[{"n":1,"commit":"0000000000000000000000000000000000000001","answered":true,"reviews":[true]}],"findings":[],"dirty":false,"lastReviewed":"0000000000000000000000000000000000000001","securityDone":false,"next":"wait","allowed":["direct","finish","cancel"]}
+]}

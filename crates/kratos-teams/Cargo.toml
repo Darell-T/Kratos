@@ -1,0 +1,24 @@
+[package]
+name = "kratos-teams"
+description = "The Teams rules as pure functions over a recorded log of facts, with no I/O, clocks, or randomness"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kratos-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+# Only this crate uses these three, so their versions are pinned here and not in the workspace table.
+# Look-behind in the security patterns needs fancy-regex.
+fancy-regex = "0.19.2"
+globset = "0.4.20"
+# Derives each report's JSON Schema from its Rust type.
+schemars = "1.2.3"
+
+[lints]
+workspace = true
