@@ -49,13 +49,21 @@ impl RunningEngine {
     /// Gives this engine its own hidden console so Ctrl+C cannot reach the test runner.
     #[cfg(windows)]
     pub fn start_for_shutdown(home: &Path) -> RunningEngine {
-        let child = Command::new("powershell.exe")
+        Self::from_child(
+            home,
+            Self::spawn_for_shutdown(home, include_str!("windows_shutdown.ps1")),
+        )
+    }
+
+    #[cfg(windows)]
+    fn spawn_for_shutdown(home: &Path, script: &str) -> Child {
+        Command::new("powershell.exe")
             .args([
                 "-NoLogo",
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                include_str!("windows_shutdown.ps1"),
+                script,
             ])
             .env("KRATOS_SHUTDOWN_ENGINE", ENGINE)
             .env("KRATOS_HOME", home)
@@ -67,23 +75,39 @@ impl RunningEngine {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap();
-        Self::from_child(home, child)
+            .unwrap()
     }
 
     fn from_child(home: &Path, mut child: Child) -> RunningEngine {
         let stdout = child.stdout.take().expect("the engine's stdout is piped");
         let (announced, listening_port) = mpsc::channel();
+        let (prepared, helper_ready) = mpsc::channel();
         // The reader keeps draining stdout after the listening line, so the engine never blocks on
         // a full pipe.
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if line == "Kratos shutdown helper ready" {
+                    let _ = prepared.send(());
+                }
                 if let Some(port) = listening_port_of(&line) {
                     let _ = announced.send(port);
                 }
             }
         });
-        match listening_port.recv_timeout(WAIT) {
+        // PowerShell compiles the helper before the engine's startup deadline begins.
+        let preparation = if child.stdin.is_some() {
+            helper_ready
+                .recv_timeout(Duration::from_secs(60))
+                .map_err(|error| format!("the shutdown helper was not ready ({error})"))
+        } else {
+            Ok(())
+        };
+        let started = preparation.and_then(|()| {
+            listening_port
+                .recv_timeout(WAIT)
+                .map_err(|error| format!("the engine printed no listening line ({error})"))
+        });
+        match started {
             Ok(port) => RunningEngine {
                 child,
                 port,
@@ -98,7 +122,7 @@ impl RunningEngine {
                 if let Some(mut pipe) = child.stderr.take() {
                     let _ = pipe.read_to_string(&mut stderr);
                 }
-                panic!("the engine printed no listening line ({error}); stderr: {stderr}");
+                panic!("{error}; stderr: {stderr}");
             }
         }
     }
@@ -361,4 +385,19 @@ pub fn next_seqs(socket: &mut EventSocket, count: usize) -> Vec<u64> {
 pub fn expect_silence(socket: &mut EventSocket) {
     let incoming = socket.next_incoming(QUIET).unwrap();
     assert_eq!(incoming, None, "the socket should be quiet");
+}
+
+#[cfg(windows)]
+#[test]
+fn console_helper_preparation_does_not_use_the_engine_startup_deadline() {
+    let home = tempfile::tempdir().unwrap();
+    let script = format!(
+        "Start-Sleep -Seconds {}\n{}",
+        WAIT.as_secs() + 1,
+        include_str!("windows_shutdown.ps1")
+    );
+    let child = RunningEngine::spawn_for_shutdown(home.path(), &script);
+    let mut engine = RunningEngine::from_child(home.path(), child);
+    assert_eq!(engine.client().get("/api/health").unwrap().status, 200);
+    engine.shutdown();
 }
