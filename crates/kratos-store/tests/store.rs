@@ -623,6 +623,54 @@ fn restore_discards_the_log_a_crash_left_behind_and_saves_what_it_held() {
 }
 
 #[test]
+fn refuses_orphaned_sidecars_without_installing_a_backup_or_losing_bytes() {
+    // A missing main file does not prove that an external SQLite writer has closed its sidecars.
+    for sidecars in [vec!["wal", "shm"], vec!["wal"], vec!["shm"]] {
+        let home = home();
+        database_at_version(home.path(), 2);
+        let backup = Store::open(home.path())
+            .unwrap()
+            .backup_taken()
+            .unwrap()
+            .clone();
+        crash_while_writing(home.path());
+        fs::remove_file(live_database(home.path())).unwrap();
+        for sidecar in ["wal", "shm"] {
+            if !sidecars.contains(&sidecar) {
+                fs::remove_file(home.path().join(format!("kratos.db-{sidecar}"))).unwrap();
+            }
+        }
+        let before: Vec<_> = sidecars
+            .iter()
+            .map(|sidecar| {
+                let path = home.path().join(format!("kratos.db-{sidecar}"));
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let backup_before = fs::read(&backup.path).unwrap();
+        let files_before = backup_files(home.path());
+
+        let result = restore(home.path(), &backup.id);
+
+        assert!(result.is_err(), "orphaned {sidecars:?} must refuse restore");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("orphaned SQLite sidecar"),
+            "the refusal must identify the recovery problem"
+        );
+        assert!(!live_database(home.path()).exists());
+        assert_eq!(backup_files(home.path()), files_before);
+        assert_eq!(fs::read(&backup.path).unwrap(), backup_before);
+        for (path, bytes) in before {
+            assert_eq!(fs::read(&path).unwrap(), bytes, "{}", path.display());
+        }
+    }
+}
+
+#[test]
 fn refuses_a_damaged_backup_and_changes_nothing() {
     // Catches a restore that installs a cut-short or mislabeled backup over a working database.
     let home = home();
