@@ -328,15 +328,17 @@ impl Actor {
     pub(super) fn fork_for_access(
         &mut self,
         thread_id: &ThreadId,
-        native_id: &str,
         limit: Option<kratos_protocol::AccessLimit>,
     ) -> bool {
-        let thread = &self.threads[thread_id];
+        let thread = self.threads.get_mut(thread_id).expect("thread loaded");
         let settings = match limit {
             Some(limit) => thread.settings.limited_to(limit),
             None => thread.settings.clone(),
         };
-        let Link::Attached { access, .. } = &thread.link else {
+        let Link::Attached {
+            native_id, access, ..
+        } = &thread.link
+        else {
             unreachable!("the caller attached this thread");
         };
         if thread.turn_settings.is_none() || settings.access().covers(*access) {
@@ -344,29 +346,25 @@ impl Actor {
         }
         let context_limit = settings.context_limit_tokens;
         let access = settings.access();
-        let profile = Profile::for_settings(&settings).id().to_owned();
         let mut params: types::ThreadForkParams = wire::required(json!({
             "threadId": native_id, "ephemeral": false, "excludeTurns": true,
             "deferGoalContinuation": true,
         }));
         params.cwd = Some(thread.folder.clone());
         params.runtime_workspace_roots = Some(vec![types::AbsolutePathBuf(thread.folder.clone())]);
-        params.model = settings.model;
         params.approval_policy = Some(policy::APPROVAL_POLICY);
         params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
-        params.permissions = Some(profile);
+        params.permissions = Some(Profile::for_settings(&settings).id().to_owned());
+        params.model = settings.model;
         params.config = thread_config(context_limit, self.settings.mcp.as_ref(), thread_id)
             .and_then(|config| config.as_object().cloned());
-        let codex = self
-            .connection()
-            .expect("the attached server is running")
-            .expect("the attached server has connected");
-        self.threads
-            .get_mut(thread_id)
-            .expect("the thread is loaded")
-            .link = Link::Attaching;
-        let (thread_id, native_id, generation) =
-            (thread_id.clone(), native_id.to_owned(), self.generation);
+        let native_id = native_id.clone();
+        thread.link = Link::Attaching;
+        let Server::Up { codex, .. } = &self.server else {
+            unreachable!("the attached server has connected");
+        };
+        let codex = codex.clone();
+        let (thread_id, generation) = (thread_id.clone(), self.generation);
         self.spawn(async move {
             let result = codex
                 .request::<methods::ThreadFork>(&params)
@@ -377,13 +375,14 @@ impl Actor {
                     turns: forked.thread.turns,
                     is_new: true,
                 });
-            if result.is_ok() {
-                let params = types::ThreadUnsubscribeParams {
-                    thread_id: native_id,
-                };
-                if let Err(error) = codex.request::<methods::ThreadUnsubscribe>(&params).await {
-                    eprintln!("could not unsubscribe the previous Codex session: {error}");
-                }
+            if result.is_ok()
+                && let Err(error) = codex
+                    .request::<methods::ThreadUnsubscribe>(&types::ThreadUnsubscribeParams {
+                        thread_id: native_id,
+                    })
+                    .await
+            {
+                eprintln!("could not unsubscribe the previous Codex session: {error}");
             }
             Done::Attached {
                 thread_id,

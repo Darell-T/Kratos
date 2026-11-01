@@ -373,14 +373,13 @@ impl Actor {
         answers: BTreeMap<String, Vec<String>>,
         limit: Option<AccessLimit>,
     ) -> Result<QuestionOutcome, ProviderError> {
-        if let (Some(limit), Some(waiting)) = (limit, self.requests.questions.get(&question_id)) {
-            let settings = self.threads[&waiting.thread_id].turn_settings();
-            if !limit.covers(settings.access()) {
-                return Err(ProviderError::Forbidden(
-                    "A thread cannot answer a question running with more permission than its own."
-                        .to_owned(),
-                ));
-            }
+        if let (Some(limit), Some(waiting)) = (limit, self.requests.questions.get(&question_id))
+            && !limit.covers(self.threads[&waiting.thread_id].turn_settings().access())
+        {
+            return Err(ProviderError::Forbidden(
+                "A thread cannot answer a question running with more permission than its own."
+                    .to_owned(),
+            ));
         }
         let Some(waiting) = self.requests.questions.remove(&question_id) else {
             let lookup = question_id.clone();

@@ -77,7 +77,7 @@ impl Actor {
                 return;
             }
         };
-        if self.fork_for_access(thread_id, &native_id, next.origin.limit()) {
+        if self.fork_for_access(thread_id, next.origin.limit()) {
             return;
         }
         let starting = self

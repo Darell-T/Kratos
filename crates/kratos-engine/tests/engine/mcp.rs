@@ -700,7 +700,12 @@ fn a_next_turn_upgrade_does_not_authorize_peer_approval_decisions() {
         )
         .unwrap();
     engine.start_turn();
-    engine.fake_codex_request(codex_control::ask(Some("peer-approval".into()), "item/commandExecution/requestApproval", json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "c1", "startedAtMs": 0, "command": "cargo test" })));
+    engine.fake_codex_request(codex_control::ask(
+        Some("peer-approval".into()),
+        "item/commandExecution/requestApproval",
+        json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "c1",
+                "startedAtMs": 0, "command": "cargo test" }),
+    ));
     let deadline = Instant::now() + WAIT;
     let approval = loop {
         let details = engine
@@ -931,7 +936,8 @@ fn a_question_answer_cannot_exceed_the_senders_or_the_receivers_turn_permission(
         );
         assert_eq!(
             was_refused, refused,
-            "sender {sender_permission:?}, plans {sender_plans}, receiver {receiver_permission:?}: {answer}"
+            "sender {:?}, plans {}, receiver {:?}: {}",
+            sender_permission, sender_plans, receiver_permission, answer
         );
         if refused {
             let details = engine.client().get(&path).unwrap();
