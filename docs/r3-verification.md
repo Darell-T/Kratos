@@ -43,13 +43,15 @@ CI limits concurrent test processes to avoid starving Windows startup probes. No
 since the client itself can spend five seconds waiting for a child to close. Request, turn, stop, and shutdown deadlines
 remain checked by their existing behavioral tests.
 
-The real-Codex tests use the pinned native 0.159.1 executable and a scripted local Responses API. Only the model is
+The real-Codex tests use native 0.159.1 with the carried Windows read-grant patch
+and a scripted local Responses API. Only the model is
 fake. Commands run through the production provider, approval handling, and actual Windows sandbox. The tests require
 a successful read or command as a positive control before accepting a denied write or request as evidence.
 
 ```powershell
 $env:KRATOS_REAL_CODEX_EXE = '<native Codex 0.159.1 executable>'
 $env:KRATOS_REAL_CODEX_HOME = '<dedicated test home>'
+./scripts/build-codex-sandbox.ps1 -CodexExe $env:KRATOS_REAL_CODEX_EXE
 # Provision this isolated home once from an administrator terminal.
 & $env:KRATOS_REAL_CODEX_EXE sandbox setup --elevated --current-user --codex-home $env:KRATOS_REAL_CODEX_HOME
 cargo test -p kratos-engine --test real_codex --locked -- --ignored --test-threads=1
@@ -58,6 +60,13 @@ cargo test -p kratos-engine --test real_codex --locked -- --ignored --test-threa
 CI runs these tests in its own provisioned home. They cover read-only plan mode, ordinary Full access execution, a
 Full access recursive delete that asks and is declined, and an Approve for me agent plus its child failing to read the
 API token or decide a waiting approval. The approval remains pending.
+
+The first-read regression creates a private workspace with 22,000 files. Its
+first sandboxed command must read the control file. Codex's original helper
+returned while read grants were still running, so commands could report that
+existing files were missing. The carried patch waits for read grants and makes
+waiting requests apply their own folders. Permission scopes and deny rules stay
+the same. The patch also includes the native mutex regression test.
 
 The restore check creates a version-4 database with the TypeScript store, starts the Rust engine to migrate it to 5,
 restores the automatic backup, compares all original tables and rows, then starts the TypeScript engine and reads
