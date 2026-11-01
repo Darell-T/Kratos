@@ -1,0 +1,32 @@
+[package]
+name = "kratos-codex-client"
+description = "A typed client for codex app-server, the JSON-RPC server inside the Codex CLI"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+kratos-process.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "time"] }
+
+# Only this crate generates code from a JSON Schema, so these are pinned here. Typify reads the
+# schema through schemars 0.8's types.
+[build-dependencies]
+prettyplease = "0.2.37"
+schemars = "0.8.22"
+serde_json.workspace = true
+syn = "2.0.117"
+typify = "0.8.0"
+
+[dev-dependencies]
+fake-agents.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[lints]
+workspace = true

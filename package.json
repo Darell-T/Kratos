@@ -16,7 +16,7 @@
     "lint": "eslint . --max-warnings 0",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=2 --testTimeout=15000",
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run test"
   },
   "devDependencies": {

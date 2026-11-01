@@ -4,22 +4,36 @@
 //! Two threads. The main thread owns the store and runs its jobs (see `store_thread`). The server
 //! and its tokio runtime run on a second thread. So a panic in the store ends the process, and the
 //! database closes only after the server, and every socket its runtime ran, has stopped.
+//!
+//! Codex is found through `CODEX_EXE`, else `PATH` (D2). Without it the engine still serves, and
+//! a request that needs Codex answers 503 saying why.
 
-mod config;
-mod hub;
-mod server;
-mod store_thread;
-
+use std::ffi::OsString;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
+use std::time::Duration;
 
-use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store};
+use kratos_codex_client::{LocateError, locate_codex};
+use kratos_command_safety::DangerousCommandPlatform;
+use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
 
-use config::{Config, ConfigError};
-use hub::Hub;
-use server::ServerState;
-use store_thread::StoreThread;
+use kratos_engine::config::{Config, ConfigError};
+use kratos_engine::hub::Hub;
+use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
+use kratos_engine::server::{self, ClientToken, ServerState};
+use kratos_engine::store_thread::{self, StoreThread};
+use kratos_engine::usage::UsageTracker;
+use kratos_engine::usage::scheduler::{self, SystemClock};
+
+/// The TypeScript provider's deadlines: a turn may run ten minutes without waiting on the user,
+/// and a request to Codex may take thirty seconds.
+const TURN_TIMEOUT: Duration = Duration::from_secs(600);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a turn Codex agreed to stop may take to end before Kratos closes Codex.
+const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn main() -> ExitCode {
     match run() {
@@ -61,6 +75,7 @@ fn serve(config: &Config) -> Result<(), StartError> {
     })?;
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
+    let token = ClientToken::issue(&config.home).map_err(StartError::Token)?;
     // The listener already accepts into its backlog, so a client may connect as soon as it reads
     // this.
     println!(
@@ -68,24 +83,95 @@ fn serve(config: &Config) -> Result<(), StartError> {
         config.home.display()
     );
     let (store_thread, store_jobs) = store_thread::channel();
-    let server = std::thread::spawn(move || run_server(listener, store_thread));
+    let home = config.home.clone();
+    let server = std::thread::spawn(move || run_server(listener, store_thread, &home, token));
     store_jobs.run(store);
     server.join().expect("the server thread does not panic")
 }
 
-fn run_server(listener: TcpListener, store: StoreThread) -> Result<(), StartError> {
+fn run_server(
+    listener: TcpListener,
+    store: StoreThread,
+    home: &Path,
+    token: ClientToken,
+) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async {
         let listener = tokio::net::TcpListener::from_std(listener)?;
-        let state = ServerState {
-            hub: Hub::new(store.clone()),
-            store,
+        let hub = Hub::new(store.clone());
+        let usage = UsageTracker::default();
+        let (codex, scheduler) = match codex_settings(home) {
+            Ok(settings) => {
+                let (provider, stops) =
+                    codex::start(settings, hub.clone(), store.clone(), usage.clone()).await?;
+                let clock = Arc::new(SystemClock);
+                let scheduler = scheduler::start(
+                    hub.clone(),
+                    store.clone(),
+                    usage.clone(),
+                    provider.clone(),
+                    clock,
+                    stops,
+                )
+                .await?;
+                (Ok(provider), Some(scheduler))
+            }
+            Err(missing) => {
+                eprintln!("Codex threads are unavailable: {missing}");
+                (Err(missing.to_string()), None)
+            }
         };
-        server::serve(listener, state, shutdown_signal()).await?;
+        let state = ServerState {
+            hub,
+            store,
+            codex,
+            scheduler,
+            usage,
+            token,
+        };
+        server::serve(listener, state.clone(), shutdown_signal()).await?;
+        // Codex ends before the store closes, so nothing it reports goes unrecorded (L2).
+        if let Ok(codex) = &state.codex {
+            codex.shutdown().await;
+        }
         Ok(())
     })
+}
+
+fn codex_settings(home: &Path) -> Result<CodexSettings, CodexMissing> {
+    let program = locate_codex(
+        std::env::var_os("CODEX_EXE").as_deref(),
+        std::env::var_os("PATH").as_deref(),
+    )?;
+    let server_folder = home.join("codex-server");
+    std::fs::create_dir_all(&server_folder).map_err(CodexMissing::ServerFolder)?;
+    let user_home = std::env::home_dir();
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| user_home.as_ref().map(|home| home.join(".codex")))
+        .and_then(|codex_home| std::path::absolute(codex_home).ok());
+    Ok(CodexSettings {
+        program,
+        extra_args: Vec::<OsString>::new(),
+        env_set: Vec::new(),
+        server_folder,
+        protected: ProtectedFolders::new(home.to_path_buf(), codex_home, user_home),
+        turn_timeout: TURN_TIMEOUT,
+        stop_timeout: STOP_TIMEOUT,
+        request_timeout: REQUEST_TIMEOUT,
+        platform: DangerousCommandPlatform::host(),
+    })
+}
+
+#[derive(Debug, thiserror::Error)]
+enum CodexMissing {
+    #[error(transparent)]
+    Locate(#[from] LocateError),
+    #[error("cannot create Codex's working folder: {0}")]
+    ServerFolder(#[source] io::Error),
 }
 
 async fn shutdown_signal() {
@@ -130,6 +216,10 @@ enum StartError {
     },
     #[error("cannot run the server: {0}")]
     Server(#[from] io::Error),
+    #[error("cannot write the client token: {0}")]
+    Token(#[source] io::Error),
+    #[error("cannot read what the last engine left unfinished: {0}")]
+    Records(#[from] StoreError),
     #[error("usage: kratos-engine [restore <backup-id>]")]
     Usage,
 }

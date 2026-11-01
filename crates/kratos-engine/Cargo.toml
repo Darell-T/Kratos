@@ -10,6 +10,9 @@ rust-version.workspace = true
 [dependencies]
 axum.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
+kratos-codex-client.workspace = true
+kratos-command-safety.workspace = true
 kratos-protocol.workspace = true
 kratos-store.workspace = true
 serde.workspace = true
@@ -17,12 +20,15 @@ serde_json.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
-tokio-stream.workspace = true
+tokio-stream = { workspace = true, features = ["sync"] }
+uuid.workspace = true
 
 # Tests run the real kratos-engine binary as a child process and drive it with kratos-client.
 [dev-dependencies]
+fake-agents.workspace = true
 kratos-client.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
 
 [lints]
 workspace = true

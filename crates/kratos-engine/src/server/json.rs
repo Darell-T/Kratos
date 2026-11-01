@@ -16,6 +16,13 @@ pub async fn read_json<T: DeserializeOwned>(body: Body) -> Result<T, ApiError> {
     })
 }
 
+/// Reads `body` to its end and throws it away, for a request refused before its body matters. See
+/// [`read_capped`] for why the body is read at all.
+pub async fn discard(body: Body) {
+    let mut chunks = body.into_data_stream();
+    while let Some(Ok(_)) = chunks.next().await {}
+}
+
 /// An oversized body is read to its end and thrown away before the 413 goes out. Answering at once
 /// would let the connection close while the client is still writing, and on Windows that resets the
 /// connection, so the client never sees the status. Memory stays constant; the cost is time spent

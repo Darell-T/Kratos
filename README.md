@@ -4,8 +4,8 @@ An engine for coding agents. It runs the Codex and Claude Code CLIs you already 
 keeps every conversation in one place that you own instead of in each provider's app.
 
 Kratos is early and under active development. It has no app or interface yet. You reach the engine through its JSON
-and WebSocket API. Thread storage and the Codex connection work today. Running agents from chat messages is in
-progress.
+and WebSocket API. The Rust engine runs Codex turns from chat messages, streams replies, and routes approvals to
+authenticated clients.
 
 ## What it is for
 
@@ -23,17 +23,17 @@ progress.
 
 ## Status
 
-| Area                                                                | State       |
-| ------------------------------------------------------------------- | ----------- |
-| Workspaces, threads and an append-only message history              | Working     |
-| Live updates to every client, with catch-up after a reconnect       | Working     |
-| Typed Codex connection: start, requests, events, approvals, cleanup | Working     |
-| Codex skills, plugins, models and sign-in status                    | Working     |
-| Sending chat messages to Codex, with queue and streaming replies    | In progress |
-| Context window tracking and per-thread model and window settings    | Planned     |
-| Approvals, diff viewer, file tree and terminal                      | Planned     |
-| Claude Code provider                                                | Planned     |
-| macOS, and opening threads from another machine                     | Planned     |
+| Area                                                                | State   |
+| ------------------------------------------------------------------- | ------- |
+| Workspaces, threads and an append-only message history              | Working |
+| Live updates to every client, with catch-up after a reconnect       | Working |
+| Typed Codex connection: start, requests, events, approvals, cleanup | Working |
+| Codex skills, plugins, models and sign-in status                    | Working |
+| Sending chat messages to Codex, with queue and streaming replies    | Working |
+| Context window tracking and per-thread model and window settings    | Working |
+| Approvals, diff viewer, file tree and terminal                      | Planned |
+| Claude Code provider                                                | Planned |
+| macOS, and opening threads from another machine                     | Planned |
 
 ## Requirements
 
@@ -58,8 +58,24 @@ The engine logs to the terminal it runs in. It answers `GET /api/health` with `{
 
 ## Run the Rust engine
 
-The Rust engine serves the same API as the TypeScript engine, on the same port and with the same data folder. The
-TypeScript engine stays until the Rust engine drives Codex and Claude Code.
+The Rust engine retains the TypeScript storage API and adds Codex operations. It uses the same default port and
+data folder. The TypeScript engine stays until the Rust migration also supports Claude Code.
+
+On Windows, use the carried Codex 0.159.1 sandbox fix. Stock 0.159.1 and 0.166.0
+can start commands before workspace read permissions are ready. Build the fixed
+helper in a separate install and select it for this terminal:
+
+```powershell
+$codexInstall = Join-Path $env:LOCALAPPDATA 'Kratos/codex-0.159.1'
+npm install --prefix $codexInstall --ignore-scripts --no-audit --no-fund '@openai/codex@0.159.1'
+$nativePath = 'node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc'
+$env:CODEX_EXE = Join-Path $codexInstall "$nativePath/bin/codex.exe"
+./scripts/build-codex-sandbox.ps1 -CodexExe $env:CODEX_EXE
+```
+
+The script builds only the native sandbox helper from a pinned source revision.
+It keeps external dependencies locked, preserves Codex's license and notice,
+and removes its temporary source and build files. CI uses the same script.
 
 ```sh
 cargo run --release -p kratos-engine   # runs the engine at http://127.0.0.1:4200
@@ -90,6 +106,21 @@ cargo run -p kratos-client -- bench-post http://127.0.0.1:4200
 ```
 
 Run `kratos-client` with no arguments to see the other commands.
+
+Every route except `/api/health` requires the per-launch token in `<KRATOS_HOME>/client-token`. `kratos-client`
+reads that file for each request, including after an engine restart. Set `KRATOS_HOME` on the client to the engine's
+data folder.
+
+Codex 0.159.1 is the tested protocol release. On Windows, the engine checks elevated sandbox readiness before
+opening a Codex thread and requests setup when necessary. Setup failure leaves queued work unsent and reports why.
+Ask me and Approve for me write only the thread's workspace and temporary folders. Full access runs commands without
+a sandbox and still asks before dangerous ones. [R3 verification](docs/r3-verification.md) lists each mode's scope.
+
+```sh
+cargo run -p kratos-client -- send <thread-id> "Explain this repository"
+cargo run -p kratos-client -- approve <approval-id> accept
+cargo run -p kratos-client -- usage
+```
 
 ## Develop
 

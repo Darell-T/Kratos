@@ -20,14 +20,18 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures_util::stream::{self, Stream};
-use kratos_protocol::{Seq, ThreadEvent, ThreadEventBody, ThreadId};
-use kratos_store::StoreError;
-use tokio::sync::watch;
+use kratos_protocol::{
+    LiveUpdate, ReplySoFar, Seq, ThreadEvent, ThreadEventBody, ThreadId, TurnId,
+};
+use kratos_store::{StoreError, ThreadWrite};
+use tokio::sync::{broadcast, watch};
 
 use crate::store_thread::StoreThread;
 
 /// The most stored bytes one page holds, except that a page always holds at least one event.
 pub const PAGE_BYTES: usize = 64 * 1024;
+/// Live updates a client may fall behind by before it gets a snapshot in their place.
+const LIVE_BACKLOG: usize = 256;
 
 /// One thread's events, as non-empty pages in order with no gaps between them. Never ends; drop it
 /// to stop following. An `Err` page means the log could not be read past the cursor.
@@ -39,6 +43,14 @@ pub type EventPages = Pin<Box<dyn Stream<Item = Result<Vec<ThreadEvent>, StoreEr
 pub struct Hub {
     store: StoreThread,
     doorbells: Doorbells,
+    live: LiveThreads,
+}
+
+/// What a write returned, and the events it appended.
+#[derive(Debug)]
+pub struct Written<T> {
+    pub value: T,
+    pub events: Vec<ThreadEvent>,
 }
 
 impl Hub {
@@ -46,30 +58,76 @@ impl Hub {
         Hub {
             store,
             doorbells: Doorbells::default(),
+            live: LiveThreads::default(),
         }
     }
 
-    /// Appends an event to the thread's log and wakes its followers. Returns once the event is
-    /// committed; never waits for a follower or a socket. `Err(UnknownThread)` appends nothing.
+    /// Runs `job` in one transaction over the thread's records and wakes the thread's followers
+    /// once it commits. Returns once it is committed; never waits for a follower or a socket. When
+    /// `job` fails, nothing it wrote is kept. `Err(UnknownThread)` writes nothing.
     #[allow(
         clippy::disallowed_methods,
-        reason = "the engine's one call to Store::append_event; clippy.toml bans every other"
+        reason = "the engine's one call to Store::write_thread; clippy.toml bans every other"
     )]
+    pub async fn write<T, F>(&self, thread_id: ThreadId, job: F) -> Result<Written<T>, StoreError>
+    where
+        F: FnOnce(&mut ThreadWrite<'_>) -> Result<T, StoreError> + Send + 'static,
+        T: Send + 'static,
+    {
+        // The commit and the ring run in one job, so a request dropped after the commit cannot skip
+        // the ring and leave followers asleep.
+        let doorbells = self.doorbells.clone();
+        let live = self.live.clone();
+        self.store
+            .call(move |store| {
+                let mut write = store.write_thread(&thread_id)?;
+                let value = job(&mut write)?;
+                let events = write.commit()?;
+                for event in &events {
+                    if let ThreadEventBody::TurnCompleted { turn_id, .. } = &event.event {
+                        live.end_turn(&thread_id, turn_id);
+                    }
+                }
+                if !events.is_empty() {
+                    doorbells.ring(&thread_id);
+                }
+                Ok(Written { value, events })
+            })
+            .await
+    }
+
+    /// Appends an event to the thread's log and wakes its followers. See [`Hub::write`].
     pub async fn append(
         &self,
         thread_id: ThreadId,
         body: ThreadEventBody,
     ) -> Result<ThreadEvent, StoreError> {
-        // The commit and the ring run in one job, so a request dropped after the commit cannot skip
-        // the ring and leave followers asleep.
-        let doorbells = self.doorbells.clone();
-        self.store
-            .call(move |store| {
-                let event = store.append_event(&thread_id, &body)?;
-                doorbells.ring(&event.thread_id);
-                Ok(event)
+        let written = self
+            .write(thread_id, move |write| {
+                write.append(body)?;
+                Ok(())
             })
-            .await
+            .await?;
+        Ok(written
+            .events
+            .into_iter()
+            .next()
+            .expect("the write appended one event"))
+    }
+
+    /// Sends `update` to the clients following the thread, without storing it. A reply delta also
+    /// extends the turn's reply so far, which a client that subscribes later gets as a snapshot.
+    pub fn publish(&self, thread_id: &ThreadId, update: LiveUpdate) {
+        self.live.publish(thread_id, update);
+    }
+
+    /// The thread's replies so far and a receiver for every later update, taken together so no
+    /// update falls between them. `None` in place of the snapshot when no turn is running.
+    pub fn watch_live(
+        &self,
+        thread_id: &ThreadId,
+    ) -> (Option<LiveUpdate>, broadcast::Receiver<LiveUpdate>) {
+        self.live.watch(thread_id)
     }
 
     /// Follows the thread's log from the cursor `after`: the events already stored, then each new
@@ -120,6 +178,97 @@ pub enum FollowError {
         after: Seq,
         last: Seq,
     },
+}
+
+/// Per thread: the running turn's replies so far, and the channel that carries live updates to the
+/// thread's clients. A slow client loses old updates rather than holding them in memory, and gets
+/// a snapshot instead.
+#[derive(Clone, Default)]
+struct LiveThreads(Arc<Mutex<HashMap<ThreadId, LiveThread>>>);
+
+struct LiveThread {
+    sender: broadcast::Sender<LiveUpdate>,
+    turn_id: Option<TurnId>,
+    replies: Vec<ReplySoFar>,
+}
+
+impl LiveThreads {
+    fn publish(&self, thread_id: &ThreadId, update: LiveUpdate) {
+        let mut threads = self.threads();
+        let thread = threads
+            .entry(thread_id.clone())
+            .or_insert_with(LiveThread::new);
+        if let LiveUpdate::ReplyDelta {
+            turn_id,
+            item_id,
+            delta,
+        } = &update
+        {
+            thread.extend_reply(turn_id, item_id, delta);
+        }
+        // No receivers is not an error: nobody follows the thread right now.
+        let _ = thread.sender.send(update);
+    }
+
+    fn end_turn(&self, thread_id: &ThreadId, turn_id: &TurnId) {
+        let mut threads = self.threads();
+        let unwatched = threads.get_mut(thread_id).is_some_and(|thread| {
+            if thread.turn_id.as_ref() != Some(turn_id) {
+                return false;
+            }
+            thread.turn_id = None;
+            thread.replies.clear();
+            thread.sender.receiver_count() == 0
+        });
+        if unwatched {
+            threads.remove(thread_id);
+        }
+    }
+
+    fn watch(&self, thread_id: &ThreadId) -> (Option<LiveUpdate>, broadcast::Receiver<LiveUpdate>) {
+        let mut threads = self.threads();
+        let thread = threads
+            .entry(thread_id.clone())
+            .or_insert_with(LiveThread::new);
+        let snapshot = thread.turn_id.clone().map(|turn_id| LiveUpdate::Snapshot {
+            turn_id: Some(turn_id),
+            replies: thread.replies.clone(),
+        });
+        (snapshot, thread.sender.subscribe())
+    }
+
+    fn threads(&self) -> MutexGuard<'_, HashMap<ThreadId, LiveThread>> {
+        // No code panics while holding this lock, so a poisoned lock still guards a consistent map.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl LiveThread {
+    fn new() -> LiveThread {
+        LiveThread {
+            sender: broadcast::channel(LIVE_BACKLOG).0,
+            turn_id: None,
+            replies: Vec::new(),
+        }
+    }
+
+    fn extend_reply(&mut self, turn_id: &TurnId, item_id: &str, delta: &str) {
+        if self.turn_id.as_ref() != Some(turn_id) {
+            self.turn_id = Some(turn_id.clone());
+            self.replies.clear();
+        }
+        match self
+            .replies
+            .iter_mut()
+            .find(|reply| reply.item_id == item_id)
+        {
+            Some(reply) => reply.text.push_str(delta),
+            None => self.replies.push(ReplySoFar {
+                item_id: item_id.to_owned(),
+                text: delta.to_owned(),
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -223,6 +372,42 @@ mod tests {
         let (store_thread, store_jobs) = store_thread::channel();
         std::thread::spawn(move || store_jobs.run(store));
         (Hub::new(store_thread), thread.id)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_committed_completion_clears_its_live_reply_even_if_the_writer_is_cancelled() {
+        let home = tempfile::tempdir().unwrap();
+        let (hub, thread_id) = hub_with_a_thread(home.path());
+        hub.publish(
+            &thread_id,
+            LiveUpdate::ReplyDelta {
+                turn_id: TurnId::new("finished".into()),
+                item_id: "reply".into(),
+                delta: "hello".into(),
+            },
+        );
+        let mut append = Box::pin(hub.append(
+            thread_id.clone(),
+            ThreadEventBody::TurnCompleted {
+                turn_id: TurnId::new("finished".into()),
+                outcome: kratos_protocol::TurnOutcome::Completed,
+                changes: kratos_protocol::TurnChanges {
+                    files: vec![],
+                    edited_since_command: false,
+                    ran_command: false,
+                },
+                context: None,
+            },
+        ));
+        assert!(poll_once(&mut append).await.is_pending());
+        drop(append);
+
+        let live = hub.clone();
+        let snapshot = hub.store.call(move |_| live.watch_live(&thread_id).0).await;
+        assert!(
+            snapshot.is_none(),
+            "completion must be visible after live state is cleared"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -45,13 +45,15 @@ impl ApiRequest {
         self
     }
 
+    pub(crate) fn names_header(&self, name: &str) -> bool {
+        self.headers
+            .iter()
+            .any(|(given, _)| given.eq_ignore_ascii_case(name))
+    }
+
     /// `Connection: close` lets the client read the reply to the end of the stream.
     pub(crate) fn encode(&self, authority: &str) -> Vec<u8> {
-        let names_header = |name: &str| {
-            self.headers
-                .iter()
-                .any(|(given, _)| given.eq_ignore_ascii_case(name))
-        };
+        let names_header = |name: &str| self.names_header(name);
         let mut text = format!("{} {} HTTP/1.1\r\n", self.method, self.path);
         for (name, value) in &self.headers {
             text.push_str(&format!("{name}: {value}\r\n"));

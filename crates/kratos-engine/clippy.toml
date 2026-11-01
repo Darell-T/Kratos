@@ -1,5 +1,6 @@
-# Hub::append rings the thread's doorbell after the commit. An append that skips the hub leaves the thread's
-# followers asleep until some later append, so the engine appends through the hub only.
+# Hub::write and Hub::append ring the thread's doorbell after the commit. A write that skips the hub leaves the thread's
+# followers asleep until some later write, so the engine writes thread records through the hub only.
 disallowed-methods = [
     { path = "kratos_store::Store::append_event", reason = "append through Hub::append, which wakes the thread's followers" },
+    { path = "kratos_store::Store::write_thread", reason = "write through Hub::write, which wakes the thread's followers" },
 ]
