@@ -1,0 +1,28 @@
+[package]
+name = "kratos-engine"
+description = "The Kratos engine: one process per machine that owns the records and serves the local API"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+futures-util.workspace = true
+kratos-protocol.workspace = true
+kratos-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_path_to_error.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tokio-stream.workspace = true
+
+# Tests run the real kratos-engine binary as a child process and drive it with kratos-client.
+[dev-dependencies]
+kratos-client.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

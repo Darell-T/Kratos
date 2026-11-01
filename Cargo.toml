@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "tools/*"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+publish = false
+rust-version = "1.99.1"
+
+# One version of each dependency for the whole workspace. Each crate opts in with `workspace = true`.
+[workspace.dependencies]
+kratos-client = { path = "tools/kratos-client" }
+kratos-protocol = { path = "crates/kratos-protocol" }
+kratos-store = { path = "crates/kratos-store" }
+
+# The HTTP and WebSocket server. Only the features the engine serves: HTTP/1.1, query strings, sockets.
+axum = { version = "0.8.9", default-features = false, features = ["http1", "query", "tokio", "ws"] }
+# stream::unfold turns a follower into the stream a socket task waits on.
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
+
+# kratos-client speaks HTTP by hand over std::net and parses replies with httparse, because the product it
+# tests refuses requests that an HTTP library would normalize. tungstenite is the WebSocket version axum uses.
+httparse = "1.10.1"
+# Formats `2026-10-22T18:45:12.345Z`, the exact shape of JavaScript's Date.toISOString().
+humantime = "2.4.0"
+# SQLite compiled from source, because Windows has no system SQLite. Seqs are u64 in Rust and INTEGER in SQLite.
+rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
+serde = { version = "1.0.229", features = ["derive"] }
+# Names the failing field in a 400, such as `text: must not be blank`.
+serde_path_to_error = "0.1.20"
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync"] }
+# StreamMap: one socket task waits on every thread it follows at once.
+tokio-stream = { version = "0.1.19", default-features = false }
+tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"] }
+# v4 for workspace and thread ids (the TypeScript engine's randomUUID), v7 for time-ordered backup ids.
+uuid = { version = "1.28.0", features = ["v4", "v7"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
