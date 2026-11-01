@@ -77,7 +77,8 @@ engine on the same folder exits with an error. The TypeScript engine takes no lo
 When the engine starts on a database with an older schema, it first copies the database to
 `backups/kratos-v<version>-<id>.db` in the data folder and prints where. `kratos-engine restore <backup-id>` makes a
 backup the live database again. It saves the database it replaces as another backup, and it refuses to run while an
-engine uses the folder.
+engine uses the folder. If `kratos.db` is missing but `kratos.db-wal` or `kratos.db-shm` remains, restore refuses and
+preserves those files. Confirm that no SQLite program uses the folder before moving the sidecars aside and retrying.
 
 `kratos-client` drives either engine and prints each reply and event as one JSON line:
 

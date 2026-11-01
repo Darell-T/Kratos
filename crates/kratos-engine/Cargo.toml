@@ -16,14 +16,13 @@ serde.workspace = true
 serde_json.workspace = true
 serde_path_to_error.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tokio-stream.workspace = true
 
 # Tests run the real kratos-engine binary as a child process and drive it with kratos-client.
 [dev-dependencies]
 kratos-client.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["time"] }
 
 [lints]
 workspace = true
