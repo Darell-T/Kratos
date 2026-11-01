@@ -5,6 +5,59 @@ use serde_json::json;
 use crate::support::Harness;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires patched Codex 0.159.1 and a provisioned Windows test home; CI runs it"]
+async fn first_command_reads_a_large_new_workspace() {
+    // Catches a command starting before its workspace read grants finish.
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::ApproveForMe,
+            plan_mode: true,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::command("Get-Content -LiteralPath z-control.txt"),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    let folder = harness.folder();
+    let isolated = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            r"$ErrorActionPreference = 'Stop'
+$folder = $env:KRATOS_TEST_WORKSPACE
+$acl = Get-Acl -LiteralPath $folder
+$acl.SetAccessRuleProtection($true, $false)
+$owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+$rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+    $owner, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+$acl.SetAccessRule($rule)
+Set-Acl -LiteralPath $folder -AclObject $acl",
+        ])
+        .env("KRATOS_TEST_WORKSPACE", &folder)
+        .output()
+        .unwrap();
+    assert!(isolated.status.success(), "{isolated:?}");
+    for index in 0..22_000 {
+        std::fs::write(folder.join(format!("fixture-{index:05}.txt")), b"").unwrap();
+    }
+    std::fs::write(folder.join("z-control.txt"), "KRATOS_COLD_WORKSPACE_READ").unwrap();
+    harness.send("first-workspace-read");
+    harness.completed().await;
+    let outputs = harness.model.tool_outputs();
+    assert_eq!(outputs.len(), 1, "{outputs:?}");
+    assert!(
+        outputs[0]
+            .to_string()
+            .contains("KRATOS_COLD_WORKSPACE_READ"),
+        "the first command must read the existing workspace file: {outputs:?}"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
 async fn a_full_access_thread_runs_a_harmless_command() {
     let mut harness = Harness::start(
