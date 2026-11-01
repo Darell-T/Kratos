@@ -9,10 +9,8 @@
     "packages/*"
   ],
   "scripts": {
-    "postinstall": "node node_modules/electron/install.js",
-    "dev": "concurrently --kill-others --names engine,ui,app --prefix-colors blue,green,magenta \"npm run dev -w @kratos/engine\" \"npm run dev -w @kratos/ui\" \"npm run dev -w @kratos/desktop\"",
-    "build": "npm run build -w @kratos/ui && npm run build -w @kratos/engine && npm run build -w @kratos/desktop",
-    "start": "npm run build && npm run start -w @kratos/desktop",
+    "dev": "npm run dev -w @kratos/engine",
+    "build": "npm run build -w @kratos/engine",
     "engine": "node packages/engine/dist/main.js",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint . --max-warnings 0",
@@ -24,9 +22,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.1",
-    "concurrently": "^10.0.5",
     "eslint": "^10.12.0",
-    "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.13.0",
     "prettier": "^3.9.9",
     "typescript": "~6.0.3",

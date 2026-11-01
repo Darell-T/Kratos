@@ -5,7 +5,7 @@ import { Store } from './store';
 
 const config = loadConfig();
 const store = new Store(config.home);
-const server = await startServer({ store, hub: new Hub(), uiDist: config.uiDist, port: config.port });
+const server = await startServer({ store, hub: new Hub(), port: config.port });
 
 console.log(`Kratos engine listening on http://127.0.0.1:${server.port} (data in ${config.home})`);
 
