@@ -28,13 +28,14 @@ async fn first_command_reads_a_large_new_workspace() {
             "-Command",
             r"$ErrorActionPreference = 'Stop'
 $folder = $env:KRATOS_TEST_WORKSPACE
-$acl = Get-Acl -LiteralPath $folder
+# The CI host passes PowerShell 7 module paths to Windows PowerShell.
+$acl = [IO.Directory]::GetAccessControl($folder)
 $acl.SetAccessRuleProtection($true, $false)
 $owner = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
     $owner, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
 $acl.SetAccessRule($rule)
-Set-Acl -LiteralPath $folder -AclObject $acl",
+[IO.Directory]::SetAccessControl($folder, $acl)",
         ])
         .env("KRATOS_TEST_WORKSPACE", &folder)
         .output()
