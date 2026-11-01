@@ -70,6 +70,7 @@ public sealed class ConsoleEngine : IDisposable {
     }
 }
 '@
+[Console]::WriteLine('Kratos shutdown helper ready')
 $engine = [ConsoleEngine]::new($env:KRATOS_SHUTDOWN_ENGINE)
 try {
     if ([Console]::ReadLine() -ne 'shutdown') { throw 'shutdown test closed its input' }
