@@ -53,6 +53,7 @@ jobs:
           npm install --prefix $install --ignore-scripts --no-audit --no-fund '@openai/codex@0.159.1'
           if ($LASTEXITCODE -ne 0) { throw 'Pinned Codex installation failed' }
           $exe = Join-Path $install 'node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe'
+          & ./scripts/build-codex-sandbox.ps1 -CodexExe $exe
           "KRATOS_REAL_CODEX_EXE=$exe" >> $env:GITHUB_ENV
           "KRATOS_REAL_CODEX_HOME=$(Join-Path $env:USERPROFILE 'kratos-real-codex-home')" >> $env:GITHUB_ENV
       - name: Provision the isolated elevated sandbox
