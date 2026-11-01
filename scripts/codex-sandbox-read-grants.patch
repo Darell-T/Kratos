@@ -1,0 +1,287 @@
+Codex rust-v0.159.1 at 8e68a98ef03cdde76d2e6800791ebdf1b3b95b24
+Apache-2.0, Copyright 2025 OpenAI.
+https://github.com/openai/codex/blob/8e68a98ef03cdde76d2e6800791ebdf1b3b95b24/LICENSE
+
+Kratos changes read-grant setup to finish before command execution.
+
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+index f60b1d9..8c343d0 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning.rs
+@@ -1,5 +1,5 @@
+ //! Privileged sandbox setup shared by the setup helper and the service's ProvisionOnly path.
+-//! Full and read-ACL setup remain helper entrypoints; only they may launch a read-ACL child.
++//! Full and read-ACL setup finish their read grants before returning.
+ //! Command-line account provisioning cannot enter the service's admitted Core path.
+
+ mod firewall;
+@@ -53,11 +53,8 @@ use std::ffi::OsStr;
+ use std::ffi::c_void;
+ use std::io::Write;
+ use std::os::windows::io::AsRawHandle;
+-use std::os::windows::process::CommandExt;
+ use std::path::Path;
+ use std::path::PathBuf;
+-use std::process::Command;
+-use std::process::Stdio;
+ use std::sync::mpsc;
+ use windows_sys::Win32::Foundation::GetLastError;
+ use windows_sys::Win32::Foundation::HLOCAL;
+@@ -96,7 +93,6 @@ const WRITE_ROOT_ALLOW_MASK: u32 =
+ mod sandbox_users;
+ mod setup_runtime_bin;
+ use read_acl_mutex::acquire_read_acl_mutex;
+-use read_acl_mutex::read_acl_mutex_exists;
+ use sandbox_users::commit_setup_marker;
+ use sandbox_users::prepare_setup_marker;
+ use sandbox_users::provision_sandbox_users;
+@@ -204,25 +200,6 @@ fn workspace_write_cap_sids_for_path(
+     Ok(sid_strs)
+ }
+
+-fn spawn_read_acl_helper(payload: &Payload, _log: &mut dyn Write) -> Result<()> {
+-    let mut read_payload = payload.clone();
+-    read_payload.mode = SetupMode::ReadAclsOnly;
+-    read_payload.refresh_only = true;
+-    let payload_json = serde_json::to_vec(&read_payload)?;
+-    let payload_b64 = BASE64.encode(payload_json);
+-    let exe = std::env::current_exe().context("locate setup helper")?;
+-    let mut command = Command::new(&exe);
+-    crate::launch_environment::configure_command(&mut command, &payload_b64)?;
+-    command
+-        .stdin(Stdio::null())
+-        .stdout(Stdio::null())
+-        .stderr(Stdio::null())
+-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+-        .spawn()
+-        .context("spawn read ACL helper")?;
+-    Ok(())
+-}
+-
+ struct ReadAclSubjects<'a> {
+     sandbox_group_psid: *mut c_void,
+     rx_psids: &'a [*mut c_void],
+@@ -651,13 +628,7 @@ fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<(
+ }
+
+ fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
+-    let _read_acl_guard = match acquire_read_acl_mutex()? {
+-        Some(guard) => guard,
+-        None => {
+-            log_line(log, "read ACL helper already running; skipping")?;
+-            return Ok(());
+-        }
+-    };
++    let _read_acl_guard = acquire_read_acl_mutex()?;
+     log_line(log, "read-acl-only mode: applying read ACLs")?;
+     let sandbox_group_sid = resolve_sandbox_users_group_sid()?;
+     let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid)?;
+@@ -927,9 +898,7 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
+
+     let mut refresh_errors: Vec<String> = Vec::new();
+
+-    // Deny-read ACEs must be present before the sandboxed command starts. Apply
+-    // them synchronously here instead of delegating them to the background
+-    // helper used for read grants.
++    // Deny-read ACEs must be present before read grants and command execution.
+     let applied_deny_read_paths = unsafe {
+         sync_persistent_deny_read_acls(
+             &payload.codex_home,
+@@ -949,33 +918,8 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
+     if payload.read_roots.is_empty() {
+         log_line(log, "no read roots to grant; skipping read ACL helper")?;
+     } else {
+-        match read_acl_mutex_exists() {
+-            Ok(true) => {
+-                log_line(log, "read ACL helper already running; skipping spawn")?;
+-            }
+-            Ok(false) => {
+-                spawn_read_acl_helper(payload, log).map_err(|err| {
+-                    anyhow::Error::new(SetupFailure::new(
+-                        SetupErrorCode::HelperReadAclHelperSpawnFailed,
+-                        format!("spawn read ACL helper failed: {err}"),
+-                    ))
+-                })?;
+-            }
+-            Err(err) => {
+-                log_line(
+-                    log,
+-                    &format!("read ACL mutex check failed: {err}; spawning anyway"),
+-                )?;
+-                spawn_read_acl_helper(payload, log).map_err(|spawn_err| {
+-                    anyhow::Error::new(SetupFailure::new(
+-                        SetupErrorCode::HelperReadAclHelperSpawnFailed,
+-                        format!(
+-                            "spawn read ACL helper failed after mutex error {err}: {spawn_err}"
+-                        ),
+-                    ))
+-                })?;
+-            }
+-        }
++        // A background grant can leave an existing workspace file unreadable when a command starts.
++        run_read_acl_only(payload, log).context("complete sandbox read grants")?;
+     }
+
+     if refresh_only {
+@@ -1147,7 +1091,7 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
+         log_line(
+             log,
+             &format!(
+-                "setup refresh: processed {} write roots (read roots delegated); errors={:?}",
++                "setup refresh: processed {} write roots; errors={:?}",
+                 payload.write_roots.len(),
+                 refresh_errors
+             ),
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs
+index 3e2120e..6939d42 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/acl_tests.rs
+@@ -12,15 +12,46 @@ use super::WRITE_DAC;
+ use super::convert_string_sid_to_sid;
+ use super::lock_sandbox_bin_dir;
+ use super::lock_sandbox_dir;
++use super::read_acl_mutex::acquire_read_acl_mutex;
+ use super::resolve_sid;
+ use super::sid_bytes_to_psid;
+ use crate::ensure_allow_write_aces;
+ use crate::path_mask_allows;
+ use crate::workspace_write_cap_sid_for_root;
+ use std::fs;
++use std::sync::mpsc;
++use std::thread;
++use std::time::Duration;
+ use windows_sys::Win32::Foundation::HLOCAL;
+ use windows_sys::Win32::Foundation::LocalFree;
+
++#[test]
++fn read_acl_requests_wait_for_the_previous_owner() {
++    let owner = acquire_read_acl_mutex().expect("first request owns read grants");
++    let (starting, started) = mpsc::channel();
++    let (completed, completion) = mpsc::channel();
++    let waiter = thread::spawn(move || {
++        starting.send(()).expect("report request start");
++        let _guard = acquire_read_acl_mutex().expect("waiting request owns read grants");
++        completed.send(()).expect("report request completion");
++    });
++    started
++        .recv_timeout(Duration::from_secs(5))
++        .expect("waiting request started");
++    let finished_while_owned = completion.recv_timeout(Duration::from_millis(250)).is_ok();
++    drop(owner);
++    if !finished_while_owned {
++        completion
++            .recv_timeout(Duration::from_secs(5))
++            .expect("waiting request completes after its predecessor");
++    }
++    waiter.join().expect("waiting request finishes");
++    assert!(
++        !finished_while_owned,
++        "the second request skipped the active grant"
++    );
++}
++
+ #[test]
+ fn provision_only_locks_plain_directory_via_handle() {
+     let temp = tempfile::tempdir().expect("tempdir");
+diff --git a/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs b/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
+index 7954826..1cd515d 100644
+--- a/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
++++ b/codex-rs/windows-sandbox-rs/src/setup_provisioning/read_acl_mutex.rs
+@@ -1,61 +1,58 @@
+-use crate::to_wide;
++use anyhow::Context;
+ use anyhow::Result;
+-use std::ffi::OsStr;
+-use windows_sys::Win32::Foundation::CloseHandle;
+-use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
+-use windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND;
+-use windows_sys::Win32::Foundation::GetLastError;
++use anyhow::bail;
++use std::io;
++use std::marker::PhantomData;
++use std::os::windows::io::AsRawHandle;
++use std::os::windows::io::FromRawHandle;
++use std::os::windows::io::OwnedHandle;
+ use windows_sys::Win32::Foundation::HANDLE;
++use windows_sys::Win32::Foundation::WAIT_ABANDONED;
++use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
++use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
+ use windows_sys::Win32::System::Threading::CreateMutexW;
+-use windows_sys::Win32::System::Threading::MUTEX_ALL_ACCESS;
+-use windows_sys::Win32::System::Threading::OpenMutexW;
+ use windows_sys::Win32::System::Threading::ReleaseMutex;
++use windows_sys::Win32::System::Threading::WaitForSingleObject;
++
++use crate::winutil::to_wide;
+
+ const READ_ACL_MUTEX_NAME: &str = "Local\\CodexSandboxReadAcl";
++const READ_ACL_MUTEX_TIMEOUT_MS: u32 = 60_000;
+
++#[must_use]
+ pub(super) struct ReadAclMutexGuard {
+-    handle: HANDLE,
++    handle: OwnedHandle,
++    _thread_bound: PhantomData<*mut ()>,
+ }
+
+ impl Drop for ReadAclMutexGuard {
+     fn drop(&mut self) {
+         unsafe {
+-            let _ = ReleaseMutex(self.handle);
+-            CloseHandle(self.handle);
+-        }
+-    }
+-}
+-
+-pub(super) fn read_acl_mutex_exists() -> Result<bool> {
+-    let name = to_wide(OsStr::new(READ_ACL_MUTEX_NAME));
+-    let handle = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, 0, name.as_ptr()) };
+-    if handle == 0 {
+-        let err = unsafe { GetLastError() };
+-        if err == ERROR_FILE_NOT_FOUND {
+-            return Ok(false);
++            ReleaseMutex(self.handle.as_raw_handle() as HANDLE);
+         }
+-        return Err(anyhow::anyhow!("OpenMutexW failed: {err}"));
+     }
+-    unsafe {
+-        CloseHandle(handle);
+-    }
+-    Ok(true)
+ }
+
+-pub(super) fn acquire_read_acl_mutex() -> Result<Option<ReadAclMutexGuard>> {
+-    let name = to_wide(OsStr::new(READ_ACL_MUTEX_NAME));
+-    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
++pub(super) fn acquire_read_acl_mutex() -> Result<ReadAclMutexGuard> {
++    let name = to_wide(READ_ACL_MUTEX_NAME);
++    let handle = unsafe {
++        CreateMutexW(std::ptr::null(), /*binitialowner*/ 0, name.as_ptr())
++    };
+     if handle == 0 {
+-        return Err(anyhow::anyhow!("CreateMutexW failed: {}", unsafe {
+-            GetLastError()
+-        }));
++        return Err(io::Error::last_os_error()).context("open sandbox read ACL mutex");
+     }
+-    let err = unsafe { GetLastError() };
+-    if err == ERROR_ALREADY_EXISTS {
+-        unsafe {
+-            CloseHandle(handle);
++    let handle = unsafe { OwnedHandle::from_raw_handle(handle as _) };
++    match unsafe {
++        WaitForSingleObject(handle.as_raw_handle() as HANDLE, READ_ACL_MUTEX_TIMEOUT_MS)
++    } {
++        // A crashed helper may have finished only some roots. This request reapplies its own.
++        WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(ReadAclMutexGuard {
++            handle,
++            _thread_bound: PhantomData,
++        }),
++        WAIT_TIMEOUT => {
++            bail!("timed out waiting for sandbox read grants after {READ_ACL_MUTEX_TIMEOUT_MS} ms")
+         }
+-        return Ok(None);
++        _ => Err(io::Error::last_os_error()).context("wait for sandbox read ACL mutex"),
+     }
+-    Ok(Some(ReadAclMutexGuard { handle }))
+ }

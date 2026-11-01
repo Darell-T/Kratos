@@ -61,6 +61,22 @@ The engine logs to the terminal it runs in. It answers `GET /api/health` with `{
 The Rust engine retains the TypeScript storage API and adds Codex operations. It uses the same default port and
 data folder. The TypeScript engine stays until the Rust migration also supports Claude Code.
 
+On Windows, use the carried Codex 0.159.1 sandbox fix. Stock 0.159.1 and 0.166.0
+can start commands before workspace read permissions are ready. Build the fixed
+helper in a separate install and select it for this terminal:
+
+```powershell
+$codexInstall = Join-Path $env:LOCALAPPDATA 'Kratos/codex-0.159.1'
+npm install --prefix $codexInstall --ignore-scripts --no-audit --no-fund '@openai/codex@0.159.1'
+$nativePath = 'node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc'
+$env:CODEX_EXE = Join-Path $codexInstall "$nativePath/bin/codex.exe"
+./scripts/build-codex-sandbox.ps1 -CodexExe $env:CODEX_EXE
+```
+
+The script builds only the native sandbox helper from a pinned source revision.
+It keeps external dependencies locked, preserves Codex's license and notice,
+and removes its temporary source and build files. CI uses the same script.
+
 ```sh
 cargo run --release -p kratos-engine   # runs the engine at http://127.0.0.1:4200
 cargo test --workspace                 # each engine test starts the real binary
