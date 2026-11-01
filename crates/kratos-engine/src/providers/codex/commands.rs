@@ -75,6 +75,13 @@ impl Actor {
             Command::CheckSettings { settings, reply } => {
                 let _ = reply.send(self.check_settings(&settings, None));
             }
+            Command::Access { thread_id, reply } => {
+                let access = self
+                    .load(&thread_id)
+                    .await
+                    .map(|()| self.threads[&thread_id].turn_settings().access());
+                let _ = reply.send(access);
+            }
             Command::Decide {
                 approval_id,
                 decision,
@@ -86,9 +93,10 @@ impl Actor {
             Command::Answer {
                 question_id,
                 answers,
+                limit,
                 reply,
             } => {
-                let answered = self.answer(question_id, answers).await;
+                let answered = self.answer(question_id, answers, limit).await;
                 let _ = reply.send(answered);
             }
             Command::Skills { thread_id, reply } => self.skills(thread_id, reply).await,

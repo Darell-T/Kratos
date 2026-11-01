@@ -30,10 +30,24 @@ pub use socket::{EventSocket, Incoming};
 pub struct Client {
     /// `host:port`: the TCP address, and the Host header unless a request names another.
     authority: String,
-    /// The file holding the engine's client token, sent as `Authorization: Bearer` unless a
-    /// request names its own.
-    token_file: Option<PathBuf>,
+    /// Sent as `Authorization: Bearer` unless a request names its own.
+    token: Option<Token>,
     acting_for: Option<ThreadId>,
+}
+
+#[derive(Clone)]
+enum Token {
+    File(PathBuf),
+    Fixed(String),
+}
+
+impl std::fmt::Debug for Token {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Token::File(path) => formatter.debug_tuple("File").field(path).finish(),
+            Token::Fixed(_) => formatter.write_str("Fixed([redacted])"),
+        }
+    }
 }
 
 impl Client {
@@ -45,7 +59,7 @@ impl Client {
         {
             Some(authority) if !authority.is_empty() && !authority.contains('/') => Ok(Client {
                 authority: authority.to_owned(),
-                token_file: None,
+                token: None,
                 acting_for: None,
             }),
             _ => Err(ClientError::Address(base_url.to_owned())),
@@ -57,7 +71,13 @@ impl Client {
     /// a client follows the engine through restarts. Without the file no token goes, as the
     /// TypeScript engine expects.
     pub fn with_token_from(mut self, home: &Path) -> Client {
-        self.token_file = Some(home.join(CLIENT_TOKEN_FILE));
+        self.token = Some(Token::File(home.join(CLIENT_TOKEN_FILE)));
+        self
+    }
+
+    /// Pins the token to this engine start so an old agent cannot regain access after a restart.
+    pub fn with_current_token(mut self) -> Client {
+        self.token = self.bearer().map(Token::Fixed);
         self
     }
 
@@ -118,7 +138,10 @@ impl Client {
     }
 
     fn bearer(&self) -> Option<String> {
-        let token = std::fs::read_to_string(self.token_file.as_ref()?).ok()?;
+        let token = match self.token.as_ref()? {
+            Token::File(path) => std::fs::read_to_string(path).ok()?,
+            Token::Fixed(bearer) => return Some(bearer.clone()),
+        };
         let token = token.trim();
         (!token.is_empty()).then(|| format!("Bearer {token}"))
     }
@@ -215,5 +238,18 @@ impl ClientError {
             self,
             ClientError::Connect { .. } | ClientError::Io(_) | ClientError::Socket(_)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_output_does_not_reveal_a_fixed_client_token() {
+        // Catches credentials reaching a log when a caller prints the client for diagnosis.
+        let mut client = Client::new("http://127.0.0.1:4200").unwrap();
+        client.token = Some(Token::Fixed("Bearer PRIVATE_TOKEN_FOR_TEST".to_owned()));
+        assert!(!format!("{client:?}").contains("PRIVATE_TOKEN_FOR_TEST"));
     }
 }

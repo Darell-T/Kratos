@@ -217,7 +217,7 @@ impl Actor {
         let thread = self.threads.get(thread_id).expect("loaded above");
         // Codex applies a context limit only when it loads the thread, so a thread loaded under
         // another limit is unloaded and loaded again.
-        let reload = match &thread.link {
+        let (reload, access) = match &thread.link {
             Link::Attached {
                 native_id,
                 context_limit,
@@ -225,9 +225,11 @@ impl Actor {
             } if *context_limit == thread.settings.context_limit_tokens => {
                 return Ok(Some(native_id.clone()));
             }
-            Link::Attached { native_id, .. } => Some(native_id.clone()),
+            Link::Attached {
+                native_id, access, ..
+            } => (Some(native_id.clone()), *access),
             Link::Attaching => return Ok(None),
-            Link::Detached => None,
+            Link::Detached => (None, thread.turn_settings().access()),
         };
         let Some(codex) = self.connection()? else {
             return Ok(None);
@@ -260,6 +262,7 @@ impl Actor {
                 thread_id,
                 generation,
                 context_limit,
+                access,
                 result,
             }
         });
@@ -271,6 +274,7 @@ impl Actor {
         thread_id: ThreadId,
         generation: u64,
         context_limit: Option<u64>,
+        access: kratos_protocol::AccessLimit,
         result: Result<Opened, RequestError>,
     ) {
         let Some(thread) = self.threads.get_mut(&thread_id) else {
@@ -286,6 +290,7 @@ impl Actor {
                     native_id: opened.native_id.clone(),
                     model: opened.model.clone(),
                     context_limit,
+                    access,
                 };
                 let recorded = if opened.is_new {
                     let plan = self.plan.clone();
@@ -317,6 +322,78 @@ impl Actor {
                     .await;
             }
         }
+    }
+
+    /// A fresh session keeps the history but drops approvals granted under wider access.
+    pub(super) fn fork_for_access(
+        &mut self,
+        thread_id: &ThreadId,
+        native_id: &str,
+        limit: Option<kratos_protocol::AccessLimit>,
+    ) -> bool {
+        let thread = &self.threads[thread_id];
+        let settings = match limit {
+            Some(limit) => thread.settings.limited_to(limit),
+            None => thread.settings.clone(),
+        };
+        let Link::Attached { access, .. } = &thread.link else {
+            unreachable!("the caller attached this thread");
+        };
+        if thread.turn_settings.is_none() || settings.access().covers(*access) {
+            return false;
+        }
+        let context_limit = settings.context_limit_tokens;
+        let access = settings.access();
+        let profile = Profile::for_settings(&settings).id().to_owned();
+        let mut params: types::ThreadForkParams = wire::required(json!({
+            "threadId": native_id, "ephemeral": false, "excludeTurns": true,
+            "deferGoalContinuation": true,
+        }));
+        params.cwd = Some(thread.folder.clone());
+        params.runtime_workspace_roots = Some(vec![types::AbsolutePathBuf(thread.folder.clone())]);
+        params.model = settings.model;
+        params.approval_policy = Some(policy::APPROVAL_POLICY);
+        params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
+        params.permissions = Some(profile);
+        params.config = thread_config(context_limit, self.settings.mcp.as_ref(), thread_id)
+            .and_then(|config| config.as_object().cloned());
+        let codex = self
+            .connection()
+            .expect("the attached server is running")
+            .expect("the attached server has connected");
+        self.threads
+            .get_mut(thread_id)
+            .expect("the thread is loaded")
+            .link = Link::Attaching;
+        let (thread_id, native_id, generation) =
+            (thread_id.clone(), native_id.to_owned(), self.generation);
+        self.spawn(async move {
+            let result = codex
+                .request::<methods::ThreadFork>(&params)
+                .await
+                .map(|forked| Opened {
+                    native_id: forked.thread.id,
+                    model: forked.model,
+                    turns: forked.thread.turns,
+                    is_new: true,
+                });
+            if result.is_ok() {
+                let params = types::ThreadUnsubscribeParams {
+                    thread_id: native_id,
+                };
+                if let Err(error) = codex.request::<methods::ThreadUnsubscribe>(&params).await {
+                    eprintln!("could not unsubscribe the previous Codex session: {error}");
+                }
+            }
+            Done::Attached {
+                thread_id,
+                generation,
+                context_limit,
+                access,
+                result,
+            }
+        });
+        true
     }
 
     /// Loads each thread waiting on Codex's history, starting Codex when it is down. A thread

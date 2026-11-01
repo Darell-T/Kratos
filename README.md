@@ -120,10 +120,18 @@ the engine checks each request against the agent's thread. A thread it creates g
 decide another thread's approval, and no request acts on the agent's own thread. The server runs outside the agent's
 sandbox, so sandboxed commands still cannot read the token.
 
+Tools use the current turn's permission, even when the user has saved different settings for the next turn.
+An agent reading its own thread sees that effective permission, so new threads inherit the right limit. A question
+answer is refused if the sender has less access than the receiving turn. MCP connections keep their original
+client token and must restart with the engine.
+
 A message from another thread runs in a turn of its own. When it starts, the receiving thread's settings drop to the
 narrower of the two threads' permissions, and to plan mode if either thread plans. They stay there after the turn,
 because the agent remembers the request, until the user raises them. Codex sees the message after a label that
 names the sender and its permission. Such a message cannot be steered into a running turn.
+
+Before a narrower turn starts, Kratos forks the native Codex session with the same conversation history. This
+drops command and file approvals granted for the previous session. The Kratos thread keeps its ID.
 
 ## Develop
 

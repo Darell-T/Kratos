@@ -6,7 +6,10 @@ use axum::extract::rejection::QueryRejection;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use kratos_protocol::{CreateThread, ListEvents, ListThreads, Provider, Seq, ThreadId};
+use kratos_protocol::{
+    ACTING_THREAD_HEADER, AccessLimit, CreateThread, ListEvents, ListThreads, Provider, Seq,
+    ThreadId,
+};
 
 use super::acting::Acting;
 use super::json::read_json;
@@ -53,20 +56,37 @@ pub(super) async fn create_thread(
 /// user.
 pub(super) async fn thread_details(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     id: ThreadPath,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    details(&state, thread_id).await
+    let access = if headers
+        .get(ACTING_THREAD_HEADER)
+        .and_then(|value| value.to_str().ok())
+        == Some(thread_id.as_str())
+    {
+        Acting::of(&state, &headers)
+            .await?
+            .map(|acting| acting.access)
+    } else {
+        None
+    };
+    details(&state, thread_id, access).await
 }
 
 pub(super) async fn details(
     state: &ServerState,
     thread_id: ThreadId,
+    access: Option<AccessLimit>,
 ) -> Result<Response, ApiError> {
-    let details = state
+    let mut details = state
         .store
         .call(move |store| store.thread_details(&thread_id))
         .await?;
+    if let Some(access) = access {
+        details.settings.permission = access.permission;
+        details.settings.plan_mode = access.plan_mode;
+    }
     Ok(json_reply(StatusCode::OK, &details))
 }
 

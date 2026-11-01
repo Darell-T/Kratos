@@ -551,3 +551,408 @@ fn only_a_full_access_agent_decides_another_thread_s_approval() {
     let answers = engine.fake_codex_answers(1);
     assert_eq!(answers[0]["result"], json!({ "decision": "accept" }));
 }
+
+#[test]
+fn a_next_turn_upgrade_does_not_widen_mcp_child_permissions() {
+    // Catches next-turn settings granting tools more access during a starting or completed turn.
+    for (permission, plan_mode) in [(Permission::AskMe, false), (Permission::FullAccess, true)] {
+        let home = tempfile::tempdir().unwrap();
+        let engine = RunningEngine::start(home.path());
+        let workspace = workspace(&engine);
+        let me = thread(&engine, &workspace, Provider::Codex, permission);
+        let path = format!("/api/threads/{}", me.id);
+        let initial = ThreadSettings {
+            permission,
+            plan_mode,
+            ..ThreadSettings::default()
+        };
+        engine
+            .client()
+            .put(&format!("{path}/settings"), &initial)
+            .unwrap()
+            .parse::<Value>()
+            .unwrap();
+        engine
+            .client()
+            .post(&format!("{path}/messages"), &json!({ "text": "first" }))
+            .unwrap();
+        engine.fake_codex_held("turn/start", 1);
+        let full = ThreadSettings {
+            permission: Permission::FullAccess,
+            ..ThreadSettings::default()
+        };
+        engine
+            .client()
+            .put(&format!("{path}/settings"), &full)
+            .unwrap()
+            .parse::<Value>()
+            .unwrap();
+        let mut mcp = Mcp::start(&engine, &me);
+
+        let (child, refused) = mcp.tool(
+            "create_thread",
+            json!({ "title": "worker", "permission": "fullAccess", "planMode": false }),
+        );
+        assert!(
+            refused,
+            "starting {permission:?}, plan {plan_mode}: {child}"
+        );
+        let (child, refused) = mcp.tool(
+            "create_thread",
+            json!({ "title": "worker", "permission": permission, "planMode": plan_mode }),
+        );
+        assert!(
+            !refused,
+            "a child at the current permission is allowed: {child}"
+        );
+        let (child, refused) = mcp.tool("create_thread", json!({ "title": "default worker" }));
+        assert!(
+            !refused,
+            "default child settings use the current turn: {child}"
+        );
+
+        engine.start_turn();
+        let deadline = Instant::now() + WAIT;
+        while engine.client().get(&path).unwrap().body["runningTurn"].is_null() {
+            assert!(Instant::now() < deadline, "the turn never started");
+            std::thread::yield_now();
+        }
+        engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+        while !engine.client().get(&path).unwrap().body["runningTurn"].is_null() {
+            assert!(Instant::now() < deadline, "the turn never ended");
+            std::thread::yield_now();
+        }
+        let (child, refused) = mcp.tool(
+            "create_thread",
+            json!({ "title": "worker", "permission": "fullAccess", "planMode": false }),
+        );
+        assert!(
+            refused,
+            "a late tool keeps the completed turn's permission: {child}"
+        );
+
+        engine
+            .client()
+            .post(&format!("{path}/messages"), &json!({ "text": "second" }))
+            .unwrap();
+        engine.fake_codex_held("turn/start", 2);
+        let (child, refused) = mcp.tool("create_thread", json!({ "title": "worker" }));
+        assert!(!refused, "the next turn gets the saved permission: {child}");
+    }
+}
+
+#[test]
+fn a_next_turn_upgrade_does_not_widen_a_running_senders_message_limit() {
+    // Catches an Ask me turn labelling its delegated message with a future Full access limit.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let workspace = workspace(&engine);
+    let me = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    let receiver = thread(&engine, &workspace, Provider::Codex, Permission::FullAccess);
+    let path = format!("/api/threads/{}", me.id);
+    engine
+        .client()
+        .post(&format!("{path}/messages"), &json!({ "text": "first" }))
+        .unwrap();
+    engine.start_turn();
+    let full = ThreadSettings {
+        permission: Permission::FullAccess,
+        ..ThreadSettings::default()
+    };
+    engine
+        .client()
+        .put(&format!("{path}/settings"), &full)
+        .unwrap()
+        .parse::<Value>()
+        .unwrap();
+
+    let (sent, refused) = Mcp::start(&engine, &me).tool(
+        "send_message",
+        json!({ "threadId": receiver.id, "text": "review" }),
+    );
+    assert!(!refused, "{sent}");
+    assert_eq!(
+        sent["limit"],
+        json!({ "permission": "askMe", "planMode": false })
+    );
+    let starts = engine.fake_codex_held("turn/start", 2);
+    assert_eq!(starts[1]["params"]["permissions"], "kratos-ask");
+    let details = engine
+        .client()
+        .get(&format!("/api/threads/{}", receiver.id))
+        .unwrap();
+    assert_eq!(details.body["settings"]["permission"], "askMe");
+}
+
+#[test]
+fn a_next_turn_upgrade_does_not_authorize_peer_approval_decisions() {
+    // Catches an active restricted turn approving a peer's request using saved future settings.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let workspace = workspace(&engine);
+    let worker = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    let me = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    engine
+        .client()
+        .post(
+            &format!("/api/threads/{}/messages", worker.id),
+            &json!({ "text": "work" }),
+        )
+        .unwrap();
+    engine.start_turn();
+    engine.fake_codex_request(codex_control::ask(Some("peer-approval".into()), "item/commandExecution/requestApproval", json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "c1", "startedAtMs": 0, "command": "cargo test" })));
+    let deadline = Instant::now() + WAIT;
+    let approval = loop {
+        let details = engine
+            .client()
+            .get(&format!("/api/threads/{}", worker.id))
+            .unwrap();
+        if let Some(id) = details.body["approvals"][0]["id"].as_str() {
+            break id.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the peer did not ask for approval"
+        );
+        std::thread::yield_now();
+    };
+    let path = format!("/api/threads/{}", me.id);
+    engine
+        .client()
+        .post(&format!("{path}/messages"), &json!({ "text": "first" }))
+        .unwrap();
+    engine.fake_codex_held("turn/start", 2);
+    let full = ThreadSettings {
+        permission: Permission::FullAccess,
+        ..ThreadSettings::default()
+    };
+    engine
+        .client()
+        .put(&format!("{path}/settings"), &full)
+        .unwrap()
+        .parse::<Value>()
+        .unwrap();
+    let mut mcp = Mcp::start(&engine, &me);
+
+    let (answer, refused) = mcp.tool(
+        "decide_approval",
+        json!({ "approvalId": approval, "decision": "accept" }),
+    );
+    assert!(refused, "the current turn must stay restricted: {answer}");
+    let details = engine
+        .client()
+        .get(&format!("/api/threads/{}", worker.id))
+        .unwrap();
+    assert_eq!(
+        details.body["approvals"][0]["id"], approval,
+        "a refused decision leaves the approval pending"
+    );
+}
+
+#[test]
+fn mcp_permissions_follow_idle_settings_until_the_first_turn_then_keep_the_turns_settings() {
+    // Catches freezing an unused thread's settings, or applying a queued downgrade to active tools.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let workspace = workspace(&engine);
+    let me = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    let path = format!("/api/threads/{}", me.id);
+    let full = ThreadSettings {
+        permission: Permission::FullAccess,
+        ..ThreadSettings::default()
+    };
+    engine
+        .client()
+        .put(&format!("{path}/settings"), &full)
+        .unwrap()
+        .parse::<Value>()
+        .unwrap();
+    let mut mcp = Mcp::start(&engine, &me);
+    let child = json!({ "title": "worker", "permission": "fullAccess", "planMode": false });
+    let (created, refused) = mcp.tool("create_thread", child.clone());
+    assert!(!refused, "settings apply before any turn: {created}");
+
+    engine
+        .client()
+        .post(&format!("{path}/messages"), &json!({ "text": "work" }))
+        .unwrap();
+    engine.fake_codex_held("turn/start", 1);
+    engine
+        .client()
+        .put(&format!("{path}/settings"), &ThreadSettings::default())
+        .unwrap()
+        .parse::<Value>()
+        .unwrap();
+    let (created, refused) = mcp.tool("create_thread", child);
+    assert!(
+        !refused,
+        "the running Full access turn keeps its permission: {created}"
+    );
+    assert_eq!(
+        engine.client().get(&path).unwrap().body["settings"]["permission"],
+        "askMe",
+        "the user still sees next-turn settings"
+    );
+}
+
+#[test]
+fn an_old_mcp_connection_cannot_gain_future_permission_after_an_engine_restart() {
+    // Catches an old agent reconnecting with a new token before a turn grants its saved upgrade.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let workspace = workspace(&engine);
+    let me = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
+    let path = format!("/api/threads/{}", me.id);
+    engine
+        .client()
+        .post(&format!("{path}/messages"), &json!({ "text": "work" }))
+        .unwrap();
+    engine.start_turn();
+    let deadline = Instant::now() + WAIT;
+    while engine.client().get(&path).unwrap().body["runningTurn"].is_null() {
+        assert!(Instant::now() < deadline, "the turn never started");
+        std::thread::yield_now();
+    }
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+    while !engine.client().get(&path).unwrap().body["runningTurn"].is_null() {
+        assert!(Instant::now() < deadline, "the turn never ended");
+        std::thread::yield_now();
+    }
+    let full = ThreadSettings {
+        permission: Permission::FullAccess,
+        ..ThreadSettings::default()
+    };
+    engine
+        .client()
+        .put(&format!("{path}/settings"), &full)
+        .unwrap()
+        .parse::<Value>()
+        .unwrap();
+    let mut old_mcp = Mcp::start(&engine, &me);
+    let port = engine.port();
+    engine.kill();
+    let engine = RunningEngine::start_on(home.path(), port);
+    let (created, refused) = old_mcp.tool(
+        "create_thread",
+        json!({ "title": "worker", "permission": "fullAccess" }),
+    );
+    assert!(
+        refused,
+        "the old MCP connection must be restarted: {created}"
+    );
+    let (whoami, refused) = Mcp::start(&engine, &me).tool("whoami", json!({}));
+    assert!(
+        !refused,
+        "a new MCP connection can read the thread: {whoami}"
+    );
+}
+
+#[test]
+fn a_question_answer_cannot_exceed_the_senders_or_the_receivers_turn_permission() {
+    // Catches question answers bypassing the sender limit, or using the receiver's future settings.
+    for (sender_permission, sender_plans, receiver_permission, next_permission, refused) in [
+        (
+            Permission::AskMe,
+            false,
+            Permission::FullAccess,
+            Permission::AskMe,
+            true,
+        ),
+        (
+            Permission::FullAccess,
+            true,
+            Permission::FullAccess,
+            Permission::FullAccess,
+            true,
+        ),
+        (
+            Permission::AskMe,
+            false,
+            Permission::AskMe,
+            Permission::FullAccess,
+            false,
+        ),
+    ] {
+        let home = tempfile::tempdir().unwrap();
+        let engine = RunningEngine::start(home.path());
+        let workspace = workspace(&engine);
+        let receiver = thread(&engine, &workspace, Provider::Codex, receiver_permission);
+        let sender = thread(&engine, &workspace, Provider::Codex, sender_permission);
+        let sender_settings = ThreadSettings {
+            permission: sender_permission,
+            plan_mode: sender_plans,
+            ..ThreadSettings::default()
+        };
+        engine
+            .client()
+            .put(
+                &format!("/api/threads/{}/settings", sender.id),
+                &sender_settings,
+            )
+            .unwrap()
+            .parse::<Value>()
+            .unwrap();
+        let path = format!("/api/threads/{}", receiver.id);
+        engine
+            .client()
+            .post(&format!("{path}/messages"), &json!({ "text": "work" }))
+            .unwrap();
+        engine.start_turn();
+        let next = ThreadSettings {
+            permission: next_permission,
+            ..ThreadSettings::default()
+        };
+        engine
+            .client()
+            .put(&format!("{path}/settings"), &next)
+            .unwrap()
+            .parse::<Value>()
+            .unwrap();
+        engine.fake_codex_request(codex_control::ask(
+            Some("question-1".into()),
+            "item/tool/requestUserInput",
+            json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "q1", "isBlocking": false,
+                    "questions": [{ "id": "color", "header": "Color", "question": "Which color?",
+                                    "options": [{ "label": "Red", "description": "Red" }] }] }),
+        ));
+        let deadline = Instant::now() + WAIT;
+        let question = loop {
+            let details = engine.client().get(&path).unwrap();
+            if let Some(id) = details.body["questions"][0]["id"].as_str() {
+                break id.to_owned();
+            }
+            assert!(Instant::now() < deadline, "the question did not arrive");
+            std::thread::yield_now();
+        };
+
+        let (answer, was_refused) = Mcp::start(&engine, &sender).tool(
+            "answer_question",
+            json!({ "questionId": question, "answers": { "color": ["Red"] } }),
+        );
+        assert_eq!(
+            was_refused, refused,
+            "sender {sender_permission:?}, plans {sender_plans}, receiver {receiver_permission:?}: {answer}"
+        );
+        if refused {
+            let details = engine.client().get(&path).unwrap();
+            assert_eq!(
+                details.body["questions"][0]["id"], question,
+                "a refused answer leaves the question pending"
+            );
+            let answered = engine
+                .client()
+                .post(
+                    &format!("/api/questions/{question}"),
+                    &json!({ "answers": { "color": ["Blue"] } }),
+                )
+                .unwrap();
+            assert_eq!(answered.status, 200, "the user can still answer");
+        }
+        let answers = engine.fake_codex_answers(1);
+        let expected = if refused { "Blue" } else { "Red" };
+        assert_eq!(
+            answers[0]["result"]["answers"]["color"]["answers"],
+            json!([expected])
+        );
+    }
+}

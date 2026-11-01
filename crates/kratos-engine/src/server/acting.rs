@@ -7,8 +7,10 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use kratos_protocol::{ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings};
-use kratos_store::{ProviderThread, StoreError};
+use kratos_protocol::{
+    ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, Provider, ThreadId, ThreadSettings,
+};
+use kratos_store::StoreError;
 
 use super::{ApiError, ServerState};
 
@@ -21,7 +23,10 @@ pub(super) async fn refuse_agents(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
-pub(super) struct Acting(ProviderThread);
+pub(super) struct Acting {
+    thread_id: ThreadId,
+    pub(super) access: AccessLimit,
+}
 
 impl Acting {
     /// The thread the request's `Kratos-Thread` header names, or `None` for the user.
@@ -48,15 +53,18 @@ impl Acting {
                 }
                 error => error.into(),
             })?;
-        Ok(Some(Acting(thread)))
-    }
-
-    fn access(&self) -> AccessLimit {
-        self.0.settings.access()
+        let access = match thread.thread.provider {
+            Provider::Codex => state.codex()?.access(thread.thread.id.clone()).await?,
+            _ => thread.settings.access(),
+        };
+        Ok(Some(Acting {
+            thread_id: thread.thread.id,
+            access,
+        }))
     }
 
     pub(super) fn not_on_itself(&self, thread_id: &ThreadId) -> Result<(), ApiError> {
-        if self.0.thread.id == *thread_id {
+        if self.thread_id == *thread_id {
             return Err(forbidden(
                 "That is your own thread. Kratos's tools act on other threads.",
             ));
@@ -66,7 +74,7 @@ impl Acting {
 
     /// A thread it creates gets no more access than it has.
     pub(super) fn may_create(&self, settings: &ThreadSettings) -> Result<(), ApiError> {
-        if !self.access().covers(settings.access()) {
+        if !self.access.covers(settings.access()) {
             return Err(forbidden(
                 "A thread cannot create a thread with more permission than its own.",
             ));
@@ -77,7 +85,7 @@ impl Acting {
     /// Only a Full access thread decides another thread's approval. A lower one would approve what
     /// its own permission has to ask the user about.
     pub(super) fn may_decide(&self) -> Result<(), ApiError> {
-        if self.access() != AccessLimit::FULL {
+        if self.access != AccessLimit::FULL {
             return Err(forbidden(
                 "Only a Full access thread may decide another thread's approval. Ask the user instead.",
             ));
@@ -88,8 +96,8 @@ impl Acting {
     /// What a message it sends to another thread records as its origin.
     pub(super) fn origin(&self) -> MessageOrigin {
         MessageOrigin::Thread {
-            thread_id: self.0.thread.id.clone(),
-            limit: self.access(),
+            thread_id: self.thread_id.clone(),
+            limit: self.access,
         }
     }
 }
