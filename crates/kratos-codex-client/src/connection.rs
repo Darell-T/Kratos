@@ -181,10 +181,13 @@ fn error_reply(id: &RequestId, code: i64, message: &str) -> Value {
     json!({ "id": id, "error": { "code": code, "message": message } })
 }
 
-/// A handle to the connection. Clones share it.
+/// A shared connection handle. Dropping the last handle requests process-tree cleanup.
+/// Call [`Codex::close`] to wait until the tree has ended.
 #[derive(Clone, Debug)]
 pub struct Codex {
     shared: Arc<Shared>,
+    // Readers and unanswered requests share state, but only public handles own shutdown.
+    close: Arc<Mutex<Option<oneshot::Sender<Duration>>>>,
 }
 
 #[derive(Debug)]
@@ -194,7 +197,6 @@ struct Shared {
     state: Mutex<State>,
     request_timeout: Duration,
     close_timeout: Duration,
-    close: Mutex<Option<oneshot::Sender<Duration>>>,
     tree_ended: watch::Receiver<bool>,
 }
 
@@ -280,7 +282,6 @@ pub async fn connect(
         state: Mutex::new(State::default()),
         request_timeout: launch.request_timeout,
         close_timeout: launch.close_timeout,
-        close: Mutex::new(Some(close_sender)),
         tree_ended,
     });
     let stderr_lines = Arc::new(Mutex::new(VecDeque::new()));
@@ -304,7 +305,10 @@ pub async fn connect(
         exited,
     ));
 
-    let codex = Codex { shared };
+    let codex = Codex {
+        shared,
+        close: Arc::new(Mutex::new(Some(close_sender))),
+    };
     let params = types::InitializeParams {
         capabilities: Some(capabilities),
         client_info: launch.client_info.clone(),
@@ -418,7 +422,6 @@ impl Codex {
     /// not read the server's last messages; calling it again only waits.
     pub async fn close(&self) {
         let close = self
-            .shared
             .close
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

@@ -467,6 +467,54 @@ async fn a_stalled_request_times_out_without_breaking_later_ones() {
 }
 
 #[tokio::test]
+async fn dropping_one_handle_leaves_its_clone_usable() {
+    let (codex, _incoming) = connect_fake().await;
+    let survivor = codex.clone();
+
+    drop(codex);
+
+    assert_eq!(
+        control(&survivor, "test/echo", json!({ "still": "connected" })).await,
+        json!({ "still": "connected" })
+    );
+    survivor.close().await;
+}
+
+#[tokio::test]
+async fn dropping_the_last_handle_ends_the_tree_even_with_an_unanswered_request() {
+    let (codex, mut incoming) = connect_fake().await;
+    let server = control(&codex, "test/pid", json!({}))
+        .await
+        .as_u64()
+        .unwrap() as u32;
+    let grandchild = control(&codex, "test/spawnChild", json!({}))
+        .await
+        .as_u64()
+        .unwrap() as u32;
+    assert!(fake_agents::process_is_running(grandchild));
+    control_request(
+        &codex,
+        codex_control::ask(None, "item/tool/requestUserInput", question("thread-A")),
+    )
+    .await;
+    let Incoming::Request(request) = next(&mut incoming).await else {
+        panic!("expected the unanswered question");
+    };
+
+    drop(codex);
+
+    let Incoming::Exited(_) = next(&mut incoming).await else {
+        panic!("the process must exit when its last handle is dropped");
+    };
+    assert!(!fake_agents::process_is_running(server));
+    assert!(!fake_agents::process_is_running(grandchild));
+    assert!(
+        !request.answer(answers(&[])),
+        "the ended connection rejects answers"
+    );
+}
+
+#[tokio::test]
 async fn close_ends_the_process_tree_and_later_requests_fail() {
     let (codex, mut incoming) = connect_fake().await;
     let server = control(&codex, "test/pid", json!({}))
