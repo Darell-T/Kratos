@@ -116,8 +116,9 @@ impl Actor {
     pub(super) async fn start_ready(&mut self) {
         while let Some(thread_id) = self.ready.pop_front() {
             self.dispatch(&thread_id).await;
-            if self.ready.contains(&thread_id) {
+            if self.ready.back() == Some(&thread_id) {
                 // Still no slot; it keeps its place.
+                self.ready.rotate_right(1);
                 return;
             }
         }

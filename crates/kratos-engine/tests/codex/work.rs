@@ -3,13 +3,14 @@
 
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use kratos_engine::providers::codex::ProviderError;
 use kratos_protocol::{
-    AccessLimit, MessageOrigin, MessageStatus, PauseReason, Permission, ThreadEventBody,
+    AccessLimit, MessageOrigin, MessageStatus, PauseReason, Permission, Seq, ThreadEventBody,
 };
 use serde_json::json;
 
-use crate::harness::{Harness, Options, message_id, text_input};
+use crate::harness::{Harness, Options, WAIT, message_id, text_input};
 
 const THREAD: &str = "thread-A";
 
@@ -254,4 +255,63 @@ async fn at_most_four_threads_wait_on_codex_to_start_a_turn() {
     assert_eq!(harness.turn_requests().await.len(), 4);
     harness.settle_start("turn-1", "inProgress").await;
     harness.held("turn/start", 5).await;
+}
+
+#[tokio::test]
+async fn waiting_threads_take_freed_start_slots_in_order() {
+    let mut harness = Harness::start(Options::default()).await;
+    let mut threads = vec![harness.thread_id.clone()];
+    for n in 2..=7 {
+        threads.push(harness.another_thread(&format!("project-{n}")).await);
+    }
+    for (n, thread_id) in threads.iter().enumerate() {
+        let mut events = harness
+            .hub
+            .follow(thread_id.clone(), Seq::BEFORE_FIRST)
+            .await
+            .unwrap();
+        harness
+            .provider
+            .send(
+                thread_id.clone(),
+                message_id(&format!("m{n}")),
+                text_input("go"),
+                MessageOrigin::User,
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let page = events.next().await.unwrap().unwrap();
+                if page
+                    .iter()
+                    .any(|event| matches!(event.event, ThreadEventBody::ProviderSession { .. }))
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the thread attaches to Codex");
+        // The session is recorded before dispatch; a later actor command waits for dispatch too.
+        harness.provider.access(thread_id.clone()).await.unwrap();
+        if n < 4 {
+            harness.held("turn/start", n + 1).await;
+        }
+    }
+
+    for count in 5..=7 {
+        harness
+            .settle_start(&format!("turn-{count}"), "inProgress")
+            .await;
+        harness.held("turn/start", count).await;
+    }
+    let started = harness.turn_requests().await;
+    harness.provider.shutdown().await;
+
+    let order: Vec<_> = started
+        .iter()
+        .map(|request| request["params"]["clientUserMessageId"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]);
 }
