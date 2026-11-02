@@ -8,7 +8,7 @@
 //! A cancel is available whenever a task is alive. A role change is available until its application
 //! checkpoint starts. User messages are facts that never change the phase.
 
-use std::fmt;
+use std::{fmt, mem};
 
 use serde::{Deserialize, Serialize};
 
@@ -342,7 +342,7 @@ fn approve_plan(
         plan,
         author,
         revision,
-    } = view.plan.clone()
+    } = mem::replace(&mut view.plan, PlanState::NoPlan)
     else {
         unreachable!("plan approval waits for a drafted plan");
     };
@@ -477,19 +477,19 @@ fn replan(
     seq: FactSeq,
 ) -> Result<Box<TaskView>, Rejection> {
     view.suspended.clear();
-    if let PlanState::Approved {
-        plan,
-        author,
-        revision,
-        ..
-    } = view.plan.clone()
-    {
-        view.plan = PlanState::Drafted {
+    view.plan = match mem::replace(&mut view.plan, PlanState::NoPlan) {
+        PlanState::Approved {
             plan,
             author,
             revision,
-        };
-    }
+            ..
+        } => PlanState::Drafted {
+            plan,
+            author,
+            revision,
+        },
+        other => other,
+    };
     let feedback = match instructions {
         Some(text) => format!("{reason}\n\n{text}"),
         None => reason.to_owned(),
@@ -518,11 +518,13 @@ fn direct(
     view.new_leg().begin_step(Work::Implement { brief }, seq)
 }
 
-fn resume(view: Box<TaskView>, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
+fn resume(mut view: Box<TaskView>, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
+    let phase = view.take_phase();
     let Phase::Waiting {
         waiting: Waiting::Trouble { left, .. },
-    } = view.phase.clone()
+    } = phase
     else {
+        view.phase = phase;
         return Err(not_allowed(&view, DecisionKind::Resume));
     };
     Ok(view.retake(left, seq))

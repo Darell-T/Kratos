@@ -287,11 +287,11 @@ impl TaskView {
     }
 
     fn on_step_failed(
-        self: Box<Self>,
+        mut self: Box<Self>,
         step: FailedStep,
         error: String,
     ) -> Result<Box<TaskView>, Rejection> {
-        let left = match (&self.phase, step) {
+        let left = match (self.take_phase(), step) {
             (
                 Phase::Active {
                     activity: activity @ Activity::Preparing { .. },
@@ -309,8 +309,11 @@ impl TaskView {
                     activity: activity @ Activity::Checking { .. },
                 },
                 FailedStep::Check,
-            ) => activity.clone(),
-            _ => return Err(self.misfit("step_failed")),
+            ) => activity,
+            (other, _) => {
+                self.phase = other;
+                return Err(self.misfit("step_failed"));
+            }
         };
         let detail = format!("{}: {error}", step.as_str());
         Ok(self.pause_in_trouble(Trouble::System, detail, left))
@@ -449,10 +452,12 @@ impl TaskView {
     /// `bindings = to`, and the deferred step starts under the new roles. The new holder gets fresh
     /// fix attempts. Rounds, findings, probes, messages, and finished evidence all stay.
     fn on_roles_reassigned(mut self: Box<Self>, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
+        let phase = self.take_phase();
         let Phase::Active {
             activity: Activity::Rebinding { to, then, step },
-        } = self.phase.clone()
+        } = phase
         else {
+            self.phase = phase;
             return Err(self.misfit("roles_reassigned"));
         };
         self.bindings = to;
@@ -466,15 +471,19 @@ impl TaskView {
         mut self: Box<Self>,
         reason: String,
     ) -> Result<Box<TaskView>, Rejection> {
+        let phase = self.take_phase();
         let Phase::Active {
             activity: Activity::Rebinding { then, step, .. },
-        } = self.phase.clone()
+        } = phase
         else {
+            self.phase = phase;
             return Err(self.misfit("role_change_rejected"));
         };
         self.pending_roles = None;
-        let held = self.start_turn(then, step, step.0)?;
-        let Phase::Active { activity: left } = held.phase.clone() else {
+        let mut held = self.start_turn(then, step, step.0)?;
+        let phase = held.take_phase();
+        let Phase::Active { activity: left } = phase else {
+            held.phase = phase;
             return Err(held.misfit("role_change_rejected"));
         };
         Ok(held.pause_in_trouble(Trouble::RoleChange, reason, left))

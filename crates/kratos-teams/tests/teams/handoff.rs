@@ -3,10 +3,11 @@
 
 use kratos_teams::decisions::{Decision, DecisionKind};
 use kratos_teams::facts::Outcome;
-use kratos_teams::facts::{Ended, Fact, FailedStep};
+use kratos_teams::facts::{Ended, Fact, FailedStep, StoredFact};
+use kratos_teams::fold::Rejection;
 use kratos_teams::members::Role;
 use kratos_teams::next_step::Step;
-use kratos_teams::view::{ApprovedBy, Note, Phase, Trouble};
+use kratos_teams::view::{Activity, ApprovedBy, Note, Phase, Trouble, Waiting};
 
 use crate::replay::*;
 use crate::support::*;
@@ -415,6 +416,106 @@ fn a_fact_for_a_step_the_task_is_not_in_is_refused() {
     });
 
     assert!(refused.is_err());
+}
+
+#[test]
+fn rejected_engine_facts_name_the_original_phase() {
+    let mut task = Task::two().script(script(vec![implements()], vec![approves()]));
+    task.run();
+    task.append(Fact::UserDecided {
+        decision: Decision::Cancel,
+    })
+    .expect("cancel applies");
+    task.step();
+    let views = prefix_views(task.log());
+    let phases = [
+        ("preparing", FailedStep::Commit),
+        ("working", FailedStep::Check),
+        ("committing", FailedStep::Check),
+        ("working", FailedStep::Prepare),
+        ("checking", FailedStep::Commit),
+        ("approved", FailedStep::Prepare),
+        ("closing", FailedStep::Prepare),
+        ("closed", FailedStep::Prepare),
+    ];
+    assert_eq!(views.len(), phases.len());
+
+    for (view, (phase, step)) in views.iter().zip(phases) {
+        for (fact, name) in [
+            (
+                Fact::StepFailed {
+                    step,
+                    error: "the operation failed".to_owned(),
+                },
+                "step_failed",
+            ),
+            (Fact::RolesReassigned, "roles_reassigned"),
+            (
+                Fact::RoleChangeRejected {
+                    reason: "the reviewer is not signed in".to_owned(),
+                },
+                "role_change_rejected",
+            ),
+        ] {
+            assert_eq!(
+                view.accepts(&fact),
+                Err(Rejection::Misfit { fact: name, phase }),
+                "{name} after fact {:?}",
+                view.seq
+            );
+        }
+    }
+}
+
+#[test]
+fn a_system_step_failure_and_resume_preserve_the_activity_and_task_data() {
+    let mut task = Task::two().script(script(vec![implements()], vec![approves()]));
+    task.run();
+    let mut checked = 0;
+
+    for mut expected in prefix_views(task.log()) {
+        let Phase::Active { activity } = &expected.phase else {
+            continue;
+        };
+        let step = match activity {
+            Activity::Preparing { .. } => FailedStep::Prepare,
+            Activity::Committing { .. } => FailedStep::Commit,
+            Activity::Checking { .. } => FailedStep::Check,
+            _ => continue,
+        };
+        let failed = expected
+            .clone()
+            .apply(StoredFact {
+                seq: expected.seq.next(),
+                fact: Fact::StepFailed {
+                    step,
+                    error: "the operation failed".to_owned(),
+                },
+            })
+            .expect("the running system step can fail");
+        let Phase::Waiting {
+            waiting: Waiting::Trouble { left, .. },
+        } = &failed.phase
+        else {
+            panic!("the failed step pauses in trouble");
+        };
+        assert_eq!(left, activity, "the failed {step:?} activity is kept whole");
+
+        let seq = failed.seq.next();
+        let resumed = failed
+            .apply(StoredFact {
+                seq,
+                fact: Fact::UserDecided {
+                    decision: Decision::Resume,
+                },
+            })
+            .expect("the failed system step resumes");
+
+        expected.seq = seq;
+        assert_eq!(resumed, expected, "resuming {step:?} preserves the task");
+        checked += 1;
+    }
+    assert_eq!(checked, 3, "prepare, commit, and check were exercised");
 }
 
 #[test]
