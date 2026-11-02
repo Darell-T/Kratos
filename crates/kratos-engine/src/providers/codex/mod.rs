@@ -33,8 +33,8 @@ use std::time::Duration;
 
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_protocol::{
-    ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
-    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, Skill, ThreadId,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId,
+    Message, MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, Skill, ThreadId,
     ThreadSettings,
 };
 use kratos_store::StoreError;
@@ -109,6 +109,8 @@ pub enum ProviderError {
     /// fail. The text says what would.
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    Forbidden(String),
     /// The setting is not one the pinned Codex supports, or is out of its reported bounds (D76).
     #[error("{0}")]
     Unsupported(String),
@@ -276,6 +278,12 @@ impl CodexProvider {
             .await
     }
 
+    /// The current or last turn's access, or the settings before the first turn starts.
+    pub async fn access(&self, thread_id: ThreadId) -> Result<AccessLimit, ProviderError> {
+        self.ask(|reply| actor::Command::Access { thread_id, reply })
+            .await
+    }
+
     /// Records the first decision on an approval and sends it to Codex. A later decision gets the
     /// recorded outcome (D83).
     pub async fn decide(
@@ -295,10 +303,12 @@ impl CodexProvider {
         &self,
         question_id: QuestionId,
         answers: BTreeMap<String, Vec<String>>,
+        limit: Option<AccessLimit>,
     ) -> Result<QuestionOutcome, ProviderError> {
         self.ask(|reply| actor::Command::Answer {
             question_id,
             answers,
+            limit,
             reply,
         })
         .await

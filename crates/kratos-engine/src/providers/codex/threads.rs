@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use kratos_codex_client::types;
-use kratos_protocol::{ContextUsage, FileChange, Message, MessageId, ThreadSettings, TurnId};
+use kratos_protocol::{
+    AccessLimit, ContextUsage, FileChange, Message, MessageId, ThreadSettings, TurnId,
+};
 
 use super::actor::Reply;
 use crate::providers::changes::ChangesRecorder;
@@ -14,7 +16,8 @@ pub(super) struct ThreadState {
     /// The settings the current or last turn started with. Codex's requests during a turn are
     /// decided by these, so a change applies from the next turn (D87). A request that arrives with
     /// no turn is decided by the last turn's.
-    pub turn_settings: ThreadSettings,
+    /// `None` before the first turn, when settings changes have no running work to affect.
+    pub turn_settings: Option<ThreadSettings>,
     pub link: Link,
     pub turn: Turn,
     /// Messages being steered into the running turn. The queue waits for their answers.
@@ -31,7 +34,7 @@ impl ThreadState {
     pub fn new(folder: String, settings: ThreadSettings) -> ThreadState {
         ThreadState {
             folder,
-            turn_settings: settings.clone(),
+            turn_settings: None,
             settings,
             link: Link::Detached,
             turn: Turn::Idle,
@@ -39,6 +42,10 @@ impl ThreadState {
             file_items: HashMap::new(),
             discards: Vec::new(),
         }
+    }
+
+    pub fn turn_settings(&self) -> &ThreadSettings {
+        self.turn_settings.as_ref().unwrap_or(&self.settings)
     }
 
     /// The thread's Codex id, when it is loaded in the running app-server.
@@ -71,6 +78,8 @@ pub(super) enum Link {
         model: String,
         /// The context limit Codex loaded the thread with (D76).
         context_limit: Option<u64>,
+        /// The access under which this session may have cached approval grants.
+        access: AccessLimit,
     },
 }
 

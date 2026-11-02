@@ -302,6 +302,7 @@ impl From<ProviderError> for ApiError {
             | ProviderError::UnknownApproval(_)
             | ProviderError::UnknownQuestion(_) => ApiError::new(StatusCode::NOT_FOUND, error),
             ProviderError::Conflict(_) => ApiError::new(StatusCode::CONFLICT, error),
+            ProviderError::Forbidden(_) => ApiError::new(StatusCode::FORBIDDEN, error),
             ProviderError::Unsupported(_) => ApiError::bad_request(error.to_string()),
             ProviderError::Unavailable(_) | ProviderError::Stopped => {
                 ApiError::unavailable(error.to_string())

@@ -8,8 +8,8 @@ use std::collections::{BTreeMap, HashMap};
 
 use kratos_codex_client::{IncomingRequest, RequestId, ServerRequest, ServerResponse, types};
 use kratos_protocol::{
-    Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest, AskReason,
-    QuestionId, QuestionOutcome, ThreadId, TurnId,
+    AccessLimit, Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest,
+    AskReason, QuestionId, QuestionOutcome, ThreadId, TurnId,
 };
 use kratos_store::{Settle, StoreError, ThreadWrite};
 use uuid::Uuid;
@@ -189,7 +189,7 @@ impl Actor {
                         wants_more_permissions: params.additional_permissions.is_some(),
                         wants_network: params.network_approval_context.is_some(),
                     };
-                    policy::decide_command(&thread.turn_settings, &ask, self.settings.platform)
+                    policy::decide_command(thread.turn_settings(), &ask, self.settings.platform)
                 };
                 let shown = ApprovalRequest::Command {
                     command: params.command.clone().unwrap_or_default(),
@@ -212,7 +212,7 @@ impl Actor {
                 let thread = &self.threads[&thread_id];
                 let changes = thread.file_items.get(&params.item_id).cloned();
                 let verdict = policy::decide_patch(
-                    &thread.turn_settings,
+                    thread.turn_settings(),
                     changes.as_deref(),
                     params.grant_root.is_some(),
                     std::path::Path::new(&thread.folder),
@@ -371,7 +371,16 @@ impl Actor {
         &mut self,
         question_id: QuestionId,
         answers: BTreeMap<String, Vec<String>>,
+        limit: Option<AccessLimit>,
     ) -> Result<QuestionOutcome, ProviderError> {
+        if let (Some(limit), Some(waiting)) = (limit, self.requests.questions.get(&question_id))
+            && !limit.covers(self.threads[&waiting.thread_id].turn_settings().access())
+        {
+            return Err(ProviderError::Forbidden(
+                "A thread cannot answer a question running with more permission than its own."
+                    .to_owned(),
+            ));
+        }
         let Some(waiting) = self.requests.questions.remove(&question_id) else {
             let lookup = question_id.clone();
             return self

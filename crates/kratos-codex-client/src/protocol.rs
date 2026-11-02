@@ -34,6 +34,7 @@ methods! {
     Initialize = "initialize": types::InitializeParams => types::InitializeResponse;
     ThreadStart = "thread/start": types::ThreadStartParams => types::ThreadStartResponse;
     ThreadResume = "thread/resume": types::ThreadResumeParams => types::ThreadResumeResponse;
+    ThreadFork = "thread/fork": types::ThreadForkParams => types::ThreadForkResponse;
     ThreadRead = "thread/read": types::ThreadReadParams => types::ThreadReadResponse;
     ThreadUnsubscribe = "thread/unsubscribe": types::ThreadUnsubscribeParams => types::ThreadUnsubscribeResponse;
     TurnStart = "turn/start": types::TurnStartParams => types::TurnStartResponse;

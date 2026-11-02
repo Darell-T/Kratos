@@ -165,7 +165,7 @@ pub(super) async fn stop(
         acting.not_on_itself(&thread_id)?;
     }
     state.codex()?.stop(thread_id.clone()).await?;
-    details(&state, thread_id).await
+    details(&state, thread_id, None).await
 }
 
 /// `POST /api/threads/{id}/resume`: 200 with the thread's details.
@@ -175,7 +175,7 @@ pub(super) async fn resume(
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
     state.codex()?.resume(thread_id.clone()).await?;
-    details(&state, thread_id).await
+    details(&state, thread_id, None).await
 }
 
 /// `PUT /api/threads/{id}/settings`: 200 with the thread's details. The settings apply from the
@@ -189,7 +189,7 @@ pub(super) async fn put_settings(
     let codex = state.codex()?;
     let settings: ThreadSettings = read_json(body).await?;
     codex.set_settings(thread_id.clone(), settings).await?;
-    details(&state, thread_id).await
+    details(&state, thread_id, None).await
 }
 
 /// `GET /api/threads/{id}/skills`: 200 with the skills Codex reports for the thread's folder, and
@@ -242,7 +242,8 @@ pub(super) async fn answer(
     body: Body,
 ) -> Result<Response, ApiError> {
     let question_id = path(id)?;
-    if let Some(acting) = Acting::of(&state, &headers).await? {
+    let acting = Acting::of(&state, &headers).await?;
+    if let Some(acting) = &acting {
         let lookup = question_id.clone();
         let stored = state
             .store
@@ -254,7 +255,9 @@ pub(super) async fn answer(
     }
     let codex = state.codex()?;
     let AnswerQuestion { answers } = read_json(body).await?;
-    let outcome = codex.answer(question_id, answers).await?;
+    let outcome = codex
+        .answer(question_id, answers, acting.map(|acting| acting.access))
+        .await?;
     Ok(json_reply(StatusCode::OK, &outcome))
 }
 

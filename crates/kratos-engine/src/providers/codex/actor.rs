@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
-    ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
-    MessageId, MessageInput, MessageOrigin, MessageStatus, QuestionId, QuestionOutcome, Skill,
-    ThreadId, ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId,
+    Message, MessageId, MessageInput, MessageOrigin, MessageStatus, QuestionId, QuestionOutcome,
+    Skill, ThreadId, ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -76,6 +76,10 @@ pub(super) enum Command {
         settings: ThreadSettings,
         reply: Reply<()>,
     },
+    Access {
+        thread_id: ThreadId,
+        reply: Reply<AccessLimit>,
+    },
     Decide {
         approval_id: ApprovalId,
         decision: ApprovalDecision,
@@ -84,6 +88,7 @@ pub(super) enum Command {
     Answer {
         question_id: QuestionId,
         answers: BTreeMap<String, Vec<String>>,
+        limit: Option<AccessLimit>,
         reply: Reply<QuestionOutcome>,
     },
     Skills {
@@ -139,6 +144,7 @@ pub(super) enum Done {
         generation: u64,
         /// The context limit the thread was loaded with (D76).
         context_limit: Option<u64>,
+        access: AccessLimit,
         result: Result<Opened, RequestError>,
     },
     StartAnswered {
@@ -286,9 +292,10 @@ impl Actor {
                 thread_id,
                 generation,
                 context_limit,
+                access,
                 result,
             } => {
-                self.on_attached(thread_id, generation, context_limit, result)
+                self.on_attached(thread_id, generation, context_limit, access, result)
                     .await
             }
             Done::StartAnswered {

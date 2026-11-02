@@ -77,6 +77,9 @@ impl Actor {
                 return;
             }
         };
+        if self.fork_for_access(thread_id, next.origin.limit()) {
+            return;
+        }
         let starting = self
             .threads
             .values()
@@ -160,7 +163,11 @@ impl Actor {
             work: TurnWork::default(),
         };
         thread.file_items.clear();
-        thread.turn_settings = thread.settings.clone();
+        thread.turn_settings = Some(thread.settings.clone());
+        let super::threads::Link::Attached { access, .. } = &mut thread.link else {
+            unreachable!("a turn starts only after its thread is attached");
+        };
+        *access = thread.settings.access();
         let mut params = turn_start_params(native_id, &message, thread.model(), &thread.settings);
         params.runtime_workspace_roots = Some(vec![types::AbsolutePathBuf(thread.folder.clone())]);
         let thread_id = thread_id.clone();

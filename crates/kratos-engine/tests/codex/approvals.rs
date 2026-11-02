@@ -468,12 +468,12 @@ async fn a_question_takes_the_first_answer_only() {
     let answer = |text: &str| BTreeMap::from([("color".to_owned(), vec![text.to_owned()])]);
     let first = harness
         .provider
-        .answer(question.id.clone(), answer("Red"))
+        .answer(question.id.clone(), answer("Red"), None)
         .await
         .unwrap();
     let second = harness
         .provider
-        .answer(question.id, answer("Blue"))
+        .answer(question.id, answer("Blue"), None)
         .await
         .unwrap();
 

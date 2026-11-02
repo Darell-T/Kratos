@@ -60,6 +60,54 @@ $acl.SetAccessRule($rule)
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
+async fn narrower_permissions_start_a_fresh_session_without_losing_history() {
+    // Catches the real fork failing, reusing session grants, or discarding earlier conversation.
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::FullAccess,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::Text("FIRST_REPLY_HISTORY_CONTROL".to_owned()),
+            Reply::Text("SECOND_REPLY".to_owned()),
+        ],
+    )
+    .await;
+    harness.send("before-permission-change");
+    harness.completed().await;
+    harness
+        .provider
+        .set_settings(harness.thread.id.clone(), ThreadSettings::default())
+        .await
+        .unwrap();
+
+    harness.send("after-permission-change");
+    let first_event = loop {
+        match harness.next_event().await {
+            event @ ThreadEventBody::ProviderSession { .. }
+            | event @ ThreadEventBody::TurnStarted { .. }
+            | event @ ThreadEventBody::ThreadPaused { .. } => break event,
+            _ => {}
+        }
+    };
+    assert!(
+        matches!(first_event, ThreadEventBody::ProviderSession { .. }),
+        "a new native session must be recorded before the narrower turn starts: {first_event:?}"
+    );
+    harness.completed().await;
+    let requests = harness.model.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]["input"]
+            .to_string()
+            .contains("FIRST_REPLY_HISTORY_CONTROL"),
+        "the fresh session must retain the previous reply"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
 async fn a_full_access_thread_runs_a_harmless_command() {
     let mut harness = Harness::start(
         ThreadSettings {

@@ -148,6 +148,7 @@ struct Fake {
     turn_observer: Option<TcpStream>,
     initialize: InitializeMode,
     fail_resume: bool,
+    fail_next_fork: bool,
     initialized: bool,
     /// Every held request, in arrival order, for `test/turnRequests`.
     held_log: Vec<Value>,
@@ -247,6 +248,7 @@ impl Fake {
         match method {
             "thread/start" => self.start_thread(&id, params),
             "thread/resume" => self.resume_thread(&id, params),
+            "thread/fork" => self.fork_thread(&id, params),
             "thread/read" => {
                 let thread = self.thread(params["threadId"].as_str().unwrap_or_default(), None);
                 self.reply(&id, json!({ "thread": thread }));
@@ -344,6 +346,26 @@ impl Fake {
         self.reply(id, thread_reply(&thread));
     }
 
+    fn fork_thread(&mut self, id: &Value, params: &Value) {
+        self.thread_log
+            .push(json!({ "method": "thread/fork", "params": params }));
+        if std::mem::take(&mut self.fail_next_fork) {
+            return self.fail(id, -32000, "fork failed");
+        }
+        let source = params["threadId"].as_str().unwrap_or_default();
+        let Some(mut thread) = self.threads.get(source).cloned() else {
+            return self.fail(id, -32600, "no rollout found for the thread");
+        };
+        let thread_id = format!("thread-{}", char::from(b'A' + self.threads_started as u8));
+        self.threads_started += 1;
+        thread["id"] = json!(thread_id);
+        if let Some(model) = params["model"].as_str() {
+            thread["model"] = json!(model);
+        }
+        self.threads.insert(thread_id, thread.clone());
+        self.reply(id, thread_reply(&thread));
+    }
+
     fn thread(&self, thread_id: &str, cwd: Option<&str>) -> Value {
         self.threads
             .get(thread_id)
@@ -411,6 +433,10 @@ impl Fake {
             codex_control::SETTLE_TURN => self.settle(id, params),
             "test/echo" => self.reply(id, params.clone()),
             "test/fail" => self.fail(id, -32000, "boom"),
+            "test/failNextFork" => {
+                self.fail_next_fork = true;
+                self.reply(id, Value::Null);
+            }
             "test/environment" => self.reply(
                 id,
                 json!({
