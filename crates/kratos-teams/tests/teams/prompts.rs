@@ -1,6 +1,6 @@
-//! What each member is told. Kratos writes every message from the record, so Kratos alone decides what
-//! a member sees. The reviewer never sees the implementer's conversation, the implementer sees only the
-//! findings Kratos confirmed, and a planner never guesses.
+//! What each member is told. Kratos writes every message from the record, so Kratos alone decides
+//! what a member sees. The reviewer never sees the implementer's conversation, the implementer sees
+//! only the findings Kratos confirmed, and a planner never guesses.
 
 use std::collections::BTreeSet;
 

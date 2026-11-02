@@ -4,7 +4,7 @@ use kratos_teams::decisions::{
     Decision, DecisionKind, Finish, PlanChangeResponse, allowed_decisions,
 };
 use kratos_teams::facts::{Fact, MessageId, StoredFact};
-use kratos_teams::fold::fold;
+use kratos_teams::fold::{Rejection, fold};
 use kratos_teams::members::{Bindings, Role};
 use kratos_teams::next_step::{CheckStep, Step, next_step};
 use kratos_teams::prompts::{Platform, PromptContext, Session, message};
@@ -59,7 +59,8 @@ pub fn runs(task: &ScriptedTask, role: Role) -> Vec<&Run> {
         .collect()
 }
 
-/// The kinds of correction the messages carried, in order, with `None` for a message that was not one.
+/// The kinds of correction the messages carried, in order, with `None` for a message that was not
+/// one.
 pub fn notes(runs: &[&Run]) -> Vec<Option<String>> {
     runs.iter()
         .map(|run| run.note.as_ref().map(tag_of))
@@ -89,14 +90,6 @@ pub fn outcomes(view: &TaskView) -> Vec<String> {
             Status::Open { .. } => "Open".to_owned(),
         })
         .collect()
-}
-
-/// A decision of `kind` that is valid wherever the task allows that kind.
-pub fn sample_decision(kind: DecisionKind, view: &TaskView) -> Decision {
-    samples(view)
-        .into_iter()
-        .find(|decision| decision.kind() == kind)
-        .unwrap_or_else(|| panic!("no sample decision of kind {kind}"))
 }
 
 /// One decision of every kind, with content that fits the task as it stands.
@@ -174,9 +167,37 @@ pub fn prefix_views(log: &[StoredFact]) -> Vec<TaskView> {
         .collect()
 }
 
+pub fn assert_decisions_match(view: &TaskView) {
+    let allowed = allowed_decisions(view);
+    let samples = samples(view);
+    for kind in &allowed {
+        assert!(
+            samples.iter().any(|decision| decision.kind() == *kind),
+            "no sample for {kind}"
+        );
+    }
+    for decision in samples {
+        let kind = decision.kind();
+        let expected = if allowed.contains(&kind) {
+            Ok(())
+        } else {
+            Err(Rejection::NotAllowed {
+                decision: kind,
+                phase: view.phase.name(),
+            })
+        };
+        assert_eq!(
+            view.accepts(&Fact::UserDecided { decision }),
+            expected,
+            "{kind} disagrees with allowed_decisions at {:?}",
+            view.phase
+        );
+    }
+}
+
 /// Every prefix of the record folds the same from a stored copy, plans the same step, accepts each
-/// decision it allows, and never waits again for a message whose result it already holds. A restart at
-/// any fact therefore continues the same way, and no completed step repeats.
+/// decision it allows, and never waits again for a message whose result it already holds. A restart
+/// at any fact therefore continues the same way, and no completed step repeats.
 pub fn assert_log_replayable(log: &[StoredFact]) {
     let mut completed: Vec<MessageId> = Vec::new();
     for (n, view) in (1..).zip(prefix_views(log)) {
@@ -194,13 +215,7 @@ pub fn assert_log_replayable(log: &[StoredFact]) {
             "a stored copy of the first {n} facts folds differently"
         );
         assert_eq!(next_step(&restored), next_step(&view));
-        for kind in allowed_decisions(&view) {
-            let decision = sample_decision(kind, &view);
-            view.accepts(&Fact::UserDecided { decision })
-                .unwrap_or_else(|error| {
-                    panic!("{kind} is allowed after fact {n} but refused: {error}")
-                });
-        }
+        assert_decisions_match(&view);
         if let Some(message) = view.phase.waiting_message() {
             assert!(
                 !completed.contains(message),
@@ -230,7 +245,8 @@ pub fn assert_replayable(task: &ScriptedTask) {
     assert_log_replayable(task.log());
 }
 
-/// The view as it was when the engine delivered `run`: the prefix of the log that waits for its message.
+/// The view as it was when the engine delivered `run`: the prefix of the log that waits for its
+/// message.
 pub fn view_when_sent(task: &ScriptedTask, run: &Run) -> TaskView {
     prefix_views(task.log())
         .into_iter()

@@ -87,8 +87,8 @@ pub struct FileChange {
     pub diff: CappedText,
 }
 
-/// A finished piece of an agent's turn, in Kratos's own terms, so every provider's history reads the
-/// same way.
+/// A finished piece of an agent's turn, in Kratos's own terms, so every provider's history reads
+/// the same way.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
     tag = "type",

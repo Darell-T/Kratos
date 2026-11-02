@@ -1,5 +1,5 @@
-//! Messages from the user (D33). The user can message any member at any time. The engine records the
-//! message with its member and a delivery id, then records what it did with it. A message never
+//! Messages from the user (D33). The user can message any member at any time. The engine records
+//! the message with its member and a delivery id, then records what it did with it. A message never
 //! replaces the step that is running.
 
 use kratos_teams::decisions::Decision;
@@ -232,7 +232,8 @@ fn a_queued_message_rides_a_correction_too_or_it_would_be_marked_delivered_unrea
         ..Script::default()
     });
     task.step_until(|task| matches!(task.next(), Step::Run { .. }));
-    // The message arrives while the first turn runs and missed it, then the turn ends with a bad report.
+    // The message arrives while the first turn runs and missed it, then the turn ends with a bad
+    // report.
     task.record(message("d1", coder(), "Use tabs."));
     task.record(disposed("d1", Disposition::Queued));
     task.step();

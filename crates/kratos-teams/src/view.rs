@@ -1,11 +1,12 @@
 //! Everything the rules know about one task, derived only from its log and never stored.
 //!
-//! The view is a state machine. `Phase` says whether Kratos or an agent can take the next step alone
-//! (`Active`), the user must decide (`Waiting`), or the task is ending (`Closing`, `Closed`). Only
-//! `Waiting` needs the user, and it names exactly what the user is asked.
+//! The view is a state machine. `Phase` says whether Kratos or an agent can take the next step
+//! alone (`Active`), the user must decide (`Waiting`), or the task is ending (`Closing`, `Closed`).
+//! Only `Waiting` needs the user, and it names exactly what the user is asked.
 //!
 //! Folding lives in `fold.rs`, `turns.rs`, `rounds.rs`, `probes.rs`, `user_messages.rs`, and
-//! `decisions.rs`. This file is the data they build, plus the questions the other modules ask of it.
+//! `decisions.rs`. This file is the data they build, plus the questions the other modules ask of
+//! it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,7 +16,7 @@ use serde::Serialize;
 use crate::evidence::{DropReason, EvidenceCheck, Rerun};
 use crate::facts::{
     ChangeSize, ContinuationId, Declined, DeliveryId, Depth, FactSeq, MessageId, Outcome,
-    ProbePolicy, RulesSnapshot, Sha, StepId, TaskPolicy, UnixMillis,
+    RulesSnapshot, Sha, StepId, TaskPolicy, UnixMillis,
 };
 use crate::members::{Bindings, MemberId, Role};
 use crate::reports::{
@@ -70,14 +71,15 @@ pub struct TaskView {
     /// How many rounds existed when the user last asked for more work. The round cap and each open
     /// finding's fix attempts count from there. Only the user's explicit requests move it (D89).
     pub leg_start: usize,
-    /// The last commit a standard review judged. The next standard review reads the diff from there.
+    /// The last commit a standard review judged. The next standard review reads the diff from
+    /// there.
     pub last_reviewed: Option<Sha>,
     /// The security and regressions passes each run once per task.
     pub passes_done: BTreeSet<PassKind>,
 
     /// Steps set aside until something is answered or decided, newest last. At most two deep. An
-    /// implementer or reviewer asks the planner, and the planner may ask the user. Empty whenever the
-    /// user could direct, step back, or accept, and whenever a role change applies.
+    /// implementer or reviewer asks the planner, and the planner may ask the user. Empty whenever
+    /// the user could direct, step back, or accept, and whenever a role change applies.
     pub suspended: Vec<Suspended>,
     pub phase: Phase,
     pub seq: FactSeq,
@@ -101,9 +103,7 @@ pub enum PlanState {
     },
 }
 
-// ---------------------------------------------------------------------------------------------
 // Phases.
-// ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -139,14 +139,15 @@ pub enum Activity {
         step: StepId,
         then: AfterCommit,
     },
-    /// A reviewer's finished report, waiting for Kratos to check its evidence. The finished `turn` is
-    /// kept so that a verdict mismatch can send a correction on the same step.
+    /// A reviewer's finished report, waiting for Kratos to check its evidence. The finished `turn`
+    /// is kept so that a verdict mismatch can send a correction on the same step.
     Checking {
         turn: Turn,
         job: ReviewJob,
         report: ReviewDone,
     },
-    /// A role change was pending when a new step came due. The step starts once the engine applies it.
+    /// A role change was pending when a new step came due. The step starts once the engine applies
+    /// it.
     Rebinding {
         step: StepId,
         to: Bindings,
@@ -227,7 +228,8 @@ pub enum Trouble {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum UsageLimitAsk {
-    /// The Team allows moving the role to another account, and each move needs the user's approval (D40).
+    /// The Team allows moving the role to another account, and each move needs the user's approval
+    /// (D40).
     Handoff,
     /// The scheduler will not resume by itself (D41). The user keeps waiting or cancels.
     LongWait { why: Declined },
@@ -240,15 +242,14 @@ pub enum ApprovedBy {
     User,
 }
 
-// ---------------------------------------------------------------------------------------------
 // Turns. Each is one piece of agent work.
-// ---------------------------------------------------------------------------------------------
 
 /// What a member is asked to do. Each variant carries only its own inputs.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Work {
-    /// Write the plan. `author` is the planner, or the implementer in a two-member Team with planning on.
+    /// Write the plan. `author` is the planner, or the implementer in a two-member Team with
+    /// planning on.
     Plan {
         author: Role,
         feedback: Option<String>,
@@ -292,9 +293,9 @@ impl Work {
         }
     }
 
-    /// Whether the turn runs in the provider's read-only plan mode. Writing a plan and every planner
-    /// job do. The answer depends on the work alone, so a restarted task cannot re-enter plan mode
-    /// after its plan was approved.
+    /// Whether the turn runs in the provider's read-only plan mode. Writing a plan and every
+    /// planner job do. The answer depends on the work alone, so a restarted task cannot re-enter
+    /// plan mode after its plan was approved.
     pub fn plan_mode(&self) -> bool {
         matches!(
             self,
@@ -360,8 +361,8 @@ impl Pass {
 pub struct ReviewJob {
     pub pass: Pass,
     pub commit: Sha,
-    /// What the reviewer diffs against. A standard pass uses the last reviewed commit, and every other
-    /// pass uses the base.
+    /// What the reviewer diffs against. A standard pass uses the last reviewed commit, and every
+    /// other pass uses the base.
     pub diff_base: Sha,
     pub depth: Depth,
 }
@@ -445,23 +446,25 @@ pub struct Stop {
     pub message: MessageId,
     /// Whether the provider had received it. The scheduler decides what that allows.
     pub delivered: bool,
-    /// The user chose to wait out a long or unknown wait (D41), so the scheduler should not ask again.
+    /// The user chose to wait out a long or unknown wait (D41), so the scheduler should not ask
+    /// again.
     pub user_accepted_wait: bool,
 }
 
-/// Who owns the next move of a step that cannot go on alone. The rules never resend the stopped message
-/// and never run a timer. They hand the step to the one scheduler and observe what it decides.
+/// Who owns the next move of a step that cannot go on alone. The rules never resend the stopped
+/// message and never run a timer. They hand the step to the one scheduler and observe what it
+/// decides.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Hold {
     /// The user approved moving the role to another account (D40). The engine tries that first.
     HandOff { stop: Stop },
-    /// The scheduler has not been told yet. Until `ContinuationScheduled` or `ContinuationDeclined` is
-    /// recorded, `next_step` keeps asking the engine to hand the step over, and the scheduler treats the
-    /// same step and stopped message as one registration.
+    /// The scheduler has not been told yet. Until `ContinuationScheduled` or `ContinuationDeclined`
+    /// is recorded, `next_step` keeps asking the engine to hand the step over, and the scheduler
+    /// treats the same step and stopped message as one registration.
     ToScheduler { stop: Stop },
-    /// The scheduler chose a continuation. Its message is the turn's `message`, and its result arrives
-    /// as an ordinary `TurnEnded`.
+    /// The scheduler chose a continuation. Its message is the turn's `message`, and its result
+    /// arrives as an ordinary `TurnEnded`.
     Scheduled {
         continuation: ContinuationId,
         resumes_at: Option<UnixMillis>,
@@ -489,7 +492,8 @@ pub enum Resolution {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Turn {
     pub step: StepId,
-    /// Fixed when the step starts. A role change applies only between steps, so a step never changes hands.
+    /// Fixed when the step starts. A role change applies only between steps, so a step never
+    /// changes hands.
     pub member: MemberId,
     pub work: Work,
     /// The message the step waits on. A result is accepted only for this one.
@@ -517,10 +521,10 @@ impl Turn {
         matches!(self.hold, None | Some(Hold::Scheduled { .. }))
     }
 
-    /// Makes the step's next message due at `seq`, under a new message id. `follows` names the message
-    /// it continues in the same session, or `None` for a fresh session. `due` decides which queued user
-    /// messages ride along, so it always moves with the message. A hold describes the old message, so
-    /// the new one starts without it.
+    /// Makes the step's next message due at `seq`, under a new message id. `follows` names the
+    /// message it continues in the same session, or `None` for a fresh session. `due` decides which
+    /// queued user messages ride along, so it always moves with the message. A hold describes the
+    /// old message, so the new one starts without it.
     pub(crate) fn resend(&mut self, seq: FactSeq, follows: Option<MessageId>) {
         self.message = MessageId::due_at(seq);
         self.due = seq;
@@ -529,8 +533,8 @@ impl Turn {
     }
 }
 
-/// Everything the engine needs to deliver one message. It is a projection of a `Turn`, so the interface
-/// does not expose retry budgets or holds. `prompts::message` turns it into text.
+/// Everything the engine needs to deliver one message. It is a projection of a `Turn`, so the
+/// interface does not expose retry budgets or holds. `prompts::message` turns it into text.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Run {
     pub step: StepId,
@@ -562,7 +566,8 @@ pub struct Question {
 }
 
 /// Where a question goes. Implementer and reviewer questions go to the planner, or to the user when
-/// there is none or the step has used its questions. A planner's own question goes to the user (D31).
+/// there is none or the step has used its questions. A planner's own question goes to the user
+/// (D31).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Answerer {
@@ -584,9 +589,7 @@ pub enum Pending {
     PlanChange { request: PlanChangeRequest },
 }
 
-// ---------------------------------------------------------------------------------------------
 // The record.
-// ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Round {
@@ -736,9 +739,7 @@ pub enum DirectionStatus {
     Dropped,
 }
 
-// ---------------------------------------------------------------------------------------------
 // Questions the other modules ask of the view.
-// ---------------------------------------------------------------------------------------------
 
 impl TaskView {
     /// A Team with a planner always plans first. Otherwise the stored setting decides (D28).
@@ -755,8 +756,8 @@ impl TaskView {
         }
     }
 
-    /// The scope in force. It is the approved plan's, or else the one the user gave at the start, with the
-    /// user's amendments on either.
+    /// The scope in force. It is the approved plan's, or else the one the user gave at the start,
+    /// with the user's amendments on either.
     pub fn scope(&self) -> Scope {
         let (source, base) = match &self.plan {
             PlanState::Approved { plan, .. } => (ScopeSource::ApprovedPlan, plan.scope.clone()),
@@ -778,7 +779,8 @@ impl TaskView {
         }
     }
 
-    /// Changed files no scope pattern covers. The review package lists them for the reviewer to judge.
+    /// Changed files no scope pattern covers. The review package lists them for the reviewer to
+    /// judge.
     pub fn outside_scope(&self) -> Vec<String> {
         self.scope()
             .outside(self.changed_files.iter().map(String::as_str))
@@ -788,8 +790,8 @@ impl TaskView {
         self.findings.iter().filter(|finding| finding.is_open())
     }
 
-    /// The id each of a review's new findings gets, in report order. The evidence check and the fold
-    /// that judges it must agree on which id is which.
+    /// The id each of a review's new findings gets, in report order. The evidence check and the
+    /// fold that judges it must agree on which id is which.
     pub(crate) fn new_finding_ids<'a>(
         &self,
         report: &'a ReviewDone,
@@ -803,8 +805,8 @@ impl TaskView {
     }
 
     /// Every text a requirement or constraint quote may come from (D30): the request, the user's
-    /// constraints, task requirements and member messages, the approved plan with its conditions and
-    /// amendments, and the three rules files.
+    /// constraints, task requirements and member messages, the approved plan with its conditions
+    /// and amendments, and the three rules files.
     pub fn quote_sources(&self) -> Vec<&str> {
         let plan = match &self.plan {
             PlanState::Approved {
@@ -830,9 +832,9 @@ impl TaskView {
             .collect()
     }
 
-    /// How many more review rounds the task may run before it pauses at the cap. A round counts once
-    /// its commit has been reviewed, so a commit that waits on a ruling, or that the user accepted as
-    /// it was, uses none.
+    /// How many more review rounds the task may run before it pauses at the cap. A round counts
+    /// once its commit has been reviewed, so a commit that waits on a ruling, or that the user
+    /// accepted as it was, uses none.
     pub fn rounds_left(&self) -> usize {
         let cap = usize::try_from(self.policy.round_cap.get()).unwrap_or(usize::MAX);
         let reviewed = self
@@ -879,14 +881,11 @@ impl TaskView {
         u32::try_from(self.rounds.len() + 1).unwrap_or(u32::MAX)
     }
 
-    /// What the next standard review diffs against. It is the last commit a standard review judged, or
-    /// the base. The engine measures the change from here, so review depth matches what the reviewer reads.
+    /// What the next standard review diffs against. It is the last commit a standard review judged,
+    /// or the base. The engine measures the change from here, so review depth matches what the
+    /// reviewer reads.
     pub fn standard_review_base(&self) -> &Sha {
         self.last_reviewed.as_ref().unwrap_or(&self.base)
-    }
-
-    pub fn is_user_decides_probes(&self) -> bool {
-        matches!(self.policy.probes, ProbePolicy::UserDecides)
     }
 }
 

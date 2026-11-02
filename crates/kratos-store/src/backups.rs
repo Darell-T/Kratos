@@ -122,8 +122,13 @@ fn find_backup(backups: &Path, id: &BackupId) -> Result<Backup, RestoreError> {
     })?;
     for entry in entries {
         let path = entry.map_err(restore_io_error(backups))?.path();
-        let name = path.file_name().and_then(|name| name.to_str());
-        if let Some(source_version) = name.and_then(|name| source_version_of(name, id)) {
+        let source_version = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("kratos-v"))
+            .and_then(|name| name.strip_suffix(&format!("-{id}.db")))
+            .and_then(|version| version.parse().ok());
+        if let Some(source_version) = source_version {
             return Ok(Backup {
                 id: *id,
                 source_version,
@@ -132,14 +137,6 @@ fn find_backup(backups: &Path, id: &BackupId) -> Result<Backup, RestoreError> {
         }
     }
     Err(unknown())
-}
-
-fn source_version_of(file_name: &str, id: &BackupId) -> Option<u32> {
-    file_name
-        .strip_prefix("kratos-v")?
-        .strip_suffix(&format!("-{id}.db"))?
-        .parse()
-        .ok()
 }
 
 fn verify(backup: &Backup) -> Result<(), RestoreError> {
@@ -182,7 +179,10 @@ fn save_live_database(directory: &DataDirectory) -> Result<Option<Backup>, Resto
     } else {
         None
     };
-    for sidecar in sqlite_sidecars(&database) {
+    for suffix in ["-wal", "-shm"] {
+        let mut name = database.as_os_str().to_owned();
+        name.push(suffix);
+        let sidecar = PathBuf::from(name);
         if sidecar.try_exists().map_err(restore_io_error(&sidecar))? {
             return Err(match saved {
                 Some(_) => RestoreError::DatabaseInUse(database),
@@ -203,14 +203,6 @@ fn install(directory: &DataDirectory, backup: &Backup) -> Result<(), RestoreErro
         .and_then(|file| file.sync_all())
         .map_err(restore_io_error(&staged))?;
     fs::rename(&staged, &database).map_err(restore_io_error(&database))
-}
-
-fn sqlite_sidecars(database: &Path) -> [PathBuf; 2] {
-    ["-wal", "-shm"].map(|suffix| {
-        let mut name = database.as_os_str().to_owned();
-        name.push(suffix);
-        PathBuf::from(name)
-    })
 }
 
 fn backup_io_error(path: &Path) -> impl FnOnce(io::Error) -> BackupError {

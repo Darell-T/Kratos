@@ -225,8 +225,8 @@ fn the_cap_is_a_setting_and_a_lower_cap_pauses_sooner() {
 
 #[test]
 fn only_the_users_explicit_requests_to_go_on_add_rounds_not_a_resume_or_a_ruling() {
-    // A lost turn twice pauses the task in round 2. Resuming is not a request for more rounds, so the
-    // count still runs from the start and the cap still pauses the task at round 3.
+    // A lost turn twice pauses the task in round 2. Resuming is not a request for more rounds, so
+    // the count still runs from the start and the cap still pauses the task at round 3.
     let mut script = script(
         vec![
             implements(),

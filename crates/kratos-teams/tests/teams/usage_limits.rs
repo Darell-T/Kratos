@@ -1,7 +1,7 @@
-//! Usage limits (D39 to D41). When a provider stops a turn at a limit, the step keeps its identity and
-//! goes to the one usage scheduler. The rules never resend the stopped message and never run a timer.
-//! A long or unknown wait asks the user, and moving a role to another account needs the user's approval
-//! every time.
+//! Usage limits (D39 to D41). When a provider stops a turn at a limit, the step keeps its identity
+//! and goes to the one usage scheduler. The rules never resend the stopped message and never run a
+//! timer. A long or unknown wait asks the user, and moving a role to another account needs the
+//! user's approval every time.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
 use kratos_teams::facts::{Declined, Ended, Fact, HandoffOutcome, MessageId};

@@ -1,5 +1,5 @@
-//! Folds a recorded fact log and prints each view and the next step as JSON lines. It reads no database
-//! and starts no engine.
+//! Folds a recorded fact log and prints each view and the next step as JSON lines. It reads no
+//! database and starts no engine.
 //!
 //! ```text
 //! cargo run -p kratos-teams --example replay
@@ -7,16 +7,17 @@
 //! cargo run -p kratos-teams --example replay -- --typescript crates/kratos-teams/tests/fixtures/reference/01-approves-in-one-round-and-lists-what.json
 //! ```
 //!
-//! With no argument it runs every two-member log in `tests/fixtures/reference/`. The TypeScript rules
-//! (`teams-core`, commit 6741f16) recorded those logs with their own view after every fact. Each fact
-//! prints the Rust view next to the TypeScript one. The known pending-security correction is reported
-//! separately, and the exit status is 1 for any unexpected difference.
+//! With no argument it runs every two-member log in `tests/fixtures/reference/`. The TypeScript
+//! rules (`teams-core`, commit 6741f16) recorded those logs with their own view after every fact.
+//! Each fact prints the Rust view next to the TypeScript one. The known pending-security correction
+//! is reported separately, and the exit status is 1 for any unexpected difference.
 //!
-//! With a path it reads one `StoredFact` per line, the format the engine appends, and prints one line
-//! for each fact:
+//! With a path it reads one `StoredFact` per line, the format the engine appends, and prints one
+//! line for each fact:
 //!
 //! - `observed`: the view in the TypeScript's words (phase, pause, rounds, findings, next step)
-//! - `next_step`: the step `next_step` names, and `message`, the text of the message when it is a run
+//! - `next_step`: the step `next_step` names, and `message`, the text of the message when it is a
+//!   run
 //! - `allowed`: the decisions the user could make now
 //! - `outside_scope`: the changed files the agreed scope does not cover
 //! - `view`: the whole Rust view (left out with `--short`)
@@ -65,8 +66,8 @@ fn main() -> ExitCode {
     }
 }
 
-/// What the rules ask for next, and the text of the message when it is a run. The message is written
-/// for a new session on Unix, which is the fullest text a member gets.
+/// What the rules ask for next, and the text of the message when it is a run. The message is
+/// written for a new session on Unix, which is the fullest text a member gets.
 fn next_and_message(view: &TaskView) -> (Value, Value) {
     let step = next_step(view);
     let text = match &step {

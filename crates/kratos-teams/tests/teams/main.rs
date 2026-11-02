@@ -1,5 +1,6 @@
-//! The Teams rules, driven end to end through the same loop the engine runs. The loop folds the log,
-//! asks `next_step`, runs the step with scripted agents, appends the result, and lets the user decide.
+//! The Teams rules, driven end to end through the same loop the engine runs. The loop folds the
+//! log, asks `next_step`, runs the step with scripted agents, appends the result, and lets the user
+//! decide.
 //!
 //! One file per behavior. Each test names the mistake it would catch.
 

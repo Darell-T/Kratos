@@ -1,6 +1,6 @@
-//! Cancelling, and results that arrive late. The user can cancel whenever Kratos or an agent works or
-//! waits for them. A result that arrives after a cancel, a duplicate result, or a result from a step the
-//! user replaced is dropped, and it cannot restart anything.
+//! Cancelling, and results that arrive late. The user can cancel whenever Kratos or an agent works
+//! or waits for them. A result that arrives after a cancel, a duplicate result, or a result from a
+//! step the user replaced is dropped, and it cannot restart anything.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
 use kratos_teams::facts::{Declined, Fact, Outcome};

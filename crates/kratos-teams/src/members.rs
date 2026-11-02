@@ -155,7 +155,8 @@ impl Bindings {
         members
     }
 
-    /// Why `to` cannot replace these bindings, or `None` when it moves the same members between roles.
+    /// Why `to` cannot replace these bindings, or `None` when it moves the same members between
+    /// roles.
     pub fn reassignment_problem(&self, to: &Bindings) -> Option<RebindProblem> {
         if self.has_planner() != to.has_planner() {
             return Some(RebindProblem::PlannerPresenceChanged);

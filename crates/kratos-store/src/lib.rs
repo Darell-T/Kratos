@@ -1,9 +1,9 @@
 //! The engine's SQLite records.
 //!
 //! [`Store::open`] locks the data directory, backs up a database that has an older schema, and runs
-//! the migrations. Migrations 1 to 4 are the TypeScript engine's, so the Rust engine opens what that
-//! engine wrote; from migration 5 on the schema is the Rust engine's own. The store is synchronous
-//! and owns one connection. Everything that appends to a thread's log goes through a
+//! the migrations. Migrations 1 to 4 are the TypeScript engine's, so the Rust engine opens what
+//! that engine wrote; from migration 5 on the schema is the Rust engine's own. The store is
+//! synchronous and owns one connection. Everything that appends to a thread's log goes through a
 //! [`ThreadWrite`].
 
 mod backups;
@@ -69,7 +69,18 @@ impl Store {
                 supported: SCHEMA_VERSION,
             });
         }
-        configure(&connection).map_err(at_database)?;
+        // The TypeScript store's settings, plus synchronous = FULL. FULL is SQLite's default,
+        // written down because a commit lost to a power cut would hand its seq to the next event,
+        // and a client that already saw that seq would drop the new event as a duplicate.
+        for (name, value) in [
+            ("journal_mode", "WAL"),
+            ("foreign_keys", "ON"),
+            ("synchronous", "FULL"),
+        ] {
+            connection
+                .pragma_update(None, name, value)
+                .map_err(at_database)?;
+        }
         let backup_taken = if (1..SCHEMA_VERSION).contains(&found) {
             Some(back_up(&connection, &directory.backups_path(), found)?)
         } else {
@@ -86,15 +97,6 @@ impl Store {
     pub fn backup_taken(&self) -> Option<&Backup> {
         self.backup_taken.as_ref()
     }
-}
-
-/// The TypeScript store's settings, plus `synchronous = FULL`. FULL is SQLite's default, written
-/// down because a commit lost to a power cut would hand its seq to the next event, and a client
-/// that already saw that seq would drop the new event as a duplicate.
-fn configure(connection: &Connection) -> rusqlite::Result<()> {
-    connection.pragma_update(None, "journal_mode", "WAL")?;
-    connection.pragma_update(None, "foreign_keys", "ON")?;
-    connection.pragma_update(None, "synchronous", "FULL")
 }
 
 #[derive(Debug, thiserror::Error)]

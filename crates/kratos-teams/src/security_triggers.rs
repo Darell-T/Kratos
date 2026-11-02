@@ -1,12 +1,13 @@
-//! Security triggers are path globs and code patterns that send a change to a security review. Matching is
-//! plain text work on the diff, with no model call.
+//! Security triggers are path globs and code patterns that send a change to a security review.
+//! Matching is plain text work on the diff, with no model call.
 //!
-//! A match selects review, and no match is not proof of safety. The patterns are a cheap filter that
-//! keeps the security review off changes that obviously need none. The reviewer's standing rules still
-//! apply to everything.
+//! A match selects review, and no match is not proof of safety. The patterns are a cheap filter
+//! that keeps the security review off changes that obviously need none. The reviewer's standing
+//! rules still apply to everything.
 //!
 //! Matching leans toward review. A pattern that exceeds the regex engine's backtracking budget on a
-//! line counts as a hit, because a line built to defeat the filter is the line a person should read.
+//! line counts as a hit, because a line built to defeat the filter is the line a person should
+//! read.
 
 use fancy_regex::RegexBuilder;
 use globset::GlobMatcher;
@@ -22,7 +23,8 @@ use crate::paths::compile;
 pub enum Trigger {
     /// A glob matched against the paths the task changed.
     Path { glob: String },
-    /// A regular expression in fancy-regex syntax, so look-behind works, matched against added lines.
+    /// A regular expression in fancy-regex syntax, so look-behind works, matched against added
+    /// lines.
     Code { pattern: String },
 }
 
@@ -63,8 +65,8 @@ pub const DEFAULT_PATHS: [&str; 6] = [
 /// credentials, and permissions in JavaScript, TypeScript, Python, and Rust projects.
 /// `tests/teams/security_triggers.rs` holds a fixture for each pattern and benign lines beside it.
 pub const DEFAULT_PATTERNS: [&str; 7] = [
-    // Processes in JavaScript and Python, then in Rust. `(?<!::)` keeps `tokio::spawn(`, which starts a
-    // task, out of the first pattern.
+    // Processes in JavaScript and Python, then in Rust. `(?<!::)` keeps `tokio::spawn(`, which
+    // starts a task, out of the first pattern.
     r"child_process|\bexeca\b|(?<!::)\bspawn(?:Sync)?\(|\bexecFile(?:Sync)?\(|\bexecSync\(|(?<!\.)\bexec\(|\bsubprocess\.|\bos\.system\(",
     r"\bCommand::new\(|\b(?:std|tokio)::process::(?:Command|Child|Stdio)\b|\btokio::process\b",
     // Network.
@@ -119,8 +121,8 @@ pub enum LineProblem {
 /// Reads the fenced `kratos-security` block of `REVIEW.md`: one `path: <glob>` or
 /// `code: <regular expression>` per line, `#` comments, and blank lines ignored.
 ///
-/// No block, or no `REVIEW.md`, gives the defaults. An empty block gives no triggers, which turns the
-/// security pass off for the project. Other fenced blocks are ignored.
+/// No block, or no `REVIEW.md`, gives the defaults. An empty block gives no triggers, which turns
+/// the security pass off for the project. Other fenced blocks are ignored.
 pub fn parse_triggers(review_md: Option<&str>) -> Result<Vec<Trigger>, TriggerError> {
     let lines: Vec<&str> = review_md.unwrap_or_default().lines().collect();
     let Some(open) = lines.iter().position(|line| fence_opening(line).is_some()) else {
@@ -147,7 +149,8 @@ pub fn parse_triggers(review_md: Option<&str>) -> Result<Vec<Trigger>, TriggerEr
     Ok(triggers)
 }
 
-/// The fence marker (three or more backticks or tildes) of a line that opens a `kratos-security` block.
+/// The fence marker (three or more backticks or tildes) of a line that opens a `kratos-security`
+/// block.
 fn fence_opening(line: &str) -> Option<&str> {
     let unindented = line.trim_start_matches(' ');
     if line.len() - unindented.len() > 3 {
@@ -260,7 +263,11 @@ fn hit(trigger: &Compiled, file: &DiffFile) -> Option<TriggerHit> {
             })
         }
         Compiled::Code { pattern, regex } => {
-            let line = file.added.iter().find(|added| matches_line(regex, added))?;
+            // An error here is the backtracking budget running out, which counts as a match.
+            let line = file
+                .added
+                .iter()
+                .find(|added| regex.is_match(added).unwrap_or(true))?;
             Some(TriggerHit::Code {
                 pattern: pattern.clone(),
                 path: file.path.clone(),
@@ -268,9 +275,4 @@ fn hit(trigger: &Compiled, file: &DiffFile) -> Option<TriggerHit> {
             })
         }
     }
-}
-
-/// An error here is the backtracking budget running out, which counts as a match.
-fn matches_line(regex: &fancy_regex::Regex, line: &str) -> bool {
-    regex.is_match(line).unwrap_or(true)
 }

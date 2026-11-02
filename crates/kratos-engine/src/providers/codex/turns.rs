@@ -60,7 +60,7 @@ impl Actor {
         let Some(thread) = self.threads.get(thread_id) else {
             return;
         };
-        if !thread.turn.is_idle() || !thread.steering.is_empty() {
+        if !matches!(thread.turn, Turn::Idle) || !thread.steering.is_empty() {
             return;
         }
         let Some(next) = self.next_to_start(thread_id).await else {
@@ -125,7 +125,12 @@ impl Actor {
             return;
         };
         let message_id = message.id.clone();
-        let lowered = lowered_settings(&self.threads[thread_id].settings, &message);
+        let settings = &self.threads[thread_id].settings;
+        let lowered = message
+            .origin
+            .limit()
+            .map(|limit| settings.limited_to(limit))
+            .filter(|lowered| lowered != settings);
         let recorded = self
             .write(thread_id, {
                 let (message_id, lowered) = (message_id.clone(), lowered.clone());
@@ -264,10 +269,7 @@ impl Actor {
             .connection()?
             .ok_or_else(|| ProviderError::Unavailable("Codex is starting".into()))?;
         let submitting = self
-            .write(thread_id, {
-                let message_id = message_id.clone();
-                move |write| write.set_message_status(&message_id, MessageStatus::Submitting)
-            })
+            .set_message_status(thread_id, &message_id, MessageStatus::Submitting)
             .await?;
         self.threads
             .get_mut(thread_id)
@@ -307,30 +309,13 @@ impl Actor {
             .threads
             .get(&thread_id)
             .and_then(|thread| thread.turn.running_id().cloned());
-        match (result, turn_id) {
-            (Ok(()), Some(turn_id)) => {
-                let _ = self
-                    .write(&thread_id, {
-                        let message_id = message_id.clone();
-                        move |write| {
-                            write.set_message_status(
-                                &message_id,
-                                MessageStatus::Accepted { turn_id },
-                            )
-                        }
-                    })
-                    .await;
-            }
+        let status = match (result, turn_id) {
+            (Ok(()), Some(turn_id)) => MessageStatus::Accepted { turn_id },
             (Err(RequestError::Rpc { code, .. }), _)
                 if kratos_codex_client::rejected_before_execution(code) =>
             {
                 // Refused before it ran: the message goes back to the queue.
-                let _ = self
-                    .write(&thread_id, {
-                        let message_id = message_id.clone();
-                        move |write| write.set_message_status(&message_id, MessageStatus::Queued)
-                    })
-                    .await;
+                MessageStatus::Queued
             }
             (result, _) => {
                 let error = result.err().map_or_else(
@@ -341,7 +326,10 @@ impl Actor {
                 self.check_delivery(&thread_id, &message_id, Delivery::Steer, error);
                 return;
             }
-        }
+        };
+        let _ = self
+            .set_message_status(&thread_id, &message_id, status)
+            .await;
         if let Some(thread) = self.threads.get_mut(&thread_id) {
             thread.steering.remove(&message_id);
         }
@@ -548,7 +536,13 @@ impl Actor {
         let outcome = wire::turn_outcome(&turn).unwrap_or(TurnOutcome::Failed {
             error: "Codex reported the turn finished while still in progress".to_owned(),
         });
-        let at_limit = wire::stopped_at_usage_limit(&turn);
+        // Whether the turn stopped because the account ran out of its included usage (D39).
+        let at_limit = matches!(
+            turn.error
+                .as_ref()
+                .and_then(|error| error.codex_error_info.as_ref()),
+            Some(types::CodexErrorInfo::UsageLimitExceeded)
+        );
         let after = match &outcome {
             _ if at_limit => After::Pause(PauseReason::UsageLimit {
                 turn_id: turn_id.clone(),
@@ -769,11 +763,6 @@ impl Actor {
             self.stop_server("a stopped turn did not end").await;
         }
     }
-}
-
-fn lowered_settings(settings: &ThreadSettings, message: &Message) -> Option<ThreadSettings> {
-    let lowered = settings.limited_to(message.origin.limit()?);
-    (lowered != *settings).then_some(lowered)
 }
 
 fn turn_start_params(

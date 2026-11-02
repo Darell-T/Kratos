@@ -1,8 +1,8 @@
-//! Every message an agent receives. The functions are pure, so the same view and run always give the
-//! same text.
+//! Every message an agent receives. The functions are pure, so the same view and run always give
+//! the same text.
 //!
-//! Members never talk to each other. Kratos writes each message from the record, so Kratos alone decides
-//! what each member sees.
+//! Members never talk to each other. Kratos writes each message from the record, so Kratos alone
+//! decides what each member sees.
 //!
 //! | Work      | Sections |
 //! | --------- | -------- |
@@ -12,11 +12,12 @@
 //! | Rule      | planner intro, task, approved plan, each disputed finding with its evidence and the implementer's reason, ruling format |
 //! | Review    | reviewer intro, task, directions, plan and scope, files outside the scope, what to diff, project rules, open findings, findings already reported, evidence rules, probe rules, report format |
 //!
-//! A message that corrects the previous one in the same session carries only the problem and what to do.
-//! A new or replacement session always gets the full text, because it has seen nothing.
+//! A message that corrects the previous one in the same session carries only the problem and what
+//! to do. A new or replacement session always gets the full text, because it has seen nothing.
 //!
-//! A message never holds the implementer's conversation or summary for the reviewer (D90), the findings
-//! Kratos dropped or listed for the implementer, or the reviewer's conversation for anyone.
+//! A message never holds the implementer's conversation or summary for the reviewer (D90), the
+//! findings Kratos dropped or listed for the implementer, or the reviewer's conversation for
+//! anyone.
 
 use crate::evidence::{EVIDENCE_TIMEOUT, MIN_QUOTE_LEN};
 use crate::facts::ProbePolicy;
@@ -56,7 +57,8 @@ pub struct PromptContext<'a> {
 /// The message for `run`. This is the only entry point the engine needs.
 pub fn message(view: &TaskView, run: &Run, ctx: &PromptContext<'_>) -> String {
     if let (Some(note), Session::Continuing) = (&run.note, ctx.session) {
-        // Keep the user's queued messages in the correction. Otherwise they would be marked delivered unread.
+        // Keep the user's queued messages in the correction. Otherwise they would be marked
+        // delivered unread.
         return sections([Some(correction(note)), carried_text(&run.carried)]);
     }
     let body = match &run.work {
@@ -91,9 +93,7 @@ fn sections<I: IntoIterator<Item = Option<String>>>(parts: I) -> String {
 /// Kratos's own step-back prompt, so the user can send it with one click.
 pub const STEP_BACK_TEXT: &str = "The work has not converged, so the approach may be wrong. Before you change more code, step back. Reread the task and the findings, write down what your earlier fixes had in common and why they did not hold, then choose a different approach.";
 
-// ---------------------------------------------------------------------------------------------
 // Corrections.
-// ---------------------------------------------------------------------------------------------
 
 fn correction(note: &Note) -> String {
     match note {
@@ -125,9 +125,7 @@ fn verdict_correction(verdict: Verdict, findings: &[Finding]) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // Pieces every role reads.
-// ---------------------------------------------------------------------------------------------
 
 fn task_section(view: &TaskView) -> String {
     format!("# Task\n\n{}", view.request.trim())
@@ -223,6 +221,12 @@ fn finding_line(finding: &Finding) -> String {
 
 fn finding_text(finding: &Finding) -> String {
     let report = &finding.report;
+    let kind = match report.kind {
+        Kind::Bug => "bug",
+        Kind::Constraint => "constraint",
+        Kind::Requirement => "requirement",
+        Kind::Design => "design",
+    };
     let evidence = if report.kind == Kind::Bug {
         format!(
             "Evidence, a command that exits non-zero on the reviewed commit: {}",
@@ -232,12 +236,7 @@ fn finding_text(finding: &Finding) -> String {
         format!("Evidence, the rule it breaks: \"{}\"", report.evidence)
     };
     [
-        format!(
-            "## {}: {} ({})",
-            finding.id,
-            report.class,
-            kind_name(report.kind)
-        ),
+        format!("## {}: {} ({})", finding.id, report.class, kind),
         format!(
             "Location: {}:{}",
             report.location.path, report.location.line
@@ -247,15 +246,6 @@ fn finding_text(finding: &Finding) -> String {
         format!("Fixed when: {}", report.fixed_when),
     ]
     .join("\n")
-}
-
-fn kind_name(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Bug => "bug",
-        Kind::Constraint => "constraint",
-        Kind::Requirement => "requirement",
-        Kind::Design => "design",
-    }
 }
 
 fn outcome(status: &FindingStatus) -> String {
@@ -295,9 +285,7 @@ fn tail(text: &str, limit: usize) -> String {
     format!("...{kept}")
 }
 
-// ---------------------------------------------------------------------------------------------
 // Resolutions and carried messages. They record what happened to this step while it was suspended.
-// ---------------------------------------------------------------------------------------------
 
 fn resolutions_text(resolutions: &[Resolution]) -> Option<String> {
     if resolutions.is_empty() {
@@ -356,9 +344,7 @@ fn carried_text(carried: &[Direction]) -> Option<String> {
     ))
 }
 
-// ---------------------------------------------------------------------------------------------
 // Plan.
-// ---------------------------------------------------------------------------------------------
 
 const NEVER_GUESS: &str = "Never guess. When something is unclear or outside what you may decide, end your turn with status question and ask the user.";
 
@@ -398,9 +384,7 @@ fn plan_message(view: &TaskView, author: Role, feedback: Option<&str>) -> String
 
 const PLAN_FORMAT: &str = "# Your report\n\nExplore the code, then end your turn with the plan:\n- status: done when the plan is ready, blocked when something outside your control stops you, or question when you need an answer first.\n- build: what to build.\n- done_means: short statements a reviewer can check.\n- files_in_scope: the files the work may touch, as globs relative to the repository root such as src/login/**. Write ** only when every file is in scope.\nThe user reads the plan and approves it before any code is written.";
 
-// ---------------------------------------------------------------------------------------------
 // Implement.
-// ---------------------------------------------------------------------------------------------
 
 const IMPLEMENTER_INTRO: &str = "You are the implementer on a Kratos Team. A separate reviewer checks your work, and Kratos carries every message between you.";
 
@@ -445,7 +429,8 @@ fn work_rules(view: &TaskView) -> String {
     )
 }
 
-/// The first message of a new implementer session. It holds the task, how to work, and the plan when there is one.
+/// The first message of a new implementer session. It holds the task, how to work, and the plan
+/// when there is one.
 fn start_text(view: &TaskView, with_plan: bool) -> String {
     sections([
         Some(IMPLEMENTER_INTRO.to_owned()),
@@ -471,7 +456,8 @@ fn takeover(view: &TaskView) -> String {
     ])
 }
 
-/// The brief of a step that is not the first one. `Start` and `Planned` are written by `start_text`.
+/// The brief of a step that is not the first one. `Start` and `Planned` are written by
+/// `start_text`.
 fn brief_text(view: &TaskView, brief: &Brief) -> String {
     match brief {
         Brief::Start | Brief::Planned => String::new(),
@@ -564,8 +550,8 @@ fn history(finding: &Finding) -> Option<String> {
     )
 }
 
-/// When the user delegated probe retention, the implementer gets the probes for the findings it fixes
-/// and the user's constraints (D78).
+/// When the user delegated probe retention, the implementer gets the probes for the findings it
+/// fixes and the user's constraints (D78).
 fn probe_offer(view: &TaskView) -> Option<String> {
     let ProbePolicy::Delegated { constraints } = &view.policy.probes else {
         return None;
@@ -613,9 +599,7 @@ fn probe_text(probe: &Probe) -> String {
     format!("Probe {}{showed}{content}", probe.path)
 }
 
-// ---------------------------------------------------------------------------------------------
 // Answer and rule, the planner's jobs after the plan.
-// ---------------------------------------------------------------------------------------------
 
 fn answer_message(view: &TaskView, question: &Question) -> String {
     let record = (question.role == Role::Reviewer)
@@ -642,8 +626,8 @@ fn answer_message(view: &TaskView, question: &Question) -> String {
     ])
 }
 
-/// What the implementer reported at each handoff, so a planner can answer a reviewer's question about
-/// the implementer's reasons without the implementer's conversation (D90).
+/// What the implementer reported at each handoff, so a planner can answer a reviewer's question
+/// about the implementer's reasons without the implementer's conversation (D90).
 fn implementer_record(view: &TaskView) -> Option<String> {
     let lines: Vec<String> = view
         .rounds
@@ -686,9 +670,7 @@ fn ruling_message(view: &TaskView, disputed: &[FindingId]) -> String {
     ])
 }
 
-// ---------------------------------------------------------------------------------------------
 // Review.
-// ---------------------------------------------------------------------------------------------
 
 const REVIEWER_INTRO: &str = "You are the reviewer on a Kratos Team. Review one commit against the task, what the user said, and the approved plan. You see the implementer's work, never its conversation. If you need the implementer's reasons, ask a question. Do not guess at them.";
 
@@ -743,8 +725,8 @@ fn what_to_review(view: &TaskView, job: &ReviewJob, diff_stat: &str) -> String {
     ])
 }
 
-/// The changed files the agreed scope does not cover. The reviewer judges them, because lockfiles and
-/// generated files change as side effects.
+/// The changed files the agreed scope does not cover. The reviewer judges them, because lockfiles
+/// and generated files change as side effects.
 fn outside_scope_text(view: &TaskView) -> Option<String> {
     let outside = view.outside_scope();
     if outside.is_empty() {

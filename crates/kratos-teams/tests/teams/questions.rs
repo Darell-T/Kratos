@@ -1,7 +1,7 @@
 //! Questions (D31). Any member can ask a question instead of finishing. An implementer's or a
-//! reviewer's question goes to the planner, or to the user when there is no planner. A planner's own
-//! question goes to the user, because a planner never guesses (D91). The answer goes back to the member
-//! who asked, and the same step goes on.
+//! reviewer's question goes to the planner, or to the user when there is no planner. A planner's
+//! own question goes to the user, because a planner never guesses (D91). The answer goes back to
+//! the member who asked, and the same step goes on.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
 use kratos_teams::facts::Fact;

@@ -2,16 +2,22 @@
 //!
 //! Two shapes exist on purpose.
 //!
-//! - The wire shape is a flat struct for each kind of report. Both CLIs force it through a JSON Schema
-//!   that schemars derives from the struct, and the schema has to stay inside the subset both accept:
-//!   every property required, `additionalProperties: false`, and no `anyOf`, `oneOf`, `allOf`, `$ref`,
-//!   `minLength`, `maxLength`, or `pattern`. So no field is optional or null. "No value" is an empty
+//! - The wire shape is a flat struct for each kind of report. Both CLIs force it through a JSON
+//!   Schema
+//!   that schemars derives from the struct, and the schema has to stay inside the subset both
+//!   accept:
+//!   every property required, `additionalProperties: false`, and no `anyOf`, `oneOf`, `allOf`,
+//!   `$ref`,
+//!   `minLength`, `maxLength`, or `pattern`. So no field is optional or null. "No value" is an
+//!   empty
 //!   string or an empty array.
-//! - The domain shape is what the rest of the crate sees. A report that asks a question is a different
-//!   variant from one that finished, so no code can read a question from a report that did not ask one.
+//! - The domain shape is what the rest of the crate sees. A report that asks a question is a
+//!   different
+//!   variant from one that finished, so no code can read a question from a report that did not ask
+//!   one.
 //!
-//! `parse_report` is the only function that crosses from one to the other. It never fails. A reply that
-//! cannot be used becomes `Report::Invalid`, whose text tells the agent what to fix.
+//! `parse_report` is the only function that crosses from one to the other. It never fails. A reply
+//! that cannot be used becomes `Report::Invalid`, whose text tells the agent what to fix.
 
 use std::fmt;
 use std::num::NonZeroU32;
@@ -25,12 +31,10 @@ use serde_json::Value;
 
 use crate::task_plan::{PlanChangeRequest, ScopePattern, TaskPlan};
 
-// ---------------------------------------------------------------------------------------------
 // Findings.
-// ---------------------------------------------------------------------------------------------
 
-/// `F1`, `F2`, and so on. Kratos assigns them from the record, so "the same finding" is a fact Kratos
-/// can check and not something a reviewer asserts.
+/// `F1`, `F2`, and so on. Kratos assigns them from the record, so "the same finding" is a fact
+/// Kratos can check and not something a reviewer asserts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FindingId(NonZeroU32);
 
@@ -88,8 +92,9 @@ impl<'de> Deserialize<'de> for FindingId {
     }
 }
 
-// Variants have no doc comments here on purpose. schemars turns a documented variant into a `oneOf`,
-// which the providers' strict mode refuses. The field that holds the enum explains it instead.
+// Variants have no doc comments here on purpose. schemars turns a documented variant into a
+// `oneOf`, which the providers' strict mode refuses. The field that holds the enum explains it
+// instead.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
 )]
@@ -127,22 +132,23 @@ pub struct FindingReport {
     /// important blocks the work. nit is a small point. pre_existing means the problem was there
     /// before this task.
     pub severity: Severity,
-    /// bug: a command shows it. constraint and requirement: the task or the rules say so. design: an
-    /// opinion.
+    /// bug: a command shows it. constraint and requirement: the task or the rules say so. design:
+    /// an opinion.
     pub kind: Kind,
     /// A short name for the kind of mistake, so every instance of it gets fixed.
     pub class: String,
     pub location: Location,
     /// What goes wrong, and for whom.
     pub problem: String,
-    /// For a bug, one shell command that exits non-zero on the reviewed commit. For a requirement or
-    /// constraint, a quote of at least 12 characters from the task, the approved plan, the user's
-    /// directions, AGENTS.md, CLAUDE.md, or REVIEW.md.
+    /// For a bug, one shell command that exits non-zero on the reviewed commit. For a requirement
+    /// or constraint, a quote of at least 12 characters from the task, the approved plan, the
+    /// user's directions, AGENTS.md, CLAUDE.md, or REVIEW.md.
     pub evidence: String,
     /// The condition that shows the finding is fixed.
     pub fixed_when: String,
-    /// Paths of the probe test files that show this finding, or an empty list. Kratos copies them into
-    /// the record, and the approval report lists each with the output that showed the bug (D78).
+    /// Paths of the probe test files that show this finding, or an empty list. Kratos copies them
+    /// into the record, and the approval report lists each with the output that showed the bug
+    /// (D78).
     pub probes: Vec<String>,
 }
 
@@ -153,9 +159,7 @@ impl FindingReport {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // Finished reports, one per kind of work.
-// ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -176,9 +180,9 @@ pub struct AddedProbe {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResponseOutcome {
     Fixed,
-    /// A dispute goes to whoever rules, the planner or the user, and never to the reviewer. The reason
-    /// may be blank here. The handoff check refuses a blank one with a message that names every
-    /// unexplained finding at once.
+    /// A dispute goes to whoever rules, the planner or the user, and never to the reviewer. The
+    /// reason may be blank here. The handoff check refuses a blank one with a message that names
+    /// every unexplained finding at once.
     Disputed {
         reason: String,
     },
@@ -252,22 +256,20 @@ pub struct Ruling {
     pub reason: String,
 }
 
-/// The planner's rulings on disputed findings. The fold checks that they cover every disputed finding
-/// exactly once, because only the fold knows which findings were disputed.
+/// The planner's rulings on disputed findings. The fold checks that they cover every disputed
+/// finding exactly once, because only the fold knows which findings were disputed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RulingsDone {
     pub rulings: Vec<Ruling>,
 }
 
-// ---------------------------------------------------------------------------------------------
 // The typed outcome of any turn's final reply.
-// ---------------------------------------------------------------------------------------------
 
-/// How a member's final reply parsed. Every kind of work shares these five outcomes, so the question,
-/// blocked, plan-change, and invalid-report handling is written once, in the fold.
+/// How a member's final reply parsed. Every kind of work shares these five outcomes, so the
+/// question, blocked, plan-change, and invalid-report handling is written once, in the fold.
 ///
-/// A question is not a blocked report. It suspends the step and gets answered. A blocked report means
-/// something outside the member's control stops it, and only the user can help.
+/// A question is not a blocked report. It suspends the step and gets answered. A blocked report
+/// means something outside the member's control stops it, and only the user can help.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum Report<T> {
@@ -315,8 +317,8 @@ pub enum Reported {
     },
 }
 
-/// Which report a piece of work must end with. Its derived schema lists every kind, which lets a test
-/// cover each one without a hand-written list.
+/// Which report a piece of work must end with. Its derived schema lists every kind, which lets a
+/// test cover each one without a hand-written list.
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
 )]
@@ -361,8 +363,8 @@ impl FinalReply {
 }
 
 /// Validates a final reply against the schema of `kind` and the rules a schema cannot express: text
-/// that must not be blank, finding ids that parse, scope globs that compile. It never fails and never
-/// panics. A reply that cannot be used becomes `Report::Invalid`.
+/// that must not be blank, finding ids that parse, scope globs that compile. It never fails and
+/// never panics. A reply that cannot be used becomes `Report::Invalid`.
 pub fn parse_report(kind: ReportKind, reply: &FinalReply, changes: &TurnChanges) -> Reported {
     let json = reply_json(reply);
     let raw = reply.raw();
@@ -405,9 +407,7 @@ fn reply_json(reply: &FinalReply) -> Result<Value, String> {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // Wire shapes. They are private, and nothing outside this module names them.
-// ---------------------------------------------------------------------------------------------
 
 // The statuses every kind of report shares. Their meaning is on the `status` field of each report.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
@@ -427,7 +427,8 @@ struct AskWire {
     question: String,
     /// Fill in only when status is plan_change: why the plan must change. Otherwise "".
     plan_change_reason: String,
-    /// Fill in only when status is plan_change: extra files you need in scope, as globs. Otherwise [].
+    /// Fill in only when status is plan_change: extra files you need in scope, as globs. Otherwise
+    /// [].
     plan_change_scope: Vec<String>,
 }
 
@@ -562,8 +563,8 @@ enum ResponseKind {
 #[serde(deny_unknown_fields)]
 struct ImplementerWire {
     /// done: the work is complete. blocked: something outside your control stops you. question: you
-    /// need an answer before you can go on. plan_change: the plan must change, most often because the
-    /// work needs more files than the plan allows.
+    /// need an answer before you can go on. plan_change: the plan must change, most often because
+    /// the work needs more files than the plan allows.
     status: Status,
     /// What changed and why, in a few sentences.
     summary: String,
@@ -634,13 +635,13 @@ struct StillOpenWire {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ReviewWire {
-    /// done: you finished the review. blocked: only the user can decide, and Kratos will not check any
-    /// finding. question: you need an answer first, for example about the reasons for a change.
+    /// done: you finished the review. blocked: only the user can decide, and Kratos will not check
+    /// any finding. question: you need an answer first, for example about the reasons for a change.
     status: Status,
     /// Starts with the number of findings, and says plainly when there is nothing to fix.
     summary: String,
-    /// approve when nothing blocks, or changes_requested when an important finding blocks. Your verdict
-    /// must agree with the findings Kratos confirms. Ignored unless status is done.
+    /// approve when nothing blocks, or changes_requested when an important finding blocks. Your
+    /// verdict must agree with the findings Kratos confirms. Ignored unless status is done.
     verdict: Verdict,
     /// New findings only.
     findings: Vec<FindingReport>,
@@ -721,7 +722,8 @@ impl AnswerWire {
 #[serde(deny_unknown_fields)]
 struct RulingWire {
     finding_id: String,
-    /// bug: the finding is real, and the implementer must fix it. not_bug: the finding is not a bug.
+    /// bug: the finding is real, and the implementer must fix it. not_bug: the finding is not a
+    /// bug.
     ruling: RulingVerdict,
     reason: String,
 }
@@ -729,8 +731,8 @@ struct RulingWire {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RulingsWire {
-    /// done: you ruled on every disputed finding. blocked: something outside your control stops you.
-    /// question: you cannot rule without the user. Never guess. plan_change: your ruling would
+    /// done: you ruled on every disputed finding. blocked: something outside your control stops
+    /// you. question: you cannot rule without the user. Never guess. plan_change: your ruling would
     /// contradict the plan.
     status: Status,
     summary: String,
@@ -770,9 +772,7 @@ fn from_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String>
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
 
-// ---------------------------------------------------------------------------------------------
 // Schemas and the strict-subset check.
-// ---------------------------------------------------------------------------------------------
 
 /// Why a derived schema is outside the subset both CLIs accept.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -802,8 +802,8 @@ const BANNED_KEYWORDS: [&str; 9] = [
 
 /// Derives the JSON Schema of `T` and refuses it unless it stays inside the strict subset: objects
 /// with every property required and `additionalProperties: false`, arrays, strings, integers,
-/// booleans, and string enums. It drops `$schema`, and the `format` and bounds that schemars adds to
-/// sized integers.
+/// booleans, and string enums. It drops `$schema`, and the `format` and bounds that schemars adds
+/// to sized integers.
 pub fn strict_json_schema<T: JsonSchema>() -> Result<Value, SchemaError> {
     let settings = schemars::generate::SchemaSettings::draft2020_12().with(|settings| {
         settings.inline_subschemas = true;
@@ -891,8 +891,8 @@ fn strict_object(
     Ok(Value::Object(object))
 }
 
-/// The JSON Schema a provider forces on the final reply of a turn of this kind. Derived once from the
-/// wire struct and checked by `strict_json_schema`.
+/// The JSON Schema a provider forces on the final reply of a turn of this kind. Derived once from
+/// the wire struct and checked by `strict_json_schema`.
 pub fn report_json_schema(kind: ReportKind) -> &'static Value {
     static PLAN: LazyLock<Value> = LazyLock::new(|| wire_schema::<PlanWire>(ReportKind::Plan));
     static IMPLEMENTER: LazyLock<Value> =

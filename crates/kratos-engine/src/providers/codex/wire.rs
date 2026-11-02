@@ -176,16 +176,6 @@ pub fn turn_outcome(turn: &types::Turn) -> Option<TurnOutcome> {
     })
 }
 
-/// Whether the turn stopped because the account ran out of its included usage (D39).
-pub fn stopped_at_usage_limit(turn: &types::Turn) -> bool {
-    matches!(
-        turn.error
-            .as_ref()
-            .and_then(|error| error.codex_error_info.as_ref()),
-        Some(types::CodexErrorInfo::UsageLimitExceeded)
-    )
-}
-
 /// The context one turn used: Codex's `last` counts are the latest request's, which is what fills
 /// the window (D76).
 pub fn context_usage(usage: &types::ThreadTokenUsage) -> ContextUsage {

@@ -4,7 +4,7 @@
 use kratos_codex_client::{Codex, RequestError, methods, types};
 use kratos_protocol::{Provider, ThreadId};
 
-use super::actor::{Actor, Deferred, Done, Reply};
+use super::actor::{Actor, Command, Done, Reply};
 use super::{ProviderError, wire};
 
 impl Actor {
@@ -33,7 +33,7 @@ impl Actor {
     pub(super) fn refresh_usage(&mut self, reply: Reply<()>) {
         match self.connection() {
             Ok(Some(codex)) => self.read_usage(codex, Some(reply)),
-            Ok(None) => self.deferred.push(Deferred::RefreshUsage { reply }),
+            Ok(None) => self.deferred.push(Command::RefreshUsage { reply }),
             Err(error) => drop(reply.send(Err(error))),
         }
     }

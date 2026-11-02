@@ -1,9 +1,9 @@
 //! What the user may do, when, and what each choice does to the task.
 //!
 //! `allowed_decisions` is the list the engine shows. When a decision arrives, the engine checks its
-//! `UserDecided` fact with `TaskView::accepts`, which is a dry run of the real thing, so what is allowed
-//! and what applies cannot drift apart. `apply_decision` is the real thing, which the fold calls for
-//! that fact.
+//! `UserDecided` fact with `TaskView::accepts`, which is a dry run of the real thing, so what is
+//! allowed and what applies cannot drift apart. `apply_decision` is the real thing, which the fold
+//! calls for that fact.
 //!
 //! A cancel is available whenever a task is alive. A role change is available until its application
 //! checkpoint starts. User messages are facts that never change the phase.
@@ -12,14 +12,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::facts::{FactSeq, Outcome, Sha, StepId};
+use crate::facts::{FactSeq, Outcome, ProbePolicy, Sha, StepId};
 use crate::fold::Rejection;
 use crate::members::Bindings;
 use crate::reports::{FindingId, RulingVerdict};
 use crate::task_plan::Amendment;
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, Finding, FindingStatus, Hold, Phase,
-    PlanState, Probe, ProbeRejection, Resolution, RulingRecord, Stop, TaskView, Turn,
+    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, Stop, TaskView, Turn,
     UsageLimitAsk, Waiting, Work,
 };
 
@@ -38,7 +38,8 @@ pub enum Decision {
     Answer {
         text: String,
     },
-    /// Rule on disputed findings when there is no planner. The named ones are not bugs, and the rest are.
+    /// Rule on disputed findings when there is no planner. The named ones are not bugs, and the
+    /// rest are.
     Rule {
         not_bug: Vec<FindingId>,
     },
@@ -47,8 +48,9 @@ pub enum Decision {
         response: PlanChangeResponse,
         instructions: Option<String>,
     },
-    /// Give the implementer direction. This is an explicit request to go on, so it starts a new count
-    /// of rounds and of fix attempts. The direction remains a requirement for the rest of the task.
+    /// Give the implementer direction. This is an explicit request to go on, so it starts a new
+    /// count of rounds and of fix attempts. The direction remains a requirement for the rest of the
+    /// task.
     Direct {
         text: String,
     },
@@ -67,9 +69,10 @@ pub enum Decision {
     KeepProbes {
         keep: Vec<String>,
     },
-    /// Move roles between the Team's members. It applies before the next new step. Sending the current
-    /// roles while a change is pending withdraws it, until the application checkpoint starts. During
-    /// that checkpoint all role-change decisions are rejected, because the engine may be applying it.
+    /// Move roles between the Team's members. It applies before the next new step. Sending the
+    /// current roles while a change is pending withdraws it, until the application checkpoint
+    /// starts. During that checkpoint all role-change decisions are rejected, because the engine
+    /// may be applying it.
     ReassignRoles {
         to: Bindings,
     },
@@ -141,7 +144,8 @@ impl fmt::Display for DecisionKind {
 }
 
 impl Decision {
-    // #lizard forgives: one arm for each of the 16 variants, and the compiler checks that none is missing.
+    // #lizard forgives: one arm for each of the 16 variants, and the compiler checks that none is
+    // missing.
     pub fn kind(&self) -> DecisionKind {
         match self {
             Decision::ApprovePlan { .. } => DecisionKind::ApprovePlan,
@@ -164,9 +168,7 @@ impl Decision {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // What is allowed.
-// ---------------------------------------------------------------------------------------------
 
 /// The decisions the task accepts now, in a stable order. Empty once the task is closing or closed.
 ///
@@ -183,11 +185,11 @@ impl Decision {
 /// | at a usage limit, long wait          | KeepWaiting, Cancel                             |
 /// | approved                             | Direct, Finish, KeepProbes when offered, Cancel |
 ///
-/// In trouble the user is offered the job that failed. When the planner's answering step failed, that is
-/// `Answer`, so the user answers the asker directly. When its ruling step failed, it is `Rule`, the same
-/// path a Team with no planner uses. When an implementer, review, commit, or evidence step failed,
-/// it is `Direct`, `StepBack`, and `Accept`. When preparation or planning failed, only `Resume` and
-/// `Cancel` make sense, because no work exists to direct or accept.
+/// In trouble the user is offered the job that failed. When the planner's answering step failed,
+/// that is `Answer`, so the user answers the asker directly. When its ruling step failed, it is
+/// `Rule`, the same path a Team with no planner uses. When an implementer, review, commit, or
+/// evidence step failed, it is `Direct`, `StepBack`, and `Accept`. When preparation or planning
+/// failed, only `Resume` and `Cancel` make sense, because no work exists to direct or accept.
 ///
 /// `ReassignRoles` comes last on every row while the task is alive, except during the role-change
 /// application checkpoint. Changing or withdrawing its authorization then returns `NotAllowed`.
@@ -246,12 +248,14 @@ fn trouble_decisions(left: &Activity) -> Vec<DecisionKind> {
 
 /// `KeepProbes` is offered only while the user decides and a probe still waits for a choice.
 fn probes_offered(view: &TaskView) -> bool {
-    view.is_user_decides_probes() && view.has_offered_probes()
+    matches!(view.policy.probes, ProbePolicy::UserDecides)
+        && view
+            .probes
+            .iter()
+            .any(|probe| probe.status == ProbeStatus::Offered)
 }
 
-// ---------------------------------------------------------------------------------------------
 // What each decision does.
-// ---------------------------------------------------------------------------------------------
 
 /// | Decision       | Effect |
 /// | -------------- | ------ |
@@ -271,7 +275,8 @@ fn probes_offered(view: &TaskView) -> bool {
 /// | KeepWaiting    | The scheduler schedules the step without asking again. |
 /// | ApproveHandoff | The engine tries the stopped role on another account, this once. |
 /// | DeclineHandoff | The step waits for the reset. |
-// #lizard forgives: one arm for each of the 16 decisions, each calling the function that applies it.
+// #lizard forgives: one arm for each of the 16 decisions, each calling the function that applies
+// it.
 pub(crate) fn apply_decision(
     view: Box<TaskView>,
     decision: Decision,
@@ -339,7 +344,7 @@ fn approve_plan(
         revision,
     } = view.plan.clone()
     else {
-        return Err(not_allowed(&view, DecisionKind::ApprovePlan));
+        unreachable!("plan approval waits for a drafted plan");
     };
     view.plan = PlanState::Approved {
         plan,
@@ -363,7 +368,7 @@ fn revise_plan(
 ) -> Result<Box<TaskView>, Rejection> {
     not_blank(&feedback, "the feedback", invalid)?;
     let PlanState::Drafted { author, .. } = &view.plan else {
-        return Err(not_allowed(&view, DecisionKind::RevisePlan));
+        unreachable!("plan revision waits for a drafted plan");
     };
     let work = Work::Plan {
         author: *author,
@@ -372,8 +377,8 @@ fn revise_plan(
     view.begin_step(work, seq)
 }
 
-/// The user answers the question on top of the stack. When the planner failed to answer, the planner's
-/// step is dropped, and the user answers the asker in its place.
+/// The user answers the question on top of the stack. When the planner failed to answer, the
+/// planner's step is dropped, and the user answers the asker in its place.
 fn answer(
     view: Box<TaskView>,
     text: String,
@@ -382,7 +387,7 @@ fn answer(
 ) -> Result<Box<TaskView>, Rejection> {
     not_blank(&text, "the answer", invalid)?;
     let Some(question) = view.pending_question() else {
-        return Err(not_allowed(&view, DecisionKind::Answer));
+        unreachable!("Answer is allowed only while a question is pending");
     };
     let resolution = Resolution::Answered {
         question: question.text.clone(),
@@ -392,33 +397,29 @@ fn answer(
     view.resume_step(resolution, seq)
 }
 
-/// The user rules on the disputed findings. The same path serves a Team with no planner and a planner
-/// that failed to rule.
+/// The user rules on the disputed findings. The same path serves a Team with no planner and a
+/// planner that failed to rule.
 fn rule(
     mut view: Box<TaskView>,
     not_bug: &[FindingId],
     seq: FactSeq,
     invalid: Invalid<'_>,
 ) -> Result<Box<TaskView>, Rejection> {
-    let (disputed, commit) = match &view.phase {
-        Phase::Waiting {
-            waiting: Waiting::Ruling { disputed, commit },
-        } => (disputed.clone(), commit.clone()),
-        Phase::Waiting {
-            waiting:
-                Waiting::Trouble {
-                    left:
-                        Activity::Turn {
-                            turn:
-                                Turn {
-                                    work: Work::Rule { disputed, commit },
-                                    ..
-                                },
-                        },
-                    ..
-                },
-        } => (disputed.clone(), commit.clone()),
-        _ => return Err(not_allowed(&view, DecisionKind::Rule)),
+    let Phase::Waiting { waiting } = &view.phase else {
+        unreachable!("Rule is allowed only while waiting for a ruling");
+    };
+    let (disputed, commit) = match waiting {
+        Waiting::Ruling { disputed, commit } => (disputed.clone(), commit.clone()),
+        Waiting::Trouble {
+            left: Activity::Turn { turn },
+            ..
+        } => {
+            let Work::Rule { disputed, commit } = &turn.work else {
+                unreachable!("Rule is allowed in trouble only after a ruling step");
+            };
+            (disputed.clone(), commit.clone())
+        }
+        _ => unreachable!("Rule is allowed only for a pending or failed ruling"),
     };
     if let Some(stranger) = not_bug.iter().find(|id| !disputed.contains(id)) {
         return Err(invalid(&format!("{stranger} is not a disputed finding")));
@@ -446,7 +447,7 @@ fn plan_change(
     seq: FactSeq,
 ) -> Result<Box<TaskView>, Rejection> {
     let Some(request) = view.pending_plan_change().cloned() else {
-        return Err(not_allowed(&view, DecisionKind::PlanChange));
+        unreachable!("PlanChange is allowed only while a plan change is pending");
     };
     if response == PlanChangeResponse::Replan {
         return replan(view, &request.reason, instructions, seq);
@@ -467,8 +468,8 @@ fn plan_change(
     view.resume_step(resolution, seq)
 }
 
-/// The suspended steps are dropped, because they were working to a plan that is going away. The plan's
-/// author writes a new plan, and the user approves it again.
+/// The suspended steps are dropped, because they were working to a plan that is going away. The
+/// plan's author writes a new plan, and the user approves it again.
 fn replan(
     mut view: Box<TaskView>,
     reason: &str,
@@ -605,18 +606,17 @@ fn handoff(view: Box<TaskView>, approved: bool) -> Result<Box<TaskView>, Rejecti
     Ok(view.active(Activity::Turn { turn }))
 }
 
-// ---------------------------------------------------------------------------------------------
 // The approval report.
-// ---------------------------------------------------------------------------------------------
 
-/// What the user reads before the final call. It is built from the view, so it cannot leave anything out.
+/// What the user reads before the final call. It is built from the view, so it cannot leave
+/// anything out.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ApprovalReport {
     pub commit: Sha,
     pub approved_by: ApprovedBy,
     pub rounds: usize,
-    /// Findings that never blocked: nits, pre-existing bugs, design opinions, and real problems outside
-    /// the changed lines. They are ranked by severity (D94).
+    /// Findings that never blocked: nits, pre-existing bugs, design opinions, and real problems
+    /// outside the changed lines. They are ranked by severity (D94).
     pub listed: Vec<Finding>,
     /// Findings Kratos could not confirm, with the reason.
     pub dropped: Vec<Finding>,

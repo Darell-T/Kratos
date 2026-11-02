@@ -1,11 +1,11 @@
-//! Messages from the user to a member (D33). The user can message any member at any time, and a message
-//! never replaces the step that is running.
+//! Messages from the user to a member (D33). The user can message any member at any time, and a
+//! message never replaces the step that is running.
 //!
-//! The engine records the message with its target member and a delivery id before it tries to deliver
-//! it, and then records what it did. Either the message reached the member's running turn, or it is
-//! kept for the member's next message. A step cannot complete while one of its member's messages has
-//! no recorded fate. A message that missed the running turn goes out with the member's next message
-//! once, and a lost turn does not count as received, so the message goes again.
+//! The engine records the message with its target member and a delivery id before it tries to
+//! deliver it, and then records what it did. Either the message reached the member's running turn,
+//! or it is kept for the member's next message. A step cannot complete while one of its member's
+//! messages has no recorded fate. A message that missed the running turn goes out with the member's
+//! next message once, and a lost turn does not count as received, so the message goes again.
 
 use crate::facts::{DeliveryId, Disposition, FactSeq};
 use crate::fold::Rejection;
@@ -109,7 +109,8 @@ impl TaskView {
         }
     }
 
-    /// The messages queued for the turn's member before its message became due. They are sent with it.
+    /// The messages queued for the turn's member before its message became due. They are sent with
+    /// it.
     fn carried_by(&self, turn: &Turn) -> Vec<Direction> {
         self.directions
             .iter()

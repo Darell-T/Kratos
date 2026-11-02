@@ -201,18 +201,6 @@ impl Fake {
         ));
     }
 
-    /// Answers a request the client sent earlier, such as a held `turn/start`.
-    fn reply_to_client(&mut self, id: &Value, result: Value) {
-        self.outbox
-            .push(Out::Client(json!({ "id": id, "result": result })));
-    }
-
-    fn fail_to_client(&mut self, id: &Value, code: i64, message: &str) {
-        self.outbox.push(Out::Client(
-            json!({ "id": id, "error": { "code": code, "message": message } }),
-        ));
-    }
-
     fn send(&mut self, message: Value) {
         self.outbox.push(Out::Client(message));
     }
@@ -492,15 +480,18 @@ impl Fake {
             return self.fail(id, -32000, "No matching pending turn request");
         };
         let held = self.held.remove(position);
-        match params["error"].as_str() {
-            Some(error) => {
-                self.fail_to_client(&held.id, params["code"].as_i64().unwrap_or(-32000), error)
-            }
+        let reply = match params["error"].as_str() {
+            Some(error) => json!({
+                "id": held.id,
+                "error": { "code": params["code"].as_i64().unwrap_or(-32000), "message": error },
+            }),
             None => {
                 self.remember_input(&held, &params["result"]);
-                self.reply_to_client(&held.id, params["result"].clone());
+                json!({ "id": held.id, "result": params["result"].clone() })
             }
-        }
+        };
+        // Answers a request the client sent earlier, such as a held turn/start.
+        self.outbox.push(Out::Client(reply));
         self.reply(id, Value::Null);
     }
 

@@ -1,9 +1,11 @@
-//! A scripted task is the engine's loop in miniature, with scripted agents, git, and evidence commands.
+//! A scripted task is the engine's loop in miniature, with scripted agents, git, and evidence
+//! commands.
 //!
-//! Every scenario builds a `ScriptedTask`, lets it run until the task waits, and asserts on the view
-//! and on the steps it ran. The loop is the one the engine runs, so these tests also prove that the
-//! public interface is enough to drive a task: `fold`, `next_step`, `accepts`, `allowed_decisions`, and
-//! the two-call evidence check. It reads nothing but facts and writes nothing but facts.
+//! Every scenario builds a `ScriptedTask`, lets it run until the task waits, and asserts on the
+//! view and on the steps it ran. The loop is the one the engine runs, so these tests also prove
+//! that the public interface is enough to drive a task: `fold`, `next_step`, `accepts`,
+//! `allowed_decisions`, and the two-call evidence check. It reads nothing but facts and writes
+//! nothing but facts.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -34,9 +36,7 @@ use crate::observe::tag_of;
 /// No scenario needs more steps than this from one helper call, so more means the rules loop.
 const MAX_STEPS: usize = 300;
 
-// ---------------------------------------------------------------------------------------------
 // The script says what the agents, git, and the sandbox would do.
-// ---------------------------------------------------------------------------------------------
 
 /// How the scheduler answers a step handed to it.
 pub enum Scheduler {
@@ -44,14 +44,15 @@ pub enum Scheduler {
     Declines(Declined),
 }
 
-/// What each role's next turns end with, and what evidence commands print. Running dry panics with the
-/// role's name, because a scenario that asks for more turns than it scripted is wrong.
+/// What each role's next turns end with, and what evidence commands print. Running dry panics with
+/// the role's name, because a scenario that asks for more turns than it scripted is wrong.
 #[derive(Default)]
 pub struct Script {
     pub planner: VecDeque<Ended>,
     pub implementer: VecDeque<Ended>,
     pub reviewer: VecDeque<Ended>,
-    /// Results of an evidence command, by command text. They are used in order, and the last repeats.
+    /// Results of an evidence command, by command text. They are used in order, and the last
+    /// repeats.
     pub commands: BTreeMap<String, Vec<CommandResult>>,
     /// Hits the security scan returns, one entry per scan.
     pub scans: VecDeque<Vec<TriggerHit>>,
@@ -84,7 +85,8 @@ impl Script {
             .unwrap_or_else(|| panic!("the {role} script ran out"))
     }
 
-    /// The command's scripted results in order, then the last one again. A command nobody scripted exits 0.
+    /// The command's scripted results in order, then the last one again. A command nobody scripted
+    /// exits 0.
     fn run_command(&self, ran: &mut CommandsRan, command: &str) -> CommandResult {
         let count = ran.entry(command.to_owned()).or_default();
         let result = self
@@ -100,7 +102,8 @@ impl Script {
         let outside = self.outside_diff.clone();
         let mut checks = BTreeMap::new();
         for candidate in &step.candidates {
-            // Every confirmed finding is inside the diff, except the classes the scenario put outside it.
+            // Every confirmed finding is inside the diff, except the classes the scenario put
+            // outside it.
             let diff =
                 (step.ranges_base.is_some()).then(|| diff_covering(&candidate.report, &outside));
             let seen = Seen {
@@ -154,9 +157,7 @@ fn diff_covering(report: &FindingReport, outside: &[String]) -> Diff {
     Diff::parse(&text)
 }
 
-// ---------------------------------------------------------------------------------------------
 // The runner.
-// ---------------------------------------------------------------------------------------------
 
 pub struct ScriptedTask {
     log: Vec<StoredFact>,
@@ -198,8 +199,8 @@ impl ScriptedTask {
         &self.log
     }
 
-    /// The engine's short transaction. It folds the latest facts, asks whether the fact still applies, and
-    /// appends it once.
+    /// The engine's short transaction. It folds the latest facts, asks whether the fact still
+    /// applies, and appends it once.
     pub fn append(&mut self, fact: Fact) -> Result<(), Rejection> {
         self.view().accepts(&fact)?;
         let seq = FactSeq(self.log.len() as u64 + 1);
@@ -255,8 +256,9 @@ impl ScriptedTask {
         ran
     }
 
-    /// Runs steps until `reached` holds. A task that stops to wait for the user first fails the test
-    /// at once, naming the step it stopped at, so a broken rule fails a test instead of hanging it.
+    /// Runs steps until `reached` holds. A task that stops to wait for the user first fails the
+    /// test at once, naming the step it stopped at, so a broken rule fails a test instead of
+    /// hanging it.
     pub fn step_until(&mut self, reached: impl Fn(&ScriptedTask) -> bool) {
         for _ in 0..MAX_STEPS {
             if reached(self) {
@@ -422,9 +424,7 @@ pub fn probe_run(from: &str, failed_before_fix: bool, passed_after_fix: bool) ->
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // Fixtures. They are the same small world every scenario starts from.
-// ---------------------------------------------------------------------------------------------
 
 pub fn sha(n: u64) -> Sha {
     Sha::parse(&format!("{n:040x}")).expect("40 hex digits")
@@ -582,9 +582,7 @@ pub fn pattern(glob: &str) -> ScopePattern {
     ScopePattern::new(glob).expect("a valid glob")
 }
 
-// ---------------------------------------------------------------------------------------------
 // Scripted turn endings.
-// ---------------------------------------------------------------------------------------------
 
 pub fn reported(reported: Reported) -> Ended {
     Ended::Reported { reported }
@@ -874,9 +872,7 @@ fn question_report<T>(summary: &str, question: &str) -> Report<T> {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // Findings.
-// ---------------------------------------------------------------------------------------------
 
 fn finding(severity: Severity, kind: Kind, class: &str, evidence: &str) -> FindingReport {
     FindingReport {

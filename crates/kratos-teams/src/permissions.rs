@@ -1,7 +1,7 @@
 //! What each role may do without asking, and what it must ask the user first (D84, D93).
 //!
-//! The planner reads and never changes anything. The reviewer writes only inside its own worktree, to
-//! leave probe files. The implementer follows the Team's permission:
+//! The planner reads and never changes anything. The reviewer writes only inside its own worktree,
+//! to leave probe files. The implementer follows the Team's permission:
 //!
 //! | Permission     | Asks the user about |
 //! | -------------- | ------------------- |
@@ -9,12 +9,12 @@
 //! | Approve for me | commands flagged as potentially dangerous, by the provider's check or by Kratos's |
 //! | Full access    | destructive commands, the ones Kratos's dangerous-command check flags (D18) |
 //!
-//! A write outside the worktree asks only under Ask me, unless the command is flagged as dangerous or
-//! destructive. A write to a protected folder asks under every permission (D20).
+//! A write outside the worktree asks only under Ask me, unless the command is flagged as dangerous
+//! or destructive. A write to a protected folder asks under every permission (D20).
 //!
-//! These rules are pure. The engine calls `approval` where the action runs, so the policy the user sees
-//! is the policy in effect, and a permission change cannot reach a turn already in progress, because the
-//! permission is frozen in the task's policy.
+//! These rules are pure. The engine calls `approval` where the action runs, so the policy the user
+//! sees is the policy in effect, and a permission change cannot reach a turn already in progress,
+//! because the permission is frozen in the task's policy.
 
 use kratos_protocol::Permission;
 
@@ -62,7 +62,8 @@ pub enum Approval {
     Deny,
 }
 
-/// What `role` may do with `action`. `permission` is the Team's, and only the implementer follows it.
+/// What `role` may do with `action`. `permission` is the Team's, and only the implementer follows
+/// it.
 pub fn approval(role: Role, permission: Permission, action: Action) -> Approval {
     if action.kind == ActionKind::Read {
         return Approval::Allow;

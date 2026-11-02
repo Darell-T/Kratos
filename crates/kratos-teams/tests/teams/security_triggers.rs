@@ -1,6 +1,6 @@
-//! Security triggers decide which changes get a security review. A match selects review, and no match is not
-//! proof of safety. Ported from `teams-evidence.test.ts`, with Rust process, network, filesystem, and
-//! permission cases added.
+//! Security triggers decide which changes get a security review. A match selects review, and no
+//! match is not proof of safety. Ported from `teams-evidence.test.ts`, with Rust process, network,
+//! filesystem, and permission cases added.
 
 use kratos_teams::diff::{Diff, DiffFile};
 use kratos_teams::security_triggers::{
@@ -429,8 +429,8 @@ fn long_benign_lines_and_disabled_triggers_still_select_no_review() {
 
 #[test]
 fn a_pattern_that_runs_out_of_budget_on_a_line_counts_as_a_hit_instead_of_hanging_or_failing() {
-    // The look-ahead inside the loop forces the backtracking engine, and the two ways to match `a` make
-    // it try every split of the line.
+    // The look-ahead inside the loop forces the backtracking engine, and the two ways to match `a`
+    // make it try every split of the line.
     let evil = code_trigger(r"^(?:(a|aa)(?!b))+$");
     let line = format!("{}b", "a".repeat(200));
 

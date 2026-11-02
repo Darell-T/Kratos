@@ -1,13 +1,14 @@
-//! `git diff` output, parsed into the files a change touched, the lines it changed, and the lines it
-//! added. The evidence rules read the changed lines, and the security triggers read the files and the
-//! added lines.
+//! `git diff` output, parsed into the files a change touched, the lines it changed, and the lines
+//! it added. The evidence rules read the changed lines, and the security triggers read the files
+//! and the added lines.
 
 use serde::{Deserialize, Serialize};
 
 /// The git arguments for every diff the engine makes for the rules, followed by the revision range.
 /// That covers each diff a check or a scan parses and the one `Committed::size` measures.
 ///
-/// - `core.quotePath=false` keeps non-ASCII file names as written. Without it git writes each byte of
+/// - `core.quotePath=false` keeps non-ASCII file names as written. Without it git writes each byte
+///   of
 ///   such a name as an octal escape.
 /// - The two prefixes make the new side `b/`, whatever the user's `diff.noprefix` says.
 /// - `--no-ext-diff` and `--no-textconv` keep a diff driver in a tree an agent wrote from running.
@@ -42,8 +43,8 @@ pub struct DiffFile {
     pub added: Vec<String>,
 }
 
-/// A unified diff, parsed. A deleted file does not appear, and a renamed or new file appears under its
-/// new name.
+/// A unified diff, parsed. A deleted file does not appear, and a renamed or new file appears under
+/// its new name.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diff {
     pub files: Vec<DiffFile>,
@@ -53,9 +54,10 @@ impl Diff {
     /// Reads `git diff` output made with `GIT_DIFF_ARGS`.
     ///
     /// The parser counts every line of a hunk against the counts in its header, context lines
-    /// included. So an added line that itself starts with `+++ ` is never taken for a file header, and
-    /// a diff made with context parses to the same ranges as one made with `-U0`. It never fails:
-    /// lines it does not know are skipped, and a hunk the text cuts short ends with the text.
+    /// included. So an added line that itself starts with `+++ ` is never taken for a file header,
+    /// and a diff made with context parses to the same ranges as one made with `-U0`. It never
+    /// fails: lines it does not know are skipped, and a hunk the text cuts short ends with the
+    /// text.
     pub fn parse(text: &str) -> Diff {
         let mut walker = Walker::default();
         for line in text.lines() {
@@ -82,8 +84,8 @@ struct Walker {
     hunk: Option<Hunk>,
 }
 
-/// A run of changed lines inside a hunk. A deletion has no new-side lines, so it remembers only that
-/// it happened.
+/// A run of changed lines inside a hunk. A deletion has no new-side lines, so it remembers only
+/// that it happened.
 enum Block {
     None,
     Deleted,

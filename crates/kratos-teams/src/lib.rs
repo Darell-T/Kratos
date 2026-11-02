@@ -1,8 +1,9 @@
-//! The Teams rules are pure functions over a recorded log of facts, with no I/O, clocks, or randomness.
+//! The Teams rules are pure functions over a recorded log of facts, with no I/O, clocks, or
+//! randomness.
 //!
-//! A Team is two or three members that plan, build, and review each other's work on one task. Kratos's
-//! own code, and not a model, holds everyone to the process (D29), and this crate is that code. The
-//! engine runs it with real agents, git, and SQLite.
+//! A Team is two or three members that plan, build, and review each other's work on one task.
+//! Kratos's own code, and not a model, holds everyone to the process (D29), and this crate is that
+//! code. The engine runs it with real agents, git, and SQLite.
 //!
 //! ```text
 //! facts --fold--> TaskView --next_step--> Step --the engine runs it--> new fact --append--> facts
@@ -26,8 +27,8 @@
 //! | `security_triggers` | which diffs get a security review |
 //! | `permissions`       | what each role may do without asking |
 //!
-//! A restart needs no special code. Fold the same facts and ask `next_step` again. The engine appends a
-//! result only after `TaskView::accepts` says it still applies.
+//! A restart needs no special code. Fold the same facts and ask `next_step` again. The engine
+//! appends a result only after `TaskView::accepts` says it still applies.
 
 pub mod decisions;
 pub mod diff;

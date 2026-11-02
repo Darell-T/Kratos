@@ -1,7 +1,7 @@
-//! Plan-change requests (D32). A member asks to change the agreed plan, most often to touch more files.
-//! The request always pauses for the user, even with a planner. The user allows it, declines it, or
-//! asks for a new plan, and can add instructions to any of the three. A plan change is only an explicit
-//! outcome a member returns. The rules never detect a contradiction on their own.
+//! Plan-change requests (D32). A member asks to change the agreed plan, most often to touch more
+//! files. The request always pauses for the user, even with a planner. The user allows it, declines
+//! it, or asks for a new plan, and can add instructions to any of the three. A plan change is only
+//! an explicit outcome a member returns. The rules never detect a contradiction on their own.
 
 use kratos_teams::decisions::{Decision, DecisionKind, PlanChangeResponse};
 use kratos_teams::facts::{Ended, Fact, StoredFact};

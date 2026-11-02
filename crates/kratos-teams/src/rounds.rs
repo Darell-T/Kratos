@@ -1,8 +1,9 @@
-//! The review loop: committing a handoff, checking a review's evidence, settling findings, rulings on
-//! disputes, and the pauses and approvals that end a round.
+//! The review loop: committing a handoff, checking a review's evidence, settling findings, rulings
+//! on disputes, and the pauses and approvals that end a round.
 //!
-//! A round is one implementer handoff plus the review of it. Rounds count from the user's last explicit
-//! request to go on (D89), and a blocking finding gets two fix attempts before the task pauses as stuck.
+//! A round is one implementer handoff plus the review of it. Rounds count from the user's last
+//! explicit request to go on (D89), and a blocking finding gets two fix attempts before the task
+//! pauses as stuck.
 
 use std::collections::BTreeMap;
 
@@ -39,11 +40,10 @@ struct Judged {
 }
 
 impl TaskView {
-    // -----------------------------------------------------------------------------------------
     // The handoff check.
-    // -----------------------------------------------------------------------------------------
 
-    /// `None` when the responses answer every open finding exactly once, and each dispute has a reason.
+    /// `None` when the responses answer every open finding exactly once, and each dispute has a
+    /// reason.
     pub(crate) fn responses_problem(&self, responses: &[Response]) -> Option<String> {
         let open: Vec<FindingId> = self.open_findings().map(|finding| finding.id).collect();
         let Coverage {
@@ -77,9 +77,7 @@ impl TaskView {
         ])
     }
 
-    // -----------------------------------------------------------------------------------------
     // Commits.
-    // -----------------------------------------------------------------------------------------
 
     /// Records the round. After a handoff, each open finding gains an attempt and the response the
     /// implementer gave it. A dispute goes to whoever rules, and otherwise the review begins.
@@ -158,8 +156,8 @@ impl TaskView {
         Ok(self.waiting(Waiting::Ruling { disputed, commit }))
     }
 
-    /// The standard review of `commit`. Once a handoff requires deeper review, its unfinished passes
-    /// belong to the task even when later fixes are small (D94).
+    /// The standard review of `commit`. Once a handoff requires deeper review, its unfinished
+    /// passes belong to the task even when later fixes are small (D94).
     pub(crate) fn begin_review(
         self: Box<Self>,
         seq: FactSeq,
@@ -191,12 +189,10 @@ impl TaskView {
         self.waiting(Waiting::Approved { commit, by })
     }
 
-    // -----------------------------------------------------------------------------------------
     // Rulings on disputes (D31).
-    // -----------------------------------------------------------------------------------------
 
-    /// The planner ruled. A ruling must cover every disputed finding exactly once, and a ruling that
-    /// does not goes back once and then pauses with the user able to rule instead.
+    /// The planner ruled. A ruling must cover every disputed finding exactly once, and a ruling
+    /// that does not goes back once and then pauses with the user able to rule instead.
     pub(crate) fn on_rulings_done(
         mut self: Box<Self>,
         seq: FactSeq,
@@ -223,8 +219,9 @@ impl TaskView {
         self.apply_rulings(&not_bug, disputed, commit, seq)
     }
 
-    /// A ruling closes the findings ruled not a bug. The rest go back to the implementer with the ruling.
-    /// With none left, the review goes on at the same commit with no extra implementer step.
+    /// A ruling closes the findings ruled not a bug. The rest go back to the implementer with the
+    /// ruling. With none left, the review goes on at the same commit with no extra implementer
+    /// step.
     pub(crate) fn apply_rulings(
         mut self: Box<Self>,
         not_bug: &[FindingId],
@@ -255,9 +252,7 @@ impl TaskView {
         )
     }
 
-    // -----------------------------------------------------------------------------------------
     // Checking a review.
-    // -----------------------------------------------------------------------------------------
 
     fn take_checking(mut self: Box<Self>) -> Result<(Box<TaskView>, Checking), Rejection> {
         match self.take_phase() {
@@ -271,9 +266,9 @@ impl TaskView {
         }
     }
 
-    /// Triages the review's new findings, settles the earlier ones by Kratos's reruns, and then decides
-    /// what follows. A verdict that disagrees with the confirmed findings goes back once on the same
-    /// step and then pauses, and the report's findings are not added.
+    /// Triages the review's new findings, settles the earlier ones by Kratos's reruns, and then
+    /// decides what follows. A verdict that disagrees with the confirmed findings goes back once on
+    /// the same step and then pauses, and the report's findings are not added.
     pub(crate) fn on_evidence_checked(
         self: Box<Self>,
         seq: FactSeq,
@@ -281,7 +276,10 @@ impl TaskView {
     ) -> Result<Box<TaskView>, Rejection> {
         let (mut view, Checking { turn, job, report }) = self.take_checking()?;
         let judged = view.judge(&job, &report, &checked)?;
-        let accepted = agrees(report.verdict, judged.blocking.len());
+        let accepted = match report.verdict {
+            Verdict::Approve => judged.blocking.is_empty(),
+            Verdict::ChangesRequested => !judged.blocking.is_empty(),
+        };
         view.record_review(&job, &report, &checked, accepted)?;
         if !accepted {
             view.merge_probes(&checked, &[]);
@@ -382,8 +380,8 @@ impl TaskView {
         }
     }
 
-    /// A blocking finding that survived its fix attempts pauses the task as stuck. Otherwise the cap
-    /// pauses it, or another round starts.
+    /// A blocking finding that survived its fix attempts pauses the task as stuck. Otherwise the
+    /// cap pauses it, or another round starts.
     fn after_blocking(
         mut self: Box<Self>,
         seq: FactSeq,
@@ -439,8 +437,9 @@ impl TaskView {
         self.begin_step(Work::Review { job: next }, seq)
     }
 
-    /// Security comes after the standard pass, then regressions. A small change runs security only when a
-    /// trigger matched. A large change runs it whenever the Team runs the security pass (D94).
+    /// Security comes after the standard pass, then regressions. A small change runs security only
+    /// when a trigger matched. A large change runs it whenever the Team runs the security pass
+    /// (D94).
     fn next_pass(&self, job: &ReviewJob) -> Option<Pass> {
         let thorough = job.depth == Depth::Thorough;
         let security = || {
@@ -505,13 +504,6 @@ fn record_attempts(findings: &mut [Finding], report: &ImplementerDone) {
     }
 }
 
-fn agrees(verdict: Verdict, blocking: usize) -> bool {
-    match verdict {
-        Verdict::Approve => blocking == 0,
-        Verdict::ChangesRequested => blocking > 0,
-    }
-}
-
 /// Only an important finding that is not a design opinion can block (HANDOFF, evidence rules).
 fn triage(
     id: FindingId,
@@ -544,7 +536,8 @@ fn triage(
     }
 }
 
-/// An open bug's rerun decides it. Only a rerun that could not run falls back to the reviewer's word.
+/// An open bug's rerun decides it. Only a rerun that could not run falls back to the reviewer's
+/// word.
 fn settle(finding: &Finding, report: &ReviewDone, rerun: Option<&Rerun>) -> FindingStatus {
     let claim = report
         .still_open
