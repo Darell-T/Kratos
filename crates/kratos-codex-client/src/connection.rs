@@ -24,7 +24,8 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use crate::protocol::{Method, Notification, ServerRequest, Unhandled, methods};
+use crate::locate::INSTALL_COMMAND;
+use crate::protocol::{Method, Notification, ServerRequest, ServerResponse, Unhandled, methods};
 use crate::{INTERNAL_ERROR, INVALID_PARAMS, METHOD_NOT_FOUND, types};
 
 /// Messages that wait for the consumer. When it falls this far behind, the reader stops reading,
@@ -120,11 +121,21 @@ pub struct IncomingRequest {
 }
 
 impl IncomingRequest {
-    /// Sends `result` unless the server already withdrew the request with
-    /// `serverRequest/resolved`, or the connection ended. Returns whether it was sent.
-    pub fn answer<T: Serialize>(mut self, result: &T) -> bool {
+    /// Sends `response` unless the server already withdrew the request with
+    /// `serverRequest/resolved`, or the connection ended. Returns whether it was sent. An answer to
+    /// another kind of request is not sent: the server gets an internal error instead.
+    pub fn answer(mut self, response: ServerResponse) -> bool {
         let responder = self.responder.take().expect("answered at most once");
-        let result = serde_json::to_value(result).expect("answer types serialize");
+        if response.method() != self.request.method() {
+            let message = format!(
+                "Kratos answered {} with an answer to {}",
+                self.request.method(),
+                response.method()
+            );
+            responder.send(&self.id, Err((INTERNAL_ERROR, message)));
+            return false;
+        }
+        let result = serde_json::to_value(&response).expect("answer types serialize");
         responder.send(&self.id, Ok(result))
     }
 
@@ -160,12 +171,14 @@ impl Responder {
         }
         let message = match outcome {
             Ok(result) => json!({ "id": id, "result": result }),
-            Err((code, message)) => {
-                json!({ "id": id, "error": { "code": code, "message": message } })
-            }
+            Err((code, message)) => error_reply(id, code, &message),
         };
         self.shared.write(&message)
     }
+}
+
+fn error_reply(id: &RequestId, code: i64, message: &str) -> Value {
+    json!({ "id": id, "error": { "code": code, "message": message } })
 }
 
 /// A handle to the connection. Clones share it.
@@ -183,7 +196,6 @@ struct Shared {
     close_timeout: Duration,
     close: Mutex<Option<oneshot::Sender<Duration>>>,
     tree_ended: watch::Receiver<bool>,
-    info: Mutex<Option<types::InitializeResponse>>,
 }
 
 #[derive(Debug, Default)]
@@ -233,7 +245,7 @@ pub enum RequestError {
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     #[error(
-        "Could not find {}. Install Codex with \"npm install -g @openai/codex\" or set CODEX_EXE.",
+        "Could not find {}. Install Codex with \"{INSTALL_COMMAND}\" or set CODEX_EXE.",
         .0.display()
     )]
     NotFound(PathBuf),
@@ -270,7 +282,6 @@ pub async fn connect(
         close_timeout: launch.close_timeout,
         close: Mutex::new(Some(close_sender)),
         tree_ended,
-        info: Mutex::new(None),
     });
     let stderr_lines = Arc::new(Mutex::new(VecDeque::new()));
 
@@ -299,12 +310,7 @@ pub async fn connect(
         client_info: launch.client_info.clone(),
     };
     match codex.request::<methods::Initialize>(&params).await {
-        Ok(info) => {
-            *codex
-                .shared
-                .info
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner) = Some(info);
+        Ok(_) => {
             codex.shared.write(&json!({ "method": "initialized" }));
             Ok((codex, incoming))
         }
@@ -339,16 +345,6 @@ fn spawn(launch: &Launch) -> Result<OwnedChild, ConnectError> {
 }
 
 impl Codex {
-    /// What the server said about itself in the handshake.
-    pub fn info(&self) -> types::InitializeResponse {
-        self.shared
-            .info
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-            .expect("connect stores the handshake before it returns a handle")
-    }
-
     pub async fn request<M: Method>(
         &self,
         params: &M::Params,
@@ -550,16 +546,14 @@ impl Reader {
             }
             Err(Unhandled::UnknownMethod) => {
                 let message = format!("Method not handled by Kratos: {method}");
-                self.shared.write(
-                    &json!({ "id": id, "error": { "code": METHOD_NOT_FOUND, "message": message } }),
-                );
+                self.shared
+                    .write(&error_reply(&id, METHOD_NOT_FOUND, &message));
             }
             Err(Unhandled::BadParams(error)) => {
                 eprintln!("codex: cannot read the parameters of {method}: {error}");
                 let message = format!("Kratos cannot read the parameters of {method}: {error}");
-                self.shared.write(
-                    &json!({ "id": id, "error": { "code": INVALID_PARAMS, "message": message } }),
-                );
+                self.shared
+                    .write(&error_reply(&id, INVALID_PARAMS, &message));
             }
         }
     }

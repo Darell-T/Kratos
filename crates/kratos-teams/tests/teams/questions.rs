@@ -4,32 +4,13 @@
 //! who asked, and the same step goes on.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
-use kratos_teams::facts::{Ended, Fact};
+use kratos_teams::facts::Fact;
 use kratos_teams::fold::Rejection;
 use kratos_teams::members::Role;
 use kratos_teams::view::{Answerer, ApprovedBy, Resolution, Trouble, Waiting, Work};
 
 use crate::replay::*;
 use crate::support::*;
-
-/// A three-member task whose plan the user approved, ready for the implementer.
-fn approved_team(
-    planner: Vec<Ended>,
-    implementer: Vec<Ended>,
-    reviewer: Vec<Ended>,
-) -> ScriptedTask {
-    let mut plans = vec![plan_ready()];
-    plans.extend(planner);
-    let mut task = Task::three().script(Script {
-        planner: plans.into(),
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    });
-    task.run();
-    task.decide(Decision::ApprovePlan { conditions: None });
-    task
-}
 
 #[test]
 fn without_a_planner_an_implementer_question_goes_to_the_user_and_the_answer_resumes_the_same_step()
@@ -376,12 +357,11 @@ fn an_answer_cannot_be_blank() {
     });
     task.run();
 
-    let refused = kratos_teams::decisions::check_decision(
-        &task.view(),
-        &Decision::Answer {
+    let refused = task.view().accepts(&Fact::UserDecided {
+        decision: Decision::Answer {
             text: "  ".to_owned(),
         },
-    );
+    });
 
     assert!(matches!(refused, Err(Rejection::InvalidDecision { .. })));
 }
@@ -395,12 +375,11 @@ fn an_answer_is_refused_when_no_question_waits() {
     });
     task.run();
 
-    let refused = kratos_teams::decisions::check_decision(
-        &task.view(),
-        &Decision::Answer {
+    let refused = task.view().accepts(&Fact::UserDecided {
+        decision: Decision::Answer {
             text: "Postgres.".to_owned(),
         },
-    );
+    });
 
     assert!(matches!(refused, Err(Rejection::NotAllowed { .. })));
 }

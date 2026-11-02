@@ -57,9 +57,9 @@ async fn a_command_runs_in_the_thread_s_folder_under_its_permission_s_sandbox() 
     assert_eq!(exec["permissionProfile"], "kratos-approve");
     assert_eq!(exec["timeoutMs"], 30_000);
     harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "command/exec", "result": { "exitCode": 0, "stdout": "clean", "stderr": "" } }),
+        .settle(
+            "command/exec",
+            json!({ "exitCode": 0, "stdout": "clean", "stderr": "" }),
         )
         .await;
 

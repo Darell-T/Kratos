@@ -6,8 +6,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use kratos_engine::providers::codex::ProviderError;
-use kratos_engine::usage::scheduler::{self, Clock, LimitStop, SchedulerHandle};
+use kratos_engine::scheduler::{self, Clock, SchedulerError, SchedulerHandle};
+use kratos_engine::usage::LimitStop;
 use kratos_protocol::{
     AccessLimit, Continuation, ContinuationId, ContinuationState, MessageInput, MessageOrigin,
     MessageStatus, Permission, Provider, ThreadEventBody, ThreadSettings, TurnId,
@@ -597,7 +597,7 @@ async fn settle_late_report(
         scheduler
             .schedule(ContinuationId::new("no-such-continuation".into()))
             .await,
-        Err(ProviderError::UnknownContinuation(_))
+        Err(SchedulerError::UnknownContinuation(_))
     ));
 }
 
@@ -745,10 +745,7 @@ async fn a_message_waiting_on_the_user_holds_the_continuation() {
         .unwrap();
     harness.held("turn/steer", 1).await;
     harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "turn/steer", "code": -32000, "error": "connection reset" }),
-        )
+        .refuse("turn/steer", -32000, "connection reset")
         .await;
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))

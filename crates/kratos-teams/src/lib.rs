@@ -18,8 +18,11 @@
 //! | `decisions`         | what the user may do, when, and what each choice does |
 //! | `task_plan`         | the plan document, the scope, and probe constraints |
 //! | `reports`           | what agents hand back: wire shapes, schemas, and typed reports |
-//! | `evidence`          | location, quote, and command checks, and the diff parser |
-//! | `prompts`           | every message an agent receives, and the task title, commit subject, and branch name |
+//! | `evidence`          | location, quote, and command checks |
+//! | `diff`              | `git diff` output, parsed into changed files, changed lines, and added lines |
+//! | `paths`             | paths relative to the repository root, and the globs that match them |
+//! | `prompts`           | every message an agent receives |
+//! | `naming`            | the task title, the commit subject, and the branch name |
 //! | `security_triggers` | which diffs get a security review |
 //! | `permissions`       | what each role may do without asking |
 //!
@@ -27,11 +30,14 @@
 //! result only after `TaskView::accepts` says it still applies.
 
 pub mod decisions;
+pub mod diff;
 pub mod evidence;
 pub mod facts;
 pub mod fold;
 pub mod members;
+pub mod naming;
 pub mod next_step;
+pub mod paths;
 pub mod permissions;
 pub mod prompts;
 pub mod reports;
@@ -40,6 +46,13 @@ pub mod task_plan;
 pub mod view;
 
 // These add methods to `TaskView`. They have nothing to export.
+mod probes;
 mod rounds;
 mod turns;
 mod user_messages;
+
+/// Whether text holds nothing but whitespace. Every rule that refuses blank text asks this, so the
+/// whitespace set is chosen in one place.
+pub(crate) fn is_blank(text: &str) -> bool {
+    text.trim().is_empty()
+}

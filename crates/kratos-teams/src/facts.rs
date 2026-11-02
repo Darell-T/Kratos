@@ -161,6 +161,22 @@ pub struct RulesSnapshot {
     pub review_md: Option<String>,
 }
 
+impl RulesSnapshot {
+    pub fn instruction_files(&self) -> [(&'static str, Option<&str>); 2] {
+        [
+            ("AGENTS.md", self.agents_md.as_deref()),
+            ("CLAUDE.md", self.claude_md.as_deref()),
+        ]
+    }
+
+    /// Every rules file, by name. The reviewer reads all of them, and a quote may come from any of them.
+    /// `REVIEW.md` is for the reviewer alone.
+    pub fn files(&self) -> [(&'static str, Option<&str>); 3] {
+        let [agents, claude] = self.instruction_files();
+        [agents, claude, ("REVIEW.md", self.review_md.as_deref())]
+    }
+}
+
 /// Who decides which of the reviewer's probe tests become permanent tests (D78).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -277,10 +293,10 @@ pub struct TaskStarted {
     pub constraints: Vec<String>,
     /// The files the user said the task may touch. Empty means the whole worktree.
     pub scope: Vec<ScopePattern>,
-    /// The first line of the request, from `prompts::task_title`. It is stored and not derived again, so
+    /// The first line of the request, from `naming::task_title`. It is stored and not derived again, so
     /// a later version of that function cannot rename the commits of a task in flight.
     pub title: String,
-    /// From `prompts::branch_name`, which starts it with the implementer's provider (D36).
+    /// From `naming::branch_name`, which starts it with the implementer's provider (D36).
     pub branch: String,
     pub base: Sha,
     pub rules: RulesSnapshot,

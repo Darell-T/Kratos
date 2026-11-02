@@ -1,20 +1,20 @@
 //! Codex's generated protocol types in Kratos's terms, and back. Nothing else in the engine reads a
-//! Codex item or writes a Codex request by hand.
+//! Codex item or answers a Codex request by hand.
 
 use std::collections::{BTreeMap, HashMap};
 
 use std::time::{Duration, SystemTime};
 
-use kratos_codex_client::types;
+use kratos_codex_client::{RequestError, ServerRequest, ServerResponse, types};
 use kratos_protocol::{
     AccessLimit, AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult,
     ContextUsage, ExtraAccess, FileChange, FileChangeKind, ItemStatus, Message, MessageInput,
     MessageOrigin, NetworkAccess, PathAccess, PathAccessMode, Permission, Provider, Question,
-    QuestionId, QuestionItem, QuestionOption, ThreadId, Timestamp, TurnChanges, TurnId,
-    TurnOutcome, UsageBucket, UsageWindow,
+    QuestionId, QuestionItem, QuestionOption, ThreadId, Timestamp, TurnId, TurnOutcome,
+    UsageBucket, UsageWindow,
 };
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 /// The most of a command's output a stored event keeps (L3). A proposal until measured on real
 /// sessions: Codex already shortens what it shows the model.
@@ -237,8 +237,30 @@ pub fn answers(answers: BTreeMap<String, Vec<String>>) -> types::ToolRequestUser
     }
 }
 
-pub fn command_decision(decision: ApprovalDecision) -> Value {
-    json!({ "decision": decision_name(decision) })
+pub fn command_decision(
+    decision: ApprovalDecision,
+) -> types::CommandExecutionRequestApprovalResponse {
+    use types::CommandExecutionApprovalDecision as Codex;
+    let decision = match decision {
+        ApprovalDecision::Accept => Codex::Accept,
+        ApprovalDecision::AcceptForSession => Codex::AcceptForSession,
+        ApprovalDecision::Decline => Codex::Decline,
+        ApprovalDecision::Cancel => Codex::Cancel,
+    };
+    types::CommandExecutionRequestApprovalResponse { decision }
+}
+
+pub fn file_change_decision(
+    decision: ApprovalDecision,
+) -> types::FileChangeRequestApprovalResponse {
+    use types::FileChangeApprovalDecision as Codex;
+    let decision = match decision {
+        ApprovalDecision::Accept => Codex::Accept,
+        ApprovalDecision::AcceptForSession => Codex::AcceptForSession,
+        ApprovalDecision::Decline => Codex::Decline,
+        ApprovalDecision::Cancel => Codex::Cancel,
+    };
+    types::FileChangeRequestApprovalResponse { decision }
 }
 
 /// Codex's answer to a request for extra permissions: what it asked for, for this turn or the
@@ -246,14 +268,45 @@ pub fn command_decision(decision: ApprovalDecision) -> Value {
 pub fn permissions_decision(
     decision: ApprovalDecision,
     requested: &types::RequestPermissionProfile,
-) -> Value {
-    match decision {
-        ApprovalDecision::Accept => json!({ "permissions": requested, "scope": "turn" }),
-        ApprovalDecision::AcceptForSession => {
-            json!({ "permissions": requested, "scope": "session" })
+) -> types::PermissionsRequestApprovalResponse {
+    let granted = types::GrantedPermissionProfile {
+        file_system: requested.file_system.clone(),
+        network: requested.network.clone(),
+    };
+    let (permissions, scope) = match decision {
+        ApprovalDecision::Accept => (granted, types::PermissionGrantScope::Turn),
+        ApprovalDecision::AcceptForSession => (granted, types::PermissionGrantScope::Session),
+        ApprovalDecision::Decline | ApprovalDecision::Cancel => (
+            types::GrantedPermissionProfile::default(),
+            types::PermissionGrantScope::Turn,
+        ),
+    };
+    types::PermissionsRequestApprovalResponse {
+        permissions,
+        scope,
+        strict_auto_review: None,
+    }
+}
+
+pub fn refusal(request: &ServerRequest) -> ServerResponse {
+    match request {
+        ServerRequest::CommandApproval(_) => {
+            ServerResponse::CommandApproval(command_decision(ApprovalDecision::Cancel))
         }
-        ApprovalDecision::Decline | ApprovalDecision::Cancel => {
-            json!({ "permissions": {}, "scope": "turn" })
+        ServerRequest::FileChangeApproval(_) => {
+            ServerResponse::FileChangeApproval(file_change_decision(ApprovalDecision::Cancel))
+        }
+        ServerRequest::Permissions(params) => ServerResponse::Permissions(permissions_decision(
+            ApprovalDecision::Decline,
+            &params.permissions,
+        )),
+        ServerRequest::UserInput(_) => ServerResponse::UserInput(answers(BTreeMap::new())),
+        ServerRequest::McpElicitation(_) => {
+            ServerResponse::McpElicitation(types::McpServerElicitationRequestResponse {
+                action: types::McpServerElicitationAction::Cancel,
+                content: Some(Value::Null),
+                meta: Some(Value::Null),
+            })
         }
     }
 }
@@ -339,15 +392,6 @@ fn path_name(path: &types::FileSystemPath) -> String {
     match subpath {
         Some(subpath) => format!("{name}/{}", subpath.0),
         None => name.to_owned(),
-    }
-}
-
-fn decision_name(decision: ApprovalDecision) -> &'static str {
-    match decision {
-        ApprovalDecision::Accept => "accept",
-        ApprovalDecision::AcceptForSession => "acceptForSession",
-        ApprovalDecision::Decline => "decline",
-        ApprovalDecision::Cancel => "cancel",
     }
 }
 
@@ -438,84 +482,34 @@ fn usage_window(window: &types::RateLimitWindow) -> UsageWindow {
     }
 }
 
-/// The Codex thread an MCP server's form belongs to.
-pub fn elicitation_thread(params: &types::McpServerElicitationRequestParams) -> String {
-    let value = serde_json::to_value(params).expect("Codex requests serialize");
-    value["threadId"].as_str().unwrap_or_default().to_owned()
-}
-
-/// A finished `command/exec`. Measured on Codex 0.159.1: a command that runs out of time ends with
-/// exit code 124 on Linux, as `timeout` reports it.
-pub fn command_result(done: types::CommandExecResponse) -> CommandResult {
-    if cfg!(unix) && done.exit_code == 124 {
-        return CommandResult::TimedOut {
+/// How a `command/exec` ended. Measured on Codex 0.159.1: a command that runs out of time ends with
+/// exit code 124 on Linux, as `timeout` reports it, and on Windows fails the request with a
+/// message that says it timed out.
+pub fn command_outcome(result: Result<types::CommandExecResponse, RequestError>) -> CommandResult {
+    match result {
+        Ok(done) if cfg!(unix) && done.exit_code == 124 => CommandResult::TimedOut {
             output: format!("{}{}", done.stdout, done.stderr),
-        };
-    }
-    CommandResult::Exited {
-        exit_code: done.exit_code,
-        stdout: done.stdout,
-        stderr: done.stderr,
-    }
-}
-
-/// What a turn changed, recorded from its finished items as they arrive.
-#[derive(Debug, Default)]
-pub struct ChangesRecorder {
-    files: Vec<String>,
-    edited_since_command: bool,
-    ran_command: bool,
-}
-
-impl ChangesRecorder {
-    pub fn record(&mut self, item: &AgentItem) {
-        match item {
-            AgentItem::FileChanges {
-                status: ItemStatus::Completed,
-                changes,
-                ..
-            } => {
-                for change in changes {
-                    self.edited(&change.path);
-                    if let FileChangeKind::Update {
-                        move_path: Some(path),
-                    } = &change.kind
-                    {
-                        self.edited(path);
-                    }
-                }
+        },
+        Ok(done) => CommandResult::Exited {
+            exit_code: done.exit_code,
+            stdout: done.stdout,
+            stderr: done.stderr,
+        },
+        Err(RequestError::Rpc { message, .. }) if message.contains("timed out") => {
+            CommandResult::TimedOut {
+                output: String::new(),
             }
-            AgentItem::Command {
-                status: ItemStatus::Completed | ItemStatus::Failed,
-                ..
-            } => {
-                self.ran_command = true;
-                self.edited_since_command = false;
-            }
-            _ => {}
         }
-    }
-
-    fn edited(&mut self, path: &str) {
-        if !self.files.iter().any(|file| file == path) {
-            self.files.push(path.to_owned());
-        }
-        self.edited_since_command = true;
-    }
-
-    /// What the turn changed, leaving the recorder empty for the next turn.
-    pub fn take(&mut self) -> TurnChanges {
-        let taken = std::mem::take(self);
-        TurnChanges {
-            files: taken.files,
-            edited_since_command: taken.edited_since_command,
-            ran_command: taken.ran_command,
-        }
+        Err(error) => CommandResult::Refused {
+            error: error.to_string(),
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn item(value: Value) -> types::ThreadItem {
@@ -523,35 +517,84 @@ mod tests {
     }
 
     #[test]
-    fn a_turn_reports_each_edited_file_once_including_a_move_destination() {
-        // Catches a recorder that misses a rename's destination, repeats a file edited twice, or
-        // keeps reporting an edit as unchecked after a later command ran.
-        let mut changes = ChangesRecorder::default();
-        let recorded = |value: Value| agent_item(&item(value)).unwrap();
-        let patch = |path: &str, kind: Value| {
-            recorded(
-                json!({ "type": "fileChange", "id": "p", "status": "completed",
-                "changes": [{ "path": path, "kind": kind, "diff": "" }] }),
-            )
+    fn each_refusal_is_the_answer_codex_has_always_been_sent() {
+        // Catches a refusal that changed shape, such as an MCP form refusal without its explicit
+        // nulls, or a permissions refusal that grants what was asked.
+        let params = |extra: Value| {
+            let mut params =
+                json!({ "threadId": "t", "turnId": "u", "itemId": "i", "startedAtMs": 0 });
+            params
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            params
         };
-        changes.record(&patch(
-            "a.rs",
-            json!({ "type": "update", "move_path": "b.rs" }),
-        ));
-        changes.record(&patch("a.rs", json!({ "type": "update" })));
-        changes.record(&recorded(
-            json!({ "type": "commandExecution", "id": "c", "command": "cargo test",
-            "commandActions": [], "cwd": "/w", "status": "failed" }),
-        ));
+        let cases = [
+            (
+                ServerRequest::CommandApproval(required(params(
+                    json!({ "command": "ls", "cwd": "/w" }),
+                ))),
+                json!({ "decision": "cancel" }),
+            ),
+            (
+                ServerRequest::FileChangeApproval(required(params(json!({})))),
+                json!({ "decision": "cancel" }),
+            ),
+            (
+                ServerRequest::Permissions(required(params(
+                    json!({ "cwd": "/w", "permissions": { "network": { "enabled": true } } }),
+                ))),
+                json!({ "permissions": {}, "scope": "turn" }),
+            ),
+            (
+                ServerRequest::UserInput(required(params(
+                    json!({ "questions": [], "isBlocking": true }),
+                ))),
+                json!({ "answers": {} }),
+            ),
+            (
+                ServerRequest::McpElicitation(required(json!({ "threadId": "t", "turnId": "u",
+                    "serverName": "docs", "mode": "form", "message": "Sign in",
+                    "requestedSchema": { "type": "object", "properties": {} } }))),
+                json!({ "action": "cancel", "content": null, "_meta": null }),
+            ),
+        ];
+        for (request, expected) in cases {
+            let refused = serde_json::to_value(refusal(&request)).unwrap();
+            assert_eq!(refused, expected, "{}", request.method());
+        }
+    }
 
-        let taken = changes.take();
-        assert_eq!(taken.files, ["a.rs", "b.rs"]);
-        assert!(!taken.edited_since_command);
-        assert!(taken.ran_command);
+    #[test]
+    fn a_command_that_ran_out_of_time_is_told_apart_from_one_codex_refused() {
+        // Catches the Windows timeout, which Codex reports as a failed request, being shown as a
+        // refusal, and any other failed request being shown as a timeout.
+        let rpc = |message: &str| RequestError::Rpc {
+            code: -32000,
+            message: message.to_owned(),
+        };
+        let exited: types::CommandExecResponse =
+            required(json!({ "exitCode": 0, "stdout": "ok", "stderr": "" }));
+
         assert_eq!(
-            changes.take().files,
-            Vec::<String>::new(),
-            "taking empties the recorder"
+            command_outcome(Err(rpc("command timed out after 5000 ms"))),
+            CommandResult::TimedOut {
+                output: String::new()
+            }
+        );
+        assert_eq!(
+            command_outcome(Err(rpc("sandbox denied"))),
+            CommandResult::Refused {
+                error: "sandbox denied".to_owned()
+            }
+        );
+        assert_eq!(
+            command_outcome(Ok(exited)),
+            CommandResult::Exited {
+                exit_code: 0,
+                stdout: "ok".to_owned(),
+                stderr: String::new()
+            }
         );
     }
 

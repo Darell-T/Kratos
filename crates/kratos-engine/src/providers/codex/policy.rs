@@ -5,12 +5,18 @@
 
 use std::path::Path;
 
+use kratos_codex_client::types;
 use kratos_command_safety::{
     DangerousCommandPlatform, dangerous_command, reads_commands_from_input, split_command_text,
 };
 use kratos_protocol::{AskReason, FileChange, FileChangeKind, Permission, ThreadSettings};
 
 use super::profiles::ProtectedFolders;
+
+/// The policy every thread and turn opens with, so each request reaches this module first.
+pub(super) const APPROVAL_POLICY: types::AskForApproval = types::AskForApproval::Untrusted;
+/// Codex's requests go to the user through Kratos, never to Codex's own reviewer.
+pub(super) const APPROVALS_REVIEWER: types::ApprovalsReviewer = types::ApprovalsReviewer::User;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -38,7 +44,7 @@ pub fn decide_command(
     request: &CommandRequest<'_>,
     platform: DangerousCommandPlatform,
 ) -> Verdict {
-    if settings.permission == Permission::AskMe {
+    if asks_every_action(settings.permission) {
         return Verdict::Ask(AskReason::AskEveryAction);
     }
     if request.reason.is_some() || request.wants_more_permissions || request.wants_network {
@@ -80,13 +86,20 @@ pub fn decide_patch(
             Ok(None) => {}
         }
     }
-    if settings.permission == Permission::AskMe || settings.plan_mode {
+    if asks_every_action(settings.permission) || settings.plan_mode {
         return Verdict::Ask(AskReason::AskEveryAction);
     }
     if asks_for_root {
         return Verdict::Ask(AskReason::Escalation);
     }
     Verdict::Accept
+}
+
+fn asks_every_action(permission: Permission) -> bool {
+    match permission {
+        Permission::AskMe => true,
+        Permission::ApproveForMe | Permission::FullAccess => false,
+    }
 }
 
 /// The file a change writes, and the file a move writes to.

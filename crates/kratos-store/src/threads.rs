@@ -3,19 +3,11 @@ use kratos_protocol::{
     ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, Timestamp, TurnChanges, TurnId,
     TurnOutcome, WorkspaceId,
 };
-use rusqlite::types::Type;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::json::{from_column, to_column};
+use crate::columns::{from_column, from_stored_name, permission_name, provider_name, to_column};
 use crate::{Store, StoreError, ThreadWrite};
-
-/// The names the `permission` column stores.
-const PERMISSIONS: [(Permission, &str); 3] = [
-    (Permission::AskMe, "askMe"),
-    (Permission::ApproveForMe, "approveForMe"),
-    (Permission::FullAccess, "fullAccess"),
-];
 
 /// What a provider needs to run a thread's turns.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,7 +38,7 @@ impl Store {
             created_at: now.clone(),
             updated_at: now,
         };
-        let settings = request.settings.clone().unwrap_or_default();
+        let settings = request.settings_or_default();
         // One statement, so the workspace cannot go missing between the check and the insert.
         let inserted = self.connection.execute(
             "INSERT INTO threads (id, workspace_id, title, provider, created_at, updated_at, model,
@@ -57,7 +49,7 @@ impl Store {
                 thread.id.as_str(),
                 thread.workspace_id.as_str(),
                 thread.title,
-                thread.provider.as_str(),
+                provider_name(thread.provider),
                 thread.created_at.as_str(),
                 thread.updated_at.as_str(),
                 settings.model,
@@ -122,24 +114,6 @@ impl Store {
             Ok((ThreadId::new(row.get(0)?), TurnId::new(row.get(1)?)))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
-    }
-
-    /// The thread a provider's own id belongs to.
-    pub fn thread_for_native_id(
-        &self,
-        provider: Provider,
-        native_id: &str,
-    ) -> Result<Option<ThreadId>, StoreError> {
-        let thread_id: Option<String> = self
-            .connection
-            .query_row(
-                "SELECT thread_id FROM provider_sessions WHERE provider = ?1 AND native_id = ?2
-                 ORDER BY started_at DESC LIMIT 1",
-                params![provider.as_str(), native_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        Ok(thread_id.map(ThreadId::new))
     }
 }
 
@@ -245,7 +219,7 @@ impl ThreadWrite<'_> {
             params![
                 Uuid::new_v4().to_string(),
                 self.thread_id().as_str(),
-                provider.as_str(),
+                provider_name(provider),
                 native_id,
                 now,
                 plan,
@@ -293,25 +267,18 @@ fn provider_thread_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderThread> {
 /// Columns 7 to 10: `model, permission, plan_mode, context_limit_tokens`.
 fn settings_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadSettings> {
     let permission: String = row.get(8)?;
-    let permission = PERMISSIONS
-        .iter()
-        .find(|(_, name)| *name == permission)
-        .map(|(permission, _)| *permission)
-        .ok_or_else(|| unknown_value(8, "permission", &permission))?;
     Ok(ThreadSettings {
         model: row.get(7)?,
-        permission,
+        permission: from_stored_name(
+            Permission::ALL,
+            permission_name,
+            &permission,
+            8,
+            "permission",
+        )?,
         plan_mode: row.get(9)?,
         context_limit_tokens: row.get(10)?,
     })
-}
-
-fn permission_name(permission: Permission) -> &'static str {
-    PERMISSIONS
-        .iter()
-        .find(|(known, _)| *known == permission)
-        .map(|(_, name)| *name)
-        .expect("every permission has a stored name")
 }
 
 /// A row whose first six columns are `id, workspace_id, title, provider, created_at, updated_at`.
@@ -321,14 +288,8 @@ fn thread_from_row(row: &Row<'_>) -> rusqlite::Result<Thread> {
         id: ThreadId::new(row.get(0)?),
         workspace_id: WorkspaceId::new(row.get(1)?),
         title: row.get(2)?,
-        provider: Provider::from_name(&provider)
-            .ok_or_else(|| unknown_value(3, "provider", &provider))?,
+        provider: from_stored_name(Provider::ALL, provider_name, &provider, 3, "provider")?,
         created_at: Timestamp::from_stored(row.get(4)?),
         updated_at: Timestamp::from_stored(row.get(5)?),
     })
-}
-
-fn unknown_value(column: usize, what: &str, value: &str) -> rusqlite::Error {
-    let reason = format!("unknown {what} {value}");
-    rusqlite::Error::FromSqlConversionFailure(column, Type::Text, reason.into())
 }

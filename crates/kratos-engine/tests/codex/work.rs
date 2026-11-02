@@ -67,10 +67,7 @@ async fn a_steered_message_joins_the_running_turn() {
     assert_eq!(steer["expectedTurnId"], "turn-1");
     assert_eq!(steer["clientUserMessageId"], "b");
     harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "turn/steer", "result": { "turnId": "turn-1" } }),
-        )
+        .settle("turn/steer", json!({ "turnId": "turn-1" }))
         .await;
 
     harness
@@ -105,10 +102,7 @@ async fn a_steer_codex_refuses_puts_the_message_back_in_the_queue() {
     harness.held("turn/steer", 1).await;
 
     harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "turn/steer", "code": -32600, "error": "turn is not steerable" }),
-        )
+        .refuse("turn/steer", -32600, "turn is not steerable")
         .await;
     harness
         .wait_for(|event| {
@@ -136,10 +130,7 @@ async fn a_steer_whose_answer_is_lost_is_never_sent_again() {
     harness.held("turn/steer", 1).await;
 
     harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "turn/steer", "code": -32000, "error": "connection reset" }),
-        )
+        .refuse("turn/steer", -32000, "connection reset")
         .await;
 
     harness
@@ -179,12 +170,7 @@ async fn a_stop_sent_before_codex_names_the_turn_stops_it_once_named() {
 
     let interrupt = &harness.held("turn/interrupt", 1).await[0]["params"];
     assert_eq!(interrupt["turnId"], "turn-1");
-    harness
-        .control(
-            "test/settleTurn",
-            json!({ "method": "turn/interrupt", "result": {} }),
-        )
-        .await;
+    harness.settle("turn/interrupt", json!({})).await;
     stop.await.unwrap().unwrap();
 }
 
@@ -197,7 +183,7 @@ async fn a_refused_message_sent_again_runs_and_lifts_the_pause() {
     harness.send("b", "second").await;
     for attempt in 1..=2 {
         harness.held("turn/start", attempt).await;
-        harness.fail_start(-32602, "bad input").await;
+        harness.refuse("turn/start", -32602, "bad input").await;
     }
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
@@ -223,7 +209,7 @@ async fn removing_a_refused_message_lets_the_next_one_run() {
     harness.send("b", "second").await;
     for attempt in 1..=2 {
         harness.held("turn/start", attempt).await;
-        harness.fail_start(-32602, "bad input").await;
+        harness.refuse("turn/start", -32602, "bad input").await;
     }
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))

@@ -2,8 +2,8 @@
 //! member's thread or history. The change becomes pending, the running step finishes, and the change
 //! applies right before the next new step. Nothing finished is repeated.
 
-use kratos_teams::decisions::{Decision, DecisionKind, allowed_decisions, check_decision};
-use kratos_teams::facts::{Ended, Fact};
+use kratos_teams::decisions::{Decision, DecisionKind, allowed_decisions};
+use kratos_teams::facts::Fact;
 use kratos_teams::fold::Rejection;
 use kratos_teams::members::{Bindings, Role};
 use kratos_teams::next_step::Step;
@@ -11,14 +11,6 @@ use kratos_teams::view::{ApprovedBy, FindingStatus, Trouble, Waiting, Work};
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
 
 fn swap() -> Decision {
     Decision::ReassignRoles {
@@ -209,7 +201,11 @@ fn a_change_that_adds_a_member_removes_one_or_changes_nothing_is_refused() {
     let with_planner = three_members();
     let same = two_members();
 
-    let refuse = |to: Bindings| check_decision(&view, &Decision::ReassignRoles { to });
+    let refuse = |to: Bindings| {
+        view.accepts(&Fact::UserDecided {
+            decision: Decision::ReassignRoles { to },
+        })
+    };
 
     assert!(matches!(
         refuse(stranger),
@@ -237,7 +233,9 @@ fn a_three_member_team_can_rearrange_every_role() {
     .expect("distinct");
 
     assert_eq!(
-        check_decision(&task.view(), &Decision::ReassignRoles { to: rotated }),
+        task.view().accepts(&Fact::UserDecided {
+            decision: Decision::ReassignRoles { to: rotated }
+        }),
         Ok(())
     );
 }
@@ -277,7 +275,9 @@ fn withdrawal_is_rejected_once_the_role_change_checkpoint_has_started() {
 
     assert!(!allowed_decisions(&task.view()).contains(&DecisionKind::ReassignRoles));
     assert!(matches!(
-        check_decision(&task.view(), &withdrawal),
+        task.view().accepts(&Fact::UserDecided {
+            decision: withdrawal.clone()
+        }),
         Err(Rejection::NotAllowed {
             decision: DecisionKind::ReassignRoles,
             ..
@@ -332,7 +332,9 @@ fn an_engine_that_cannot_apply_the_change_leaves_the_old_roles_and_pauses_with_t
         ))
     );
     assert!(matches!(
-        check_decision(&view, &Decision::ReassignRoles { to: two_members() }),
+        view.accepts(&Fact::UserDecided {
+            decision: Decision::ReassignRoles { to: two_members() }
+        }),
         Err(Rejection::InvalidDecision { .. })
     ));
     assert!(matches!(

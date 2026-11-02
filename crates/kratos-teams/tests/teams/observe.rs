@@ -10,7 +10,14 @@ use kratos_teams::next_step::{Step, next_step};
 use kratos_teams::view::{
     Activity, FindingStatus, PassKind, Phase, TaskView, Trouble, Waiting, Work,
 };
+use serde::Serialize;
 use serde_json::{Value, json};
+
+pub fn tag_of(value: &impl Serialize) -> String {
+    let value = serde_json::to_value(value).expect("a value serializes");
+    let tag = value.as_str().or_else(|| value["kind"].as_str());
+    tag.expect("a unit variant or a kind tag").to_owned()
+}
 
 pub fn snake_to_camel(name: &str) -> String {
     let mut out = String::new();
@@ -65,8 +72,7 @@ fn phase_name(view: &TaskView) -> &'static str {
 }
 
 fn trouble_name(why: Trouble) -> String {
-    let name = serde_json::to_value(why).expect("a trouble serializes");
-    snake_to_camel(name.as_str().expect("a string"))
+    snake_to_camel(&tag_of(&why))
 }
 
 /// Why the task is paused, in the TypeScript's words, or `null`.
@@ -75,10 +81,7 @@ fn pause_name(view: &TaskView) -> Value {
         return Value::Null;
     };
     match waiting {
-        Waiting::Findings { why, .. } => json!(format!(
-            "findings:{}",
-            serde_json::to_value(why).unwrap().as_str().unwrap()
-        )),
+        Waiting::Findings { why, .. } => json!(format!("findings:{}", tag_of(why))),
         Waiting::Ruling { .. } => json!("disputed"),
         Waiting::Trouble { why, .. } => json!(format!("trouble:{}", trouble_name(*why))),
         _ => Value::Null,
@@ -86,21 +89,13 @@ fn pause_name(view: &TaskView) -> Value {
 }
 
 fn status_name(status: &FindingStatus) -> String {
-    let label = |value: Value| snake_to_camel(value.as_str().expect("a string"));
     match status {
         FindingStatus::Open { .. } => "open".to_owned(),
-        FindingStatus::Closed { how } => {
-            format!("closed:{}", label(serde_json::to_value(how).unwrap()))
-        }
+        FindingStatus::Closed { how } => format!("closed:{}", snake_to_camel(&tag_of(how))),
         FindingStatus::Dropped { reason } => {
-            format!(
-                "dropped:{}",
-                label(serde_json::to_value(reason.why).unwrap())
-            )
+            format!("dropped:{}", snake_to_camel(&tag_of(&reason.why)))
         }
-        FindingStatus::Listed { why } => {
-            format!("listed:{}", label(serde_json::to_value(why).unwrap()))
-        }
+        FindingStatus::Listed { why } => format!("listed:{}", snake_to_camel(&tag_of(why))),
     }
 }
 

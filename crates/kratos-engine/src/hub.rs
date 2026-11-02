@@ -188,7 +188,11 @@ struct LiveThreads(Arc<Mutex<HashMap<ThreadId, LiveThread>>>);
 
 struct LiveThread {
     sender: broadcast::Sender<LiveUpdate>,
-    turn_id: Option<TurnId>,
+    running: Option<RunningReplies>,
+}
+
+struct RunningReplies {
+    turn_id: TurnId,
     replies: Vec<ReplySoFar>,
 }
 
@@ -213,11 +217,10 @@ impl LiveThreads {
     fn end_turn(&self, thread_id: &ThreadId, turn_id: &TurnId) {
         let mut threads = self.threads();
         let unwatched = threads.get_mut(thread_id).is_some_and(|thread| {
-            if thread.turn_id.as_ref() != Some(turn_id) {
+            if thread.running.as_ref().map(|running| &running.turn_id) != Some(turn_id) {
                 return false;
             }
-            thread.turn_id = None;
-            thread.replies.clear();
+            thread.running = None;
             thread.sender.receiver_count() == 0
         });
         if unwatched {
@@ -230,9 +233,9 @@ impl LiveThreads {
         let thread = threads
             .entry(thread_id.clone())
             .or_insert_with(LiveThread::new);
-        let snapshot = thread.turn_id.clone().map(|turn_id| LiveUpdate::Snapshot {
-            turn_id: Some(turn_id),
-            replies: thread.replies.clone(),
+        let snapshot = thread.running.as_ref().map(|running| LiveUpdate::Snapshot {
+            turn_id: running.turn_id.clone(),
+            replies: running.replies.clone(),
         });
         (snapshot, thread.sender.subscribe())
     }
@@ -247,23 +250,29 @@ impl LiveThread {
     fn new() -> LiveThread {
         LiveThread {
             sender: broadcast::channel(LIVE_BACKLOG).0,
-            turn_id: None,
-            replies: Vec::new(),
+            running: None,
         }
     }
 
     fn extend_reply(&mut self, turn_id: &TurnId, item_id: &str, delta: &str) {
-        if self.turn_id.as_ref() != Some(turn_id) {
-            self.turn_id = Some(turn_id.clone());
-            self.replies.clear();
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.turn_id != *turn_id)
+        {
+            self.running = None;
         }
-        match self
+        let running = self.running.get_or_insert_with(|| RunningReplies {
+            turn_id: turn_id.clone(),
+            replies: Vec::new(),
+        });
+        match running
             .replies
             .iter_mut()
             .find(|reply| reply.item_id == item_id)
         {
             Some(reply) => reply.text.push_str(delta),
-            None => self.replies.push(ReplySoFar {
+            None => running.replies.push(ReplySoFar {
                 item_id: item_id.to_owned(),
                 text: delta.to_owned(),
             }),

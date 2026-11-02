@@ -10,10 +10,10 @@
 
 use std::fmt;
 
-use globset::{Glob, GlobBuilder, GlobMatcher};
+use globset::GlobMatcher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::evidence::{climbs, is_rooted, repo_path};
+use crate::paths::{PatternError, compile, parse_repo_path, repo_path};
 
 /// A glob relative to the repository root that names files a task may change: `src/auth/**`,
 /// `docs/*.md`, `Cargo.toml`. A folder needs an explicit `/**`, because Kratos cannot tell a file from a
@@ -27,22 +27,11 @@ pub struct ScopePattern {
     matcher: GlobMatcher,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum PatternError {
-    #[error("`{pattern}` is not a valid glob: {reason}")]
-    NotAGlob { pattern: String, reason: String },
-    #[error("`{pattern}` must be relative to the repository root and stay inside it")]
-    OutsideRepository { pattern: String },
-}
-
 impl ScopePattern {
     pub fn new(glob: &str) -> Result<ScopePattern, PatternError> {
-        let text = repo_path(glob.trim());
-        if is_rooted(&text) || climbs(&text) {
-            return Err(PatternError::OutsideRepository {
-                pattern: glob.to_owned(),
-            });
-        }
+        let text = parse_repo_path(glob.trim()).map_err(|_| PatternError::OutsideRepository {
+            pattern: glob.to_owned(),
+        })?;
         let matcher = compile(&text)?.compile_matcher();
         Ok(ScopePattern { text, matcher })
     }
@@ -55,17 +44,6 @@ impl ScopePattern {
     pub fn covers(&self, path: &str) -> bool {
         self.matcher.is_match(repo_path(path))
     }
-}
-
-/// Compiles a glob with `*` kept inside one path component, as in `.gitignore`.
-pub(crate) fn compile(glob: &str) -> Result<Glob, PatternError> {
-    GlobBuilder::new(glob)
-        .literal_separator(true)
-        .build()
-        .map_err(|error| PatternError::NotAGlob {
-            pattern: glob.to_owned(),
-            reason: error.kind().to_string(),
-        })
 }
 
 impl fmt::Debug for ScopePattern {
@@ -125,7 +103,7 @@ impl TaskPlan {
         done_means: Vec<String>,
         scope: Vec<ScopePattern>,
     ) -> Result<TaskPlan, PlanProblem> {
-        if build.trim().is_empty() {
+        if crate::is_blank(&build) {
             return Err(PlanProblem::NothingToBuild);
         }
         if done_means.is_empty() {
@@ -133,7 +111,7 @@ impl TaskPlan {
         }
         if done_means
             .iter()
-            .any(|statement| statement.trim().is_empty())
+            .any(|statement| crate::is_blank(statement))
         {
             return Err(PlanProblem::BlankDoneMeans);
         }
@@ -179,36 +157,6 @@ pub struct ProbeConstraints {
     pub test_paths: Vec<ScopePattern>,
     /// The user's own words, shown to the implementer unchanged.
     pub note: String,
-}
-
-/// Why a probe copy breaks the user's constraints. The git half of the check, that the probe fails
-/// before the fix and passes after, is the engine's.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CopyProblem {
-    /// The path is not inside the repository, or not under one of the user's test paths.
-    OutsideAllowedPaths,
-    OutsideScope,
-}
-
-/// Whether the implementer may keep a probe at `to`: under one of the user's test paths and inside
-/// the agreed scope. A pure path rule, so the engine cannot apply it more loosely than the user wrote it.
-pub fn probe_copy_problem(
-    constraints: &ProbeConstraints,
-    scope: &Scope,
-    to: &str,
-) -> Option<CopyProblem> {
-    // A glob matches text, so `tests/../../x` would match `tests/**` without this check.
-    let path = repo_path(to);
-    let allowed = !is_rooted(&path)
-        && !climbs(&path)
-        && constraints
-            .test_paths
-            .iter()
-            .any(|pattern| pattern.covers(&path));
-    if !allowed {
-        return Some(CopyProblem::OutsideAllowedPaths);
-    }
-    (!scope.covers(to)).then_some(CopyProblem::OutsideScope)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

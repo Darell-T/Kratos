@@ -5,11 +5,17 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_protocol::{Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome, Workspace};
+use fake_agents::codex_control::{self, ControlRequest};
+use kratos_api_client::{Client, ClientError, EventSocket, Incoming};
+use kratos_protocol::{
+    CreateThread, Provider, RequiredText, Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome,
+    routes,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::{BenchReport, Client, ClientError, EventSocket, Incoming};
+use crate::bench::temp_workspace;
+use crate::{BenchError, BenchReport};
 
 const WAIT: Duration = Duration::from_secs(10);
 const THREADS: usize = 10;
@@ -28,8 +34,8 @@ pub struct TurnBenchReport {
 /// Measures 200 sequential turns on ten threads against an engine running fake-codex.
 /// Both intervals include local transport, so they upper-bound engine overhead without adding
 /// instrumentation to production. All timestamps come from this process's monotonic clock.
-pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchReport, ClientError> {
-    client.get("/api/usage")?.parse::<Value>()?;
+pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchReport, BenchError> {
+    client.get(routes::USAGE)?.parse::<Value>()?;
     let mut fake = Control::connect(control_file)?;
     let observer = Observer::start(&mut fake)?;
     let threads = create_threads(client)?;
@@ -55,20 +61,20 @@ pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchRepo
     })
 }
 
-fn create_threads(client: &Client) -> Result<Vec<Thread>, ClientError> {
-    let workspace: Workspace = client
-        .post(
-            "/api/workspaces",
-            &json!({ "name": "turn benchmark", "path": std::env::temp_dir() }),
-        )?
-        .parse()?;
+fn create_threads(client: &Client) -> Result<Vec<Thread>, BenchError> {
+    let workspace = client.create_workspace(&temp_workspace("turn benchmark"))?;
     (0..THREADS)
         .map(|number| {
-            client.post("/api/threads", &json!({
-                "workspaceId": workspace.id, "title": format!("bench {number}"), "provider": "codex"
-            }))?.parse()
+            client.create_thread(&CreateThread {
+                workspace_id: workspace.id.clone(),
+                title: RequiredText::new(&format!("bench {number}"))
+                    .expect("the title is not blank"),
+                provider: Provider::Codex,
+                settings: None,
+            })
         })
-        .collect()
+        .collect::<Result<_, _>>()
+        .map_err(BenchError::from)
 }
 
 fn measure_turn(
@@ -78,38 +84,26 @@ fn measure_turn(
     observer: &Observer,
     fake: &mut Control,
     socket: &mut EventSocket,
-) -> Result<(Duration, Duration), ClientError> {
+) -> Result<(Duration, Duration), BenchError> {
     let message_id = format!("bench-{number}");
     let posted_at = Instant::now();
     client
         .post(
-            &format!("/api/threads/{}/messages", thread.id),
+            &routes::thread_messages(&thread.id),
             &json!({ "messageId": message_id, "text": message_id }),
         )?
         .parse::<Value>()?;
     let (request, received_at) = observer
         .arrivals
         .recv_timeout(WAIT)
-        .map_err(|_| ClientError::TimedOut(WAIT))??;
-    if request["method"] != "turn/start" || request["params"]["input"][0]["text"] != message_id {
-        return Err(ClientError::Bench(format!(
-            "unexpected turn request: {request}"
-        )));
-    }
-    let native_id = &request["params"]["threadId"];
+        .map_err(|_| BenchError::from(ClientError::TimedOut(WAIT)))??;
+    let native_id = started_thread(&request, &message_id)?;
     let turn_id = format!("bench-turn-{number}");
-    fake.call(
-        "test/settleTurn",
-        json!({ "method": "turn/start", "threadId": native_id,
-        "result": { "turn": { "id": turn_id, "status": "inProgress", "items": [] } } }),
-    )?;
+    let settled = codex_control::settle_start(&turn_id, "inProgress", Some(native_id));
+    fake.call(settled)?;
     let completion_sent = Instant::now();
-    fake.call(
-        "test/emit",
-        json!({ "method": "turn/completed", "params": {
-        "threadId": native_id, "turn": { "id": turn_id, "status": "completed", "items": [] }
-    } }),
-    )?;
+    let completed = codex_control::complete(native_id, &turn_id, "completed");
+    fake.call(completed)?;
     await_completion(socket, &thread.id, &turn_id)?;
     Ok((
         received_at.duration_since(posted_at),
@@ -117,16 +111,27 @@ fn measure_turn(
     ))
 }
 
+fn started_thread<'a>(request: &'a Value, message_id: &str) -> Result<&'a str, BenchError> {
+    let expected =
+        request["method"] == "turn/start" && request["params"]["input"][0]["text"] == message_id;
+    match request["params"]["threadId"].as_str() {
+        Some(native_id) if expected => Ok(native_id),
+        _ => Err(BenchError::Failed(format!(
+            "unexpected turn request: {request}"
+        ))),
+    }
+}
+
 fn await_completion(
     socket: &mut EventSocket,
     thread_id: &kratos_protocol::ThreadId,
     turn_id: &str,
-) -> Result<(), ClientError> {
+) -> Result<(), BenchError> {
     let deadline = Instant::now() + WAIT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let Some(Incoming::Text(text)) = socket.next_incoming(remaining)? else {
-            return Err(ClientError::TimedOut(WAIT));
+            return Err(ClientError::TimedOut(WAIT).into());
         };
         let message: ServerMessage =
             serde_json::from_str(&text).map_err(|source| ClientError::Json {
@@ -145,18 +150,20 @@ fn await_completion(
                         || completed_id.as_str() != turn_id
                         || outcome != TurnOutcome::Completed
                     {
-                        return Err(ClientError::Bench(format!(
+                        return Err(BenchError::Failed(format!(
                             "unexpected completion: {completed_id}, {outcome:?}"
                         )));
                     }
                     return Ok(());
                 }
             }
-            ServerMessage::Error { message, .. } => return Err(ClientError::Engine(message)),
+            ServerMessage::Error { message, .. } => {
+                return Err(ClientError::Engine(message).into());
+            }
             _ => {}
         }
         if Instant::now() >= deadline {
-            return Err(ClientError::TimedOut(WAIT));
+            return Err(ClientError::TimedOut(WAIT).into());
         }
     }
 }
@@ -164,11 +171,8 @@ fn await_completion(
 struct Control(BufReader<TcpStream>);
 
 impl Control {
-    fn connect(control_file: &Path) -> Result<Self, ClientError> {
-        let port: u16 = std::fs::read_to_string(control_file)?
-            .trim()
-            .parse()
-            .map_err(|_| ClientError::Bench("fake-codex's control file is not a port".into()))?;
+    fn connect(control_file: &Path) -> Result<Self, BenchError> {
+        let port = codex_control::read_port(control_file)?;
         let stream = TcpStream::connect(("127.0.0.1", port))?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(WAIT))?;
@@ -176,7 +180,10 @@ impl Control {
         Ok(Self(BufReader::new(stream)))
     }
 
-    fn call(&mut self, method: &str, params: Value) -> Result<Value, ClientError> {
+    fn call(
+        &mut self,
+        ControlRequest { method, params }: ControlRequest,
+    ) -> Result<Value, BenchError> {
         writeln!(
             self.0.get_mut(),
             "{}",
@@ -189,13 +196,13 @@ impl Control {
             source,
         })?;
         if response.get("error").is_some() || response.get("result").is_none() {
-            return Err(ClientError::Bench(format!("{method} failed: {response}")));
+            return Err(BenchError::Failed(format!("{method} failed: {response}")));
         }
         Ok(response["result"].clone())
     }
 }
 
-type Arrival = Result<(Value, Instant), ClientError>;
+type Arrival = Result<(Value, Instant), BenchError>;
 
 struct Observer {
     stream: TcpStream,
@@ -203,12 +210,12 @@ struct Observer {
 }
 
 impl Observer {
-    fn start(fake: &mut Control) -> Result<Self, ClientError> {
+    fn start(fake: &mut Control) -> Result<Self, BenchError> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
-        fake.call(
-            "test/observeTurns",
-            json!({ "port": listener.local_addr()?.port() }),
-        )?;
+        fake.call(ControlRequest {
+            method: "test/observeTurns",
+            params: json!({ "port": listener.local_addr()?.port() }),
+        })?;
         let (stream, _) = listener.accept()?;
         stream.set_read_timeout(Some(WAIT))?;
         let reader = BufReader::new(stream.try_clone()?);
@@ -216,12 +223,14 @@ impl Observer {
         thread::spawn(move || {
             for line in reader.lines() {
                 let received_at = Instant::now();
-                let arrival = line.map_err(ClientError::Io).and_then(|line| {
+                let arrival = line.map_err(BenchError::from).and_then(|line| {
                     serde_json::from_str(&line)
                         .map(|request| (request, received_at))
-                        .map_err(|source| ClientError::Json {
-                            what: "observed turn request",
-                            source,
+                        .map_err(|source| {
+                            BenchError::from(ClientError::Json {
+                                what: "observed turn request",
+                                source,
+                            })
                         })
                 });
                 if send.send(arrival).is_err() {

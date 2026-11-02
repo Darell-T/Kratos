@@ -2,7 +2,7 @@
 //! the planner rules on every disputed finding. With none, the user rules. The reviewer never rules on
 //! its own finding. A planner's ruling takes effect at once, and its reasons stay in the record.
 
-use kratos_teams::decisions::{Decision, DecisionKind, check_decision};
+use kratos_teams::decisions::{Decision, DecisionKind};
 use kratos_teams::facts::{Ended, Fact};
 use kratos_teams::fold::{Rejection, fold};
 use kratos_teams::members::Role;
@@ -291,12 +291,11 @@ fn the_user_cannot_rule_on_a_finding_nobody_disputed() {
         vec![],
     );
 
-    let refused = check_decision(
-        &task.view(),
-        &Decision::Rule {
+    let refused = task.view().accepts(&Fact::UserDecided {
+        decision: Decision::Rule {
             not_bug: vec![fid(2)],
         },
-    );
+    });
 
     assert!(matches!(refused, Err(Rejection::InvalidDecision { .. })));
 }

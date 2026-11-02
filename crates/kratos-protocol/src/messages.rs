@@ -1,29 +1,18 @@
-use std::fmt;
-
 use serde::de::{Deserializer, Error};
 use serde::{Deserialize, Serialize};
 
 use crate::{AccessLimit, ContinuationId, RequiredText, ThreadId, Timestamp, TurnId};
 
-/// A message's id. A client may choose it, so that sending the same message again after a lost
-/// reply finds the first one instead of queueing a copy (D85); otherwise the engine issues a UUID.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-#[serde(transparent)]
-pub struct MessageId(String);
+string_id! {
+    /// A message's id. A client may choose it, so that sending the same message again after a lost
+    /// reply finds the first one instead of queueing a copy (D85); otherwise the engine issues a
+    /// UUID.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+    MessageId
+}
 
 /// Longer ids are refused, so an id never grows a row past a page.
 pub const MAX_MESSAGE_ID_CHARS: usize = 128;
-
-impl MessageId {
-    /// For ids the engine issued or read from its records.
-    pub fn new(id: String) -> MessageId {
-        MessageId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 impl<'de> Deserialize<'de> for MessageId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -34,12 +23,6 @@ impl<'de> Deserialize<'de> for MessageId {
             )));
         }
         Ok(MessageId(id))
-    }
-}
-
-impl fmt::Display for MessageId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
     }
 }
 
@@ -131,29 +114,51 @@ pub struct Message {
     pub queued_at: Timestamp,
 }
 
-/// The body of `POST /api/threads/{id}/messages` to a thread whose provider Kratos drives: `text`,
-/// or `input` parts, with an optional `messageId`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SendMessage {
-    #[serde(default)]
-    pub message_id: Option<MessageId>,
-    #[serde(default)]
-    pub text: Option<RequiredText>,
-    #[serde(default)]
-    pub input: Option<Vec<MessageInput>>,
+pub struct PostMessage {
+    pub text: RequiredText,
 }
 
-impl SendMessage {
-    /// The message's parts and the id the client chose. `Err` names what is wrong with the body.
-    pub fn into_parts(self) -> Result<(Option<MessageId>, Vec<MessageInput>), &'static str> {
-        match (self.text, self.input) {
-            (Some(text), None) => Ok((self.message_id, vec![MessageInput::Text { text }])),
-            (None, Some(input)) if !input.is_empty() => Ok((self.message_id, input)),
-            (None, Some(_)) => Err("input: must not be empty"),
-            (Some(_), Some(_)) => Err("send either text or input, not both"),
-            (None, None) => Err("missing field `text` or `input`"),
-        }
+/// The body of `POST /api/threads/{id}/messages` to a thread whose provider Kratos drives: `text`,
+/// or `input` parts, with an optional `messageId`. Text alone parses as one text part, and it
+/// serializes as parts.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", try_from = "SendMessageBody")]
+pub struct SendMessage {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<MessageId>,
+    /// Never empty.
+    pub input: Vec<MessageInput>,
+}
+
+/// [`SendMessage`] as a client writes it, before the check that it holds exactly one non-empty
+/// form.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SendMessageBody {
+    #[serde(default)]
+    message_id: Option<MessageId>,
+    #[serde(default)]
+    text: Option<RequiredText>,
+    #[serde(default)]
+    input: Option<Vec<MessageInput>>,
+}
+
+impl TryFrom<SendMessageBody> for SendMessage {
+    type Error = &'static str;
+
+    fn try_from(body: SendMessageBody) -> Result<SendMessage, &'static str> {
+        let input = match (body.text, body.input) {
+            (Some(text), None) => vec![MessageInput::Text { text }],
+            (None, Some(input)) if !input.is_empty() => input,
+            (None, Some(_)) => return Err("input: must not be empty"),
+            (Some(_), Some(_)) => return Err("send either text or input, not both"),
+            (None, None) => return Err("missing field `text` or `input`"),
+        };
+        Ok(SendMessage {
+            message_id: body.message_id,
+            input,
+        })
     }
 }
 

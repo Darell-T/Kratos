@@ -1,33 +1,17 @@
-use std::fmt;
+use std::collections::BTreeMap;
 
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, Message, PauseReason, Permission, Provider, Question, RequiredText, Seq, Timestamp,
-    TurnId, WorkspaceId,
+    Approval, Message, PauseReason, Question, RequiredText, Seq, Timestamp, TurnId, WorkspaceId,
 };
 
-/// A thread's id. The engine issues UUIDs. Any string parses, because a thread that does not exist
-/// answers 404.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ThreadId(String);
-
-impl ThreadId {
-    pub fn new(id: String) -> ThreadId {
-        ThreadId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ThreadId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
+string_id! {
+    /// A thread's id. The engine issues UUIDs. Any string parses, because a thread that does not
+    /// exist answers 404.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+    ThreadId
 }
 
 /// One task run by one agent on this machine.
@@ -43,7 +27,32 @@ pub struct Thread {
     pub updated_at: Timestamp,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+/// The agent CLI a thread runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Codex,
+    Claude,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 2] = [Provider::Codex, Provider::Claude];
+
+    /// The name in JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Provider::Codex => "codex",
+            Provider::Claude => "claude",
+        }
+    }
+}
+
+/// A new provider breaks this match, as a reminder to add it to [`Provider::ALL`].
+const _: () = match Provider::Codex {
+    Provider::Codex | Provider::Claude => {}
+};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateThread {
     #[serde(deserialize_with = "trimmed_workspace_id")]
@@ -51,9 +60,40 @@ pub struct CreateThread {
     pub title: RequiredText,
     pub provider: Provider,
     /// The defaults when absent.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<ThreadSettings>,
 }
+
+impl CreateThread {
+    pub fn settings_or_default(&self) -> ThreadSettings {
+        self.settings.clone().unwrap_or_default()
+    }
+}
+
+/// How much a thread's agent may do without asking. `ApproveForMe` is not `FullAccess`, and a
+/// command the dangerous-command check flags asks the user under every permission. The variants
+/// run from least to most trusting, so `min` picks the narrower of two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Permission {
+    AskMe,
+    ApproveForMe,
+    FullAccess,
+}
+
+impl Permission {
+    /// Every permission, least trusting first.
+    pub const ALL: [Permission; 3] = [
+        Permission::AskMe,
+        Permission::ApproveForMe,
+        Permission::FullAccess,
+    ];
+}
+
+/// A new permission breaks this match, as a reminder to add it to [`Permission::ALL`].
+const _: () = match Permission::AskMe {
+    Permission::AskMe | Permission::ApproveForMe | Permission::FullAccess => {}
+};
 
 /// What a thread's next turn runs with. A change applies from the next turn, never to the turn
 /// running now (D87).
@@ -91,9 +131,10 @@ impl ThreadSettings {
 
     /// These settings with no more access than `limit`.
     pub fn limited_to(&self, limit: AccessLimit) -> ThreadSettings {
+        let access = self.access().intersect(limit);
         ThreadSettings {
-            permission: self.permission.min(limit.permission),
-            plan_mode: self.plan_mode || limit.plan_mode,
+            permission: access.permission,
+            plan_mode: access.plan_mode,
             ..self.clone()
         }
     }
@@ -116,8 +157,39 @@ impl AccessLimit {
 
     /// Whether `other` is no more than this: no higher permission, and planning if this plans.
     pub fn covers(self, other: AccessLimit) -> bool {
-        other.permission <= self.permission && (other.plan_mode || !self.plan_mode)
+        self.intersect(other) == other
     }
+
+    /// The most access both allow: the lower permission, and planning if either plans. Narrowing
+    /// and the `covers` check both use this one order, so they cannot disagree.
+    fn intersect(self, other: AccessLimit) -> AccessLimit {
+        AccessLimit {
+            permission: self.permission.min(other.permission),
+            plan_mode: self.plan_mode || other.plan_mode,
+        }
+    }
+}
+
+/// The narrower sandbox a Team gives a member's thread. A thread without one runs by its permission
+/// alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreadSandbox {
+    /// Writable besides the thread's own folder.
+    pub extra_writable_roots: Vec<String>,
+    pub outside_writes: OutsideWrites,
+    /// Set for every command the thread runs, for example a package cache inside a writable root.
+    pub env: BTreeMap<String, String>,
+}
+
+/// What happens to a write outside a sandboxed thread's roots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutsideWrites {
+    /// The user decides.
+    Ask,
+    /// Refused without asking.
+    Deny,
 }
 
 fn trimmed_workspace_id<'de, D: Deserializer<'de>>(

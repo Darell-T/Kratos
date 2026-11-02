@@ -9,8 +9,12 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_client::{Client, EventSocket, Incoming};
-use kratos_protocol::{Seq, ServerMessage, Thread, ThreadEvent, ThreadId, Workspace};
+use fake_agents::codex_control::{self, ControlRequest};
+use kratos_api_client::{Client, EventSocket, Incoming};
+use kratos_protocol::{
+    CLIENT_TOKEN_FILE, CreateThread, CreateWorkspace, Provider, RequiredText, Seq, ServerMessage,
+    Thread, ThreadEvent, ThreadId, Workspace,
+};
 use serde_json::json;
 
 const ENGINE: &str = env!("CARGO_BIN_EXE_kratos-engine");
@@ -133,16 +137,20 @@ impl RunningEngine {
 
     /// The client token this engine issued at its start.
     pub fn token(&self) -> String {
-        std::fs::read_to_string(self.home.join("client-token")).unwrap()
+        std::fs::read_to_string(self.home.join(CLIENT_TOKEN_FILE)).unwrap()
+    }
+
+    pub fn fake_codex_control_file(&self) -> PathBuf {
+        self.home.join(FAKE_CODEX_CONTROL)
     }
 
     /// A `test/*` request to the fake Codex this engine started, waiting for it to start. Panics
     /// on an error answer.
     pub fn fake_codex(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        let control = self.home.join(FAKE_CODEX_CONTROL);
+        let control = self.fake_codex_control_file();
         let deadline = Instant::now() + WAIT;
         let port = loop {
-            if let Ok(port) = std::fs::read_to_string(&control) {
+            if let Ok(port) = codex_control::read_port(&control) {
                 break port;
             }
             assert!(
@@ -151,8 +159,7 @@ impl RunningEngine {
             );
             thread::sleep(Duration::from_millis(20));
         };
-        let mut stream =
-            std::net::TcpStream::connect(("127.0.0.1", port.trim().parse().unwrap())).unwrap();
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         let request = json!({ "id": 1, "method": method, "params": params });
         std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
@@ -161,6 +168,10 @@ impl RunningEngine {
         let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
         assert!(answer.get("error").is_none(), "{method} failed: {answer}");
         answer["result"].clone()
+    }
+
+    pub fn fake_codex_request(&self, request: ControlRequest) {
+        self.fake_codex(request.method, request.params);
     }
 
     /// Waits until the fake Codex holds `count` requests of `method`, and returns them.
@@ -187,6 +198,11 @@ impl RunningEngine {
         }
     }
 
+    pub fn start_turn(&self) {
+        self.fake_codex_held("turn/start", 1);
+        self.fake_codex_request(codex_control::settle_start("turn-1", "inProgress", None));
+    }
+
     /// Waits until the engine answered `count` of the requests the fake Codex sent it, and returns
     /// the answers. An answer travels to Codex after the API's reply, so a test waits for it.
     pub fn fake_codex_answers(&self, count: usize) -> Vec<serde_json::Value> {
@@ -206,22 +222,23 @@ impl RunningEngine {
         }
     }
 
+    pub fn create_workspace(&self) -> Workspace {
+        let request = CreateWorkspace {
+            name: RequiredText::new("repo").unwrap(),
+            path: RequiredText::new(&self.home.to_string_lossy()).unwrap(),
+        };
+        self.client().create_workspace(&request).unwrap()
+    }
+
     /// Creates a workspace on the engine's home and a thread of `provider` in it.
-    pub fn create_thread_of(&self, provider: &str) -> Thread {
-        let client = self.client();
-        let workspace_body = json!({ "name": "repo", "path": self.home });
-        let workspace: Workspace = client
-            .post("/api/workspaces", &workspace_body)
-            .unwrap()
-            .parse()
-            .unwrap();
-        let thread_body =
-            json!({ "workspaceId": workspace.id, "title": "chat", "provider": provider });
-        client
-            .post("/api/threads", &thread_body)
-            .unwrap()
-            .parse()
-            .unwrap()
+    pub fn create_thread_of(&self, provider: Provider) -> Thread {
+        let request = CreateThread {
+            workspace_id: self.create_workspace().id,
+            title: RequiredText::new("chat").unwrap(),
+            provider,
+            settings: None,
+        };
+        self.client().create_thread(&request).unwrap()
     }
 
     pub fn home(&self) -> &Path {
@@ -237,7 +254,7 @@ impl RunningEngine {
     /// Creates a workspace on the engine's home, which is an existing absolute folder, and a
     /// Claude thread in it, which keeps R2's plain message log.
     pub fn create_thread(&self) -> Thread {
-        self.create_thread_of("claude")
+        self.create_thread_of(Provider::Claude)
     }
 
     /// Ends the process abruptly, as a crash would, and waits for it to exit.

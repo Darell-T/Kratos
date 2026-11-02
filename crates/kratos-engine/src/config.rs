@@ -1,8 +1,14 @@
+//! Everything the engine reads from its environment, read once at start.
+
 use std::ffi::OsString;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-pub const DEFAULT_PORT: u16 = 4200;
+use kratos_protocol::{DEFAULT_PORT, HOME_VAR, ThreadId, engine_home};
+
+/// The variable naming the port the engine listens on. Empty counts as unset.
+pub const PORT_VAR: &str = "KRATOS_PORT";
+pub const THREAD_ID_VAR: &str = "KRATOS_THREAD_ID";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {
@@ -10,34 +16,53 @@ pub struct Config {
     pub home: PathBuf,
     /// 0 asks the system for a free port; the listening line then names the real one.
     pub port: u16,
+    pub user_home: Option<PathBuf>,
+    pub codex_exe: Option<OsString>,
+    pub path: Option<OsString>,
+    /// Codex's data folder: `CODEX_HOME`, else `.codex` in the user's home folder, made absolute.
+    pub codex_home: Option<PathBuf>,
+    pub mcp_thread: Option<ThreadId>,
 }
 
 impl Config {
     /// Reads `KRATOS_HOME` (default `.kratos` in the user's home folder, made absolute against the
-    /// current directory) and `KRATOS_PORT` (default 4200). An empty value counts as unset.
+    /// current directory), `KRATOS_PORT` (default 4200), Codex's variables, and the `mcp`
+    /// subcommand's thread. An empty value counts as unset.
     pub fn from_env() -> Result<Config, ConfigError> {
+        let user_home = std::env::home_dir();
         Ok(Config {
-            home: home_from_env()?,
+            home: home_from_env(user_home.as_deref())?,
             port: port_from_env()?,
+            codex_exe: std::env::var_os("CODEX_EXE"),
+            path: std::env::var_os("PATH"),
+            codex_home: codex_home_from_env(user_home.as_deref()),
+            mcp_thread: std::env::var(THREAD_ID_VAR)
+                .ok()
+                .filter(|id| !id.is_empty())
+                .map(ThreadId::new),
+            user_home,
         })
     }
 }
 
-fn home_from_env() -> Result<PathBuf, ConfigError> {
-    let requested = match non_empty_var("KRATOS_HOME") {
-        Some(home) => PathBuf::from(home),
-        None => std::env::home_dir()
-            .ok_or(ConfigError::NoHomeFolder)?
-            .join(".kratos"),
-    };
+fn home_from_env(user_home: Option<&Path>) -> Result<PathBuf, ConfigError> {
+    let requested =
+        engine_home(std::env::var_os(HOME_VAR), user_home).ok_or(ConfigError::NoHomeFolder)?;
     std::path::absolute(&requested).map_err(|source| ConfigError::Home {
         path: requested,
         source,
     })
 }
 
+fn codex_home_from_env(user_home: Option<&Path>) -> Option<PathBuf> {
+    non_empty_var("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| user_home.map(|home| home.join(".codex")))
+        .and_then(|codex_home| std::path::absolute(codex_home).ok())
+}
+
 fn port_from_env() -> Result<u16, ConfigError> {
-    let Some(raw) = non_empty_var("KRATOS_PORT") else {
+    let Some(raw) = non_empty_var(PORT_VAR) else {
         return Ok(DEFAULT_PORT);
     };
     let text = raw.to_string_lossy().into_owned();

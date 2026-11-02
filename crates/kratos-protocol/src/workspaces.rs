@@ -1,24 +1,11 @@
-use std::fmt;
-
 use serde::de::{Deserializer, Error};
 use serde::{Deserialize, Serialize};
 
 use crate::{RequiredText, Timestamp};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct WorkspaceId(String);
-
-impl WorkspaceId {
-    /// For ids the engine issued or read from its records. Ids from clients arrive through
-    /// `Deserialize`.
-    pub fn new(id: String) -> WorkspaceId {
-        WorkspaceId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+string_id! {
+    #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+    WorkspaceId
 }
 
 impl<'de> Deserialize<'de> for WorkspaceId {
@@ -30,12 +17,6 @@ impl<'de> Deserialize<'de> for WorkspaceId {
             return Err(D::Error::custom("must not be empty"));
         }
         Ok(WorkspaceId(id))
-    }
-}
-
-impl fmt::Display for WorkspaceId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
     }
 }
 
@@ -53,7 +34,7 @@ pub struct Workspace {
 
 /// The engine also requires `path` to name an existing absolute directory, which only the
 /// filesystem can answer, so that check runs in the route, not here.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreateWorkspace {
     pub name: RequiredText,
     pub path: RequiredText,

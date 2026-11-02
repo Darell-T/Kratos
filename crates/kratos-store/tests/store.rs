@@ -5,7 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use kratos_protocol::{
-    CreateThread, CreateWorkspace, Seq, Thread, ThreadEventBody, ThreadId, WorkspaceId,
+    CreateThread, CreateWorkspace, Seq, Thread, ThreadEvent, ThreadEventBody, ThreadId, WorkspaceId,
 };
 use kratos_store::{
     BackupId, DirectoryError, OpenError, RestoreError, SCHEMA_VERSION, Store, StoreError, restore,
@@ -60,6 +60,16 @@ fn message(text: &str) -> ThreadEventBody {
     ThreadEventBody::UserMessage {
         text: text.to_owned(),
     }
+}
+
+fn append(
+    store: &mut Store,
+    thread_id: &ThreadId,
+    body: ThreadEventBody,
+) -> Result<ThreadEvent, StoreError> {
+    let mut write = store.write_thread(thread_id)?;
+    write.append(body)?;
+    Ok(write.commit()?.pop().expect("the write appended one event"))
 }
 
 fn seed_thread(store: &Store, title: &str) -> Thread {
@@ -218,9 +228,9 @@ fn numbers_events_per_thread_from_one() {
     let quiet = seed_thread(&store, "quiet");
 
     let appended = [
-        store.append_event(&first.id, &message("a")).unwrap().seq,
-        store.append_event(&first.id, &message("b")).unwrap().seq,
-        store.append_event(&second.id, &message("c")).unwrap().seq,
+        append(&mut store, &first.id, message("a")).unwrap().seq,
+        append(&mut store, &first.id, message("b")).unwrap().seq,
+        append(&mut store, &second.id, message("c")).unwrap().seq,
     ];
 
     assert_eq!(appended, [Seq::new(1), Seq::new(2), Seq::new(1)]);
@@ -252,9 +262,7 @@ fn keeps_events_across_reopening() {
             "a new database has nothing to back up"
         );
         let thread = seed_thread(&store, "persisted");
-        store
-            .append_event(&thread.id, &message("before restart"))
-            .unwrap();
+        append(&mut store, &thread.id, message("before restart")).unwrap();
         thread
     };
 
@@ -270,8 +278,7 @@ fn keeps_events_across_reopening() {
     );
     assert_eq!(seqs(&reopened, &thread.id, 0, usize::MAX), [1]);
     assert_eq!(
-        reopened
-            .append_event(&thread.id, &message("after"))
+        append(&mut reopened, &thread.id, message("after"))
             .unwrap()
             .seq,
         Seq::new(2)
@@ -289,7 +296,7 @@ fn appending_sets_the_thread_updated_at_to_the_event_time() {
     let thread = seed_thread(&store, "clock");
 
     thread::sleep(Duration::from_millis(10));
-    let event = store.append_event(&thread.id, &message("tick")).unwrap();
+    let event = append(&mut store, &thread.id, message("tick")).unwrap();
 
     let listed = &store.list_threads(&thread.workspace_id).unwrap()[0];
     assert_eq!(listed.created_at, thread.created_at);
@@ -304,7 +311,7 @@ fn refuses_events_for_an_unknown_thread_without_writing() {
     let mut store = Store::open(home.path()).unwrap();
     let missing = ThreadId::new("missing".into());
 
-    let error = store.append_event(&missing, &message("x")).unwrap_err();
+    let error = append(&mut store, &missing, message("x")).unwrap_err();
     assert!(matches!(&error, StoreError::UnknownThread(id) if *id == missing));
     assert_eq!(error.to_string(), "Unknown thread missing");
     assert!(matches!(
@@ -345,6 +352,31 @@ fn lists_only_a_workspace_own_threads_oldest_first() {
 }
 
 #[test]
+fn refuses_a_thread_whose_stored_provider_it_does_not_know() {
+    // Catches a provider name this build does not know read back as some provider it does.
+    let home = home();
+    let store = Store::open(home.path()).unwrap();
+    let thread = seed_thread(&store, "from a later build");
+    let connection = Connection::open(live_database(home.path())).unwrap();
+    connection
+        .execute_batch("PRAGMA ignore_check_constraints = ON;")
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE threads SET provider = 'gemini' WHERE id = ?1",
+            [thread.id.as_str()],
+        )
+        .unwrap();
+
+    let error = store.list_threads(&thread.workspace_id).unwrap_err();
+    assert!(matches!(error, StoreError::Sqlite(_)), "{error:?}");
+    assert!(
+        error.to_string().ends_with("unknown provider gemini"),
+        "{error}"
+    );
+}
+
+#[test]
 fn reports_an_unknown_workspace_when_listing_or_creating_threads() {
     // Catches an empty list where the API must answer 404, and a thread created in a missing
     // workspace.
@@ -372,7 +404,7 @@ fn pages_events_by_size_and_always_moves_forward() {
     // Each of these events is stored as `{"kind":"user.message","text":"xxxx…"}`: 133 bytes.
     let text = "x".repeat(100);
     for _ in 0..3 {
-        store.append_event(&thread.id, &message(&text)).unwrap();
+        append(&mut store, &thread.id, message(&text)).unwrap();
     }
 
     assert_eq!(
@@ -433,9 +465,7 @@ fn opens_a_database_the_typescript_engine_wrote() {
                 serde_json::to_value(&events).unwrap(),
                 served["events"][thread.id.as_str()]
             );
-            let next = store
-                .append_event(&thread.id, &message("continues"))
-                .unwrap();
+            let next = append(&mut store, &thread.id, message("continues")).unwrap();
             assert_eq!(
                 next.seq.get(),
                 events.len() as u64 + 1,
@@ -541,12 +571,12 @@ fn restores_a_backup_and_keeps_the_replaced_database_as_a_backup() {
         let at_version = contents(&live);
         let mut store = Store::open(home.path()).unwrap();
         let backup = store.backup_taken().unwrap().clone();
-        store
-            .append_event(
-                &ThreadId::new("thread-1".into()),
-                &message("after the migration"),
-            )
-            .unwrap();
+        append(
+            &mut store,
+            &ThreadId::new("thread-1".into()),
+            message("after the migration"),
+        )
+        .unwrap();
         drop(store);
         let migrated = contents(&live);
         assert_ne!(migrated, at_version);

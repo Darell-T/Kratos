@@ -1,7 +1,8 @@
 use fake_agents::responses::Reply;
-use kratos_client::Incoming;
+use kratos_api_client::Incoming;
 use kratos_protocol::{
-    Permission, Seq, ServerMessage, Thread, ThreadEventBody, ThreadSettings, TurnOutcome,
+    CLIENT_TOKEN_FILE, Permission, Seq, ServerMessage, Thread, ThreadEventBody, ThreadSettings,
+    TurnOutcome,
 };
 use serde_json::json;
 
@@ -88,7 +89,7 @@ try {{
     .unwrap();
     let outputs = harness.model.tool_outputs();
     assert_eq!(outputs.len(), 2, "both attacker tool calls must execute");
-    let token = std::fs::read_to_string(harness.home().join("client-token")).unwrap();
+    let token = std::fs::read_to_string(harness.home().join(CLIENT_TOKEN_FILE)).unwrap();
     let output = serde_json::to_string(&outputs).unwrap();
     assert!(
         !output.contains(&token),

@@ -1,19 +1,10 @@
 //! What Codex sends: notifications become thread events and live updates, and requests become
 //! approvals and questions, or answers Kratos gives itself.
 
-use kratos_codex_client::{
-    Incoming, IncomingRequest, Notification, RequestId, ServerRequest, types,
-};
-use kratos_protocol::{
-    Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason, LiveUpdate, Provider,
-    QuestionId, ThreadEventBody, ThreadId, TurnId,
-};
-use serde_json::json;
-use uuid::Uuid;
+use kratos_codex_client::{Incoming, Notification, RequestId, types};
+use kratos_protocol::{LiveUpdate, Provider, ThreadEventBody, ThreadId, TurnId};
 
-use super::actor::{Actor, settle_closed};
-use super::policy::{self, CommandRequest, Verdict};
-use super::requests::{Answer, Waiting};
+use super::actor::Actor;
 use super::wire;
 
 impl Actor {
@@ -74,7 +65,7 @@ impl Actor {
     }
 
     /// The Kratos thread a Codex thread id belongs to, among the threads loaded in this server.
-    fn thread_of(&self, native_id: &str) -> Option<ThreadId> {
+    pub(super) fn thread_of(&self, native_id: &str) -> Option<ThreadId> {
         self.threads
             .iter()
             .find(|(_, thread)| thread.native_id() == Some(native_id))
@@ -111,7 +102,9 @@ impl Actor {
             return;
         };
         let thread = self.threads.get_mut(&thread_id).expect("found above");
-        thread.changes.record(&item);
+        if let Some(work) = thread.turn.work_mut() {
+            work.changes.record(&item);
+        }
         let turn_id = TurnId::new(completed.turn_id);
         let _ = self
             .write(&thread_id, move |write| {
@@ -143,22 +136,11 @@ impl Actor {
             return;
         };
         let context = wire::context_usage(&usage.token_usage);
+        self.learn_window(&thread_id, context.context_window);
         let thread = self.threads.get_mut(&thread_id).expect("found above");
-        let loaded_without_limit = matches!(
-            thread.link,
-            super::threads::Link::Attached {
-                context_limit: None,
-                ..
-            }
-        );
-        if loaded_without_limit
-            && let (Some(window), Some(model)) = (context.context_window, thread.model())
-        {
-            // The model's own window, seen with no setting of Kratos's in force (D76).
-            self.windows.insert(model.to_owned(), window);
+        if let Some(work) = thread.turn.work_mut() {
+            work.context = Some(context.clone());
         }
-        let thread = self.threads.get_mut(&thread_id).expect("found above");
-        thread.context = Some(context.clone());
         self.hub.publish(
             &thread_id,
             LiveUpdate::Context {
@@ -167,202 +149,4 @@ impl Actor {
             },
         );
     }
-
-    /// Codex no longer needs an answer: the request closes, and an answer sent later is dropped.
-    async fn withdraw(&mut self, codex_id: &RequestId) {
-        if let Some((thread_id, closed)) = self.requests.withdraw(codex_id) {
-            let _ = self
-                .write(&thread_id, move |write| {
-                    settle_closed(write, &closed, "Codex no longer needs an answer")
-                })
-                .await;
-        }
-    }
-
-    async fn on_request(&mut self, request: IncomingRequest) {
-        let native_id = request_thread(&request.request);
-        let Some(thread_id) = self.thread_of(&native_id) else {
-            // A thread Kratos does not run cannot be granted anything.
-            cancel(request);
-            return;
-        };
-        match &request.request {
-            ServerRequest::CommandApproval(params) => {
-                let verdict = {
-                    let thread = &self.threads[&thread_id];
-                    let ask = CommandRequest {
-                        command: params.command.as_deref(),
-                        reason: params.reason.as_deref(),
-                        wants_more_permissions: params.additional_permissions.is_some(),
-                        wants_network: params.network_approval_context.is_some(),
-                    };
-                    policy::decide_command(&thread.turn_settings, &ask, self.settings.platform)
-                };
-                let shown = ApprovalRequest::Command {
-                    command: params.command.clone().unwrap_or_default(),
-                    cwd: params.cwd.as_ref().map(|cwd| cwd.0.clone()),
-                    reason: params.reason.clone(),
-                    access: wire::command_access(params),
-                };
-                let turn_id = TurnId::new(params.turn_id.clone());
-                self.settle_or_ask(
-                    thread_id,
-                    turn_id,
-                    request,
-                    verdict,
-                    shown,
-                    Answer::Decision,
-                )
-                .await;
-            }
-            ServerRequest::FileChangeApproval(params) => {
-                let thread = &self.threads[&thread_id];
-                let changes = thread.file_items.get(&params.item_id).cloned();
-                let verdict = policy::decide_patch(
-                    &thread.turn_settings,
-                    changes.as_deref(),
-                    params.grant_root.is_some(),
-                    std::path::Path::new(&thread.folder),
-                    &self.settings.protected,
-                );
-                let shown = ApprovalRequest::FileChanges {
-                    changes: changes.unwrap_or_default(),
-                    reason: params.reason.clone(),
-                };
-                let turn_id = TurnId::new(params.turn_id.clone());
-                self.settle_or_ask(
-                    thread_id,
-                    turn_id,
-                    request,
-                    verdict,
-                    shown,
-                    Answer::Decision,
-                )
-                .await;
-            }
-            ServerRequest::Permissions(params) => {
-                let shown = ApprovalRequest::Permissions {
-                    reason: params.reason.clone(),
-                    access: wire::permissions_access(&params.permissions),
-                };
-                let (turn_id, requested) = (
-                    TurnId::new(params.turn_id.clone()),
-                    params.permissions.clone(),
-                );
-                let verdict = Verdict::Ask(AskReason::Escalation);
-                self.settle_or_ask(
-                    thread_id,
-                    turn_id,
-                    request,
-                    verdict,
-                    shown,
-                    Answer::Permissions(requested),
-                )
-                .await;
-            }
-            ServerRequest::UserInput(params) => {
-                let question = wire::question(QuestionId::new(Uuid::new_v4().to_string()), params);
-                self.ask_question(thread_id, request, question).await;
-            }
-            // Kratos shows no MCP forms yet, so the tool call that asked is declined.
-            ServerRequest::McpElicitation(_) => {
-                request.answer(&json!({ "action": "cancel", "content": null, "_meta": null }));
-            }
-        }
-    }
-
-    async fn settle_or_ask(
-        &mut self,
-        thread_id: ThreadId,
-        turn_id: TurnId,
-        request: IncomingRequest,
-        verdict: Verdict,
-        shown: ApprovalRequest,
-        answer: Answer,
-    ) {
-        let why = match verdict {
-            Verdict::Accept => {
-                request.answer(&wire::command_decision(ApprovalDecision::Accept));
-                return;
-            }
-            Verdict::Ask(why) => why,
-        };
-        let approval = Approval {
-            id: ApprovalId::new(Uuid::new_v4().to_string()),
-            turn_id: turn_id.clone(),
-            request: shown,
-            why,
-        };
-        let id = approval.id.clone();
-        if self
-            .write(&thread_id, move |write| write.request_approval(approval))
-            .await
-            .is_err()
-        {
-            cancel(request);
-            return;
-        }
-        self.requests.approvals.insert(
-            id,
-            Waiting {
-                thread_id,
-                turn_id,
-                codex_id: request.id.clone(),
-                request,
-                answer,
-            },
-        );
-    }
-
-    async fn ask_question(
-        &mut self,
-        thread_id: ThreadId,
-        request: IncomingRequest,
-        question: kratos_protocol::Question,
-    ) {
-        let (id, turn_id) = (question.id.clone(), question.turn_id.clone());
-        if self
-            .write(&thread_id, move |write| write.ask_question(question))
-            .await
-            .is_err()
-        {
-            request.answer(&json!({ "answers": {} }));
-            return;
-        }
-        self.requests.questions.insert(
-            id,
-            Waiting {
-                thread_id,
-                turn_id,
-                codex_id: request.id.clone(),
-                request,
-                answer: Answer::Answers,
-            },
-        );
-    }
-}
-
-fn request_thread(request: &ServerRequest) -> String {
-    match request {
-        ServerRequest::CommandApproval(params) => params.thread_id.clone(),
-        ServerRequest::FileChangeApproval(params) => params.thread_id.clone(),
-        ServerRequest::UserInput(params) => params.thread_id.clone(),
-        ServerRequest::Permissions(params) => params.thread_id.clone(),
-        ServerRequest::McpElicitation(params) => wire::elicitation_thread(params),
-    }
-}
-
-/// Answers a request Kratos will not put to the user with the refusal of its kind.
-fn cancel(request: IncomingRequest) {
-    let answer = match &request.request {
-        ServerRequest::CommandApproval(_) | ServerRequest::FileChangeApproval(_) => {
-            wire::command_decision(ApprovalDecision::Cancel)
-        }
-        ServerRequest::Permissions(_) => json!({ "permissions": {}, "scope": "turn" }),
-        ServerRequest::UserInput(_) => json!({ "answers": {} }),
-        ServerRequest::McpElicitation(_) => {
-            json!({ "action": "cancel", "content": null, "_meta": null })
-        }
-    };
-    request.answer(&answer);
 }

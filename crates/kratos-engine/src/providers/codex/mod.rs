@@ -10,16 +10,19 @@
 //! once the turn before it is confirmed finished, and a message whose delivery is uncertain is
 //! never sent again: only the provider's history or the user settles it.
 
+mod account;
 mod actor;
+mod approvals;
 mod commands;
 mod connection;
 mod incoming;
 pub mod policy;
 pub mod profiles;
+mod queue;
 mod recovery;
-mod requests;
 #[cfg(windows)]
 mod sandbox;
+mod settings;
 mod threads;
 mod turns;
 pub mod wire;
@@ -38,9 +41,9 @@ use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::hub::Hub;
+use crate::mcp::McpServer;
 use crate::store_thread::StoreThread;
-use crate::usage::UsageTracker;
-use crate::usage::scheduler::LimitStop;
+use crate::usage::{LimitStop, UsageTracker};
 
 pub use profiles::ProtectedFolders;
 
@@ -68,13 +71,6 @@ pub struct CodexSettings {
     pub request_timeout: Duration,
     pub platform: DangerousCommandPlatform,
     pub mcp: Option<McpServer>,
-}
-
-#[derive(Clone, Debug)]
-pub struct McpServer {
-    pub program: PathBuf,
-    pub home: PathBuf,
-    pub port: u16,
 }
 
 /// What became of a continuation the scheduler sent (D39).
@@ -109,8 +105,6 @@ pub enum ProviderError {
     UnknownApproval(ApprovalId),
     #[error("Unknown question {0}")]
     UnknownQuestion(QuestionId),
-    #[error("Unknown continuation {0}")]
-    UnknownContinuation(ContinuationId),
     /// The request does not fit the thread's state, for example a retry of a message that did not
     /// fail. The text says what would.
     #[error("{0}")]

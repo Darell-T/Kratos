@@ -6,11 +6,11 @@
 //! and Rust replaced on purpose, such as `needsUser`, is refused.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kratos_teams::facts::{Fact, FactSeq, StoredFact};
 use kratos_teams::fold::fold;
-use kratos_teams::view::TaskView;
+use kratos_teams::view::{Activity, Phase, TaskView};
 use serde_json::{Map, Value, json};
 
 use crate::observe::{camel_to_snake, observe};
@@ -35,6 +35,32 @@ impl Reference {
         }
         expected
     }
+
+    pub fn differing_facts(&self, folded: &[Folded]) -> Vec<usize> {
+        folded
+            .iter()
+            .zip(&self.expected)
+            .filter(|(ours, theirs)| &ours.observed != *theirs)
+            .map(|(ours, _)| ours.fact)
+            .collect()
+    }
+}
+
+pub fn read_every_reference() -> Result<Vec<Reference>, String> {
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference");
+    let unreadable = |error: std::io::Error| format!("{}: {error}", folder.display());
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&folder).map_err(unreadable)? {
+        let path = entry.map_err(unreadable)?.path();
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "json")
+        {
+            files.push(path);
+        }
+    }
+    files.sort();
+    files.iter().map(|path| read_reference(path)).collect()
 }
 
 pub fn read_reference(path: &Path) -> Result<Reference, String> {
@@ -313,7 +339,12 @@ const TRANSLATORS: [(&str, Translator); 10] = [
 /// The first `implementer.opened` is the worktree being ready. A later one is a replacement thread,
 /// which is the engine's business, so Rust has no fact for it.
 fn opened(_: &Value, view: &TaskView) -> Result<Option<Value>, String> {
-    let is_preparing = view.phase.name() == "preparing";
+    let is_preparing = matches!(
+        view.phase,
+        Phase::Active {
+            activity: Activity::Preparing { .. }
+        }
+    );
     Ok((is_preparing && view.rounds.is_empty()).then(|| json!({"kind": "prepared"})))
 }
 

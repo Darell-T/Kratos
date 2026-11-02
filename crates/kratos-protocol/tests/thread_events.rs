@@ -4,13 +4,13 @@
 //! unreadable. Round-trips between two builds of the same types would not notice; literal text does.
 
 use kratos_protocol::{
-    AgentItem, Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason, CappedText,
-    ContextUsage, Continuation, ContinuationId, ContinuationState, ExtraAccess, FileChange,
-    FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId, MessageInput, MessageOrigin,
-    MessageStatus, NetworkAccess, PathAccess, PathAccessMode, PauseReason, Permission, Provider,
-    Question, QuestionId, QuestionItem, QuestionOption, ReplySoFar, RequiredText, SendMessage,
-    ServerMessage, ThreadEventBody, ThreadId, ThreadSettings, Timestamp, TurnChanges, TurnId,
-    TurnOutcome, UsageWait,
+    AccessLimit, AgentItem, Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason,
+    CappedText, ContextUsage, Continuation, ContinuationId, ContinuationState, ExtraAccess,
+    FileChange, FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId, MessageInput,
+    MessageOrigin, MessageStatus, NetworkAccess, PathAccess, PathAccessMode, PauseReason,
+    Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption, ReplySoFar,
+    RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId, ThreadSettings, Timestamp,
+    TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
 use std::fmt::Debug;
 
@@ -447,7 +447,7 @@ fn live_updates_have_their_socket_shape() {
         ServerMessage::Live {
             thread_id,
             update: LiveUpdate::Snapshot {
-                turn_id: Some(turn()),
+                turn_id: turn(),
                 replies: vec![ReplySoFar {
                     item_id: "i-1".into(),
                     text: "Hello".into(),
@@ -462,15 +462,14 @@ fn live_updates_have_their_socket_shape() {
 fn a_message_body_is_text_or_parts_with_an_optional_id() {
     // Catches a body that accepts both forms at once, an empty part list, or an id the store would
     // have to truncate, each of which would queue a message the client did not mean.
-    let parse = |body: &str| serde_json::from_str::<SendMessage>(body).map(SendMessage::into_parts);
+    let parse = |body: &str| serde_json::from_str::<SendMessage>(body);
 
-    let (id, input) = parse(r#"{"text":"  hi  "}"#).unwrap().unwrap();
-    assert_eq!(id, None);
+    let SendMessage { message_id, input } = parse(r#"{"text":"  hi  "}"#).unwrap();
+    assert_eq!(message_id, None);
     assert_eq!(input, [MessageInput::Text { text: text("hi") }]);
-    let (id, input) = parse(r#"{"messageId":"m-9","input":[{"type":"image","path":"C:\\a.png"}]}"#)
-        .unwrap()
-        .unwrap();
-    assert_eq!(id, Some(MessageId::new("m-9".into())));
+    let SendMessage { message_id, input } =
+        parse(r#"{"messageId":"m-9","input":[{"type":"image","path":"C:\\a.png"}]}"#).unwrap();
+    assert_eq!(message_id, Some(MessageId::new("m-9".into())));
     assert_eq!(
         input,
         [MessageInput::Image {
@@ -478,13 +477,9 @@ fn a_message_body_is_text_or_parts_with_an_optional_id() {
         }]
     );
 
-    assert!(
-        parse(r#"{"text":"hi","input":[{"type":"text","text":"hi"}]}"#)
-            .unwrap()
-            .is_err()
-    );
-    assert!(parse(r#"{"input":[]}"#).unwrap().is_err());
-    assert!(parse(r#"{"messageId":"m"}"#).unwrap().is_err());
+    assert!(parse(r#"{"text":"hi","input":[{"type":"text","text":"hi"}]}"#).is_err());
+    assert!(parse(r#"{"input":[]}"#).is_err());
+    assert!(parse(r#"{"messageId":"m"}"#).is_err());
     let longest = "x".repeat(128);
     assert!(parse(&format!(r#"{{"messageId":"{longest}","text":"hi"}}"#)).is_ok());
     for refused in [
@@ -514,4 +509,49 @@ fn thread_settings_refuse_unknown_fields() {
         )
         .is_err()
     );
+}
+
+#[test]
+fn narrowing_settings_keeps_what_both_sides_allow_and_nothing_more() {
+    // Catches narrowing and the covers check drifting apart, which would run a message from
+    // another thread with access its sender lacked, or let the access check refuse what narrowing
+    // allowed. The first four checks catch an order that runs the wrong way or ignores plan mode.
+    let access = |permission, plan_mode| AccessLimit {
+        permission,
+        plan_mode,
+    };
+    let (ask, approve, full) = (
+        Permission::AskMe,
+        Permission::ApproveForMe,
+        Permission::FullAccess,
+    );
+    assert!(!access(ask, false).covers(access(approve, false)));
+    assert!(!access(approve, false).covers(access(full, false)));
+    assert!(!access(full, true).covers(access(full, false)));
+    assert!(AccessLimit::FULL.covers(access(ask, true)));
+
+    let every_limit: Vec<AccessLimit> = [ask, approve, full]
+        .into_iter()
+        .flat_map(|permission| [access(permission, false), access(permission, true)])
+        .collect();
+    for own in &every_limit {
+        let settings = ThreadSettings {
+            permission: own.permission,
+            plan_mode: own.plan_mode,
+            ..ThreadSettings::default()
+        };
+        for limit in &every_limit {
+            let lowered = settings.limited_to(*limit).access();
+            assert!(limit.covers(lowered), "{limit:?} covers {lowered:?}");
+            assert!(own.covers(lowered), "{own:?} covers {lowered:?}");
+            for other in &every_limit {
+                assert_eq!(
+                    lowered.covers(*other),
+                    own.covers(*other) && limit.covers(*other),
+                    "{own:?} limited to {limit:?} is {lowered:?}, which must cover {other:?} \
+                     exactly when both sides do"
+                );
+            }
+        }
+    }
 }

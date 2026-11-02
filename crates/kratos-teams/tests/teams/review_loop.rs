@@ -2,7 +2,6 @@
 //! security pass. Ported from the TypeScript `teams-task.test.ts`.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
-use kratos_teams::facts::Ended;
 use kratos_teams::members::Role;
 use kratos_teams::security_triggers::TriggerHit;
 use kratos_teams::view::{
@@ -12,18 +11,6 @@ use kratos_teams::view::{
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
-
-fn fix_f1() -> Ended {
-    implements_answering(vec![fixed(1)])
-}
 
 fn spawn_hit() -> TriggerHit {
     TriggerHit::Code {
@@ -50,7 +37,7 @@ fn a_clean_review_approves_in_one_round_and_lists_what_cannot_block_without_chec
     assert_eq!(view.phase, approved(1, ApprovedBy::Reviewer));
     assert_eq!(outcomes(&view), ["Nit", "Design", "PreExisting"]);
     assert_eq!(checks(&task)[0].candidates, []);
-    assert_eq!(task.script.commands_run(), 0);
+    assert_eq!(task.commands_run(), 0);
     assert_eq!(runs(&task, Role::Implementer).len(), 1);
     assert_eq!(view.last_reviewed, Some(sha(1)));
     assert_replayable(&task);

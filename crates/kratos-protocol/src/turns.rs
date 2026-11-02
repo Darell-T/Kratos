@@ -1,26 +1,9 @@
-use std::fmt;
-
 use serde::{Deserialize, Serialize};
 
-/// A turn's id, as the provider issued it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TurnId(String);
-
-impl TurnId {
-    pub fn new(id: String) -> TurnId {
-        TurnId(id)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for TurnId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
+string_id! {
+    /// A turn's id, as the provider issued it.
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+    TurnId
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +19,16 @@ pub enum TurnOutcome {
     Failed {
         error: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnChanges {
+    /// Files the turn edited, as the provider reported their paths.
+    pub files: Vec<String>,
+    /// The turn edited a file after its last command, so no command has checked that edit.
+    pub edited_since_command: bool,
+    pub ran_command: bool,
 }
 
 /// Text Kratos keeps only the start of, because stored events have a size budget (L3).
@@ -136,4 +129,26 @@ pub struct ContextUsage {
     pub total_tokens: i64,
     /// The model's context window the provider works with, when it said.
     pub context_window: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CommandResult {
+    /// On Windows a crashed process reports its NTSTATUS, which reads as a negative `i32`.
+    Exited {
+        exit_code: i32,
+        stdout: String,
+        stderr: String,
+    },
+    TimedOut {
+        output: String,
+    },
+    /// The sandbox refused the command, for example a write outside the thread's roots.
+    Refused {
+        error: String,
+    },
 }

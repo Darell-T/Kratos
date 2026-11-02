@@ -1,5 +1,5 @@
 use kratos_protocol::{Seq, ThreadEvent, ThreadId, Timestamp};
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::{Store, StoreError};
 
@@ -7,16 +7,8 @@ impl Store {
     /// The seq of the thread's latest event, or [`Seq::BEFORE_FIRST`] when it has none.
     /// `Err(UnknownThread)` when no thread has this id.
     pub fn last_seq(&self, thread_id: &ThreadId) -> Result<Seq, StoreError> {
-        let last: Option<u64> = self
-            .connection
-            .query_row(
-                "SELECT COALESCE((SELECT MAX(seq) FROM thread_events WHERE thread_id = threads.id), 0)
-                 FROM threads WHERE id = ?1",
-                [thread_id.as_str()],
-                |row| row.get(0),
-            )
-            .optional()?;
-        last.map(Seq::new)
+        last_seq_of(&self.connection, thread_id)?
+            .map(Seq::new)
             .ok_or_else(|| StoreError::UnknownThread(thread_id.clone()))
     }
 
@@ -53,6 +45,21 @@ impl Store {
         }
         Ok(events)
     }
+}
+
+/// The seq of the thread's latest event, 0 when it has none, or `None` when no thread has this id.
+pub(crate) fn last_seq_of(
+    connection: &Connection,
+    thread_id: &ThreadId,
+) -> rusqlite::Result<Option<u64>> {
+    connection
+        .query_row(
+            "SELECT COALESCE((SELECT MAX(seq) FROM thread_events WHERE thread_id = threads.id), 0)
+             FROM threads WHERE id = ?1",
+            [thread_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
 }
 
 struct StoredEvent {

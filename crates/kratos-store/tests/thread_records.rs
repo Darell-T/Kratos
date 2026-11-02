@@ -184,7 +184,7 @@ fn a_message_whose_delivery_is_uncertain_is_never_queued_again() {
             matches!(
                 refused,
                 Err(StoreError::MessageTransition {
-                    from: "unknown",
+                    from: MessageStatus::Unknown { .. },
                     ..
                 })
             ),
@@ -568,14 +568,13 @@ fn a_restored_migration_backup_is_the_database_the_typescript_engine_wrote() {
     let backup = store.backup_taken().unwrap().clone();
     let thread = store.list_workspaces().unwrap()[0].id.clone();
     let thread = store.list_threads(&thread).unwrap()[0].id.clone();
-    store
-        .append_event(
-            &thread,
-            &ThreadEventBody::UserMessage {
-                text: "written by migration 5".into(),
-            },
-        )
+    let mut write = store.write_thread(&thread).unwrap();
+    write
+        .append(ThreadEventBody::UserMessage {
+            text: "written by migration 5".into(),
+        })
         .unwrap();
+    write.commit().unwrap();
     drop(store);
     restore(home.path(), &backup.id).unwrap();
 

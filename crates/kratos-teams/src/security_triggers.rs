@@ -12,8 +12,8 @@ use fancy_regex::RegexBuilder;
 use globset::GlobMatcher;
 use serde::{Deserialize, Serialize};
 
-use crate::evidence::DiffFile;
-use crate::task_plan::compile;
+use crate::diff::DiffFile;
+use crate::paths::compile;
 
 /// One trigger, as parsed from `REVIEW.md` or taken from the defaults. It is stored as text in the
 /// task's first fact and compiled each time it is matched.

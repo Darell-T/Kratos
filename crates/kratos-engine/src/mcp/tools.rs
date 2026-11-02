@@ -4,20 +4,19 @@
 //! reaches only the routes the engine opens to agents, in `server::agent_routes`.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use kratos_client::{ApiReply, ApiRequest, ClientError};
+use kratos_api_client::{ApiReply, ClientError};
 use kratos_protocol::{
-    ApprovalDecision, Permission, RequiredText, Seq, ThreadDetails, ThreadEvent, ThreadEventBody,
-    ThreadId, ThreadSettings,
+    AnswerQuestion, ApprovalDecision, ApprovalId, CreateThread, DecideApproval, ErrorBody,
+    MessageInput, Permission, Provider, QuestionId, RequiredText, SendMessage, Seq, ThreadDetails,
+    ThreadEvent, ThreadId, ThreadSettings, WorkspaceId, routes,
 };
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::{Call, MAX_WAIT_SECONDS, transcript};
-use crate::server::ACTING_THREAD_HEADER;
+use super::{Call, MAX_WAIT_SECONDS, transcript, wait};
 
 type Answer = Result<Value, String>;
 
@@ -29,8 +28,6 @@ struct Tool {
 }
 
 const DEFAULT_WAIT_SECONDS: u64 = 300;
-/// How often a wait checks whether Codex cancelled the call.
-const CANCEL_CHECK: Duration = Duration::from_secs(1);
 
 #[rustfmt::skip]
 const TOOLS: [Tool; 11] = [
@@ -68,12 +65,14 @@ pub fn list() -> Vec<Value> {
         .collect()
 }
 
-pub fn call(call: &Call, params: &Value) -> Value {
-    let name = params["name"].as_str().unwrap_or_default();
-    let arguments = match params.get("arguments") {
-        None | Some(Value::Null) => json!({}),
-        Some(arguments) => arguments.clone(),
-    };
+#[derive(Deserialize)]
+pub struct ToolCall {
+    name: String,
+    arguments: Option<Value>,
+}
+
+pub fn call(call: &Call, ToolCall { name, arguments }: ToolCall) -> Value {
+    let arguments = arguments.unwrap_or_else(|| json!({}));
     let answer = match TOOLS.iter().find(|tool| tool.name == name) {
         Some(tool) => (tool.run)(call, arguments),
         None => Err(format!("Kratos has no tool named {name}")),
@@ -152,29 +151,26 @@ fn parse_arguments<T: DeserializeOwned>(arguments: Value) -> Result<T, String> {
 
 fn whoami(call: &Call, arguments: Value) -> Answer {
     let NoArguments {} = parse_arguments(arguments)?;
-    call.get(&thread_path(&call.caller.thread_id))
+    call.get(&routes::thread(&call.caller.thread_id))
 }
 
 fn list_workspaces(call: &Call, arguments: Value) -> Answer {
     let NoArguments {} = parse_arguments(arguments)?;
-    call.get("/api/workspaces")
+    call.get(routes::WORKSPACES)
 }
 
 fn list_threads(call: &Call, arguments: Value) -> Answer {
     let InWorkspace { workspace_id } = parse_arguments(arguments)?;
     let workspace = match workspace_id {
-        Some(id) => id.into_string(),
-        None => me(call)?.thread.workspace_id.as_str().to_owned(),
+        Some(id) => WorkspaceId::new(id.into_string()),
+        None => me(call)?.thread.workspace_id,
     };
-    call.get(&format!(
-        "/api/threads?workspaceId={}",
-        percent_encode(&workspace)
-    ))
+    call.get(&routes::threads_in(&workspace))
 }
 
 fn get_thread(call: &Call, arguments: Value) -> Answer {
     let OnThread { thread_id } = parse_arguments(arguments)?;
-    call.get(&thread_path(&thread_id))
+    call.get(&routes::thread(&thread_id))
 }
 
 fn read_thread(call: &Call, arguments: Value) -> Answer {
@@ -196,22 +192,29 @@ fn create_thread(call: &Call, arguments: Value) -> Answer {
         model: request.model.map(RequiredText::into_string),
         ..ThreadSettings::default()
     };
-    let workspace = match request.workspace_id {
-        Some(id) => id.into_string(),
-        None => me.thread.workspace_id.as_str().to_owned(),
+    let workspace_id = match request.workspace_id {
+        Some(id) => WorkspaceId::new(id.into_string()),
+        None => me.thread.workspace_id,
     };
     call.post(
-        "/api/threads",
-        &json!({ "workspaceId": workspace, "title": request.title, "provider": "codex",
-                 "settings": settings }),
+        routes::THREADS,
+        &CreateThread {
+            workspace_id,
+            title: request.title,
+            provider: Provider::Codex,
+            settings: Some(settings),
+        },
     )
 }
 
 fn send_message(call: &Call, arguments: Value) -> Answer {
     let SendArguments { thread_id, text } = parse_arguments(arguments)?;
     call.post(
-        &format!("{}/messages", thread_path(&thread_id)),
-        &json!({ "text": text }),
+        &routes::thread_messages(&thread_id),
+        &SendMessage {
+            message_id: None,
+            input: vec![MessageInput::Text { text }],
+        },
     )
 }
 
@@ -229,74 +232,14 @@ fn wait_for_turn(call: &Call, arguments: Value) -> Answer {
             "Invalid arguments: timeoutSeconds must be 1 to {MAX_WAIT_SECONDS}"
         ));
     }
-    let details: ThreadDetails = parse(call.get(&thread_path(&thread_id))?)?;
-    if let Some(state) = settled(&details) {
-        return Ok(state);
-    }
-    let deadline = Instant::now() + Duration::from_secs(seconds);
-    follow(call, thread_id, details.last_seq, deadline)
-}
-
-/// Follows the thread's events after `after` until one ends the wait, Codex cancels the call, or
-/// `deadline` passes.
-fn follow(call: &Call, thread_id: ThreadId, after: Seq, deadline: Instant) -> Answer {
-    let mut follower = call.caller.client.follow(thread_id, after);
-    let mut last = after;
-    let mut reply = None;
-    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
-        if call.cancelled.load(Ordering::Relaxed) {
-            return Err("Cancelled".to_owned());
-        }
-        let event = match follower.next_event(left.min(CANCEL_CHECK)) {
-            Ok(event) => event,
-            Err(ClientError::TimedOut(_)) => continue,
-            Err(error) => return Err(format!("Kratos is unreachable: {error}")),
-        };
-        last = event.seq;
-        if let Some(text) = transcript::reply(&event.event) {
-            reply = Some(text.to_owned());
-        }
-        if let Some(state) = ended(&event.event, reply.as_deref()) {
-            return Ok(state);
-        }
-    }
-    Ok(json!({ "state": "timedOut", "lastSeq": last }))
-}
-
-fn settled(details: &ThreadDetails) -> Option<Value> {
-    if !details.approvals.is_empty() || !details.questions.is_empty() {
-        return Some(
-            json!({ "state": "waitingForInput", "approvals": details.approvals,
-                            "questions": details.questions }),
-        );
-    }
-    if let Some(reason) = &details.paused {
-        return Some(json!({ "state": "paused", "reason": reason }));
-    }
-    (details.running_turn.is_none() && details.queue.is_empty()).then(|| json!({ "state": "idle" }))
-}
-
-fn ended(event: &ThreadEventBody, reply: Option<&str>) -> Option<Value> {
-    match event {
-        ThreadEventBody::TurnCompleted { outcome, .. } => {
-            Some(json!({ "state": "turnEnded", "outcome": outcome, "reply": reply }))
-        }
-        ThreadEventBody::ApprovalRequested { approval } => {
-            Some(json!({ "state": "waitingForInput", "approvals": [approval] }))
-        }
-        ThreadEventBody::QuestionAsked { question } => {
-            Some(json!({ "state": "waitingForInput", "questions": [question] }))
-        }
-        ThreadEventBody::ThreadPaused { reason } => {
-            Some(json!({ "state": "paused", "reason": reason }))
-        }
-        _ => None,
-    }
+    let details: ThreadDetails = parse(call.get(&routes::thread(&thread_id))?)?;
+    let outcome = wait::wait(call, thread_id, details, Duration::from_secs(seconds))?;
+    Ok(serde_json::to_value(outcome).expect("a wait outcome serializes"))
 }
 
 fn stop_thread(call: &Call, arguments: Value) -> Answer {
     let OnThread { thread_id } = parse_arguments(arguments)?;
-    call.post(&format!("{}/stop", thread_path(&thread_id)), &json!({}))
+    call.post(&routes::thread_stop(&thread_id), &json!({}))
 }
 
 fn answer_question(call: &Call, arguments: Value) -> Answer {
@@ -305,8 +248,8 @@ fn answer_question(call: &Call, arguments: Value) -> Answer {
         answers,
     } = parse_arguments(arguments)?;
     call.post(
-        &format!("/api/questions/{}", percent_encode(question_id.as_str())),
-        &json!({ "answers": answers }),
+        &routes::question(&QuestionId::new(question_id.into_string())),
+        &AnswerQuestion { answers },
     )
 }
 
@@ -316,13 +259,13 @@ fn decide_approval(call: &Call, arguments: Value) -> Answer {
         decision,
     } = parse_arguments(arguments)?;
     call.post(
-        &format!("/api/approvals/{}", percent_encode(approval_id.as_str())),
-        &json!({ "decision": decision }),
+        &routes::approval(&ApprovalId::new(approval_id.into_string())),
+        &DecideApproval { decision },
     )
 }
 
 fn me(call: &Call) -> Result<ThreadDetails, String> {
-    parse(call.get(&thread_path(&call.caller.thread_id))?)
+    parse(call.get(&routes::thread(&call.caller.thread_id))?)
 }
 
 /// Every event after `after`, page by page, and the seq of the newest.
@@ -334,8 +277,8 @@ fn events_after(
     let mut events = Vec::new();
     let mut last = after;
     loop {
-        let path = format!("{}/events?after={}", thread_path(thread_id), last.get());
-        let page: Vec<ThreadEvent> = parse(call.get(&path)?)?;
+        let page: Vec<ThreadEvent> =
+            parse(call.get(&routes::thread_events_after(thread_id, last))?)?;
         let Some(newest) = page.last() else {
             return Ok((events, last));
         };
@@ -344,40 +287,13 @@ fn events_after(
     }
 }
 
-fn thread_path(thread_id: &ThreadId) -> String {
-    format!("/api/threads/{}", percent_encode(thread_id.as_str()))
-}
-
-/// Everything but unreserved characters, for a path segment or query value.
-fn percent_encode(text: &str) -> String {
-    let mut encoded = String::new();
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            encoded.push(char::from(byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
-}
-
 impl Call<'_> {
     fn get(&self, path: &str) -> Answer {
-        self.send(ApiRequest::new("GET", path))
+        reply_body(self.caller.client.get(path))
     }
 
-    fn post(&self, path: &str, body: &Value) -> Answer {
-        let body = serde_json::to_vec(body).expect("a JSON value serializes");
-        self.send(
-            ApiRequest::new("POST", path)
-                .header("Content-Type", "application/json")
-                .body(body),
-        )
-    }
-
-    fn send(&self, request: ApiRequest) -> Answer {
-        let request = request.header(ACTING_THREAD_HEADER, self.caller.thread_id.as_str());
-        reply_body(self.caller.client.send(&request))
+    fn post(&self, path: &str, body: &impl Serialize) -> Answer {
+        reply_body(self.caller.client.post(path, body))
     }
 }
 
@@ -386,9 +302,9 @@ fn reply_body(reply: Result<ApiReply, ClientError>) -> Answer {
     if (200..300).contains(&reply.status) {
         return Ok(reply.body);
     }
-    let reason = match reply.body["error"].as_str() {
-        Some(reason) => reason.to_owned(),
-        None => reply.body.to_string(),
+    let reason = match ErrorBody::deserialize(&reply.body) {
+        Ok(ErrorBody { error }) => error,
+        Err(_) => reply.body.to_string(),
     };
     Err(format!("Kratos refused ({}): {reason}", reply.status))
 }
@@ -423,7 +339,7 @@ fn create_input() -> Value {
             "properties": {
                 "title": { "type": "string" },
                 "workspaceId": { "type": "string" },
-                "permission": { "enum": ["askMe", "approveForMe", "fullAccess"] },
+                "permission": { "enum": Permission::ALL },
                 "planMode": { "type": "boolean" },
                 "model": { "type": "string" } } })
 }
@@ -452,5 +368,91 @@ fn decide_input() -> Value {
     json!({ "type": "object", "required": ["approvalId", "decision"], "additionalProperties": false,
             "properties": {
                 "approvalId": { "type": "string" },
-                "decision": { "enum": ["accept", "acceptForSession", "decline", "cancel"] } } })
+                "decision": { "enum": ApprovalDecision::ALL } } })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_for(tool: &str, arguments: Value) -> Result<(), String> {
+        match tool {
+            "whoami" | "list_workspaces" => parse_arguments::<NoArguments>(arguments).map(drop),
+            "list_threads" => parse_arguments::<InWorkspace>(arguments).map(drop),
+            "get_thread" | "stop_thread" => parse_arguments::<OnThread>(arguments).map(drop),
+            "read_thread" => parse_arguments::<ReadArguments>(arguments).map(drop),
+            "create_thread" => parse_arguments::<CreateArguments>(arguments).map(drop),
+            "send_message" => parse_arguments::<SendArguments>(arguments).map(drop),
+            "wait_for_turn" => parse_arguments::<WaitArguments>(arguments).map(drop),
+            "answer_question" => parse_arguments::<AnswerArguments>(arguments).map(drop),
+            "decide_approval" => parse_arguments::<DecideArguments>(arguments).map(drop),
+            other => panic!("no arguments struct named for tool {other}"),
+        }
+    }
+
+    fn samples(schema: &Value) -> Vec<Value> {
+        if let Some(values) = schema["enum"].as_array() {
+            return values.clone();
+        }
+        match schema["type"].as_str() {
+            Some("string") => vec![json!("x")],
+            Some("integer") => vec![schema.get("minimum").cloned().unwrap_or(json!(1))],
+            Some("boolean") => vec![json!(true)],
+            Some("object") => samples(&schema["additionalProperties"])
+                .into_iter()
+                .map(|value| json!({ "k": value }))
+                .collect(),
+            Some("array") => samples(&schema["items"])
+                .into_iter()
+                .map(|value| json!([value]))
+                .collect(),
+            other => panic!("no sample for a property of type {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_tool_schema_describes_the_arguments_its_tool_parses() {
+        // Catches a schema that advertises a property, a type, or an enum value the tool refuses,
+        // or that marks a property optional or required unlike the tool's struct.
+        for tool in &TOOLS {
+            let schema = (tool.input)();
+            let properties = schema["properties"].as_object().unwrap();
+            let required: Vec<&str> = schema["required"]
+                .as_array()
+                .map(|names| names.iter().map(|name| name.as_str().unwrap()).collect())
+                .unwrap_or_default();
+            let full: serde_json::Map<String, Value> = properties
+                .iter()
+                .map(|(name, property)| (name.clone(), samples(property)[0].clone()))
+                .collect();
+            let minimal: serde_json::Map<String, Value> = full
+                .iter()
+                .filter(|(name, _)| required.contains(&name.as_str()))
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            assert_eq!(minimal.len(), required.len(), "{}: required", tool.name);
+
+            parse_for(tool.name, Value::Object(full.clone()))
+                .unwrap_or_else(|error| panic!("{}: every property: {error}", tool.name));
+            parse_for(tool.name, Value::Object(minimal.clone()))
+                .unwrap_or_else(|error| panic!("{}: required only: {error}", tool.name));
+            for (name, property) in properties {
+                for sample in samples(property) {
+                    let mut arguments = full.clone();
+                    arguments.insert(name.clone(), sample.clone());
+                    parse_for(tool.name, Value::Object(arguments))
+                        .unwrap_or_else(|error| panic!("{}: {name}={sample}: {error}", tool.name));
+                }
+            }
+            for name in &required {
+                let mut arguments = minimal.clone();
+                arguments.remove(*name);
+                assert!(
+                    parse_for(tool.name, Value::Object(arguments)).is_err(),
+                    "{}: {name} is required by the schema only",
+                    tool.name
+                );
+            }
+        }
+    }
 }

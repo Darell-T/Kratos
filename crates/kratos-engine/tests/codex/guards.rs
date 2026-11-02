@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use kratos_engine::providers::codex::McpServer;
+use kratos_engine::mcp::McpServer;
 use kratos_protocol::{AccessLimit, MessageOrigin, Permission, ThreadId, ThreadSettings};
 use serde_json::json;
 

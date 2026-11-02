@@ -11,8 +11,8 @@ rust-version.workspace = true
 axum.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
+kratos-api-client.workspace = true
 kratos-codex-client.workspace = true
-kratos-client.workspace = true
 kratos-command-safety.workspace = true
 kratos-protocol.workspace = true
 kratos-store.workspace = true
@@ -27,6 +27,7 @@ uuid.workspace = true
 # Tests run the real kratos-engine binary as a child process.
 [dev-dependencies]
 fake-agents.workspace = true
+kratos-client.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
 

@@ -13,22 +13,31 @@ use kratos_codex_client::{
     Codex, ConnectError, Exit, Incoming, Launch, RequestError, connect, methods, types,
 };
 use kratos_protocol::{MessageStatus, PauseReason, Provider, ThreadId, TurnId, TurnOutcome};
-use kratos_store::{StoreError, ThreadWrite};
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::actor::{Actor, Done, Opened, Server, settle_closed};
+use super::actor::{Actor, Done, Opened, Server};
+use super::approvals::settle_closed;
 use super::profiles::Profile;
-use super::threads::{Link, ThreadState, Turn};
-use super::wire;
-use super::{CodexSettings, McpServer, ProviderError};
-use crate::mcp;
+use super::threads::{Link, ThreadState};
+use super::{CodexSettings, ProviderError, policy, queue, wire};
+use crate::mcp::{self, McpServer};
 
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(1);
 const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);
 /// An exit sooner than this after the start counts as a failed start.
 const SETTLED_AFTER: Duration = Duration::from_secs(60);
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum StartError {
+    #[error(transparent)]
+    Connect(#[from] ConnectError),
+    /// The server started, but its sandbox is not ready, so it was closed.
+    #[cfg(windows)]
+    #[error("Codex did not complete the handshake: {0}")]
+    Sandbox(#[source] super::sandbox::SandboxError),
+}
 
 #[derive(Default)]
 pub(super) struct Restarts {
@@ -85,14 +94,9 @@ fn thread_config(
         config.insert("model_context_window".to_owned(), json!(tokens));
     }
     if let Some(mcp) = mcp {
-        let kratos = json!({
-            "command": mcp.program,
-            "args": ["mcp"],
-            "env": { "KRATOS_HOME": mcp.home, "KRATOS_PORT": mcp.port.to_string(),
-                     (mcp::THREAD_ID_VAR): thread_id.as_str() },
-            "default_tools_approval_mode": "approve",
-            "tool_timeout_sec": MCP_TOOL_TIMEOUT_SECONDS,
-        });
+        let mut kratos = mcp.launch(thread_id);
+        kratos["default_tools_approval_mode"] = json!("approve");
+        kratos["tool_timeout_sec"] = json!(MCP_TOOL_TIMEOUT_SECONDS);
         config.insert("mcp_servers".to_owned(), json!({ "kratos": kratos }));
     }
     (!config.is_empty()).then_some(serde_json::Value::Object(config))
@@ -102,7 +106,7 @@ fn launch(settings: &CodexSettings) -> Launch {
     let mut args: Vec<OsString> = vec!["app-server".into()];
     args.extend(settings.extra_args.iter().cloned());
     #[cfg(windows)]
-    args.extend(["-c".into(), "windows.sandbox=\"elevated\"".into()]);
+    args.extend(super::sandbox::launch_arguments());
     args.extend(settings.protected.launch_arguments(&std::env::temp_dir()));
     Launch {
         program: settings.program.clone(),
@@ -157,7 +161,7 @@ impl Actor {
     pub(super) async fn on_connected(
         &mut self,
         generation: u64,
-        result: Result<(Codex, mpsc::Receiver<Incoming>), ConnectError>,
+        result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     ) {
         if generation != self.generation {
             if let Ok((codex, _)) = result {
@@ -173,8 +177,8 @@ impl Actor {
                     incoming,
                 };
                 self.read_account(generation, codex);
-                for command in std::mem::take(&mut self.deferred) {
-                    self.on_command(command).await;
+                for deferred in std::mem::take(&mut self.deferred) {
+                    self.on_command(deferred.into_command()).await;
                 }
                 self.reconcile_waiting().await;
                 let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
@@ -186,8 +190,8 @@ impl Actor {
                 self.restarts.failed();
                 self.server = Server::Down;
                 let message = error.to_string();
-                for command in std::mem::take(&mut self.deferred) {
-                    command.fail(ProviderError::Unavailable(message.clone()));
+                for deferred in std::mem::take(&mut self.deferred) {
+                    deferred.fail(ProviderError::Unavailable(message.clone()));
                 }
                 let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
                 for thread_id in threads {
@@ -200,28 +204,6 @@ impl Actor {
                     .await;
                 }
             }
-        }
-    }
-
-    /// Reads the plan that pays for the account (D24) and the account's usage (D38).
-    fn read_account(&self, generation: u64, codex: Codex) {
-        let reader = codex.clone();
-        self.spawn(async move {
-            let plan = match reader
-                .request::<methods::AccountRead>(&types::GetAccountParams::default())
-                .await
-            {
-                Ok(read) => wire::plan(&read),
-                Err(_) => None,
-            };
-            Done::Account { generation, plan }
-        });
-        self.read_usage(codex, None);
-    }
-
-    pub(super) fn on_account(&mut self, generation: u64, plan: Option<String>) {
-        if generation == self.generation {
-            self.plan = plan;
         }
     }
 
@@ -245,28 +227,26 @@ impl Actor {
             }
             Link::Attached { native_id, .. } => Some(native_id.clone()),
             Link::Attaching => return Ok(None),
-            Link::Detached | Link::Failed => None,
+            Link::Detached => None,
         };
         let Some(codex) = self.connection()? else {
             return Ok(None);
         };
-        let stored = self
+        let native_id = self
             .store
             .call({
                 let thread_id = thread_id.clone();
                 move |store| store.provider_thread(&thread_id)
             })
-            .await?;
+            .await?
+            .native_id;
         let thread = self.threads.get_mut(thread_id).expect("loaded above");
         thread.link = Link::Attaching;
-        let profile = Profile::for_settings(&stored.settings).id().to_owned();
-        let config = thread_config(
-            stored.settings.context_limit_tokens,
-            self.settings.mcp.as_ref(),
-            thread_id,
-        );
+        let profile = Profile::for_settings(&thread.settings).id().to_owned();
+        let context_limit = thread.settings.context_limit_tokens;
+        let config = thread_config(context_limit, self.settings.mcp.as_ref(), thread_id);
+        let (folder, model) = (thread.folder.clone(), thread.settings.model.clone());
         let (thread_id, generation) = (thread_id.clone(), self.generation);
-        let context_limit = stored.settings.context_limit_tokens;
         self.spawn(async move {
             if let Some(native_id) = reload {
                 let params = types::ThreadUnsubscribeParams {
@@ -275,22 +255,11 @@ impl Actor {
                 // A thread Codex already unloaded needs nothing more.
                 let _ = codex.request::<methods::ThreadUnsubscribe>(&params).await;
             }
-            let result = open_thread(
-                &codex,
-                stored.native_id,
-                stored.folder,
-                stored.settings.model,
-                profile,
-                config,
-            )
-            .await
-            .map(|opened| Opened {
-                context_limit,
-                ..opened
-            });
+            let result = open_thread(&codex, native_id, folder, model, profile, config).await;
             Done::Attached {
                 thread_id,
                 generation,
+                context_limit,
                 result,
             }
         });
@@ -301,6 +270,7 @@ impl Actor {
         &mut self,
         thread_id: ThreadId,
         generation: u64,
+        context_limit: Option<u64>,
         result: Result<Opened, RequestError>,
     ) {
         let Some(thread) = self.threads.get_mut(&thread_id) else {
@@ -315,7 +285,7 @@ impl Actor {
                 thread.link = Link::Attached {
                     native_id: opened.native_id.clone(),
                     model: opened.model.clone(),
-                    context_limit: opened.context_limit,
+                    context_limit,
                 };
                 let recorded = if opened.is_new {
                     let plan = self.plan.clone();
@@ -341,7 +311,7 @@ impl Actor {
             }
             Err(error) => {
                 let message = format!("Codex could not load the thread: {error}");
-                thread.link = Link::Failed;
+                thread.link = Link::Detached;
                 fail_discards(thread, &message);
                 self.pause_if_waiting(&thread_id, PauseReason::Unavailable { error: message })
                     .await;
@@ -387,8 +357,10 @@ impl Actor {
         if found.is_empty() {
             return Ok(());
         }
-        self.write(thread_id, move |write| settle_from_history(write, found))
-            .await
+        self.write(thread_id, move |write| {
+            queue::settle_from_history(write, found)
+        })
+        .await
     }
 
     /// Codex ended. A turn it was running ended with it; a start it was answering stays uncertain
@@ -402,12 +374,9 @@ impl Actor {
             let thread = self.threads.get_mut(thread_id).expect("listed above");
             thread.link = Link::Detached;
             fail_discards(thread, &format!("Codex could not load the thread: {error}"));
-            let Turn::Running { turn_id, .. } = &thread.turn else {
+            let Some((turn_id, work)) = thread.turn.end_running() else {
                 continue;
             };
-            let turn_id = turn_id.clone();
-            thread.turn = Turn::Idle;
-            let changes = thread.changes.take();
             let outcome = TurnOutcome::Failed {
                 error: error.clone(),
             };
@@ -420,7 +389,7 @@ impl Actor {
                     thread_id,
                     turn_id,
                     outcome,
-                    changes,
+                    work,
                     super::turns::After::PauseIfWaiting(pause),
                 )
                 .await;
@@ -442,19 +411,6 @@ impl Actor {
             eprintln!("closing Codex: {reason}");
             codex.close().await;
         }
-    }
-
-    /// Pauses the thread for `reason` when messages wait in its queue, so the user sees why
-    /// nothing starts (L7).
-    pub(super) async fn pause_if_waiting(&mut self, thread_id: &ThreadId, reason: PauseReason) {
-        let _ = self
-            .write(thread_id, move |write| {
-                if !write.pending_messages()?.is_empty() {
-                    write.pause(reason)?;
-                }
-                Ok(())
-            })
-            .await;
     }
 
     /// The thread's state, read from the store the first time the actor sees the thread.
@@ -489,7 +445,7 @@ impl Actor {
 async fn connect_ready(
     launch: Launch,
     capabilities: types::InitializeCapabilities,
-) -> Result<(Codex, mpsc::Receiver<Incoming>), ConnectError> {
+) -> Result<(Codex, mpsc::Receiver<Incoming>), StartError> {
     #[cfg(windows)]
     let cwd = launch.cwd.clone();
     let (codex, incoming) = connect(launch, capabilities).await?;
@@ -498,7 +454,7 @@ async fn connect_ready(
         let mut incoming = incoming;
         if let Err(error) = super::sandbox::prepare(&codex, &mut incoming, cwd).await {
             codex.close().await;
-            return Err(ConnectError::Handshake(error));
+            return Err(StartError::Sandbox(error));
         }
         Ok((codex, incoming))
     }
@@ -510,38 +466,6 @@ fn fail_discards(thread: &mut ThreadState, error: &str) {
     for (_, reply) in std::mem::take(&mut thread.discards) {
         let _ = reply.send(Err(ProviderError::Unavailable(error.to_owned())));
     }
-}
-
-/// Records each found message as accepted by its turn, then lifts a delivery pause once nothing
-/// uncertain is left, or turns it into an interrupted pause while messages wait.
-fn settle_from_history(
-    write: &mut ThreadWrite<'_>,
-    found: Vec<(kratos_protocol::MessageId, TurnId)>,
-) -> Result<(), StoreError> {
-    for (message_id, turn_id) in found {
-        write.set_message_status(&message_id, MessageStatus::Accepted { turn_id })?;
-    }
-    let pending = write.pending_messages()?;
-    let uncertain = pending.iter().any(|message| {
-        matches!(
-            message.status,
-            MessageStatus::Unknown { .. } | MessageStatus::Failed { .. }
-        )
-    });
-    let paused_for_delivery = matches!(
-        write.provider_thread()?.paused,
-        Some(PauseReason::DeliveryUncertain { .. })
-    );
-    match (paused_for_delivery && !uncertain, pending.is_empty()) {
-        (false, _) => {}
-        (true, true) => {
-            write.resume()?;
-        }
-        (true, false) => {
-            write.pause(PauseReason::Interrupted)?;
-        }
-    }
-    Ok(())
 }
 
 /// Resumes the Codex thread `native_id`, or starts one in `folder`, with every turn's approvals
@@ -561,8 +485,8 @@ async fn open_thread(
                 wire::required(json!({ "threadId": native_id }));
             params.cwd = Some(folder);
             params.model = model;
-            params.approval_policy = Some(types::AskForApproval::Untrusted);
-            params.approvals_reviewer = Some(types::ApprovalsReviewer::User);
+            params.approval_policy = Some(policy::APPROVAL_POLICY);
+            params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
             params.permissions = Some(profile);
             params.config = config;
             let resumed = codex.request::<methods::ThreadResume>(&params).await?;
@@ -571,15 +495,14 @@ async fn open_thread(
                 model: resumed.model,
                 turns: resumed.thread.turns,
                 is_new: false,
-                context_limit: None,
             })
         }
         None => {
             let params = types::ThreadStartParams {
                 cwd: Some(folder),
                 model,
-                approval_policy: Some(types::AskForApproval::Untrusted),
-                approvals_reviewer: Some(types::ApprovalsReviewer::User),
+                approval_policy: Some(policy::APPROVAL_POLICY),
+                approvals_reviewer: Some(policy::APPROVALS_REVIEWER),
                 permissions: Some(profile),
                 config,
                 ephemeral: Some(false),
@@ -591,7 +514,6 @@ async fn open_thread(
                 model: started.model,
                 turns: started.thread.turns,
                 is_new: true,
-                context_limit: None,
             })
         }
     }

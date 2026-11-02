@@ -15,15 +15,16 @@ use std::time::{Duration, SystemTime};
 
 use kratos_protocol::{
     AccountUsage, Allowance, Continuation, ContinuationId, ContinuationState, PauseReason,
-    Provider, ThreadId, Timestamp, TurnId, UsageBucket, UsageWait, UsageWindow,
+    Provider, ThreadId, Timestamp, UsageBucket, UsageWait, UsageWindow,
 };
+use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use super::UsageTracker;
 use crate::hub::Hub;
-use crate::providers::codex::{CodexProvider, Continued, ProviderError};
+use crate::providers::codex::{CodexProvider, Continued};
 use crate::store_thread::StoreThread;
+use crate::usage::{LimitStop, UsageTracker};
 
 /// D41: a stop at a window this long resumes on its own at the reset.
 const AUTOMATIC_WINDOW_MINUTES: i64 = 300;
@@ -32,12 +33,18 @@ const RECHECK_AFTER: Duration = Duration::from_secs(5 * 60);
 /// Checks in a row without a usable answer before the user decides.
 const MAX_UNANSWERED_CHECKS: u32 = 3;
 
-/// A turn that stopped at a usage limit, reported by its provider.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LimitStop {
-    pub thread_id: ThreadId,
-    pub turn_id: TurnId,
-    pub provider: Provider,
+#[derive(Debug, thiserror::Error)]
+pub enum SchedulerError {
+    #[error("Unknown continuation {0}")]
+    UnknownContinuation(ContinuationId),
+    #[error("{0}")]
+    Conflict(String),
+    /// The scheduler has stopped, as it does when the engine shuts down. The text is the one the
+    /// API answered when the scheduler reported its failures as the provider's.
+    #[error("The Codex provider has stopped")]
+    Stopped,
+    #[error(transparent)]
+    Store(#[from] StoreError),
 }
 
 /// Wall-clock time, and waiting for it. Tests move a clock by hand instead of waiting hours.
@@ -82,7 +89,7 @@ pub fn plan(provider: Provider, account: Option<&AccountUsage>) -> Plan {
         .iter()
         .map(|(_, window)| window.resets_at.clone())
         .collect::<Option<Vec<Timestamp>>>()
-        .and_then(|resets| resets.into_iter().max_by(|a, b| a.as_str().cmp(b.as_str())));
+        .and_then(|resets| resets.into_iter().max_by_key(Timestamp::instant));
     let why = if spent.is_empty() {
         Some("Codex did not say which limit stopped the turn")
     } else if resets_at.is_none() {
@@ -176,7 +183,7 @@ enum Request {
     /// The user's go for a continuation that waits on them (D41).
     Schedule {
         continuation_id: ContinuationId,
-        reply: oneshot::Sender<Result<Continuation, ProviderError>>,
+        reply: oneshot::Sender<Result<Continuation, SchedulerError>>,
     },
 }
 
@@ -191,7 +198,7 @@ impl SchedulerHandle {
     pub async fn schedule(
         &self,
         continuation_id: ContinuationId,
-    ) -> Result<Continuation, ProviderError> {
+    ) -> Result<Continuation, SchedulerError> {
         let (reply, answer) = oneshot::channel();
         self.requests
             .send(Request::Schedule {
@@ -199,8 +206,8 @@ impl SchedulerHandle {
                 reply,
             })
             .await
-            .map_err(|_| ProviderError::Stopped)?;
-        answer.await.map_err(|_| ProviderError::Stopped)?
+            .map_err(|_| SchedulerError::Stopped)?;
+        answer.await.map_err(|_| SchedulerError::Stopped)?
     }
 }
 
@@ -224,7 +231,7 @@ pub async fn start(
     provider: CodexProvider,
     clock: Arc<dyn Clock>,
     mut stops: mpsc::UnboundedReceiver<LimitStop>,
-) -> Result<SchedulerHandle, kratos_store::StoreError> {
+) -> Result<SchedulerHandle, StoreError> {
     let (due, mut due_ids) = mpsc::unbounded_channel();
     let mut scheduler = Scheduler {
         hub,
@@ -290,7 +297,7 @@ impl Scheduler {
         });
     }
 
-    async fn on_stop(&self, stop: LimitStop) -> Result<(), kratos_store::StoreError> {
+    async fn on_stop(&self, stop: LimitStop) -> Result<(), StoreError> {
         // A fresh read, so the plan rests on what the provider says now. A failed read leaves the
         // last known usage, which the plan treats as no evidence where it lacks any.
         let _ = self.provider.refresh_usage().await;
@@ -479,24 +486,24 @@ impl Scheduler {
         }
     }
 
-    async fn schedule(&self, id: ContinuationId) -> Result<Continuation, ProviderError> {
+    async fn schedule(&self, id: ContinuationId) -> Result<Continuation, SchedulerError> {
         let lookup = id.clone();
         let (thread_id, continuation) = self
             .store
             .call(move |store| store.continuation(&lookup))
             .await?
-            .ok_or_else(|| ProviderError::UnknownContinuation(id.clone()))?;
+            .ok_or_else(|| SchedulerError::UnknownContinuation(id.clone()))?;
         match &continuation.state {
             ContinuationState::Scheduled => return Ok(continuation),
             ContinuationState::AwaitingUser { .. } => {}
             ContinuationState::Sent { .. } | ContinuationState::Cancelled { .. } => {
-                return Err(ProviderError::Conflict(
+                return Err(SchedulerError::Conflict(
                     "The continuation was already sent or cancelled".into(),
                 ));
             }
         }
         let Some(resets_at) = continuation.resets_at.clone() else {
-            return Err(ProviderError::Conflict(
+            return Err(SchedulerError::Conflict(
                 "Codex did not say when the limit resets, so there is no time to resume at".into(),
             ));
         };
@@ -508,7 +515,7 @@ impl Scheduler {
             })
             .await?
             .value
-            .ok_or_else(|| ProviderError::Conflict("The continuation is no longer open".into()))?;
+            .ok_or_else(|| SchedulerError::Conflict("The continuation is no longer open".into()))?;
         self.arm(&updated.id, updated.resets_at.as_ref());
         Ok(updated)
     }
@@ -610,6 +617,27 @@ mod tests {
                 .as_ref()
                 .map(Timestamp::as_str),
             Some(LATER)
+        );
+    }
+
+    #[test]
+    fn the_latest_reset_of_the_spent_windows_wins_by_time_not_by_text() {
+        // Catches resets compared as text, where the shorter form without milliseconds sorts after
+        // a later instant written with them.
+        let earlier = "2030-01-01T05:00:00Z";
+        let later = "2030-01-01T05:00:00.500Z";
+        let two_spent = account(
+            Allowance::Blocked,
+            vec![
+                bucket("codex", Some(window(300, 100, earlier)), None),
+                bucket("codex_other", Some(window(300, 100, later)), None),
+            ],
+        );
+
+        let planned = plan(Provider::Codex, Some(&two_spent));
+        assert_eq!(
+            planned.resets_at.as_ref().map(Timestamp::as_str),
+            Some(later)
         );
     }
 

@@ -12,25 +12,23 @@
 use std::ffi::OsString;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
-use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kratos_client::Client;
+use kratos_api_client::Client;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
-use kratos_protocol::ThreadId;
 use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
 
 use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
-use kratos_engine::mcp;
-use kratos_engine::providers::codex::{self, CodexSettings, McpServer, ProtectedFolders};
+use kratos_engine::mcp::{self, McpServer};
+use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
+use kratos_engine::scheduler::{self, SystemClock};
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::UsageTracker;
-use kratos_engine::usage::scheduler::{self, SystemClock};
 
 /// The TypeScript provider's deadlines: a turn may run ten minutes without waiting on the user,
 /// and a request to Codex may take thirty seconds.
@@ -57,21 +55,18 @@ fn run() -> Result<(), StartError> {
         .collect();
     match &arguments[..] {
         [] => serve(&config),
-        [command] if command == "mcp" => mcp(&config),
+        [command] if command == mcp::SUBCOMMAND => mcp(&config),
         [command, id] if command == "restore" => restore(&config, &id.parse()?),
         _ => Err(StartError::Usage),
     }
 }
 
 fn mcp(config: &Config) -> Result<(), StartError> {
-    let thread_id = std::env::var(mcp::THREAD_ID_VAR)
-        .ok()
-        .filter(|id| !id.is_empty())
-        .ok_or(StartError::McpThread)?;
+    let thread_id = config.mcp_thread.clone().ok_or(StartError::McpThread)?;
     let client = Client::new(&format!("http://127.0.0.1:{}", config.port))
         .expect("a loopback address is valid")
         .with_token_from(&config.home);
-    let caller = mcp::Caller::new(client, ThreadId::new(thread_id));
+    let caller = mcp::Caller::new(client, thread_id);
     mcp::serve(&caller, io::stdin().lock(), io::stdout())?;
     Ok(())
 }
@@ -101,8 +96,9 @@ fn serve(config: &Config) -> Result<(), StartError> {
         config.home.display()
     );
     let (store_thread, store_jobs) = store_thread::channel();
-    let home = config.home.clone();
-    let server = std::thread::spawn(move || run_server(listener, store_thread, &home, token));
+    let server_config = config.clone();
+    let server =
+        std::thread::spawn(move || run_server(listener, store_thread, &server_config, token));
     store_jobs.run(store);
     server.join().expect("the server thread does not panic")
 }
@@ -110,7 +106,7 @@ fn serve(config: &Config) -> Result<(), StartError> {
 fn run_server(
     listener: TcpListener,
     store: StoreThread,
-    home: &Path,
+    config: &Config,
     token: ClientToken,
 ) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -121,7 +117,7 @@ fn run_server(
         let hub = Hub::new(store.clone());
         let usage = UsageTracker::default();
         let port = listener.local_addr()?.port();
-        let (codex, scheduler) = match codex_settings(home, port) {
+        let codex = match codex_settings(config, port) {
             Ok(settings) => {
                 let (provider, stops) =
                     codex::start(settings, hub.clone(), store.clone(), usage.clone()).await?;
@@ -135,56 +131,53 @@ fn run_server(
                     stops,
                 )
                 .await?;
-                (Ok(provider), Some(scheduler))
+                Ok(server::Codex {
+                    provider,
+                    scheduler: Some(scheduler),
+                })
             }
             Err(missing) => {
                 eprintln!("Codex threads are unavailable: {missing}");
-                (Err(missing.to_string()), None)
+                Err(missing.to_string())
             }
         };
         let state = ServerState {
             hub,
             store,
             codex,
-            scheduler,
             usage,
             token,
         };
         server::serve(listener, state.clone(), shutdown_signal()).await?;
         // Codex ends before the store closes, so nothing it reports goes unrecorded (L2).
         if let Ok(codex) = &state.codex {
-            codex.shutdown().await;
+            codex.provider.shutdown().await;
         }
         Ok(())
     })
 }
 
-fn codex_settings(home: &Path, port: u16) -> Result<CodexSettings, CodexMissing> {
-    let program = locate_codex(
-        std::env::var_os("CODEX_EXE").as_deref(),
-        std::env::var_os("PATH").as_deref(),
-    )?;
-    let server_folder = home.join("codex-server");
+fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMissing> {
+    let program = locate_codex(config.codex_exe.as_deref(), config.path.as_deref())?;
+    let server_folder = config.home.join("codex-server");
     std::fs::create_dir_all(&server_folder).map_err(CodexMissing::ServerFolder)?;
-    let user_home = std::env::home_dir();
-    let codex_home = std::env::var_os("CODEX_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| user_home.as_ref().map(|home| home.join(".codex")))
-        .and_then(|codex_home| std::path::absolute(codex_home).ok());
     Ok(CodexSettings {
         program,
         extra_args: Vec::<OsString>::new(),
         env_set: Vec::new(),
         server_folder,
-        protected: ProtectedFolders::new(home.to_path_buf(), codex_home, user_home),
+        protected: ProtectedFolders::new(
+            config.home.clone(),
+            config.codex_home.clone(),
+            config.user_home.clone(),
+        ),
         turn_timeout: TURN_TIMEOUT,
         stop_timeout: STOP_TIMEOUT,
         request_timeout: REQUEST_TIMEOUT,
         platform: DangerousCommandPlatform::host(),
         mcp: Some(McpServer {
             program: std::env::current_exe().map_err(CodexMissing::Engine)?,
-            home: home.to_path_buf(),
+            home: config.home.clone(),
             port,
         }),
     })

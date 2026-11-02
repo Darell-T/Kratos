@@ -7,10 +7,10 @@
 //! [`ThreadWrite`].
 
 mod backups;
+mod columns;
 mod continuations;
 mod data_directory;
 mod events;
-mod json;
 mod messages;
 mod migrations;
 mod requests;
@@ -21,7 +21,7 @@ mod write;
 use std::path::{Path, PathBuf};
 
 use kratos_protocol::{
-    ApprovalId, ContinuationId, MessageId, QuestionId, Seq, ThreadId, WorkspaceId,
+    ApprovalId, ContinuationId, MessageId, MessageStatus, QuestionId, Seq, ThreadId, WorkspaceId,
 };
 use rusqlite::Connection;
 
@@ -120,8 +120,8 @@ pub enum OpenError {
     },
 }
 
-/// The `Unknown…` cases are expected absences that the API answers with 404; the rest are
-/// failures.
+/// What went wrong with a store call. [`StoreError::is_refusal`] tells a request the store refused
+/// from a store that failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
     #[error("Unknown workspace {0}")]
@@ -141,11 +141,15 @@ pub enum StoreError {
     UnknownContinuation(ContinuationId),
     /// A caller asked for a status change the queue's rules forbid, such as resending a message
     /// whose delivery is uncertain (D11). Nothing was written.
-    #[error("message {message_id} cannot go from {from} to {to}")]
+    #[error(
+        "message {message_id} cannot go from {} to {}",
+        messages::status_name(.from),
+        messages::status_name(.to)
+    )]
     MessageTransition {
         message_id: MessageId,
-        from: &'static str,
-        to: &'static str,
+        from: MessageStatus,
+        to: MessageStatus,
     },
     /// A client sent an id the thread already holds with another message. Nothing was written.
     #[error("Message {0} was already sent with different content; send it under a new id")]
@@ -161,4 +165,23 @@ pub enum StoreError {
     },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+}
+
+impl StoreError {
+    /// Whether the store refused the request for what it asked, such as an unknown id or a move
+    /// the queue forbids, and wrote nothing. Otherwise the store itself failed. A new variant must
+    /// be classified here.
+    pub fn is_refusal(&self) -> bool {
+        match self {
+            StoreError::UnknownWorkspace(_)
+            | StoreError::UnknownThread(_)
+            | StoreError::UnknownMessage { .. }
+            | StoreError::UnknownApproval(_)
+            | StoreError::UnknownQuestion(_)
+            | StoreError::UnknownContinuation(_)
+            | StoreError::MessageTransition { .. }
+            | StoreError::MessageIdTaken(_) => true,
+            StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => false,
+        }
+    }
 }

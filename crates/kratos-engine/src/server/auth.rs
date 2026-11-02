@@ -14,12 +14,11 @@ use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use kratos_protocol::CLIENT_TOKEN_FILE;
+use kratos_protocol::routes::HEALTH;
 
 use super::ApiError;
 use super::json::discard;
-
-/// The file in the data directory that holds the token.
-pub const TOKEN_FILE: &str = "client-token";
 
 #[derive(Clone)]
 pub struct ClientToken(Arc<str>);
@@ -32,13 +31,13 @@ impl ClientToken {
         let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
         // Written whole beside the old one, then moved over it, so a client never reads half a
         // token; created readable by the user alone before any byte is written.
-        let partial = home.join(format!("{TOKEN_FILE}.partial"));
+        let partial = home.join(format!("{CLIENT_TOKEN_FILE}.partial"));
         let _ = std::fs::remove_file(&partial);
         let mut file = private_file(&partial)?;
         file.write_all(token.as_bytes())?;
         file.sync_all()?;
         drop(file);
-        std::fs::rename(&partial, home.join(TOKEN_FILE))?;
+        std::fs::rename(&partial, home.join(CLIENT_TOKEN_FILE))?;
         Ok(ClientToken(token.into()))
     }
 
@@ -86,7 +85,7 @@ pub(super) async fn require_client_token(
         .headers()
         .get(AUTHORIZATION)
         .and_then(|value| value.as_bytes().strip_prefix(b"Bearer "));
-    let is_health = request.uri().path() == "/api/health";
+    let is_health = request.uri().path() == HEALTH;
     if is_health || presented.is_some_and(|presented| token.matches(presented)) {
         return next.run(request).await;
     }
@@ -106,18 +105,23 @@ mod tests {
         let first = ClientToken::issue(home.path()).unwrap();
         let second = ClientToken::issue(home.path()).unwrap();
 
-        let stored = std::fs::read_to_string(home.path().join(TOKEN_FILE)).unwrap();
+        let stored = std::fs::read_to_string(home.path().join(CLIENT_TOKEN_FILE)).unwrap();
         assert_eq!(stored.len(), 64);
         assert_eq!(stored, &*second.0);
         assert_ne!(first.0, second.0);
         assert!(second.matches(stored.as_bytes()));
         assert!(!second.matches(&stored.as_bytes()[..63]));
         assert!(!second.matches(first.0.as_bytes()));
-        assert!(!home.path().join(format!("{TOKEN_FILE}.partial")).exists());
+        assert!(
+            !home
+                .path()
+                .join(format!("{CLIENT_TOKEN_FILE}.partial"))
+                .exists()
+        );
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(home.path().join(TOKEN_FILE))
+            let mode = std::fs::metadata(home.path().join(CLIENT_TOKEN_FILE))
                 .unwrap()
                 .permissions()
                 .mode();

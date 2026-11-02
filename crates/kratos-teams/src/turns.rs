@@ -8,8 +8,7 @@
 use kratos_protocol::TurnChanges;
 
 use crate::facts::{
-    ContinuationId, Declined, Ended, FactSeq, HandoffOutcome, MessageId, Outcome, StepId,
-    UnixMillis,
+    ContinuationId, Declined, Ended, FactSeq, HandoffOutcome, MessageId, StepId, UnixMillis,
 };
 use crate::fold::Rejection;
 use crate::members::Role;
@@ -17,12 +16,9 @@ use crate::reports::{AnswerDone, ImplementerDone, Report, Reported, ReviewDone};
 use crate::task_plan::{PlanChangeRequest, TaskPlan};
 use crate::view::{
     Activity, AfterCommit, Answerer, Hold, MAX_QUESTIONS_PER_STEP, Note, Pending, Phase, PlanState,
-    Question, Resolution, Retry, Stop, Suspended, TaskView, Trouble, Turn, UsageLimitAsk, Waiting,
-    Work,
+    Question, Resolution, Retry, ReviewJob, Stop, Suspended, TaskView, Trouble, Turn,
+    UsageLimitAsk, Waiting, Work,
 };
-
-/// What a kind of work does with its own finished report.
-type Finish<T> = fn(Box<TaskView>, FactSeq, Turn, T) -> Result<Box<TaskView>, Rejection>;
 
 impl TaskView {
     /// Takes the turn a result is for out of the view, or refuses the result as stale. A turn held for
@@ -32,13 +28,7 @@ impl TaskView {
         mut self: Box<Self>,
         message: &MessageId,
     ) -> Result<(Box<TaskView>, Turn), Rejection> {
-        let phase = std::mem::replace(
-            &mut self.phase,
-            Phase::Closed {
-                outcome: Outcome::Cancelled,
-            },
-        );
-        match phase {
+        match self.take_phase() {
             Phase::Active {
                 activity: Activity::Turn { turn },
             } if turn.awaits(message) => Ok((self, turn)),
@@ -87,14 +77,23 @@ impl TaskView {
                 self.dirty = fold_dirty(self.dirty, &changes);
                 self.settle(seq, turn, report, TaskView::on_implementer_done)
             }
-            (Work::Review { .. }, Reported::Review { report }) => {
-                self.settle(seq, turn, report, TaskView::on_review_done)
+            (Work::Review { job }, Reported::Review { report }) => {
+                let job = job.clone();
+                self.settle(seq, turn, report, |view, _, turn, done| {
+                    Ok(view.on_review_done(turn, job, done))
+                })
             }
-            (Work::Answer { .. }, Reported::Answer { report }) => {
-                self.settle(seq, turn, report, TaskView::on_answer_done)
+            (Work::Answer { question }, Reported::Answer { report }) => {
+                let question = question.clone();
+                self.settle(seq, turn, report, |view, seq, _, done| {
+                    view.on_answer_done(seq, question, done)
+                })
             }
-            (Work::Rule { .. }, Reported::Rulings { report }) => {
-                self.settle(seq, turn, report, TaskView::on_rulings_done)
+            (Work::Rule { disputed, commit }, Reported::Rulings { report }) => {
+                let (disputed, commit) = (disputed.clone(), commit.clone());
+                self.settle(seq, turn, report, |view, seq, turn, done| {
+                    view.on_rulings_done(seq, turn, &disputed, commit, done)
+                })
             }
             (work, reported) => Err(Rejection::WrongReport {
                 work: work.name(),
@@ -103,21 +102,19 @@ impl TaskView {
         }
     }
 
-    /// The outcomes every kind of work shares. Only a finished report is the work's own business.
+    /// The outcomes every kind of work shares. Only a finished report is the work's own business, and
+    /// `finished` is what that kind of work does with it.
     fn settle<T>(
         self: Box<Self>,
         seq: FactSeq,
         mut turn: Turn,
         report: Report<T>,
-        finished: Finish<T>,
+        finished: impl FnOnce(Box<TaskView>, FactSeq, Turn, T) -> Result<Box<TaskView>, Rejection>,
     ) -> Result<Box<TaskView>, Rejection> {
         match report {
-            Report::Invalid { error, .. } => Ok(self.retry_turn(
-                turn,
-                Retry::InvalidReport,
-                Note::InvalidReport { error },
-                seq,
-            )),
+            Report::Invalid { error, .. } => {
+                Ok(self.retry_turn(turn, Note::InvalidReport { error }, seq))
+            }
             Report::Blocked { summary } => {
                 turn.note = None;
                 Ok(self.pause_turn(Trouble::Blocked, turn, summary))
@@ -137,22 +134,25 @@ impl TaskView {
     pub(crate) fn retry_turn(
         self: Box<Self>,
         mut turn: Turn,
-        cause: Retry,
         note: Note,
         seq: FactSeq,
     ) -> Box<TaskView> {
+        let cause = note.cause();
         if turn.retries.contains(&cause) {
             let detail = note.detail();
-            // A reviewer is asked for a fresh review, so it keeps no correction. Everyone else is
-            // asked again with the same note.
-            turn.note = (turn.work.role() != Role::Reviewer).then_some(note);
+            // A resume after the pause opens a new session.
+            turn.note = Note::reaches_new_session(turn.work.role()).then_some(note);
             return self.pause_turn(cause.into(), turn, detail);
         }
         turn.retries.push(cause);
-        turn.follows = (cause != Retry::Lost).then(|| turn.message.clone());
+        let follows = (cause != Retry::Lost).then(|| turn.message.clone());
+        let hold = turn.hold.take();
+        turn.resend(seq, follows);
+        // FIXME: a kept `Hold::Scheduled` names a continuation that will never carry this correction,
+        // so `next_step` waits on the engine and the step stalls. Dropping the hold changes behavior,
+        // so it goes with the fix that moves the hold onto `Activity::Turn`.
+        turn.hold = hold;
         turn.note = Some(note);
-        turn.message = MessageId::due_at(seq);
-        turn.due = seq;
         self.active(Activity::Turn { turn })
     }
 
@@ -163,8 +163,7 @@ impl TaskView {
         turn: Turn,
         detail: String,
     ) -> Box<TaskView> {
-        let role = turn.work.role();
-        self.pause_in_trouble(why, role, detail, Activity::Turn { turn })
+        self.pause_in_trouble(why, detail, Activity::Turn { turn })
     }
 
     fn turn_lost(mut self: Box<Self>, turn: Turn, reason: String, seq: FactSeq) -> Box<TaskView> {
@@ -173,7 +172,7 @@ impl TaskView {
             self.dirty = true;
         }
         self.requeue_steered(&turn.member);
-        self.retry_turn(turn, Retry::Lost, Note::Lost { reason }, seq)
+        self.retry_turn(turn, Note::Lost { reason }, seq)
     }
 
     // -----------------------------------------------------------------------------------------
@@ -183,17 +182,17 @@ impl TaskView {
     /// The provider stopped the turn at a usage limit. The step keeps its identity and goes to the one
     /// scheduler. With account handoff on, the user is asked first, every time (D40).
     fn hold_turn(self: Box<Self>, mut turn: Turn, delivered: bool) -> Box<TaskView> {
-        turn.hold = Some(Hold::ToScheduler {
-            stop: Stop {
-                message: turn.message.clone(),
-                delivered,
-                user_accepted_wait: false,
-            },
-        });
+        let stop = Stop {
+            message: turn.message.clone(),
+            delivered,
+            user_accepted_wait: false,
+        };
         if self.policy.account_handoff {
+            turn.hold = None;
             let ask = UsageLimitAsk::Handoff;
-            return self.waiting(Waiting::UsageLimit { turn, ask });
+            return self.waiting(Waiting::UsageLimit { turn, stop, ask });
         }
+        turn.hold = Some(Hold::ToScheduler { stop });
         self.active(Activity::Turn { turn })
     }
 
@@ -239,12 +238,12 @@ impl TaskView {
         step: StepId,
         why: Declined,
     ) -> Result<Box<TaskView>, Rejection> {
-        let turn = self.held_turn(step, "continuation_declined")?;
-        if !matches!(turn.hold, Some(Hold::ToScheduler { .. })) {
+        let mut turn = self.held_turn(step, "continuation_declined")?;
+        let Some(Hold::ToScheduler { stop }) = turn.hold.take() else {
             return Err(self.misfit("continuation_declined"));
-        }
+        };
         let ask = UsageLimitAsk::LongWait { why };
-        Ok(self.waiting(Waiting::UsageLimit { turn, ask }))
+        Ok(self.waiting(Waiting::UsageLimit { turn, stop, ask }))
     }
 
     /// `HandedOff` sends the step again as a fresh session. `Unavailable` goes on to the scheduler.
@@ -259,11 +258,7 @@ impl TaskView {
             return Err(self.misfit("account_handoff"));
         };
         match outcome {
-            HandoffOutcome::HandedOff => {
-                turn.message = MessageId::due_at(seq);
-                turn.due = seq;
-                turn.follows = None;
-            }
+            HandoffOutcome::HandedOff => turn.resend(seq, None),
             HandoffOutcome::Unavailable { .. } => turn.hold = Some(Hold::ToScheduler { stop }),
         }
         Ok(self.active(Activity::Turn { turn }))
@@ -330,11 +325,9 @@ impl TaskView {
             return Err(self.misfit("an answer"));
         };
         turn.resolutions.push(resolution);
-        turn.follows = Some(turn.message.clone());
-        turn.message = MessageId::due_at(seq);
-        turn.due = seq;
+        let follows = Some(turn.message.clone());
+        turn.resend(seq, follows);
         turn.note = None;
-        turn.hold = None;
         Ok(self.active(Activity::Turn { turn }))
     }
 
@@ -342,12 +335,9 @@ impl TaskView {
     fn on_answer_done(
         self: Box<Self>,
         seq: FactSeq,
-        turn: Turn,
+        question: Question,
         answer: AnswerDone,
     ) -> Result<Box<TaskView>, Rejection> {
-        let Work::Answer { question } = turn.work else {
-            return Err(self.misfit("an answer"));
-        };
         let resolution = Resolution::Answered {
             question: question.text,
             answer: answer.answer,
@@ -393,15 +383,10 @@ impl TaskView {
             .responses_problem(&done.responses)
             .or_else(|| self.probes_problem(&turn.work, &done))
         {
-            return Ok(self.retry_turn(
-                turn,
-                Retry::InvalidReport,
-                Note::InvalidReport { error },
-                seq,
-            ));
+            return Ok(self.retry_turn(turn, Note::InvalidReport { error }, seq));
         }
         if self.dirty {
-            return Ok(self.retry_turn(turn, Retry::UncheckedEdits, Note::UncheckedEdits, seq));
+            return Ok(self.retry_turn(turn, Note::UncheckedEdits, seq));
         }
         Ok(self.active(Activity::Committing {
             step: turn.step,
@@ -412,19 +397,11 @@ impl TaskView {
     /// The reviewer finished. Evidence is checked before anything is believed.
     fn on_review_done(
         self: Box<Self>,
-        _seq: FactSeq,
         turn: Turn,
+        job: ReviewJob,
         report: ReviewDone,
-    ) -> Result<Box<TaskView>, Rejection> {
-        let Work::Review { job } = turn.work.clone() else {
-            return Err(self.misfit("a review"));
-        };
-        Ok(self.active(Activity::Checking {
-            step: turn.step,
-            turn,
-            job,
-            report,
-        }))
+    ) -> Box<TaskView> {
+        self.active(Activity::Checking { turn, job, report })
     }
 }
 

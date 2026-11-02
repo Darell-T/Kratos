@@ -2,30 +2,24 @@
 //! a member sees. The reviewer never sees the implementer's conversation, the implementer sees only the
 //! findings Kratos confirmed, and a planner never guesses.
 
+use std::collections::BTreeSet;
+
 use kratos_protocol::Provider;
 use kratos_teams::decisions::{Decision, PlanChangeResponse};
 use kratos_teams::evidence::{EvidenceCheck, Seen, Start, start_check};
-use kratos_teams::facts::{Disposition, Ended, Fact};
+use kratos_teams::facts::{Depth, Disposition, Fact, FactSeq, MessageId, StepId};
 use kratos_teams::members::Role;
-use kratos_teams::prompts::{STEP_BACK_TEXT, Session, branch_name, commit_subject, task_title};
-use kratos_teams::reports::RulingVerdict;
+use kratos_teams::naming::{branch_name, commit_subject, task_title};
+use kratos_teams::prompts::{Platform, PromptContext, STEP_BACK_TEXT, Session, message};
+use kratos_teams::reports::{
+    FinalReply, Report, ReportKind, Reported, RulingVerdict, parse_report, report_json_schema,
+};
 use kratos_teams::security_triggers::TriggerHit;
-use kratos_teams::view::{Brief, Work};
+use kratos_teams::view::{Brief, Pass, Question, ReviewJob, Run, TaskView, Work};
+use serde_json::{Value, json};
 
 use crate::replay::*;
 use crate::support::*;
-
-fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
-    Script {
-        implementer: implementer.into(),
-        reviewer: reviewer.into(),
-        ..Script::default()
-    }
-}
-
-fn fix_f1() -> Ended {
-    implements_answering(vec![fixed(1)])
-}
 
 fn second_round() -> ScriptedTask {
     let mut script = script(
@@ -690,4 +684,172 @@ fn a_big_probe_file_is_cut_so_it_cannot_fill_the_implementers_context() {
     assert!(text.contains(&"x".repeat(4000)));
     assert!(!text.contains(&"x".repeat(4001)));
     assert!(text.contains("(cut short)"));
+}
+
+#[test]
+fn every_report_section_names_only_fields_the_schema_has_and_offers_only_statuses_the_parser_accepts()
+ {
+    let mut task = Task::three().script(Script {
+        planner: vec![plan_ready()].into(),
+        ..Script::default()
+    });
+    task.run();
+    let view = task.view();
+    let question = Question {
+        asker: coder(),
+        role: Role::Implementer,
+        summary: "Read the form.".to_owned(),
+        text: "Which helper?".to_owned(),
+    };
+    let job = ReviewJob {
+        pass: Pass::Standard,
+        commit: sha(1),
+        diff_base: sha(0xba5e),
+        depth: Depth::Single,
+    };
+    let works = [
+        (
+            ReportKind::Plan,
+            Work::Plan {
+                author: Role::Planner,
+                feedback: None,
+            },
+        ),
+        (
+            ReportKind::Implementer,
+            Work::Implement {
+                brief: Brief::Start,
+            },
+        ),
+        (ReportKind::Answer, Work::Answer { question }),
+        (
+            ReportKind::Rulings,
+            Work::Rule {
+                disputed: Vec::new(),
+                commit: sha(1),
+            },
+        ),
+        (ReportKind::Review, Work::Review { job }),
+    ];
+
+    for (kind, work) in works {
+        let schema = report_json_schema(kind);
+        let mut names = BTreeSet::new();
+        schema_names(schema, &mut names);
+        let text = message(&view, &run_for(&view, work), &fresh());
+        let section = report_section(&text);
+
+        for word in snake_case_words(section) {
+            assert!(
+                names.contains(word),
+                "the {kind:?} report section names {word}, which its schema does not have"
+            );
+        }
+        if section.contains("plan_change") {
+            let mut reply = sample_reply(schema);
+            reply["status"] = json!("plan_change");
+            reply["ask"]["plan_change_reason"] = json!("It needs more files.");
+            let reported = parse_report(kind, &FinalReply::Json(reply), &checked());
+            assert!(
+                is_plan_change(&reported),
+                "the {kind:?} report section offers plan_change, and the parser refuses it: {reported:?}"
+            );
+        }
+    }
+}
+
+fn run_for(view: &TaskView, work: Work) -> Run {
+    let role = work.role();
+    Run {
+        step: StepId(FactSeq(1)),
+        message: MessageId::new("m1"),
+        follows: None,
+        member: view
+            .bindings
+            .member(role)
+            .expect("the Team has the role")
+            .id
+            .clone(),
+        role,
+        plan_mode: work.plan_mode(),
+        work,
+        note: None,
+        resolutions: Vec::new(),
+        carried: Vec::new(),
+    }
+}
+
+fn fresh() -> PromptContext<'static> {
+    PromptContext {
+        session: Session::Fresh,
+        diff_stat: "",
+        platform: Platform::Unix,
+    }
+}
+
+fn report_section(text: &str) -> &str {
+    let start = text.find("# Your report").expect("a report section");
+    let rest = &text[start..];
+    let end = rest[1..].find("\n# ").map_or(rest.len(), |at| at + 1);
+    &rest[..end]
+}
+
+fn snake_case_words(text: &str) -> BTreeSet<&str> {
+    text.split(|c: char| !(c.is_ascii_lowercase() || c == '_'))
+        .filter(|word| word.contains('_') && !word.starts_with('_') && !word.ends_with('_'))
+        .collect()
+}
+
+fn schema_names(schema: &Value, names: &mut BTreeSet<String>) {
+    match schema {
+        Value::Object(object) => {
+            if let Some(Value::Object(properties)) = object.get("properties") {
+                names.extend(properties.keys().cloned());
+            }
+            if let Some(Value::Array(values)) = object.get("enum") {
+                names.extend(values.iter().filter_map(Value::as_str).map(str::to_owned));
+            }
+            object.values().for_each(|value| schema_names(value, names));
+        }
+        Value::Array(items) => items.iter().for_each(|item| schema_names(item, names)),
+        _ => {}
+    }
+}
+
+fn sample_reply(schema: &Value) -> Value {
+    match schema["type"].as_str() {
+        Some("object") => Value::Object(
+            schema["properties"]
+                .as_object()
+                .expect("an object schema has properties")
+                .iter()
+                .map(|(name, property)| (name.clone(), sample_reply(property)))
+                .collect(),
+        ),
+        Some("array") => json!([]),
+        Some("integer") => json!(0),
+        Some("boolean") => json!(false),
+        _ => schema["enum"]
+            .get(0)
+            .cloned()
+            .unwrap_or_else(|| json!("text")),
+    }
+}
+
+fn is_plan_change(reported: &Reported) -> bool {
+    matches!(
+        reported,
+        Reported::Plan {
+            report: Report::PlanChange { .. }
+        } | Reported::Implementer {
+            report: Report::PlanChange { .. },
+            ..
+        } | Reported::Review {
+            report: Report::PlanChange { .. }
+        } | Reported::Answer {
+            report: Report::PlanChange { .. }
+        } | Reported::Rulings {
+            report: Report::PlanChange { .. }
+        }
+    )
 }

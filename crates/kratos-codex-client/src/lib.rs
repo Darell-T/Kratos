@@ -24,8 +24,12 @@ pub use connection::{
     Codex, ConnectError, Exit, Incoming, IncomingRequest, Launch, RequestError, RequestId, connect,
 };
 pub use locate::{LocateError, locate_codex};
-pub use protocol::{Method, Notification, ServerRequest, methods};
+pub use protocol::{Method, Notification, ServerRequest, ServerResponse, methods};
 
+/// JSON-RPC's error for a message that is not JSON.
+const PARSE_ERROR: i64 = -32700;
+/// JSON-RPC's error for JSON that is not a valid request.
+const INVALID_REQUEST: i64 = -32600;
 /// JSON-RPC's error for a method the receiver does not handle.
 pub const METHOD_NOT_FOUND: i64 = -32601;
 /// JSON-RPC's error for parameters the receiver cannot read.
@@ -37,5 +41,8 @@ pub const INTERNAL_ERROR: i64 = -32603;
 /// parse, was not a valid request, named no method, or had parameters it could not read. A start
 /// that fails with one of these never began a turn, so it is safe to try once more.
 pub fn rejected_before_execution(code: i64) -> bool {
-    matches!(code, -32700 | -32600 | -32601 | -32602)
+    matches!(
+        code,
+        PARSE_ERROR | INVALID_REQUEST | METHOD_NOT_FOUND | INVALID_PARAMS
+    )
 }

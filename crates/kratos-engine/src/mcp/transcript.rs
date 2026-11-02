@@ -28,7 +28,17 @@ pub fn line(event: &ThreadEventBody) -> Option<String> {
             Some(format!("waiting for an answer to question {}", question.id))
         }
         ThreadEventBody::ThreadPaused { reason } => Some(format!("paused: {}", pause_text(reason))),
-        _ => None,
+        ThreadEventBody::MessageStatusChanged { .. }
+        | ThreadEventBody::TurnStarted { .. }
+        | ThreadEventBody::ApprovalDecided { .. }
+        | ThreadEventBody::ApprovalClosed { .. }
+        | ThreadEventBody::QuestionAnswered { .. }
+        | ThreadEventBody::QuestionClosed { .. }
+        | ThreadEventBody::ThreadResumed
+        | ThreadEventBody::SettingsChanged { .. }
+        | ThreadEventBody::ProviderError { .. }
+        | ThreadEventBody::ContinuationChanged { .. }
+        | ThreadEventBody::ProviderSession { .. } => None,
     }
 }
 

@@ -7,18 +7,19 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Duration;
 
-use kratos_codex_client::{Codex, ConnectError, Incoming, RequestError, types};
+use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
-    MessageId, MessageInput, MessageOrigin, Provider, QuestionId, QuestionOutcome, Skill, ThreadId,
-    ThreadSettings, TurnChanges, TurnOutcome,
+    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, Skill, ThreadId,
+    ThreadSettings,
 };
-use kratos_store::{Settle, StoreError, ThreadWrite};
+use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
 
-use super::requests::Requests;
+use super::approvals::Requests;
+use super::connection::StartError;
 use super::threads::ThreadState;
-use super::turns::{After, Stopper};
+use super::turns::{Delivery, Stopper};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
@@ -108,12 +109,71 @@ pub(super) enum Command {
     },
 }
 
+pub(super) enum Deferred {
+    Discard {
+        thread_id: ThreadId,
+        message_id: MessageId,
+        reply: Reply<Message>,
+    },
+    RefreshUsage {
+        reply: Reply<()>,
+    },
+    Skills {
+        thread_id: ThreadId,
+        reply: Reply<Vec<Skill>>,
+    },
+    Run {
+        thread_id: ThreadId,
+        command: Vec<String>,
+        timeout: Duration,
+        reply: Reply<CommandResult>,
+    },
+}
+
+impl Deferred {
+    pub(super) fn fail(self, error: ProviderError) {
+        match self {
+            Deferred::Discard { reply, .. } => drop(reply.send(Err(error))),
+            Deferred::RefreshUsage { reply } => drop(reply.send(Err(error))),
+            Deferred::Skills { reply, .. } => drop(reply.send(Err(error))),
+            Deferred::Run { reply, .. } => drop(reply.send(Err(error))),
+        }
+    }
+
+    pub(super) fn into_command(self) -> Command {
+        match self {
+            Deferred::Discard {
+                thread_id,
+                message_id,
+                reply,
+            } => Command::Discard {
+                thread_id,
+                message_id,
+                reply,
+            },
+            Deferred::RefreshUsage { reply } => Command::RefreshUsage { reply },
+            Deferred::Skills { thread_id, reply } => Command::Skills { thread_id, reply },
+            Deferred::Run {
+                thread_id,
+                command,
+                timeout,
+                reply,
+            } => Command::Run {
+                thread_id,
+                command,
+                timeout,
+                reply,
+            },
+        }
+    }
+}
+
 /// Work the actor started, finished. Each names the thread, turn, or attempt it belongs to, so the
 /// actor can tell a stale one.
 pub(super) enum Done {
     Connected {
         generation: u64,
-        result: Result<(Codex, mpsc::Receiver<Incoming>), ConnectError>,
+        result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     },
     Account {
         generation: u64,
@@ -122,6 +182,8 @@ pub(super) enum Done {
     Attached {
         thread_id: ThreadId,
         generation: u64,
+        /// The context limit the thread was loaded with (D76).
+        context_limit: Option<u64>,
         result: Result<Opened, RequestError>,
     },
     StartAnswered {
@@ -134,7 +196,7 @@ pub(super) enum Done {
     DeliveryChecked {
         thread_id: ThreadId,
         message_id: MessageId,
-        attempt: Option<u64>,
+        delivery: Delivery,
         error: String,
         found: Option<Box<types::Turn>>,
     },
@@ -177,7 +239,6 @@ pub(super) struct Opened {
     pub model: String,
     pub turns: Vec<types::Turn>,
     pub is_new: bool,
-    pub context_limit: Option<u64>,
 }
 
 /// The app-server, as far as the actor knows.
@@ -201,7 +262,7 @@ pub(crate) struct Actor {
     pub(super) restarts: super::connection::Restarts,
     /// Each model's own context window, as Codex reported it with no setting of Kratos's in force
     /// (D76).
-    pub(super) windows: HashMap<String, i64>,
+    pub(super) windows: HashMap<String, u64>,
     /// The plan that pays for the running server's account (D24).
     pub(super) plan: Option<String>,
     pub(super) threads: HashMap<ThreadId, ThreadState>,
@@ -209,14 +270,13 @@ pub(crate) struct Actor {
     /// Threads waiting for a start slot, oldest first.
     pub(super) ready: VecDeque<ThreadId>,
     pub(super) next_attempt: u64,
-    /// Commands that wait for the app-server to come up.
-    pub(super) deferred: Vec<Command>,
+    pub(super) deferred: Vec<Deferred>,
     /// Threads to load once the app-server is up, so its history settles their uncertain messages.
     pub(super) reconcile: Vec<ThreadId>,
     pub(super) done: mpsc::UnboundedSender<Done>,
     pub(super) completions: mpsc::UnboundedReceiver<Done>,
     /// Where usage-limit stops go: the scheduler owns continuation (D39).
-    pub(super) limit_stops: Option<mpsc::UnboundedSender<crate::usage::scheduler::LimitStop>>,
+    pub(super) limit_stops: mpsc::UnboundedSender<crate::usage::LimitStop>,
 }
 
 impl Actor {
@@ -270,8 +330,12 @@ impl Actor {
             Done::Attached {
                 thread_id,
                 generation,
+                context_limit,
                 result,
-            } => self.on_attached(thread_id, generation, result).await,
+            } => {
+                self.on_attached(thread_id, generation, context_limit, result)
+                    .await
+            }
             Done::StartAnswered {
                 thread_id,
                 attempt,
@@ -280,11 +344,11 @@ impl Actor {
             Done::DeliveryChecked {
                 thread_id,
                 message_id,
-                attempt,
+                delivery,
                 error,
                 found,
             } => {
-                self.on_delivery_checked(thread_id, message_id, attempt, error, found)
+                self.on_delivery_checked(thread_id, message_id, delivery, error, found)
                     .await;
             }
             Done::Steered {
@@ -339,15 +403,7 @@ impl Actor {
     {
         match self.hub.write(thread_id.clone(), job).await {
             Ok(written) => Ok(written.value),
-            Err(
-                error @ (StoreError::UnknownThread(_)
-                | StoreError::UnknownMessage { .. }
-                | StoreError::UnknownApproval(_)
-                | StoreError::UnknownQuestion(_)
-                | StoreError::UnknownContinuation(_)
-                | StoreError::MessageTransition { .. }
-                | StoreError::MessageIdTaken(_)),
-            ) => Err(ProviderError::Store(error)),
+            Err(error) if error.is_refusal() => Err(ProviderError::Store(error)),
             Err(error) => {
                 eprintln!("cannot record Codex work, so Codex stops: {error}");
                 self.stop_server(&format!("Kratos could not record Codex's work: {error}"))
@@ -357,75 +413,9 @@ impl Actor {
         }
     }
 
-    /// Records how a turn ended and closes what waited on it, then pauses the queue as `after`
-    /// says.
-    pub(super) async fn record_turn_end(
-        &mut self,
-        thread_id: &ThreadId,
-        turn_id: kratos_protocol::TurnId,
-        outcome: TurnOutcome,
-        changes: TurnChanges,
-        after: After,
-    ) -> Result<(), ProviderError> {
-        let context = self
-            .threads
-            .get_mut(thread_id)
-            .and_then(|thread| thread.context.take());
-        let closed = self
-            .requests
-            .close(thread_id, |waiting| waiting.turn_id == turn_id);
-        self.write(thread_id, move |write| {
-            settle_closed(write, &closed, "The turn ended")?;
-            write.complete_turn(turn_id, outcome, changes, context)?;
-            match after {
-                After::Continue => {}
-                After::PauseIfWaiting(reason) => {
-                    if !write.pending_messages()?.is_empty() {
-                        write.pause(reason)?;
-                    }
-                }
-                After::Pause(reason) => {
-                    write.pause(reason)?;
-                }
-            }
-            Ok(())
-        })
-        .await?;
-        if let Some(thread) = self.threads.get_mut(thread_id) {
-            thread.file_items.clear();
-        }
-        Ok(())
-    }
-
-    /// Reports a usage-limit stop to the scheduler, which plans the continuation (D39).
-    pub(super) fn report_limit_stop(&self, thread_id: &ThreadId, turn_id: kratos_protocol::TurnId) {
-        if let Some(stops) = &self.limit_stops {
-            let _ = stops.send(crate::usage::scheduler::LimitStop {
-                thread_id: thread_id.clone(),
-                turn_id,
-                provider: Provider::Codex,
-            });
-        }
-    }
-
     async fn shutdown(&mut self) {
         self.stop_server("Kratos is shutting down").await;
     }
-}
-
-/// Settles requests a step closed, in the same write as the step.
-pub(super) fn settle_closed(
-    write: &mut ThreadWrite<'_>,
-    closed: &super::requests::Closed,
-    reason: &str,
-) -> Result<(), StoreError> {
-    for approval in &closed.approvals {
-        write.settle_approval(approval, Settle::Close(reason.to_owned()))?;
-    }
-    for question in &closed.questions {
-        write.settle_question(question, Settle::Close(reason.to_owned()))?;
-    }
-    Ok(())
 }
 
 async fn next_incoming(server: &mut Server) -> Incoming {

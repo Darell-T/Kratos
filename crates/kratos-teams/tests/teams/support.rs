@@ -2,14 +2,15 @@
 //!
 //! Every scenario builds a `ScriptedTask`, lets it run until the task waits, and asserts on the view
 //! and on the steps it ran. The loop is the one the engine runs, so these tests also prove that the
-//! public interface is enough to drive a task: `fold`, `next_step`, `accepts`, `check_decision`, and the
-//! two-call evidence check. It reads nothing but facts and writes nothing but facts.
+//! public interface is enough to drive a task: `fold`, `next_step`, `accepts`, `allowed_decisions`, and
+//! the two-call evidence check. It reads nothing but facts and writes nothing but facts.
 
 use std::collections::{BTreeMap, VecDeque};
 
 use kratos_protocol::{CommandResult, Permission, Provider, TurnChanges};
-use kratos_teams::decisions::{Decision, allowed_decisions, check_decision};
-use kratos_teams::evidence::{Diff, Seen, Start, finish_check, rerun, start_check};
+use kratos_teams::decisions::{Decision, allowed_decisions};
+use kratos_teams::diff::Diff;
+use kratos_teams::evidence::{Seen, Start, finish_check, rerun, start_check};
 use kratos_teams::facts::{
     ChangeSize, ContinuationId, Declined, DeliveryId, Ended, EvidenceChecked, Fact, FactSeq,
     HandoffOutcome, LargeChange, MessageId, ProbePolicy, ProbeRun, RoundCap, RulesSnapshot, Sha,
@@ -17,8 +18,8 @@ use kratos_teams::facts::{
 };
 use kratos_teams::fold::{Rejection, fold};
 use kratos_teams::members::{Bindings, Member, MemberId, Role};
+use kratos_teams::naming::{branch_name, task_title};
 use kratos_teams::next_step::{CheckStep, Step, next_step};
-use kratos_teams::prompts::{branch_name, task_title};
 use kratos_teams::reports::{
     AddedProbe, AnswerDone, Check, FindingId, FindingReport, ImplementerDone, Kind, Location,
     Report, Reported, Response, ResponseOutcome, ReviewDone, Ruling, RulingVerdict, RulingsDone,
@@ -27,6 +28,8 @@ use kratos_teams::reports::{
 use kratos_teams::security_triggers::{Trigger, TriggerHit};
 use kratos_teams::task_plan::{PlanChangeRequest, ScopePattern, TaskPlan};
 use kratos_teams::view::{Activity, Phase, TaskView};
+
+use crate::observe::tag_of;
 
 /// No scenario needs more steps than this from one helper call, so more means the rules loop.
 const MAX_STEPS: usize = 300;
@@ -65,15 +68,9 @@ pub struct Script {
     pub probes: Vec<kratos_teams::evidence::ProbeCapture>,
     /// The files each round's commit changed.
     pub files: Vec<String>,
-    pub ran: BTreeMap<String, usize>,
 }
 
-impl Script {
-    /// How many evidence commands ran, counting a rerun of the same command again.
-    pub fn commands_run(&self) -> usize {
-        self.ran.values().sum()
-    }
-}
+type CommandsRan = BTreeMap<String, usize>;
 
 impl Script {
     fn next_ended(&mut self, role: Role) -> Ended {
@@ -88,8 +85,8 @@ impl Script {
     }
 
     /// The command's scripted results in order, then the last one again. A command nobody scripted exits 0.
-    fn run_command(&mut self, command: &str) -> CommandResult {
-        let count = self.ran.entry(command.to_owned()).or_default();
+    fn run_command(&self, ran: &mut CommandsRan, command: &str) -> CommandResult {
+        let count = ran.entry(command.to_owned()).or_default();
         let result = self
             .commands
             .get(command)
@@ -98,7 +95,7 @@ impl Script {
         result.cloned().unwrap_or_else(passes)
     }
 
-    fn evidence_for(&mut self, step: &CheckStep) -> EvidenceChecked {
+    fn evidence_for(&mut self, step: &CheckStep, ran: &mut CommandsRan) -> EvidenceChecked {
         let sources: Vec<&str> = step.sources.iter().map(String::as_str).collect();
         let outside = self.outside_diff.clone();
         let mut checks = BTreeMap::new();
@@ -116,7 +113,7 @@ impl Script {
                 Start::Done(done) => done,
                 Start::RunCommand(command) => finish_check(
                     &candidate.report,
-                    &self.run_command(&command),
+                    &self.run_command(ran, &command),
                     diff.as_ref(),
                 ),
             };
@@ -125,7 +122,12 @@ impl Script {
         let rechecks = step
             .recheck
             .iter()
-            .map(|open| (open.id, rerun(&self.run_command(&open.report.evidence))))
+            .map(|open| {
+                (
+                    open.id,
+                    rerun(&self.run_command(ran, &open.report.evidence)),
+                )
+            })
             .collect();
         let security_hits = step
             .scan
@@ -162,6 +164,7 @@ pub struct ScriptedTask {
     pub script: Script,
     /// Every step the loop ran, in order.
     pub steps: Vec<Step>,
+    commands_ran: CommandsRan,
 }
 
 impl ScriptedTask {
@@ -177,7 +180,13 @@ impl ScriptedTask {
             continuations: 0,
             script,
             steps: Vec::new(),
+            commands_ran: CommandsRan::new(),
         }
+    }
+
+    /// How many evidence commands ran, counting a rerun of the same command again.
+    pub fn commands_run(&self) -> usize {
+        self.commands_ran.values().sum()
     }
 
     /// A restart folds the same facts again.
@@ -205,6 +214,7 @@ impl ScriptedTask {
             continuations: 0,
             script,
             steps: Vec::new(),
+            commands_ran: CommandsRan::new(),
         }
     }
 
@@ -218,7 +228,7 @@ impl ScriptedTask {
         let view = self.view();
         let step = next_step(&view);
         let fact = match &step {
-            Step::Wait { on } => match engine_turn(&view) {
+            Step::Wait { on } => match view.phase.waiting_message().cloned() {
                 Some(message) if matches!(on, kratos_teams::next_step::Wait::Engine { .. }) => {
                     self.continuation_result(&view, message)
                 }
@@ -275,7 +285,6 @@ impl ScriptedTask {
         }
     }
 
-    /// The user decides. The harness runs the same check the engine runs, then records the fact, then runs the loop.
     pub fn decide(&mut self, decision: Decision) -> Vec<String> {
         let view = self.view();
         assert!(
@@ -284,7 +293,6 @@ impl ScriptedTask {
             decision.kind(),
             view.phase.name()
         );
-        check_decision(&view, &decision).expect("the decision applies");
         self.append(Fact::UserDecided { decision })
             .expect("the decision applies");
         self.run()
@@ -292,8 +300,6 @@ impl ScriptedTask {
 
     /// A decision the user makes while an agent works. The loop does not run afterwards.
     pub fn decide_while_working(&mut self, decision: Decision) {
-        let view = self.view();
-        check_decision(&view, &decision).expect("the decision applies");
         self.append(Fact::UserDecided { decision })
             .expect("the decision applies");
     }
@@ -312,7 +318,7 @@ impl ScriptedTask {
             },
             Step::Commit { commit } => self.committed(commit.round, &commit.added_probes),
             Step::Check { check } => Fact::EvidenceChecked {
-                checked: Box::new(self.script.evidence_for(check)),
+                checked: Box::new(self.script.evidence_for(check, &mut self.commands_ran)),
             },
             Step::ApplyRoles { .. } if self.script.role_change_fails => Fact::RoleChangeRejected {
                 reason: "the reviewer is not signed in".to_owned(),
@@ -375,15 +381,8 @@ impl ScriptedTask {
     }
 }
 
-fn engine_turn(view: &TaskView) -> Option<MessageId> {
-    view.phase.waiting_message().cloned()
-}
-
 pub fn step_name(step: &Step) -> String {
-    serde_json::to_value(step).expect("steps serialize")["kind"]
-        .as_str()
-        .expect("tagged")
-        .to_owned()
+    tag_of(step)
 }
 
 pub fn passes() -> CommandResult {
@@ -676,23 +675,11 @@ pub fn implements_without_running() -> Ended {
 }
 
 pub fn implementer_invalid(error: &str) -> Ended {
-    implementer_report(
-        Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
-        checked(),
-    )
+    implementer_report(invalid_report(error), checked())
 }
 
 pub fn implementer_invalid_after_edit(error: &str) -> Ended {
-    implementer_report(
-        Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
-        edited_after_check(),
-    )
+    implementer_report(invalid_report(error), edited_after_check())
 }
 
 pub fn implementer_blocked(summary: &str) -> Ended {
@@ -705,13 +692,7 @@ pub fn implementer_blocked(summary: &str) -> Ended {
 }
 
 pub fn implementer_asks(question: &str) -> Ended {
-    implementer_report(
-        Report::Question {
-            summary: "Half done.".to_owned(),
-            question: question.to_owned(),
-        },
-        checked(),
-    )
+    implementer_report(question_report("Half done.", question), checked())
 }
 
 pub fn implementer_wants_plan_change(reason: &str, extra: &[&str]) -> Ended {
@@ -756,19 +737,13 @@ pub fn plan_with(scope: &str) -> Ended {
 
 pub fn plan_question(question: &str) -> Ended {
     reported(Reported::Plan {
-        report: Report::Question {
-            summary: "Read the code.".to_owned(),
-            question: question.to_owned(),
-        },
+        report: question_report("Read the code.", question),
     })
 }
 
 pub fn plan_invalid(error: &str) -> Ended {
     reported(Reported::Plan {
-        report: Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
+        report: invalid_report(error),
     })
 }
 
@@ -784,10 +759,7 @@ pub fn planner_answers(answer: &str) -> Ended {
 
 pub fn planner_asks_user(question: &str) -> Ended {
     reported(Reported::Answer {
-        report: Report::Question {
-            summary: "Read the code.".to_owned(),
-            question: question.to_owned(),
-        },
+        report: question_report("Read the code.", question),
     })
 }
 
@@ -805,10 +777,7 @@ pub fn planner_wants_plan_change(reason: &str) -> Ended {
 
 pub fn planner_answer_invalid(error: &str) -> Ended {
     reported(Reported::Answer {
-        report: Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
+        report: invalid_report(error),
     })
 }
 
@@ -831,10 +800,7 @@ pub fn planner_rules(rulings: &[(u32, RulingVerdict)]) -> Ended {
 
 pub fn planner_ruling_question(question: &str) -> Ended {
     reported(Reported::Rulings {
-        report: Report::Question {
-            summary: "Read the code.".to_owned(),
-            question: question.to_owned(),
-        },
+        report: question_report("Read the code.", question),
     })
 }
 
@@ -876,10 +842,7 @@ pub fn still_open(finding: u32, diagnosis: &str) -> Ended {
 
 pub fn reviewer_invalid(error: &str) -> Ended {
     reported(Reported::Review {
-        report: Report::Invalid {
-            error: error.to_owned(),
-            raw: "{}".to_owned(),
-        },
+        report: invalid_report(error),
     })
 }
 
@@ -893,11 +856,22 @@ pub fn reviewer_blocked(summary: &str) -> Ended {
 
 pub fn reviewer_asks(question: &str) -> Ended {
     reported(Reported::Review {
-        report: Report::Question {
-            summary: "Read the diff.".to_owned(),
-            question: question.to_owned(),
-        },
+        report: question_report("Read the diff.", question),
     })
+}
+
+fn invalid_report<T>(error: &str) -> Report<T> {
+    Report::Invalid {
+        error: error.to_owned(),
+        raw: "{}".to_owned(),
+    }
+}
+
+fn question_report<T>(summary: &str, question: &str) -> Report<T> {
+    Report::Question {
+        summary: summary.to_owned(),
+        question: question.to_owned(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -953,4 +927,35 @@ pub fn script_commands(script: &mut Script, command: &str, results: Vec<CommandR
 
 pub fn delivery(id: &str) -> DeliveryId {
     DeliveryId::new(id)
+}
+
+pub fn script(implementer: Vec<Ended>, reviewer: Vec<Ended>) -> Script {
+    Script {
+        implementer: implementer.into(),
+        reviewer: reviewer.into(),
+        ..Script::default()
+    }
+}
+
+pub fn fix_f1() -> Ended {
+    implements_answering(vec![fixed(1)])
+}
+
+/// A three-member task whose plan the user approved, ready for the implementer.
+pub fn approved_team(
+    planner: Vec<Ended>,
+    implementer: Vec<Ended>,
+    reviewer: Vec<Ended>,
+) -> ScriptedTask {
+    let mut plans = vec![plan_ready()];
+    plans.extend(planner);
+    let mut task = Task::three().script(Script {
+        planner: plans.into(),
+        implementer: implementer.into(),
+        reviewer: reviewer.into(),
+        ..Script::default()
+    });
+    task.run();
+    task.decide(Decision::ApprovePlan { conditions: None });
+    task
 }

@@ -1,7 +1,7 @@
 //! Reading a finished task, and the check that a restart at any fact continues the same way.
 
 use kratos_teams::decisions::{
-    Decision, DecisionKind, Finish, PlanChangeResponse, allowed_decisions, check_decision,
+    Decision, DecisionKind, Finish, PlanChangeResponse, allowed_decisions,
 };
 use kratos_teams::facts::{Fact, MessageId, StoredFact};
 use kratos_teams::fold::fold;
@@ -12,6 +12,7 @@ use kratos_teams::view::{
     Activity, ApprovedBy, Phase, ProbeStatus, Run, TaskView, Trouble, Turn, Waiting, Work,
 };
 
+use crate::observe::tag_of;
 use crate::support::{ScriptedTask, sha};
 
 /// The phase of an approved task.
@@ -34,9 +35,7 @@ pub fn waiting(view: &TaskView) -> Option<&Waiting> {
 /// The pause a task is in because of trouble, if any.
 pub fn trouble(view: &TaskView) -> Option<(Trouble, Role, &str)> {
     match waiting(view)? {
-        Waiting::Trouble {
-            why, role, detail, ..
-        } => Some((*why, *role, detail)),
+        Waiting::Trouble { why, detail, left } => Some((*why, left.role(), detail)),
         _ => None,
     }
 }
@@ -63,14 +62,7 @@ pub fn runs(task: &ScriptedTask, role: Role) -> Vec<&Run> {
 /// The kinds of correction the messages carried, in order, with `None` for a message that was not one.
 pub fn notes(runs: &[&Run]) -> Vec<Option<String>> {
     runs.iter()
-        .map(|run| {
-            run.note.as_ref().map(|note| {
-                serde_json::to_value(note).expect("a note serializes")["kind"]
-                    .as_str()
-                    .expect("tagged")
-                    .to_owned()
-            })
-        })
+        .map(|run| run.note.as_ref().map(tag_of))
         .collect()
 }
 
@@ -176,14 +168,19 @@ pub fn swap_implementer_and_reviewer(bindings: &Bindings) -> Bindings {
     .expect("distinct members")
 }
 
+pub fn prefix_views(log: &[StoredFact]) -> Vec<TaskView> {
+    (1..=log.len())
+        .map(|n| fold(&log[..n]).expect("every prefix folds"))
+        .collect()
+}
+
 /// Every prefix of the record folds the same from a stored copy, plans the same step, accepts each
 /// decision it allows, and never waits again for a message whose result it already holds. A restart at
 /// any fact therefore continues the same way, and no completed step repeats.
 pub fn assert_log_replayable(log: &[StoredFact]) {
     let mut completed: Vec<MessageId> = Vec::new();
-    for n in 1..=log.len() {
+    for (n, view) in (1..).zip(prefix_views(log)) {
         let prefix = &log[..n];
-        let view = fold(prefix).expect("every prefix folds");
         let stored: Vec<StoredFact> = prefix
             .iter()
             .map(|fact| {
@@ -199,9 +196,10 @@ pub fn assert_log_replayable(log: &[StoredFact]) {
         assert_eq!(next_step(&restored), next_step(&view));
         for kind in allowed_decisions(&view) {
             let decision = sample_decision(kind, &view);
-            check_decision(&view, &decision).unwrap_or_else(|error| {
-                panic!("{kind} is allowed after fact {n} but refused: {error}")
-            });
+            view.accepts(&Fact::UserDecided { decision })
+                .unwrap_or_else(|error| {
+                    panic!("{kind} is allowed after fact {n} but refused: {error}")
+                });
         }
         if let Some(message) = view.phase.waiting_message() {
             assert!(
@@ -234,8 +232,8 @@ pub fn assert_replayable(task: &ScriptedTask) {
 
 /// The view as it was when the engine delivered `run`: the prefix of the log that waits for its message.
 pub fn view_when_sent(task: &ScriptedTask, run: &Run) -> TaskView {
-    (1..=task.log().len())
-        .map(|n| fold(&task.log()[..n]).expect("every prefix folds"))
+    prefix_views(task.log())
+        .into_iter()
         .find(|view| view.phase.waiting_message() == Some(&run.message))
         .unwrap_or_else(|| panic!("no prefix of the log waits for {:?}", run.message))
 }

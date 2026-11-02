@@ -1,5 +1,6 @@
-//! A thread's turns: when the next queued message starts, how a start whose answer was lost is
-//! settled, and how a turn ends.
+//! A thread's turns: when the next queued message starts, how a queued message steers the running
+//! turn, how a start or steer whose answer was lost is settled, how a turn is stopped, and how it
+//! ends.
 
 use std::time::Duration;
 
@@ -10,9 +11,10 @@ use kratos_protocol::{
 use serde_json::json;
 
 use super::actor::{Actor, Done, MAX_STARTING, Reply};
+use super::approvals::settle_closed;
 use super::profiles::Profile;
-use super::threads::Turn;
-use super::{ProviderError, wire};
+use super::threads::{Turn, TurnWork};
+use super::{ProviderError, policy, queue, wire};
 
 /// How long `turn/interrupt` may take to answer.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -24,6 +26,12 @@ pub(super) enum After {
     PauseIfWaiting(PauseReason),
     /// Pause whatever waits, because something other than the queue decides what comes next.
     Pause(PauseReason),
+}
+
+/// The request whose answer was lost: a start, by its attempt, or a steer.
+pub(super) enum Delivery {
+    Start { attempt: u64 },
+    Steer,
 }
 
 /// Who asked Codex to stop a turn, which decides what follows when Codex does not stop it.
@@ -144,9 +152,8 @@ impl Actor {
             message_id: message_id.clone(),
             early_completion: None,
             stop_waiters: Vec::new(),
+            work: TurnWork::default(),
         };
-        thread.changes.take();
-        thread.context = None;
         thread.file_items.clear();
         thread.turn_settings = thread.settings.clone();
         let mut params = turn_start_params(native_id, &message, thread.model(), &thread.settings);
@@ -192,7 +199,12 @@ impl Actor {
                 self.refuse_start(&thread_id, &message_id, message).await;
             }
             Err(error) => {
-                self.check_delivery(&thread_id, &message_id, Some(attempt), error.to_string());
+                self.check_delivery(
+                    &thread_id,
+                    &message_id,
+                    Delivery::Start { attempt },
+                    error.to_string(),
+                );
             }
         }
         self.start_ready().await;
@@ -209,16 +221,131 @@ impl Actor {
         let message_id = message_id.clone();
         let _ = self
             .write(thread_id, move |write| {
-                write.set_message_status(
-                    &message_id,
-                    MessageStatus::Failed {
-                        error: error.clone(),
-                    },
-                )?;
-                write.pause(PauseReason::Refused { message_id, error })?;
-                Ok(())
+                queue::mark_refused(write, message_id, error)
             })
             .await;
+    }
+
+    /// Adds a queued message to the running turn. Answers once Codex has the request; the outcome
+    /// arrives as the message's status.
+    pub(super) async fn steer(
+        &mut self,
+        thread_id: &ThreadId,
+        message_id: MessageId,
+    ) -> Result<Message, ProviderError> {
+        self.load(thread_id).await?;
+        let thread = &self.threads[thread_id];
+        let (
+            Turn::Running {
+                turn_id,
+                stopping: false,
+                ..
+            },
+            Some(native_id),
+        ) = (&thread.turn, thread.native_id())
+        else {
+            return Err(ProviderError::Conflict(
+                "Only a running turn can be steered".into(),
+            ));
+        };
+        let (turn_id, native_id) = (turn_id.clone(), native_id.to_owned());
+        let message = self.message(thread_id, &message_id).await?;
+        if message.status != MessageStatus::Queued {
+            return Err(ProviderError::Conflict(format!(
+                "Only a queued message can steer the turn; message {message_id} is not queued"
+            )));
+        }
+        if message.origin.limit().is_some() {
+            return Err(ProviderError::Conflict(
+                "A message from another thread runs in a turn of its own, with no more than that thread's permission".into(),
+            ));
+        }
+        let codex = self
+            .connection()?
+            .ok_or_else(|| ProviderError::Unavailable("Codex is starting".into()))?;
+        let submitting = self
+            .write(thread_id, {
+                let message_id = message_id.clone();
+                move |write| write.set_message_status(&message_id, MessageStatus::Submitting)
+            })
+            .await?;
+        self.threads
+            .get_mut(thread_id)
+            .expect("loaded above")
+            .steering
+            .insert(message_id.clone());
+        let params = types::TurnSteerParams {
+            additional_context: None,
+            client_user_message_id: Some(message_id.as_str().to_owned()),
+            expected_turn_id: turn_id.as_str().to_owned(),
+            input: wire::user_input(&message),
+            responsesapi_client_metadata: None,
+            thread_id: native_id,
+        };
+        let thread_id = thread_id.clone();
+        self.spawn(async move {
+            let result = codex
+                .request::<methods::TurnSteer>(&params)
+                .await
+                .map(|_| ());
+            Done::Steered {
+                thread_id,
+                message_id,
+                result,
+            }
+        });
+        Ok(submitting)
+    }
+
+    pub(super) async fn on_steered(
+        &mut self,
+        thread_id: ThreadId,
+        message_id: MessageId,
+        result: Result<(), RequestError>,
+    ) {
+        let turn_id = self
+            .threads
+            .get(&thread_id)
+            .and_then(|thread| thread.turn.running_id().cloned());
+        match (result, turn_id) {
+            (Ok(()), Some(turn_id)) => {
+                let _ = self
+                    .write(&thread_id, {
+                        let message_id = message_id.clone();
+                        move |write| {
+                            write.set_message_status(
+                                &message_id,
+                                MessageStatus::Accepted { turn_id },
+                            )
+                        }
+                    })
+                    .await;
+            }
+            (Err(RequestError::Rpc { code, .. }), _)
+                if kratos_codex_client::rejected_before_execution(code) =>
+            {
+                // Refused before it ran: the message goes back to the queue.
+                let _ = self
+                    .write(&thread_id, {
+                        let message_id = message_id.clone();
+                        move |write| write.set_message_status(&message_id, MessageStatus::Queued)
+                    })
+                    .await;
+            }
+            (result, _) => {
+                let error = result.err().map_or_else(
+                    || "The turn ended before Codex confirmed the steer".to_owned(),
+                    |error| error.to_string(),
+                );
+                // The message stays in `steering` until the history check settles it.
+                self.check_delivery(&thread_id, &message_id, Delivery::Steer, error);
+                return;
+            }
+        }
+        if let Some(thread) = self.threads.get_mut(&thread_id) {
+            thread.steering.remove(&message_id);
+        }
+        self.dispatch(&thread_id).await;
     }
 
     /// The answer to `turn/start` or `turn/steer` was lost, so Codex may or may not have taken the
@@ -227,7 +354,7 @@ impl Actor {
         &self,
         thread_id: &ThreadId,
         message_id: &MessageId,
-        attempt: Option<u64>,
+        delivery: Delivery,
         error: String,
     ) {
         let (thread_id, message_id) = (thread_id.clone(), message_id.clone());
@@ -254,7 +381,7 @@ impl Actor {
             Done::DeliveryChecked {
                 thread_id,
                 message_id,
-                attempt,
+                delivery,
                 error,
                 found,
             }
@@ -265,12 +392,12 @@ impl Actor {
         &mut self,
         thread_id: ThreadId,
         message_id: MessageId,
-        attempt: Option<u64>,
+        delivery: Delivery,
         error: String,
         found: Option<Box<types::Turn>>,
     ) {
-        match attempt {
-            Some(attempt) => {
+        match delivery {
+            Delivery::Start { attempt } => {
                 let is_current = matches!(
                     self.threads.get(&thread_id).map(|thread| &thread.turn),
                     Some(Turn::Starting { attempt: current, .. }) if *current == attempt
@@ -286,7 +413,7 @@ impl Actor {
                     }
                 }
             }
-            None => {
+            Delivery::Steer => {
                 if let Some(thread) = self.threads.get_mut(&thread_id) {
                     thread.steering.remove(&message_id);
                 }
@@ -317,14 +444,7 @@ impl Actor {
     ) {
         let _ = self
             .write(thread_id, move |write| {
-                write.set_message_status(
-                    &message_id,
-                    MessageStatus::Unknown {
-                        error: error.clone(),
-                    },
-                )?;
-                write.pause(PauseReason::DeliveryUncertain { message_id, error })?;
-                Ok(())
+                queue::mark_uncertain(write, message_id, error)
             })
             .await;
     }
@@ -356,17 +476,17 @@ impl Actor {
         let Turn::Starting {
             early_completion,
             stop_waiters,
+            work,
             ..
-        } = std::mem::replace(
-            &mut thread.turn,
-            Turn::Running {
-                turn_id: turn_id.clone(),
-                stopping: false,
-                deadline_epoch: 0,
-            },
-        )
+        } = std::mem::replace(&mut thread.turn, Turn::Idle)
         else {
             unreachable!("accept_start follows a start");
+        };
+        thread.turn = Turn::Running {
+            turn_id: turn_id.clone(),
+            stopping: false,
+            deadline_epoch: 0,
+            work,
         };
         if recorded.is_err() {
             return;
@@ -424,9 +544,7 @@ impl Actor {
         if !is_running {
             return;
         }
-        let turn_id = TurnId::new(turn.id.clone());
-        thread.turn = Turn::Idle;
-        let changes = thread.changes.take();
+        let (turn_id, work) = thread.turn.end_running().expect("the turn runs");
         let outcome = wire::turn_outcome(&turn).unwrap_or(TurnOutcome::Failed {
             error: "Codex reported the turn finished while still in progress".to_owned(),
         });
@@ -443,7 +561,7 @@ impl Actor {
             TurnOutcome::Completed | TurnOutcome::Interrupted => After::Continue,
         };
         if self
-            .record_turn_end(thread_id, turn_id.clone(), outcome, changes, after)
+            .record_turn_end(thread_id, turn_id.clone(), outcome, work, after)
             .await
             .is_err()
         {
@@ -453,6 +571,40 @@ impl Actor {
             self.report_limit_stop(thread_id, turn_id);
         }
         self.dispatch(thread_id).await;
+    }
+
+    /// Records how a turn ended and closes what waited on it, then pauses the queue as `after`
+    /// says.
+    pub(super) async fn record_turn_end(
+        &mut self,
+        thread_id: &ThreadId,
+        turn_id: kratos_protocol::TurnId,
+        outcome: TurnOutcome,
+        work: TurnWork,
+        after: After,
+    ) -> Result<(), ProviderError> {
+        let TurnWork { changes, context } = work;
+        let changes = changes.finish();
+        let closed = self
+            .requests
+            .close(thread_id, |waiting_turn| *waiting_turn == turn_id);
+        self.write(thread_id, move |write| {
+            settle_closed(write, &closed, "The turn ended")?;
+            write.complete_turn(turn_id, outcome, changes, context)?;
+            match after {
+                After::Continue => {}
+                After::PauseIfWaiting(reason) => queue::pause_if_waiting(write, reason)?,
+                After::Pause(reason) => {
+                    write.pause(reason)?;
+                }
+            }
+            Ok(())
+        })
+        .await?;
+        if let Some(thread) = self.threads.get_mut(thread_id) {
+            thread.file_items.clear();
+        }
+        Ok(())
     }
 
     /// Sets the running turn's deadline again, from now.
@@ -486,7 +638,7 @@ impl Actor {
     pub(super) async fn on_deadline(&mut self, thread_id: ThreadId, turn_id: TurnId, epoch: u64) {
         let is_current = matches!(
             self.threads.get(&thread_id).map(|thread| &thread.turn),
-            Some(Turn::Running { turn_id: running, stopping: false, deadline_epoch })
+            Some(Turn::Running { turn_id: running, stopping: false, deadline_epoch, .. })
                 if *running == turn_id && *deadline_epoch == epoch
         );
         if !is_current {
@@ -503,6 +655,20 @@ impl Actor {
             .await;
         if paused.is_ok() {
             self.interrupt(&thread_id, Stopper::Deadline);
+        }
+    }
+
+    pub(super) async fn stop(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
+        if let Err(error) = self.load(thread_id).await {
+            let _ = reply.send(Err(error));
+            return;
+        }
+        let thread = self.threads.get_mut(thread_id).expect("loaded above");
+        match &mut thread.turn {
+            Turn::Idle => drop(reply.send(Ok(()))),
+            // Stopped as soon as its id is known.
+            Turn::Starting { stop_waiters, .. } => stop_waiters.push(reply),
+            Turn::Running { .. } => self.interrupt(thread_id, Stopper::Users(vec![reply])),
         }
     }
 
@@ -622,8 +788,8 @@ fn turn_start_params(
     }));
     params.client_user_message_id = Some(message.id.as_str().to_owned());
     params.model = settings.model.clone();
-    params.approval_policy = Some(types::AskForApproval::Untrusted);
-    params.approvals_reviewer = Some(types::ApprovalsReviewer::User);
+    params.approval_policy = Some(policy::APPROVAL_POLICY);
+    params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
     params.permissions = Some(Profile::for_settings(settings).id().to_owned());
     params.collaboration_mode = model.map(|model| types::CollaborationMode {
         mode: if settings.plan_mode {

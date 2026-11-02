@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::thread;
 
-use kratos_client::{ApiReply, ApiRequest, Client, ClientError, Incoming};
+use kratos_api_client::{ApiReply, ApiRequest, Client, ClientError, Incoming};
 use kratos_protocol::{Seq, Thread, Workspace};
 use serde_json::{Value, json};
 

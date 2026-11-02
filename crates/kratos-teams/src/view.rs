@@ -4,8 +4,8 @@
 //! (`Active`), the user must decide (`Waiting`), or the task is ending (`Closing`, `Closed`). Only
 //! `Waiting` needs the user, and it names exactly what the user is asked.
 //!
-//! Folding lives in `fold.rs`, `turns.rs`, `rounds.rs`, `user_messages.rs`, and `decisions.rs`. This file is
-//! the data they build, plus the questions the other modules ask of it.
+//! Folding lives in `fold.rs`, `turns.rs`, `rounds.rs`, `probes.rs`, `user_messages.rs`, and
+//! `decisions.rs`. This file is the data they build, plus the questions the other modules ask of it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -142,7 +142,6 @@ pub enum Activity {
     /// A reviewer's finished report, waiting for Kratos to check its evidence. The finished `turn` is
     /// kept so that a verdict mismatch can send a correction on the same step.
     Checking {
-        step: StepId,
         turn: Turn,
         job: ReviewJob,
         report: ReviewDone,
@@ -182,15 +181,17 @@ pub enum Waiting {
         why: FindingsPause,
         ids: Vec<FindingId>,
     },
+    /// `left.role()` names whose job failed.
     Trouble {
         why: Trouble,
-        role: Role,
         detail: String,
         left: Activity,
     },
-    /// A usage limit stopped the turn, and the user decides what happens next.
+    /// A usage limit stopped the turn, and the user decides what happens next. The turn has no hold
+    /// while the user decides. The decision gives it one from `stop`.
     UsageLimit {
         turn: Turn,
+        stop: Stop,
         ask: UsageLimitAsk,
     },
     Approved {
@@ -405,6 +406,21 @@ pub enum Note {
 }
 
 impl Note {
+    /// Whether a correction reaches `role` in a new session. A reviewer's new session is a fresh
+    /// review, so it starts with no correction. Everyone else is asked again with the same note.
+    pub(crate) fn reaches_new_session(role: Role) -> bool {
+        role != Role::Reviewer
+    }
+
+    pub(crate) fn cause(&self) -> Retry {
+        match self {
+            Note::InvalidReport { .. } => Retry::InvalidReport,
+            Note::UncheckedEdits => Retry::UncheckedEdits,
+            Note::Lost { .. } => Retry::Lost,
+            Note::VerdictMismatch { .. } => Retry::VerdictMismatch,
+        }
+    }
+
     /// What the pause says when a second problem of the same cause stops the step.
     pub fn detail(&self) -> String {
         match self {
@@ -499,6 +515,17 @@ impl Turn {
     /// A turn held for the scheduler or for a handoff waits for the engine, not for a result.
     pub fn is_awaiting_result(&self) -> bool {
         matches!(self.hold, None | Some(Hold::Scheduled { .. }))
+    }
+
+    /// Makes the step's next message due at `seq`, under a new message id. `follows` names the message
+    /// it continues in the same session, or `None` for a fresh session. `due` decides which queued user
+    /// messages ride along, so it always moves with the message. A hold describes the old message, so
+    /// the new one starts without it.
+    pub(crate) fn resend(&mut self, seq: FactSeq, follows: Option<MessageId>) {
+        self.message = MessageId::due_at(seq);
+        self.due = seq;
+        self.follows = follows;
+        self.hold = None;
     }
 }
 
@@ -670,6 +697,7 @@ pub enum ProbeStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProbeRejection {
+    /// The path is not inside the repository, or not under one of the user's test paths.
     OutsideAllowedPaths,
     OutsideScope,
     /// It passed on the commit before the fix, so it proves nothing.
@@ -760,6 +788,20 @@ impl TaskView {
         self.findings.iter().filter(|finding| finding.is_open())
     }
 
+    /// The id each of a review's new findings gets, in report order. The evidence check and the fold
+    /// that judges it must agree on which id is which.
+    pub(crate) fn new_finding_ids<'a>(
+        &self,
+        report: &'a ReviewDone,
+    ) -> impl Iterator<Item = (FindingId, &'a FindingReport)> + use<'a> {
+        let first = self.findings.len();
+        report
+            .findings
+            .iter()
+            .enumerate()
+            .map(move |(index, finding)| (FindingId::nth(first + index), finding))
+    }
+
     /// Every text a requirement or constraint quote may come from (D30): the request, the user's
     /// constraints, task requirements and member messages, the approved plan with its conditions and
     /// amendments, and the three rules files.
@@ -777,13 +819,7 @@ impl TaskView {
             .amendments
             .iter()
             .flat_map(|a| a.instructions.as_deref());
-        let rules = [
-            &self.rules.agents_md,
-            &self.rules.claude_md,
-            &self.rules.review_md,
-        ]
-        .into_iter()
-        .flat_map(|text| text.as_deref());
+        let rules = self.rules.files().into_iter().flat_map(|(_, text)| text);
         std::iter::once(self.request.as_str())
             .chain(self.constraints.iter().map(String::as_str))
             .chain(self.requirements.iter().map(String::as_str))
@@ -836,6 +872,17 @@ impl TaskView {
     /// The commit the next round diffs from. It is the last round's, or the base.
     pub fn head(&self) -> &Sha {
         self.rounds.last().map_or(&self.base, |round| &round.commit)
+    }
+
+    /// The number the next commit's round gets. Rounds count from 1 over the task's lifetime.
+    pub(crate) fn next_round(&self) -> u32 {
+        u32::try_from(self.rounds.len() + 1).unwrap_or(u32::MAX)
+    }
+
+    /// What the next standard review diffs against. It is the last commit a standard review judged, or
+    /// the base. The engine measures the change from here, so review depth matches what the reviewer reads.
+    pub fn standard_review_base(&self) -> &Sha {
+        self.last_reviewed.as_ref().unwrap_or(&self.base)
     }
 
     pub fn is_user_decides_probes(&self) -> bool {

@@ -168,7 +168,7 @@ impl TaskView {
     pub(crate) fn start(started: &TaskStarted, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
         if [&started.request, &started.title, &started.branch]
             .iter()
-            .any(|text| text.trim().is_empty())
+            .any(|text| crate::is_blank(text))
         {
             return Err(Rejection::InvalidStart(
                 "the request, the title, and the branch must not be blank",
@@ -262,6 +262,15 @@ impl TaskView {
         self
     }
 
+    /// Moves the phase out so a reducer can take its activity by value. The caller sets the phase
+    /// again before it returns the view, so the placeholder is never seen.
+    pub(crate) fn take_phase(&mut self) -> Phase {
+        let placeholder = Phase::Closed {
+            outcome: Outcome::Cancelled,
+        };
+        std::mem::replace(&mut self.phase, placeholder)
+    }
+
     /// Plan first when the Team plans first, and otherwise start work.
     fn on_prepared(self: Box<Self>, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
         let Phase::Active {
@@ -301,22 +310,16 @@ impl TaskView {
             _ => return Err(self.misfit("step_failed")),
         };
         let detail = format!("{}: {error}", step.as_str());
-        Ok(self.pause_in_trouble(Trouble::System, left.role(), detail, left))
+        Ok(self.pause_in_trouble(Trouble::System, detail, left))
     }
 
     pub(crate) fn pause_in_trouble(
         self: Box<Self>,
         why: Trouble,
-        role: Role,
         detail: String,
         left: Activity,
     ) -> Box<TaskView> {
-        self.waiting(Waiting::Trouble {
-            why,
-            role,
-            detail,
-            left,
-        })
+        self.waiting(Waiting::Trouble { why, detail, left })
     }
 
     fn on_cleaned(self: Box<Self>) -> Result<Box<TaskView>, Rejection> {
@@ -353,10 +356,7 @@ impl TaskView {
         let activity = match activity {
             Activity::Turn { mut turn } => {
                 turn.retries.clear();
-                turn.follows = None;
-                turn.hold = None;
-                turn.message = MessageId::due_at(seq);
-                turn.due = seq;
+                turn.resend(seq, None);
                 Activity::Turn { turn }
             }
             other => other,
@@ -470,11 +470,10 @@ impl TaskView {
             return Err(self.misfit("role_change_rejected"));
         };
         self.pending_roles = None;
-        let role = then.role();
         let held = self.start_turn(then, step, step.0)?;
         let Phase::Active { activity: left } = held.phase.clone() else {
             return Err(held.misfit("role_change_rejected"));
         };
-        Ok(held.pause_in_trouble(Trouble::RoleChange, role, reason, left))
+        Ok(held.pause_in_trouble(Trouble::RoleChange, reason, left))
     }
 }

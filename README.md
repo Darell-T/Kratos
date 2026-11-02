@@ -207,12 +207,13 @@ and retains pending submissions. The factory accepts `requestTimeoutMs`, `turnTi
 
 ## Packages
 
-| Package                  | What it is                                                                                   |
-| ------------------------ | -------------------------------------------------------------------------------------------- |
-| `packages/engine`        | The background process: SQLite store, JSON and WebSocket API on `127.0.0.1`, provider logic. |
-| `packages/protocol`      | Types and schemas for the engine's API.                                                      |
-| `packages/codex`         | A typed client for `codex app-server`, with types generated from the installed Codex.        |
-| `crates/kratos-protocol` | The Rust engine's wire types: the JSON that clients and the engine exchange.                 |
-| `crates/kratos-store`    | The Rust engine's SQLite store, with migrations, backups, and the data-folder lock.          |
-| `crates/kratos-engine`   | The Rust engine: the same API as `packages/engine`.                                          |
-| `tools/kratos-client`    | A command-line client that drives either engine and prints JSON lines.                       |
+| Package                    | What it is                                                                                    |
+| -------------------------- | --------------------------------------------------------------------------------------------- |
+| `packages/engine`          | The background process: SQLite store, JSON and WebSocket API on `127.0.0.1`, provider logic.  |
+| `packages/protocol`        | Types and schemas for the engine's API.                                                       |
+| `packages/codex`           | A typed client for `codex app-server`, with types generated from the installed Codex.         |
+| `crates/kratos-protocol`   | The Rust engine's wire types: the JSON that clients and the engine exchange.                  |
+| `crates/kratos-store`      | The Rust engine's SQLite store, with migrations, backups, and the data-folder lock.           |
+| `crates/kratos-engine`     | The Rust engine: the same API as `packages/engine`.                                           |
+| `crates/kratos-api-client` | A client for the engine's API, shared by the engine's MCP server, `kratos-client`, and tests. |
+| `tools/kratos-client`      | A command-line client that drives either engine and prints JSON lines.                        |

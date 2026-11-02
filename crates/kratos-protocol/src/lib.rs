@@ -4,12 +4,42 @@
 //! fields, `kind` tags on thread events, and `type` tags on socket messages. Parsing is the
 //! validation: blank text fails to parse, so a handler never sees it.
 
-mod agents;
+/// Declares an id that is a string on the wire, with `new`, `as_str`, and `Display`. Each id gives
+/// its own doc comment and derives, and an id that refuses some strings writes its own
+/// `Deserialize`.
+macro_rules! string_id {
+    ($(#[$attribute:meta])* $name:ident) => {
+        $(#[$attribute])*
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            /// Builds the id as given, without the checks an id's own `Deserialize` may apply.
+            /// The engine checks every id it receives.
+            pub fn new(id: String) -> $name {
+                $name(id)
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
 mod api;
 mod approvals;
 mod events;
 mod messages;
+pub mod routes;
 mod skills;
+mod socket;
 mod text;
 mod threads;
 mod time;
@@ -17,31 +47,30 @@ mod turns;
 mod usage;
 mod workspaces;
 
-pub use agents::{CommandResult, OutsideWrites, Permission, Provider, ThreadSandbox, TurnChanges};
-pub use api::{ErrorBody, Health};
+pub use api::{
+    ACTING_THREAD_HEADER, CLIENT_TOKEN_FILE, DEFAULT_PORT, ErrorBody, HOME_VAR, Health, engine_home,
+};
 pub use approvals::{
     AnswerQuestion, Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest,
     AskReason, DecideApproval, ExtraAccess, NetworkAccess, PathAccess, PathAccessMode, Question,
     QuestionId, QuestionItem, QuestionOption, QuestionOutcome,
 };
-pub use events::{
-    ClientMessage, LiveUpdate, PauseReason, PostMessage, ReplySoFar, Seq, ServerMessage,
-    ThreadEvent, ThreadEventBody,
-};
+pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody};
 pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
-    QueueFull, SendMessage,
+    PostMessage, QueueFull, SendMessage,
 };
 pub use skills::{Skill, ThreadSkills};
+pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};
 pub use text::RequiredText;
 pub use threads::{
-    AccessLimit, CreateThread, ListEvents, ListThreads, Thread, ThreadDetails, ThreadId,
-    ThreadSettings,
+    AccessLimit, CreateThread, ListEvents, ListThreads, OutsideWrites, Permission, Provider,
+    Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
 };
 pub use time::Timestamp;
 pub use turns::{
-    AgentItem, CappedText, ContextUsage, FileChange, FileChangeKind, ItemStatus, TurnId,
-    TurnOutcome,
+    AgentItem, CappedText, CommandResult, ContextUsage, FileChange, FileChangeKind, ItemStatus,
+    TurnChanges, TurnId, TurnOutcome,
 };
 pub use usage::{
     AccountUsage, Allowance, Continuation, ContinuationId, ContinuationState, UsageBucket,

@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::thread::{self, JoinHandle};
 
-use kratos_client::{ApiRequest, Client};
+use kratos_api_client::{ApiRequest, Client};
 use serde_json::json;
 
 const FORBIDDEN: &str = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\

@@ -7,30 +7,14 @@
 //! instead of `needsUser`, a blocked review skipping the evidence check, and a round count that only the
 //! user's explicit requests restart) has its own tests and no reference log.
 
-use std::fs;
-use std::path::PathBuf;
-
 use kratos_teams::fold::fold;
 use kratos_teams::next_step::{Step, next_step};
 use kratos_teams::view::{Pass, Work};
 
-use crate::typescript::{Reference, fold_reference, read_reference};
+use crate::typescript::{Reference, fold_reference, read_every_reference};
 
-pub fn reference_logs() -> Vec<Reference> {
-    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference");
-    let mut files: Vec<PathBuf> = fs::read_dir(&folder)
-        .expect("the reference folder exists")
-        .map(|entry| entry.expect("a readable entry").path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
-        .collect();
-    files.sort();
-    files
-        .iter()
-        .map(|path| read_reference(path).unwrap_or_else(|error| panic!("{error}")))
-        .collect()
+fn reference_logs() -> Vec<Reference> {
+    read_every_reference().unwrap_or_else(|error| panic!("{error}"))
 }
 
 #[test]
@@ -74,13 +58,7 @@ fn the_legacy_restart_log_differs_only_where_security_was_previously_skipped() {
         .find(|log| log.name == "a restart at any fact continues the same way")
         .expect("the restart reference remains on file");
     let (rust, _) = fold_reference(&log).expect("the reference folds");
-    let differing: Vec<_> = rust
-        .iter()
-        .zip(&log.expected)
-        .filter(|(ours, theirs)| &ours.observed != *theirs)
-        .map(|(ours, _)| ours.fact)
-        .collect();
-    assert_eq!(differing, [12]);
+    assert_eq!(log.differing_facts(&rust), [12]);
     assert_eq!(log.expected[11]["phase"], "approved");
     let Step::Run { run } = next_step(&rust[11].view) else {
         panic!("the corrected checkpoint requests the outstanding review");

@@ -6,16 +6,16 @@
 //! relative values.
 
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
-use kratos_client::{
-    ApiReply, ApiRequest, Client, ClientError, Followed, Incoming, Normalizer, bench_post,
-    bench_turns,
+use kratos_api_client::{ApiReply, ApiRequest, Client, ClientError, Followed, Incoming};
+use kratos_client::{BenchError, Normalizer, bench_post, bench_turns};
+use kratos_protocol::{
+    ApprovalId, ContinuationId, DEFAULT_PORT, HOME_VAR, MessageId, QuestionId, Seq, ServerMessage,
+    ThreadId, WorkspaceId, engine_home, routes,
 };
-use kratos_protocol::{Seq, ServerMessage, ThreadId};
 use serde_json::{Value, json};
 
 pub const USAGE: &str = "\
@@ -37,7 +37,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   resume <thread-id>
   settings <thread-id> <settings-json>
   skills <thread-id>
-  approve <approval-id> <accept|acceptForSession|decline|cancel>
+  approve <approval-id> <decision>
   answer <question-id> <answers-json>
   schedule <continuation-id>
   usage
@@ -57,7 +57,6 @@ request sends exactly what it is told, for the Host, Origin, and size-cap checks
 socket-send sends one message of exactly <bytes> bytes and reports whether the engine closed
 the socket.";
 
-const DEFAULT_URL: &str = "http://127.0.0.1:4200";
 /// `subscribe` gives up when the engine sends nothing for this long.
 const SUBSCRIBE_WAIT: Duration = Duration::from_secs(60);
 /// `socket-send` waits this long to learn whether the engine closes the socket.
@@ -68,11 +67,18 @@ pub enum Failure {
     /// The command line is wrong. Nothing was sent.
     Usage(String),
     Client(ClientError),
+    Bench(BenchError),
 }
 
 impl From<ClientError> for Failure {
     fn from(error: ClientError) -> Failure {
         Failure::Client(error)
+    }
+}
+
+impl From<BenchError> for Failure {
+    fn from(error: BenchError) -> Failure {
+        Failure::Bench(error)
     }
 }
 
@@ -137,7 +143,7 @@ pub fn run(arguments: &[String]) -> Result<(), Failure> {
         .option("--url")
         .map(str::to_owned)
         .or_else(|| std::env::var("KRATOS_URL").ok())
-        .unwrap_or_else(|| DEFAULT_URL.to_owned());
+        .unwrap_or_else(|| format!("http://127.0.0.1:{DEFAULT_PORT}"));
     let mut session = Session {
         client: with_token(Client::new(&url)?),
         normalizer: args.normalize.then(Normalizer::default),
@@ -253,39 +259,37 @@ impl Session {
 }
 
 fn health(session: &mut Session, _: &Args) -> Result<(), Failure> {
-    session.get("/api/health")
+    session.get(routes::HEALTH)
 }
 
 fn workspaces(session: &mut Session, _: &Args) -> Result<(), Failure> {
-    session.get("/api/workspaces")
+    session.get(routes::WORKSPACES)
 }
 
 fn create_workspace(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let [name, path] = [0, 1].map(|index| &args.positional[index]);
-    session.post("/api/workspaces", &json!({ "name": name, "path": path }))
+    session.post(routes::WORKSPACES, &json!({ "name": name, "path": path }))
 }
 
 fn threads(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    session.get(&format!(
-        "/api/threads?workspaceId={}",
-        encode(&args.positional[0])
-    ))
+    let workspace_id = WorkspaceId::new(args.positional[0].clone());
+    session.get(&routes::threads_in(&workspace_id))
 }
 
 fn create_thread(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let [workspace_id, title, provider] = [0, 1, 2].map(|index| &args.positional[index]);
     let body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
-    session.post("/api/threads", &body)
+    session.post(routes::THREADS, &body)
 }
 
 fn post(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let path = format!("/api/threads/{}/messages", encode(&args.positional[0]));
+    let path = routes::thread_messages(&thread_id(args));
     session.post(&path, &json!({ "text": args.positional[1] }))
 }
 
 /// Text alone goes as `text`; with attachments, as `input` parts, the text first (D86).
 fn send(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let path = format!("/api/threads/{}/messages", encode(&args.positional[0]));
+    let path = routes::thread_messages(&thread_id(args));
     let text = &args.positional[1];
     let attachments: Vec<Value> = args
         .options_named("--image")
@@ -308,44 +312,50 @@ fn send(session: &mut Session, args: &Args) -> Result<(), Failure> {
 }
 
 fn thread_details(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    session.get(&format!("/api/threads/{}", encode(&args.positional[0])))
+    session.get(&routes::thread(&thread_id(args)))
 }
 
-fn message_path(args: &Args, action: &str) -> String {
-    let [thread_id, message_id] = [0, 1].map(|index| encode(&args.positional[index]));
-    format!("/api/threads/{thread_id}/messages/{message_id}{action}")
+fn thread_id(args: &Args) -> ThreadId {
+    ThreadId::new(args.positional[0].clone())
+}
+
+fn message_id(args: &Args) -> MessageId {
+    MessageId::new(args.positional[1].clone())
 }
 
 fn steer(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    session.post(&message_path(args, "/steer"), &json!({}))
+    let path = routes::message_steer(&thread_id(args), &message_id(args));
+    session.post(&path, &json!({}))
 }
 
 fn remove(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let reply = session.client.delete(&message_path(args, ""))?;
+    let reply = session
+        .client
+        .delete(&routes::message(&thread_id(args), &message_id(args)))?;
     session.print_reply(reply);
     Ok(())
 }
 
 fn retry(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    session.post(&message_path(args, "/retry"), &json!({}))
+    let path = routes::message_retry(&thread_id(args), &message_id(args));
+    session.post(&path, &json!({}))
 }
 
 fn discard(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    session.post(&message_path(args, "/discard"), &json!({}))
+    let path = routes::message_discard(&thread_id(args), &message_id(args));
+    session.post(&path, &json!({}))
 }
 
 fn stop(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let path = format!("/api/threads/{}/stop", encode(&args.positional[0]));
-    session.post(&path, &json!({}))
+    session.post(&routes::thread_stop(&thread_id(args)), &json!({}))
 }
 
 fn resume(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let path = format!("/api/threads/{}/resume", encode(&args.positional[0]));
-    session.post(&path, &json!({}))
+    session.post(&routes::thread_resume(&thread_id(args)), &json!({}))
 }
 
 fn settings(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let path = format!("/api/threads/{}/settings", encode(&args.positional[0]));
+    let path = routes::thread_settings(&thread_id(args));
     let body = json_argument(&args.positional[1], "settings-json")?;
     let reply = session.client.put(&path, &body)?;
     session.print_reply(reply);
@@ -353,47 +363,35 @@ fn settings(session: &mut Session, args: &Args) -> Result<(), Failure> {
 }
 
 fn skills(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    session.get(&format!(
-        "/api/threads/{}/skills",
-        encode(&args.positional[0])
-    ))
+    session.get(&routes::thread_skills(&thread_id(args)))
 }
 
 fn approve(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let path = format!("/api/approvals/{}", encode(&args.positional[0]));
+    let path = routes::approval(&ApprovalId::new(args.positional[0].clone()));
     session.post(&path, &json!({ "decision": args.positional[1] }))
 }
 
 fn answer(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let path = format!("/api/questions/{}", encode(&args.positional[0]));
+    let path = routes::question(&QuestionId::new(args.positional[0].clone()));
     let answers = json_argument(&args.positional[1], "answers-json")?;
     session.post(&path, &json!({ "answers": answers }))
 }
 
 fn schedule(session: &mut Session, args: &Args) -> Result<(), Failure> {
-    let path = format!(
-        "/api/continuations/{}/schedule",
-        encode(&args.positional[0])
-    );
+    let path = routes::continuation_schedule(&ContinuationId::new(args.positional[0].clone()));
     session.post(&path, &json!({}))
 }
 
 fn usage_report(session: &mut Session, _: &Args) -> Result<(), Failure> {
-    session.get("/api/usage")
+    session.get(routes::USAGE)
 }
 
 fn json_argument(text: &str, name: &str) -> Result<Value, Failure> {
     serde_json::from_str(text).or_else(|_| usage(format!("{name} must be JSON, got {text:?}")))
 }
 
-/// `client` with the token of the engine on `$KRATOS_HOME`, else on `.kratos` in the user's home
-/// folder.
 fn with_token(client: Client) -> Client {
-    let home = std::env::var_os("KRATOS_HOME")
-        .filter(|home| !home.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::home_dir().map(|home| home.join(".kratos")));
-    match home {
+    match engine_home(std::env::var_os(HOME_VAR), std::env::home_dir().as_deref()) {
         Some(home) => client.with_token_from(&home),
         None => client,
     }
@@ -501,17 +499,6 @@ fn split_header(header: &str) -> Result<(&str, &str), Failure> {
         Some((name, value)) => Ok((name.trim(), value.trim())),
         None => usage(format!("a header looks like name:value, got {header:?}")),
     }
-}
-
-fn encode(text: &str) -> String {
-    text.bytes()
-        .map(|byte| match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                char::from(byte).to_string()
-            }
-            _ => format!("%{byte:02X}"),
-        })
-        .collect()
 }
 
 /// A JSON body of exactly `size` bytes, `{"text":"xxx…"}`, for probing the engine's body cap.

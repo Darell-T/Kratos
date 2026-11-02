@@ -3,11 +3,16 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kratos_protocol::{Seq, ServerMessage, Thread, ThreadEvent, ThreadId, Workspace};
+use kratos_protocol::{
+    CreateThread, CreateWorkspace, Provider, RequiredText, Seq, ServerMessage, ThreadEvent,
+    ThreadId, routes,
+};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::{Client, ClientError, EventSocket, Incoming};
+use kratos_api_client::{Client, EventSocket, Incoming};
+
+use crate::BenchError;
 
 const ARRIVAL_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -28,7 +33,7 @@ pub struct BenchReport {
 /// is timed from just before its POST to the arrival of its event on the socket.
 ///
 /// The run fails, and prints no number, when an event is missing, repeated, or out of order.
-pub fn bench_post(client: &Client, messages: NonZeroUsize) -> Result<BenchReport, ClientError> {
+pub fn bench_post(client: &Client, messages: NonZeroUsize) -> Result<BenchReport, BenchError> {
     let thread_id = create_thread(client)?;
     let mut socket = client.connect_events(&[])?;
     socket.subscribe(&thread_id, Seq::BEFORE_FIRST)?;
@@ -41,27 +46,36 @@ pub fn bench_post(client: &Client, messages: NonZeroUsize) -> Result<BenchReport
     let latencies = match_arrivals(&starts, &arrived)?;
     reader
         .join()
-        .map_err(|_| ClientError::Bench("the socket reader panicked".into()))?;
+        .map_err(|_| BenchError::Failed("the socket reader panicked".into()))?;
     Ok(BenchReport::from_latencies(latencies))
 }
 
-fn create_thread(client: &Client) -> Result<ThreadId, ClientError> {
-    let temp_folder = std::env::temp_dir().to_string_lossy().into_owned();
-    let workspace_body = json!({ "name": "bench", "path": temp_folder });
-    let workspace: Workspace = client.post("/api/workspaces", &workspace_body)?.parse()?;
+fn create_thread(client: &Client) -> Result<ThreadId, BenchError> {
+    let workspace = client.create_workspace(&temp_workspace("bench"))?;
     // A Claude thread keeps R2's plain message log, the path this probe measures.
-    let thread_body =
-        json!({ "workspaceId": workspace.id, "title": "bench", "provider": "claude" });
-    let thread: Thread = client.post("/api/threads", &thread_body)?.parse()?;
+    let thread = client.create_thread(&CreateThread {
+        workspace_id: workspace.id,
+        title: RequiredText::new("bench").expect("the title is not blank"),
+        provider: Provider::Claude,
+        settings: None,
+    })?;
     Ok(thread.id)
+}
+
+pub(crate) fn temp_workspace(name: &str) -> CreateWorkspace {
+    CreateWorkspace {
+        name: RequiredText::new(name).expect("the name is not blank"),
+        path: RequiredText::new(&std::env::temp_dir().to_string_lossy())
+            .expect("the temporary folder has a path"),
+    }
 }
 
 fn post_all(
     client: &Client,
     thread_id: &ThreadId,
     messages: usize,
-) -> Result<Vec<Instant>, ClientError> {
-    let path = format!("/api/threads/{thread_id}/messages");
+) -> Result<Vec<Instant>, BenchError> {
+    let path = routes::thread_messages(thread_id);
     let mut starts = Vec::with_capacity(messages);
     for number in 1..=messages {
         starts.push(Instant::now());
@@ -75,10 +89,10 @@ fn post_all(
 fn match_arrivals(
     starts: &[Instant],
     arrived: &Receiver<Arrival>,
-) -> Result<Vec<Duration>, ClientError> {
+) -> Result<Vec<Duration>, BenchError> {
     let mut latencies = Vec::with_capacity(starts.len());
     for (index, start) in starts.iter().enumerate() {
-        let silent = || ClientError::Bench(format!("no event arrived within {ARRIVAL_TIMEOUT:?}"));
+        let silent = || BenchError::Failed(format!("no event arrived within {ARRIVAL_TIMEOUT:?}"));
         let (seq, at) = arrived
             .recv_timeout(ARRIVAL_TIMEOUT)
             .map_err(|_| silent())??;
@@ -88,17 +102,17 @@ fn match_arrivals(
     Ok(latencies)
 }
 
-fn expect_seq(seq: Seq, expected: usize) -> Result<(), ClientError> {
+fn expect_seq(seq: Seq, expected: usize) -> Result<(), BenchError> {
     if seq.get() == expected as u64 {
         return Ok(());
     }
-    Err(ClientError::Bench(format!(
+    Err(BenchError::Failed(format!(
         "event {} arrived where event {expected} belongs",
         seq.get()
     )))
 }
 
-type Arrival = Result<(Seq, Instant), ClientError>;
+type Arrival = Result<(Seq, Instant), BenchError>;
 
 fn read_arrivals(mut socket: EventSocket, expected: usize, arrivals: &Sender<Arrival>) {
     for _ in 0..expected {
@@ -107,12 +121,12 @@ fn read_arrivals(mut socket: EventSocket, expected: usize, arrivals: &Sender<Arr
         let arrival = match incoming {
             Ok(Some(Incoming::Text(text))) => match serde_json::from_str(&text) {
                 Ok(ServerMessage::Event { event }) => Ok((event.seq, at)),
-                _ => Err(ClientError::Bench(format!("expected an event, got {text}"))),
+                _ => Err(BenchError::Failed(format!("expected an event, got {text}"))),
             },
-            Ok(other) => Err(ClientError::Bench(format!(
+            Ok(other) => Err(BenchError::Failed(format!(
                 "expected an event, got {other:?}"
             ))),
-            Err(error) => Err(error),
+            Err(error) => Err(error.into()),
         };
         let failed = arrival.is_err();
         if arrivals.send(arrival).is_err() || failed {

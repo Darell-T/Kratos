@@ -7,29 +7,57 @@
 
 mod tools;
 mod transcript;
+mod wait;
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
-use kratos_client::Client;
-use kratos_protocol::ThreadId;
+use kratos_api_client::Client;
+use kratos_codex_client::RequestId;
+use kratos_protocol::{HOME_VAR, ThreadId};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::config::{PORT_VAR, THREAD_ID_VAR};
+
 pub const MAX_WAIT_SECONDS: u64 = 1800;
-/// The variable that names the thread whose agent the server serves.
-pub const THREAD_ID_VAR: &str = "KRATOS_THREAD_ID";
+pub const SUBCOMMAND: &str = "mcp";
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const PARSE_ERROR: i64 = -32700;
+const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
+const INVALID_PARAMS: i64 = -32602;
 
 const INSTRUCTIONS: &str = "Tools for working with the other threads in Kratos: list and read \
 threads, start new ones, send them messages, wait for their turns, and answer what they ask. The \
 receiver of a message answers in its own thread, so read the answer with wait_for_turn or \
 read_thread.";
+
+/// How Codex starts this server: the engine's own binary, told the engine's data folder and port.
+#[derive(Clone, Debug)]
+pub struct McpServer {
+    pub program: PathBuf,
+    pub home: PathBuf,
+    pub port: u16,
+}
+
+impl McpServer {
+    /// The command, arguments, and environment that start the server for `thread_id`, as Codex's
+    /// `mcp_servers` entry spells them.
+    pub fn launch(&self, thread_id: &ThreadId) -> Value {
+        json!({
+            "command": self.program,
+            "args": [SUBCOMMAND],
+            "env": { (HOME_VAR): self.home, (PORT_VAR): self.port.to_string(),
+                     (THREAD_ID_VAR): thread_id.as_str() },
+        })
+    }
+}
 
 pub struct Caller {
     client: Client,
@@ -38,7 +66,10 @@ pub struct Caller {
 
 impl Caller {
     pub fn new(client: Client, thread_id: ThreadId) -> Caller {
-        Caller { client, thread_id }
+        Caller {
+            client: client.acting_for(thread_id.clone()),
+            thread_id,
+        }
     }
 }
 
@@ -46,6 +77,21 @@ impl Caller {
 struct Call<'a> {
     caller: &'a Caller,
     cancelled: &'a AtomicBool,
+}
+
+/// A JSON-RPC message from Codex. One without an id is a notification, which gets no answer.
+#[derive(Deserialize)]
+struct RpcRequest {
+    id: Option<RequestId>,
+    method: String,
+    #[serde(default)]
+    params: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Cancelled {
+    request_id: RequestId,
 }
 
 /// Serves until `input` ends. Each request is answered on its own thread, so a long
@@ -59,19 +105,26 @@ pub fn serve(caller: &Caller, input: impl BufRead, output: impl Write + Send) ->
             if line.trim().is_empty() {
                 continue;
             }
-            let request: Value = match serde_json::from_str(&line) {
+            let request: RpcRequest = match serde_json::from_str(&line) {
                 Ok(request) => request,
                 Err(error) => {
-                    let failed = failure(Value::Null, PARSE_ERROR, &error.to_string());
-                    write(&output, &failed)?;
+                    let code = if error.is_data() {
+                        INVALID_REQUEST
+                    } else {
+                        PARSE_ERROR
+                    };
+                    write(&output, &failure(None, code, &error.to_string()))?;
                     continue;
                 }
             };
-            if request["method"] == "notifications/cancelled" {
-                running.cancel(&request["params"]["requestId"]);
+            if request.method == "notifications/cancelled" {
+                // A notification gets no answer, so one naming no request is dropped.
+                if let Ok(Cancelled { request_id }) = serde_json::from_value(request.params) {
+                    running.cancel(&request_id);
+                }
                 continue;
             }
-            let Some(id) = request.get("id").cloned() else {
+            let Some(id) = request.id.clone() else {
                 continue;
             };
             let cancelled = running.start(&id);
@@ -81,7 +134,7 @@ pub fn serve(caller: &Caller, input: impl BufRead, output: impl Write + Send) ->
                     caller,
                     cancelled: &cancelled,
                 };
-                let answer = answer(&call, id.clone(), &request);
+                let answer = answer(&call, request);
                 running.finish(&id);
                 // A closed stdout means Codex has gone, and the loop above ends at its EOF.
                 let _ = write(output, &answer);
@@ -93,26 +146,26 @@ pub fn serve(caller: &Caller, input: impl BufRead, output: impl Write + Send) ->
 
 /// The requests being answered, by their JSON-RPC id.
 #[derive(Default)]
-struct Running(Mutex<HashMap<String, Arc<AtomicBool>>>);
+struct Running(Mutex<HashMap<RequestId, Arc<AtomicBool>>>);
 
 impl Running {
-    fn start(&self, id: &Value) -> Arc<AtomicBool> {
+    fn start(&self, id: &RequestId) -> Arc<AtomicBool> {
         let cancelled = Arc::new(AtomicBool::new(false));
-        self.lock().insert(id.to_string(), cancelled.clone());
+        self.lock().insert(id.clone(), cancelled.clone());
         cancelled
     }
 
-    fn cancel(&self, id: &Value) {
-        if let Some(cancelled) = self.lock().get(&id.to_string()) {
+    fn cancel(&self, id: &RequestId) {
+        if let Some(cancelled) = self.lock().get(id) {
             cancelled.store(true, Ordering::Relaxed);
         }
     }
 
-    fn finish(&self, id: &Value) {
-        self.lock().remove(&id.to_string());
+    fn finish(&self, id: &RequestId) {
+        self.lock().remove(id);
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Arc<AtomicBool>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<RequestId, Arc<AtomicBool>>> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -123,9 +176,9 @@ fn write(output: &Mutex<impl Write>, message: &Value) -> io::Result<()> {
     output.flush()
 }
 
-fn answer(call: &Call, id: Value, request: &Value) -> Value {
-    let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
-    let result = match request["method"].as_str().unwrap_or_default() {
+fn answer(call: &Call, request: RpcRequest) -> Value {
+    let RpcRequest { id, method, params } = request;
+    let result = match method.as_str() {
         "initialize" => json!({
             "protocolVersion": params["protocolVersion"].as_str().unwrap_or(PROTOCOL_VERSION),
             "capabilities": { "tools": {} },
@@ -134,12 +187,57 @@ fn answer(call: &Call, id: Value, request: &Value) -> Value {
         }),
         "ping" => json!({}),
         "tools/list" => json!({ "tools": tools::list() }),
-        "tools/call" => tools::call(call, &params),
+        "tools/call" => match serde_json::from_value(params) {
+            Ok(tool_call) => tools::call(call, tool_call),
+            Err(error) => return failure(id, INVALID_PARAMS, &error.to_string()),
+        },
         method => return failure(id, METHOD_NOT_FOUND, &format!("unknown method {method}")),
     };
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-fn failure(id: Value, code: i64, message: &str) -> Value {
+fn failure(id: Option<RequestId>, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_request_of_the_wrong_shape_answers_a_json_rpc_error() {
+        // Catches a tools/call without a tool name run as a call to the tool named "", and a
+        // message with no method answered as a call to an unknown method.
+        let client = Client::new("http://127.0.0.1:9").unwrap();
+        let caller = Caller::new(client, ThreadId::new("t".to_owned()));
+        let input = [
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":2}"#,
+            "not json",
+        ]
+        .join("\n");
+        let mut output = Vec::new();
+        serve(&caller, input.as_bytes(), &mut output).unwrap();
+
+        let mut answers: Vec<(Value, i64)> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .map(|answer| {
+                (
+                    answer["id"].clone(),
+                    answer["error"]["code"].as_i64().unwrap(),
+                )
+            })
+            .collect();
+        answers.sort_by_key(|(_, code)| *code);
+        assert_eq!(
+            answers,
+            [
+                (Value::Null, PARSE_ERROR),
+                (json!(1), INVALID_PARAMS),
+                (Value::Null, INVALID_REQUEST),
+            ]
+        );
+    }
 }

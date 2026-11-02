@@ -2,10 +2,10 @@
 //! the diff parser that says which lines a round changed. Ported from `teams-evidence.test.ts`.
 
 use kratos_protocol::CommandResult;
+use kratos_teams::diff::{Diff, GIT_DIFF_ARGS, LineRange};
 use kratos_teams::evidence::{
-    CommandJudgment, Diff, DropWhy, EvidenceCheck, GIT_DIFF_ARGS, LineRange, LocationProblem,
-    RerunVerdict, Seen, Start, finish_check, judge_command, location_problem, quote_appears, rerun,
-    start_check,
+    CommandJudgment, DropWhy, EvidenceCheck, LocationProblem, RerunVerdict, Seen, Start,
+    finish_check, judge_command, location_problem, quote_appears, rerun, start_check,
 };
 use kratos_teams::reports::Location;
 
@@ -316,9 +316,9 @@ fn the_diff_parser_reads_changed_ranges_and_added_lines_from_git_diff_u0() {
         diff.files.iter().all(|file| file.path != "old.ts"),
         "a deleted file has no new side"
     );
-    assert!(diff.touches(&location("a.ts", 4)));
-    assert!(!diff.touches(&location("./a.ts", 1)));
-    assert!(!diff.touches(&location("other.ts", 1)));
+    assert!(diff.touches("a.ts", 4));
+    assert!(!diff.touches("./a.ts", 1));
+    assert!(!diff.touches("other.ts", 1));
 }
 
 #[test]

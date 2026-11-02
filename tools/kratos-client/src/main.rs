@@ -12,9 +12,12 @@ fn main() -> ExitCode {
             eprintln!("{message}\n\n{}", commands::USAGE);
             ExitCode::from(2)
         }
-        Err(Failure::Client(error)) => {
-            eprintln!("{}", serde_json::json!({ "error": error.to_string() }));
-            ExitCode::FAILURE
-        }
+        Err(Failure::Client(error)) => failed(&error),
+        Err(Failure::Bench(error)) => failed(&error),
     }
+}
+
+fn failed(error: &dyn std::error::Error) -> ExitCode {
+    eprintln!("{}", serde_json::json!({ "error": error.to_string() }));
+    ExitCode::FAILURE
 }

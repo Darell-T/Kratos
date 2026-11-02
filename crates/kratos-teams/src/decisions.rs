@@ -1,8 +1,9 @@
 //! What the user may do, when, and what each choice does to the task.
 //!
-//! `allowed_decisions` is the list the engine shows. `check_decision` is the check it runs when a
-//! decision arrives, and it is a dry run of the real thing, so what is allowed and what applies cannot
-//! drift apart. `apply_decision` is the real thing, which the fold calls for a `UserDecided` fact.
+//! `allowed_decisions` is the list the engine shows. When a decision arrives, the engine checks its
+//! `UserDecided` fact with `TaskView::accepts`, which is a dry run of the real thing, so what is allowed
+//! and what applies cannot drift apart. `apply_decision` is the real thing, which the fold calls for
+//! that fact.
 //!
 //! A cancel is available whenever a task is alive. A role change is available until its application
 //! checkpoint starts. User messages are facts that never change the phase.
@@ -18,7 +19,7 @@ use crate::reports::{FindingId, RulingVerdict};
 use crate::task_plan::Amendment;
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, Finding, FindingStatus, Hold, Phase,
-    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, TaskView, Turn,
+    PlanState, Probe, ProbeRejection, Resolution, RulingRecord, Stop, TaskView, Turn,
     UsageLimitAsk, Waiting, Work,
 };
 
@@ -245,17 +246,7 @@ fn trouble_decisions(left: &Activity) -> Vec<DecisionKind> {
 
 /// `KeepProbes` is offered only while the user decides and a probe still waits for a choice.
 fn probes_offered(view: &TaskView) -> bool {
-    view.is_user_decides_probes()
-        && view
-            .probes
-            .iter()
-            .any(|probe| probe.status == ProbeStatus::Offered)
-}
-
-/// Whether `decision` would apply right now, which needs the phase to allow it and its content to be
-/// valid. The engine calls this when it records a decision.
-pub fn check_decision(view: &TaskView, decision: &Decision) -> Result<(), Rejection> {
-    apply_decision(Box::new(view.clone()), decision.clone(), view.seq.next()).map(drop)
+    view.is_user_decides_probes() && view.has_offered_probes()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -288,10 +279,7 @@ pub(crate) fn apply_decision(
 ) -> Result<Box<TaskView>, Rejection> {
     let kind = decision.kind();
     if !allowed_decisions(&view).contains(&kind) {
-        return Err(Rejection::NotAllowed {
-            decision: kind,
-            phase: view.phase.name(),
-        });
+        return Err(not_allowed(&view, kind));
     }
     let invalid = |reason: &str| Rejection::InvalidDecision {
         decision: kind,
@@ -322,8 +310,15 @@ pub(crate) fn apply_decision(
 
 type Invalid<'a> = &'a dyn Fn(&str) -> Rejection;
 
+fn not_allowed(view: &TaskView, decision: DecisionKind) -> Rejection {
+    Rejection::NotAllowed {
+        decision,
+        phase: view.phase.name(),
+    }
+}
+
 fn not_blank(text: &str, what: &str, invalid: Invalid<'_>) -> Result<(), Rejection> {
-    if text.trim().is_empty() {
+    if crate::is_blank(text) {
         return Err(invalid(&format!("{what} must not be blank")));
     }
     Ok(())
@@ -344,7 +339,7 @@ fn approve_plan(
         revision,
     } = view.plan.clone()
     else {
-        return Err(view.misfit("approve_plan"));
+        return Err(not_allowed(&view, DecisionKind::ApprovePlan));
     };
     view.plan = PlanState::Approved {
         plan,
@@ -368,7 +363,7 @@ fn revise_plan(
 ) -> Result<Box<TaskView>, Rejection> {
     not_blank(&feedback, "the feedback", invalid)?;
     let PlanState::Drafted { author, .. } = &view.plan else {
-        return Err(view.misfit("revise_plan"));
+        return Err(not_allowed(&view, DecisionKind::RevisePlan));
     };
     let work = Work::Plan {
         author: *author,
@@ -387,7 +382,7 @@ fn answer(
 ) -> Result<Box<TaskView>, Rejection> {
     not_blank(&text, "the answer", invalid)?;
     let Some(question) = view.pending_question() else {
-        return Err(view.misfit("answer"));
+        return Err(not_allowed(&view, DecisionKind::Answer));
     };
     let resolution = Resolution::Answered {
         question: question.text.clone(),
@@ -423,7 +418,7 @@ fn rule(
                     ..
                 },
         } => (disputed.clone(), commit.clone()),
-        _ => return Err(view.misfit("rule")),
+        _ => return Err(not_allowed(&view, DecisionKind::Rule)),
     };
     if let Some(stranger) = not_bug.iter().find(|id| !disputed.contains(id)) {
         return Err(invalid(&format!("{stranger} is not a disputed finding")));
@@ -451,7 +446,7 @@ fn plan_change(
     seq: FactSeq,
 ) -> Result<Box<TaskView>, Rejection> {
     let Some(request) = view.pending_plan_change().cloned() else {
-        return Err(view.misfit("plan_change"));
+        return Err(not_allowed(&view, DecisionKind::PlanChange));
     };
     if response == PlanChangeResponse::Replan {
         return replan(view, &request.reason, instructions, seq);
@@ -527,7 +522,7 @@ fn resume(view: Box<TaskView>, seq: FactSeq) -> Result<Box<TaskView>, Rejection>
         waiting: Waiting::Trouble { left, .. },
     } = view.phase.clone()
     else {
-        return Err(view.misfit("resume"));
+        return Err(not_allowed(&view, DecisionKind::Resume));
     };
     Ok(view.retake(left, seq))
 }
@@ -548,21 +543,10 @@ fn keep_probes(
     seq: FactSeq,
     invalid: Invalid<'_>,
 ) -> Result<Box<TaskView>, Rejection> {
-    let is_offered = |path: &String, probes: &[Probe]| {
-        probes
-            .iter()
-            .any(|probe| probe.path == *path && probe.status == ProbeStatus::Offered)
-    };
-    if let Some(stranger) = keep.iter().find(|path| !is_offered(path, &view.probes)) {
+    if let Some(stranger) = keep.iter().find(|path| !view.offers_probe(path)) {
         return Err(invalid(&format!("{stranger} is not an offered probe")));
     }
-    for probe in &mut view.probes {
-        if probe.status == ProbeStatus::Offered && !keep.contains(&probe.path) {
-            probe.status = ProbeStatus::Rejected {
-                reason: ProbeRejection::UserDeclined,
-            };
-        }
-    }
+    view.reject_offered_probes(keep, ProbeRejection::UserDeclined);
     if keep.is_empty() {
         return Ok(view);
     }
@@ -590,28 +574,34 @@ fn reassign(
     Ok(view)
 }
 
-fn usage_limit_turn(view: &TaskView) -> Result<Turn, Rejection> {
+fn usage_limit_turn(view: &TaskView, decision: DecisionKind) -> Result<(Turn, Stop), Rejection> {
     match &view.phase {
         Phase::Waiting {
-            waiting: Waiting::UsageLimit { turn, .. },
-        } => Ok(turn.clone()),
-        _ => Err(view.misfit("a usage-limit decision")),
+            waiting: Waiting::UsageLimit { turn, stop, .. },
+        } => Ok((turn.clone(), stop.clone())),
+        _ => Err(not_allowed(view, decision)),
     }
 }
 
 fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
-    let mut turn = usage_limit_turn(&view)?;
-    if let Some(Hold::ToScheduler { stop }) = &mut turn.hold {
-        stop.user_accepted_wait = true;
-    }
+    let (mut turn, mut stop) = usage_limit_turn(&view, DecisionKind::KeepWaiting)?;
+    stop.user_accepted_wait = true;
+    turn.hold = Some(Hold::ToScheduler { stop });
     Ok(view.active(Activity::Turn { turn }))
 }
 
 fn handoff(view: Box<TaskView>, approved: bool) -> Result<Box<TaskView>, Rejection> {
-    let mut turn = usage_limit_turn(&view)?;
-    if let (true, Some(Hold::ToScheduler { stop })) = (approved, turn.hold.clone()) {
-        turn.hold = Some(Hold::HandOff { stop });
-    }
+    let decision = if approved {
+        DecisionKind::ApproveHandoff
+    } else {
+        DecisionKind::DeclineHandoff
+    };
+    let (mut turn, stop) = usage_limit_turn(&view, decision)?;
+    turn.hold = Some(if approved {
+        Hold::HandOff { stop }
+    } else {
+        Hold::ToScheduler { stop }
+    });
     Ok(view.active(Activity::Turn { turn }))
 }
 

@@ -7,18 +7,17 @@
 use std::collections::BTreeMap;
 
 use crate::evidence::{EvidenceCheck, Rerun, RerunVerdict};
-use crate::facts::{ChangeSize, Depth, EvidenceChecked, FactSeq, ProbePolicy, ProbeRun, Sha};
+use crate::facts::{ChangeSize, Depth, EvidenceChecked, FactSeq, ProbeRun, Sha};
 use crate::fold::Rejection;
 use crate::reports::{
-    AddedProbe, FindingId, FindingReport, ImplementerDone, Kind, Response, ResponseOutcome,
-    ReviewDone, RulingVerdict, RulingsDone, Severity, Verdict,
+    FindingId, FindingReport, ImplementerDone, Kind, Response, ResponseOutcome, ReviewDone,
+    RulingVerdict, RulingsDone, Severity, Verdict,
 };
 use crate::security_triggers::MAX_HITS;
-use crate::task_plan::{CopyProblem, probe_copy_problem};
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, ClosedHow, FIX_ATTEMPTS, Finding,
-    FindingStatus, FindingsPause, ListedWhy, Note, Pass, PassKind, Phase, Probe, ProbeRejection,
-    ProbeStatus, Retry, Review, ReviewJob, Round, RulingRecord, TaskView, Turn, Waiting, Work,
+    FindingStatus, FindingsPause, ListedWhy, Note, Pass, PassKind, Phase, Review, ReviewJob, Round,
+    RulingRecord, TaskView, Turn, Waiting, Work,
 };
 
 /// A report of the reviewer, taken out of the view for checking.
@@ -46,76 +45,36 @@ impl TaskView {
 
     /// `None` when the responses answer every open finding exactly once, and each dispute has a reason.
     pub(crate) fn responses_problem(&self, responses: &[Response]) -> Option<String> {
-        let answers = |finding: &Finding| {
-            let id = finding.id;
-            responses.iter().filter(move |r| r.finding == id)
-        };
-        let open: Vec<&Finding> = self.open_findings().collect();
-        let ids_where = |wanted: &dyn Fn(&Finding) -> bool| -> String {
-            let ids: Vec<String> = open
-                .iter()
-                .filter(|finding| wanted(finding))
-                .map(|finding| finding.id.to_string())
-                .collect();
-            ids.join(", ")
-        };
-        let is_blank_dispute = |response: &Response| matches!(&response.outcome, ResponseOutcome::Disputed { reason } if reason.trim().is_empty());
-        let missing = ids_where(&|f| answers(f).count() == 0);
-        let repeated = ids_where(&|f| answers(f).count() > 1);
-        let unexplained = ids_where(&|f| answers(f).any(is_blank_dispute));
-        let problems: Vec<String> = [
-            (!missing.is_empty())
-                .then(|| format!("Answer every open finding in responses. Missing: {missing}.")),
-            (!repeated.is_empty())
-                .then(|| format!("Answer each finding once. Answered more than once: {repeated}.")),
-            (!unexplained.is_empty())
-                .then(|| format!("Give a reason for each dispute: {unexplained}.")),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        (!problems.is_empty()).then(|| problems.join(" "))
-    }
-
-    /// `None` when the probes an implementer added are ones it may add, and name probes the reviewer
-    /// left. Only the implementer adds a probe to the project, and only when the user chose it or
-    /// delegated the choice (D78).
-    pub(crate) fn probes_problem(&self, work: &Work, done: &ImplementerDone) -> Option<String> {
-        let picks = match work {
-            Work::Implement {
-                brief: Brief::KeepProbes { paths },
-            } => Some(paths),
-            _ => None,
-        };
-        let delegated = matches!(self.policy.probes, ProbePolicy::Delegated { .. });
-        let added: Vec<&str> = done.added_probes.iter().map(|p| p.from.as_str()).collect();
-        if picks.is_none() && !delegated {
-            return (!added.is_empty())
-                .then(|| "added_probes: you may not add probes now. Leave it empty.".to_owned());
-        }
-        if let Some(unknown) = added.iter().find(|from| !self.offers_probe(from)) {
-            return Some(format!(
-                "added_probes: {unknown} is not a probe the reviewer left."
-            ));
-        }
-        let missing: Vec<&str> = picks
-            .into_iter()
-            .flatten()
-            .map(String::as_str)
-            .filter(|path| !added.contains(path))
-            .collect();
-        (!missing.is_empty()).then(|| {
-            format!(
-                "added_probes: add each probe the user chose. Missing: {}.",
-                missing.join(", ")
-            )
-        })
-    }
-
-    fn offers_probe(&self, path: &str) -> bool {
-        self.probes
+        let open: Vec<FindingId> = self.open_findings().map(|finding| finding.id).collect();
+        let Coverage {
+            missing, repeated, ..
+        } = coverage(&open, responses.iter().map(|r| r.finding));
+        let is_blank_dispute = |response: &Response| matches!(&response.outcome, ResponseOutcome::Disputed { reason } if crate::is_blank(reason));
+        let unexplained: Vec<FindingId> = open
             .iter()
-            .any(|probe| probe.path == path && probe.status == ProbeStatus::Offered)
+            .filter(|id| {
+                responses
+                    .iter()
+                    .any(|r| r.finding == **id && is_blank_dispute(r))
+            })
+            .copied()
+            .collect();
+        problems([
+            (!missing.is_empty()).then(|| {
+                format!(
+                    "Answer every open finding in responses. Missing: {}.",
+                    id_list(&missing)
+                )
+            }),
+            (!repeated.is_empty()).then(|| {
+                format!(
+                    "Answer each finding once. Answered more than once: {}.",
+                    id_list(&repeated)
+                )
+            }),
+            (!unexplained.is_empty())
+                .then(|| format!("Give a reason for each dispute: {}.", id_list(&unexplained))),
+        ])
     }
 
     // -----------------------------------------------------------------------------------------
@@ -142,7 +101,7 @@ impl TaskView {
         }
         view.changed_files.extend(files.iter().cloned());
         view.rounds.push(Round {
-            n: u32::try_from(view.rounds.len() + 1).unwrap_or(u32::MAX),
+            n: view.next_round(),
             commit: commit.clone(),
             report,
             files,
@@ -158,13 +117,7 @@ impl TaskView {
     }
 
     fn take_committing(mut self: Box<Self>) -> Result<(Box<TaskView>, AfterCommit), Rejection> {
-        let phase = std::mem::replace(
-            &mut self.phase,
-            Phase::Closed {
-                outcome: crate::facts::Outcome::Cancelled,
-            },
-        );
-        match phase {
+        match self.take_phase() {
             Phase::Active {
                 activity: Activity::Committing { then, .. },
             } => Ok((self, then)),
@@ -219,10 +172,7 @@ impl TaskView {
         let job = ReviewJob {
             pass: Pass::Standard,
             commit,
-            diff_base: self
-                .last_reviewed
-                .clone()
-                .unwrap_or_else(|| self.base.clone()),
+            diff_base: self.standard_review_base().clone(),
             depth: if thorough {
                 Depth::Thorough
             } else {
@@ -232,109 +182,13 @@ impl TaskView {
         self.begin_step(Work::Review { job }, seq)
     }
 
-    // -----------------------------------------------------------------------------------------
-    // Probes.
-    // -----------------------------------------------------------------------------------------
-
-    /// Decides the fate of each probe the implementer added. Git showed whether it fails before the fix
-    /// and passes after it. The constraints are the user's, and the rules apply them here, so the
-    /// engine cannot keep a probe the user refused.
-    fn apply_probe_runs(
-        &mut self,
-        added: &[AddedProbe],
-        runs: &[ProbeRun],
-    ) -> Result<(), Rejection> {
-        for probe in added {
-            let Some(run) = runs.iter().find(|run| run.from == probe.from) else {
-                return Err(Rejection::InvalidFact(format!(
-                    "committed has no probe run for {}",
-                    probe.from
-                )));
-            };
-            let status = self.judge_added_probe(probe, run);
-            if let Some(entry) = self.probes.iter_mut().find(|p| p.path == probe.from) {
-                entry.status = status;
-            }
-        }
-        Ok(())
-    }
-
-    fn judge_added_probe(&self, probe: &AddedProbe, run: &ProbeRun) -> ProbeStatus {
-        let ProbePolicy::Delegated { constraints } = &self.policy.probes else {
-            return Self::probe_by_run(probe, run);
-        };
-        match probe_copy_problem(constraints, &self.scope(), &probe.to) {
-            Some(CopyProblem::OutsideAllowedPaths) => ProbeStatus::Rejected {
-                reason: ProbeRejection::OutsideAllowedPaths,
-            },
-            Some(CopyProblem::OutsideScope) => ProbeStatus::Rejected {
-                reason: ProbeRejection::OutsideScope,
-            },
-            None => Self::probe_by_run(probe, run),
-        }
-    }
-
-    /// A kept probe must fail before the fix and pass after it.
-    fn probe_by_run(probe: &AddedProbe, run: &ProbeRun) -> ProbeStatus {
-        let reason = if !run.failed_before_fix {
-            ProbeRejection::PassedBeforeTheFix
-        } else if !run.passed_after_fix {
-            ProbeRejection::FailedAfterTheFix
-        } else {
-            return ProbeStatus::Retained {
-                as_path: probe.to.clone(),
-                evidence: run.evidence.clone(),
-            };
-        };
-        ProbeStatus::Rejected { reason }
-    }
-
-    /// Approval covers one commit. Probes nobody added are rejected when the user delegated the choice,
-    /// so the approval always lists what was kept and what was not.
     pub(crate) fn enter_approved(
         mut self: Box<Self>,
         commit: Sha,
         by: ApprovedBy,
     ) -> Box<TaskView> {
-        if matches!(self.policy.probes, ProbePolicy::Delegated { .. }) {
-            for probe in &mut self.probes {
-                if probe.status == ProbeStatus::Offered {
-                    probe.status = ProbeStatus::Rejected {
-                        reason: ProbeRejection::NotAdded,
-                    };
-                }
-            }
-        }
+        self.reject_unadded_probes();
         self.waiting(Waiting::Approved { commit, by })
-    }
-
-    fn merge_probes(&mut self, checked: &EvidenceChecked, added: &[Finding]) {
-        for capture in &checked.probes {
-            let finding = added
-                .iter()
-                .find(|f| f.report.probes.contains(&capture.path));
-            let showed = finding.and_then(|f| match checked.checks.get(&f.id) {
-                Some(EvidenceCheck::Confirmed { output, .. }) => output.clone(),
-                _ => None,
-            });
-            let entry = Probe {
-                path: capture.path.clone(),
-                content: capture.content.clone(),
-                truncated: capture.truncated,
-                finding: finding.map(|f| f.id),
-                showed,
-                status: ProbeStatus::Offered,
-            };
-            match self.probes.iter_mut().find(|p| p.path == capture.path) {
-                Some(existing) => {
-                    existing.content = entry.content;
-                    existing.truncated = entry.truncated;
-                    existing.finding = existing.finding.or(entry.finding);
-                    existing.showed = existing.showed.take().or(entry.showed);
-                }
-                None => self.probes.push(entry),
-            }
-        }
     }
 
     // -----------------------------------------------------------------------------------------
@@ -347,18 +201,12 @@ impl TaskView {
         mut self: Box<Self>,
         seq: FactSeq,
         turn: Turn,
+        disputed: &[FindingId],
+        commit: Sha,
         done: RulingsDone,
     ) -> Result<Box<TaskView>, Rejection> {
-        let Work::Rule { disputed, commit } = turn.work.clone() else {
-            return Err(self.misfit("rulings"));
-        };
-        if let Some(error) = rulings_problem(&disputed, &done) {
-            return Ok(self.retry_turn(
-                turn,
-                Retry::InvalidReport,
-                Note::InvalidReport { error },
-                seq,
-            ));
+        if let Some(error) = rulings_problem(disputed, &done) {
+            return Ok(self.retry_turn(turn, Note::InvalidReport { error }, seq));
         }
         let mut not_bug = Vec::new();
         for ruling in done.rulings {
@@ -372,7 +220,7 @@ impl TaskView {
                 by: Answerer::Planner,
             });
         }
-        self.apply_rulings(&not_bug, &disputed, commit, seq)
+        self.apply_rulings(&not_bug, disputed, commit, seq)
     }
 
     /// A ruling closes the findings ruled not a bug. The rest go back to the implementer with the ruling.
@@ -412,18 +260,9 @@ impl TaskView {
     // -----------------------------------------------------------------------------------------
 
     fn take_checking(mut self: Box<Self>) -> Result<(Box<TaskView>, Checking), Rejection> {
-        let phase = std::mem::replace(
-            &mut self.phase,
-            Phase::Closed {
-                outcome: crate::facts::Outcome::Cancelled,
-            },
-        );
-        match phase {
+        match self.take_phase() {
             Phase::Active {
-                activity:
-                    Activity::Checking {
-                        turn, job, report, ..
-                    },
+                activity: Activity::Checking { turn, job, report },
             } => Ok((self, Checking { turn, job, report })),
             other => {
                 self.phase = other;
@@ -443,14 +282,14 @@ impl TaskView {
         let (mut view, Checking { turn, job, report }) = self.take_checking()?;
         let judged = view.judge(&job, &report, &checked)?;
         let accepted = agrees(report.verdict, judged.blocking.len());
-        view.record_review(&job, &report, &checked, accepted);
+        view.record_review(&job, &report, &checked, accepted)?;
         if !accepted {
             view.merge_probes(&checked, &[]);
             let note = Note::VerdictMismatch {
                 verdict: report.verdict,
                 findings: judged.reviewed,
             };
-            return Ok(view.retry_turn(turn, Retry::VerdictMismatch, note, seq));
+            return Ok(view.retry_turn(turn, note, seq));
         }
         view.merge_probes(&checked, &judged.added);
         view.findings = judged.findings;
@@ -470,10 +309,9 @@ impl TaskView {
         report: &ReviewDone,
         checked: &EvidenceChecked,
     ) -> Result<Judged, Rejection> {
-        let round = u32::try_from(self.rounds.len()).unwrap_or(u32::MAX);
+        let round = self.rounds.last().map_or(0, |round| round.n);
         let mut added = Vec::new();
-        for (index, finding) in report.findings.iter().enumerate() {
-            let id = FindingId::nth(self.findings.len() + index);
+        for (id, finding) in self.new_finding_ids(report) {
             added.push(Finding {
                 id,
                 round,
@@ -521,9 +359,11 @@ impl TaskView {
         report: &ReviewDone,
         checked: &EvidenceChecked,
         accepted: bool,
-    ) {
+    ) -> Result<(), Rejection> {
         let Some(last) = self.rounds.last_mut() else {
-            return;
+            return Err(Rejection::InvalidFact(
+                "evidence_checked has no round to record its review in".to_owned(),
+            ));
         };
         last.reviews.push(Review {
             pass: job.pass.kind(),
@@ -533,6 +373,7 @@ impl TaskView {
             rechecks: checked.rechecks.clone(),
             hits: checked.security_hits.clone(),
         });
+        Ok(())
     }
 
     fn finish_pass(&mut self, job: &ReviewJob) {
@@ -736,46 +577,70 @@ fn settle(finding: &Finding, report: &ReviewDone, rerun: Option<&Rerun>) -> Find
 
 /// `None` when the rulings cover every disputed finding exactly once and give a reason for each.
 fn rulings_problem(disputed: &[FindingId], done: &RulingsDone) -> Option<String> {
-    let mut counts: BTreeMap<FindingId, usize> = BTreeMap::new();
-    for ruling in &done.rulings {
-        *counts.entry(ruling.finding).or_default() += 1;
-    }
-    let ids = |select: &dyn Fn(&FindingId) -> bool| -> Vec<String> {
-        disputed
-            .iter()
-            .filter(|id| select(id))
-            .map(ToString::to_string)
-            .collect()
-    };
-    let missing = ids(&|id| !counts.contains_key(id));
-    let repeated = ids(&|id| counts.get(id).is_some_and(|n| *n > 1));
-    let strangers: Vec<String> = counts
-        .keys()
-        .filter(|id| !disputed.contains(id))
-        .map(ToString::to_string)
-        .collect();
-    let problems: Vec<String> = [
+    let Coverage {
+        missing,
+        repeated,
+        strangers,
+    } = coverage(disputed, done.rulings.iter().map(|ruling| ruling.finding));
+    problems([
         (!missing.is_empty()).then(|| {
             format!(
                 "Rule on every disputed finding. Missing: {}.",
-                missing.join(", ")
+                id_list(&missing)
             )
         }),
         (!repeated.is_empty()).then(|| {
             format!(
                 "Rule on each finding once. Ruled more than once: {}.",
-                repeated.join(", ")
+                id_list(&repeated)
             )
         }),
         (!strangers.is_empty()).then(|| {
             format!(
                 "Rule only on the disputed findings. Not disputed: {}.",
-                strangers.join(", ")
+                id_list(&strangers)
             )
         }),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    (!problems.is_empty()).then(|| problems.join(" "))
+    ])
+}
+
+struct Coverage {
+    missing: Vec<FindingId>,
+    repeated: Vec<FindingId>,
+    strangers: Vec<FindingId>,
+}
+
+fn coverage(expected: &[FindingId], given: impl IntoIterator<Item = FindingId>) -> Coverage {
+    let mut counts: BTreeMap<FindingId, usize> = BTreeMap::new();
+    for id in given {
+        *counts.entry(id).or_default() += 1;
+    }
+    let count = |id: &FindingId| counts.get(id).copied().unwrap_or(0);
+    Coverage {
+        missing: expected
+            .iter()
+            .filter(|id| count(id) == 0)
+            .copied()
+            .collect(),
+        repeated: expected
+            .iter()
+            .filter(|id| count(id) > 1)
+            .copied()
+            .collect(),
+        strangers: counts
+            .keys()
+            .filter(|id| !expected.contains(id))
+            .copied()
+            .collect(),
+    }
+}
+
+fn id_list(ids: &[FindingId]) -> String {
+    let ids: Vec<String> = ids.iter().map(ToString::to_string).collect();
+    ids.join(", ")
+}
+
+fn problems(found: impl IntoIterator<Item = Option<String>>) -> Option<String> {
+    let found: Vec<String> = found.into_iter().flatten().collect();
+    (!found.is_empty()).then(|| found.join(" "))
 }

@@ -4,7 +4,7 @@ use kratos_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::json::{required_column, to_column};
+use crate::columns::{required_column, to_column, unreadable};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// Where a new message joins a thread's queue.
@@ -27,20 +27,6 @@ pub enum Enqueued {
         pending: usize,
     },
 }
-
-/// The status changes a message may make. Anything else is a defect in the caller.
-///
-/// A message whose delivery is uncertain only leaves `unknown` for `accepted`, when the provider's
-/// history shows it, or `cancelled`, when the user discards it (D11).
-const TRANSITIONS: [(&str, &[&str]); 6] = [
-    ("queued", &["submitting", "cancelled"]),
-    // Back to `queued` when the provider refused a steer before acting on it.
-    ("submitting", &["accepted", "failed", "unknown", "queued"]),
-    ("failed", &["queued", "cancelled"]),
-    ("unknown", &["accepted", "cancelled"]),
-    ("accepted", &[]),
-    ("cancelled", &[]),
-];
 
 /// Statuses of a message the provider has not taken yet. They count against the queue limit.
 const PENDING: &str = "'queued', 'submitting', 'failed', 'unknown'";
@@ -119,7 +105,7 @@ impl ThreadWrite<'_> {
     }
 
     /// Moves a message to `status` and records the change. `Err(MessageTransition)` for a change
-    /// [`TRANSITIONS`] does not allow, which writes nothing.
+    /// [`may_move`] does not allow, which writes nothing.
     pub fn set_message_status(
         &mut self,
         id: &MessageId,
@@ -131,23 +117,24 @@ impl ThreadWrite<'_> {
                 message_id: id.clone(),
             }
         })?;
-        let (from, to) = (status_name(&current.status), status_name(&status));
-        let allowed = TRANSITIONS
-            .iter()
-            .find(|(name, _)| *name == from)
-            .is_some_and(|(_, next)| next.contains(&to));
-        if !allowed {
+        if !may_move(&current.status, &status) {
             return Err(StoreError::MessageTransition {
                 message_id: id.clone(),
-                from,
-                to,
+                from: current.status,
+                to: status,
             });
         }
         let (turn_id, error) = status_details(&status);
         self.transaction.execute(
             "UPDATE thread_messages SET status = ?1, turn_id = ?2, error = ?3
              WHERE thread_id = ?4 AND id = ?5",
-            params![to, turn_id, error, self.thread_id().as_str(), id.as_str()],
+            params![
+                status_name(&status),
+                turn_id,
+                error,
+                self.thread_id().as_str(),
+                id.as_str()
+            ],
         )?;
         self.append(ThreadEventBody::MessageStatusChanged {
             message_id: id.clone(),
@@ -228,15 +215,32 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         id: MessageId::new(row.get(0)?),
         input: required_column(row, 1)?,
         origin: required_column(row, 2)?,
-        status: status_from_columns(&status, turn_id, error).ok_or_else(|| {
-            let reason = format!("message status {status} without its details");
-            rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, reason.into())
-        })?,
+        status: status_from_columns(&status, turn_id, error)
+            .ok_or_else(|| unreadable(3, format!("message status {status} without its details")))?,
         queued_at: Timestamp::from_stored(row.get(6)?),
     })
 }
 
-fn status_name(status: &MessageStatus) -> &'static str {
+/// Whether a message may change from `from` to `to`. Anything else is a defect in the caller.
+///
+/// A message whose delivery is uncertain only leaves `unknown` for `accepted`, when the provider's
+/// history shows it, or `cancelled`, when the user discards it (D11).
+fn may_move(from: &MessageStatus, to: &MessageStatus) -> bool {
+    use MessageStatus::{Accepted, Cancelled, Failed, Queued, Submitting, Unknown};
+    match from {
+        Queued => matches!(to, Submitting | Cancelled),
+        // Back to `queued` when the provider refused a steer before acting on it.
+        Submitting => matches!(
+            to,
+            Accepted { .. } | Failed { .. } | Unknown { .. } | Queued
+        ),
+        Failed { .. } => matches!(to, Queued | Cancelled),
+        Unknown { .. } => matches!(to, Accepted { .. } | Cancelled),
+        Accepted { .. } | Cancelled => false,
+    }
+}
+
+pub(crate) fn status_name(status: &MessageStatus) -> &'static str {
     match status {
         MessageStatus::Queued => "queued",
         MessageStatus::Submitting => "submitting",

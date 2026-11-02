@@ -2,7 +2,8 @@
 //!
 //! `fake-codex` speaks `codex app-server`'s JSON-RPC over stdio. Tests steer it through `test/*`
 //! requests: they hold and settle turns, emit notifications, ask the client questions, and read
-//! back what the client sent. The engine never links this crate; tests run its binaries.
+//! back what the client sent; `codex_control` builds those requests. The engine never links this
+//! crate; tests run its binaries.
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -10,6 +11,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
 
+pub mod codex_control;
 pub mod responses;
 
 /// The path of the fake named `name`, such as `fake-codex`, built on first use.

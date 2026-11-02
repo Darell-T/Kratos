@@ -23,7 +23,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 
 use kratos_teams::decisions::allowed_decisions;
@@ -128,11 +128,7 @@ fn replay_facts(path: &Path, short: bool) -> Result<(), String> {
 /// The raw differences from TypeScript, and how many violate Rust's corrected expectations.
 fn differing_facts(log: &typescript::Reference) -> Result<(usize, usize), String> {
     let (folded, _) = typescript::fold_reference(log)?;
-    let differing = folded
-        .iter()
-        .zip(&log.expected)
-        .filter(|(ours, theirs)| &ours.observed != *theirs)
-        .count();
+    let differing = log.differing_facts(&folded).len();
     let unexpected = folded
         .iter()
         .filter(|ours| ours.observed != log.expected_rust(ours.fact))
@@ -174,21 +170,10 @@ fn replay_typescript(path: &Path, short: bool) -> Result<usize, String> {
 
 /// One line for each reference log, then a total. Exits 1 for an unexpected difference.
 fn replay_every_reference() -> Result<bool, String> {
-    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference");
-    let mut files: Vec<PathBuf> = fs::read_dir(&folder)
-        .map_err(|error| format!("{}: {error}", folder.display()))?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension == "json")
-        })
-        .collect();
-    files.sort();
+    let logs = typescript::read_every_reference()?;
     let (mut facts, mut differing, mut unexpected) = (0, 0, 0);
-    for file in &files {
-        let log = typescript::read_reference(file)?;
-        let (diff, unplanned) = differing_facts(&log)?;
+    for log in &logs {
+        let (diff, unplanned) = differing_facts(log)?;
         print(
             &json!({"log": log.name, "facts": log.facts.len(), "differing": diff, "unexpected": unplanned}),
         );
@@ -197,7 +182,7 @@ fn replay_every_reference() -> Result<bool, String> {
         unexpected += unplanned;
     }
     print(
-        &json!({"summary": true, "logs": files.len(), "facts": facts, "differing": differing, "unexpected": unexpected}),
+        &json!({"summary": true, "logs": logs.len(), "facts": facts, "differing": differing, "unexpected": unexpected}),
     );
     Ok(unexpected == 0)
 }

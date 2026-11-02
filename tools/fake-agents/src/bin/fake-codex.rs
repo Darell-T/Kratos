@@ -17,9 +17,11 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use fake_agents::codex_control;
 use serde_json::{Value, json};
 
 fn main() {
@@ -29,12 +31,7 @@ fn main() {
         return;
     }
     let fake = Arc::new(Mutex::new(Fake {
-        hang_initialize: arguments
-            .iter()
-            .any(|argument| argument == "--hang-initialize"),
-        bad_initialize: arguments
-            .iter()
-            .any(|argument| argument == "--bad-initialize"),
+        initialize: InitializeMode::from_arguments(&arguments),
         fail_resume: arguments.iter().any(|argument| argument == "--fail-resume"),
         ..Fake::default()
     }));
@@ -86,10 +83,7 @@ fn flag_or_variable(arguments: &[String], flag: &str, variable: &str) -> Option<
 fn serve_control(fake: Arc<Mutex<Fake>>, path: &str) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a localhost port is free");
     let port = listener.local_addr().expect("the port is known").port();
-    // Written whole and renamed, so a test that sees the file reads the whole port.
-    let partial = format!("{path}.partial");
-    std::fs::write(&partial, port.to_string()).expect("the control file is writable");
-    std::fs::rename(&partial, path).expect("the control file can be renamed");
+    codex_control::write_port(Path::new(path), port).expect("the control file is writable");
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let fake = fake.clone();
@@ -130,10 +124,29 @@ enum Out {
 }
 
 #[derive(Default)]
+enum InitializeMode {
+    #[default]
+    Answer,
+    Hang,
+    Malformed,
+}
+
+impl InitializeMode {
+    fn from_arguments(arguments: &[String]) -> InitializeMode {
+        let has = |flag: &str| arguments.iter().any(|argument| argument == flag);
+        match (has("--hang-initialize"), has("--bad-initialize")) {
+            (false, false) => InitializeMode::Answer,
+            (true, false) => InitializeMode::Hang,
+            (false, true) => InitializeMode::Malformed,
+            (true, true) => panic!("--hang-initialize and --bad-initialize cannot both be set"),
+        }
+    }
+}
+
+#[derive(Default)]
 struct Fake {
     turn_observer: Option<TcpStream>,
-    hang_initialize: bool,
-    bad_initialize: bool,
+    initialize: InitializeMode,
     fail_resume: bool,
     initialized: bool,
     /// Every held request, in arrival order, for `test/turnRequests`.
@@ -298,11 +311,10 @@ impl Fake {
     }
 
     fn initialize(&mut self, id: Value, params: &Value) {
-        if self.hang_initialize {
-            return;
-        }
-        if self.bad_initialize {
-            return self.reply(&id, json!({}));
+        match self.initialize {
+            InitializeMode::Answer => {}
+            InitializeMode::Hang => return,
+            InitializeMode::Malformed => return self.reply(&id, json!({})),
         }
         let client = &params["clientInfo"];
         self.reply(
@@ -408,7 +420,7 @@ impl Fake {
                 let answers = Value::Array(self.answers.clone());
                 self.reply(id, answers);
             }
-            "test/settleTurn" => self.settle(id, params),
+            codex_control::SETTLE_TURN => self.settle(id, params),
             "test/echo" => self.reply(id, params.clone()),
             "test/fail" => self.fail(id, -32000, "boom"),
             "test/environment" => self.reply(
@@ -428,17 +440,17 @@ impl Fake {
                 self.reply(id, json!("still alive"));
             }
             "test/pid" => self.reply(id, json!(std::process::id())),
-            "test/ask" => {
+            codex_control::ASK => {
                 let request_id = match &params["requestId"] {
                     Value::Null => json!("ask-1"),
                     request_id => request_id.clone(),
                 };
-                send(
-                    &json!({ "id": request_id, "method": params["method"], "params": params["params"] }),
+                self.send(
+                    json!({ "id": request_id, "method": params["method"], "params": params["params"] }),
                 );
                 self.reply(id, Value::Null);
             }
-            "test/emit" => {
+            codex_control::EMIT => {
                 self.emit(params);
                 self.reply(id, Value::Null);
             }
@@ -602,7 +614,11 @@ fn skills(params: &Value) -> Value {
 
 fn plugins(params: &Value) -> Value {
     let cwd = params["cwds"][0].as_str().unwrap_or_default();
-    json!({ "marketplaces": [{ "name": cwd, "plugins": [{ "id": "project", "name": "Project plugin", "installed": true, "enabled": true }] }] })
+    json!({ "marketplaces": [{ "name": cwd, "plugins": [{
+        "id": "project", "name": "Project plugin", "installed": true, "enabled": true,
+        "authPolicy": "ON_USE", "installPolicy": "AVAILABLE",
+        "source": { "type": "local", "path": cwd },
+    }] }] })
 }
 
 /// Starts a copy of this fake that sleeps, outside any wait, and returns its process id. The client

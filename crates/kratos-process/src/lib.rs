@@ -49,10 +49,6 @@ impl OwnedChild {
         &mut self.child
     }
 
-    pub fn id(&self) -> Option<u32> {
-        self.child.id()
-    }
-
     /// Ends every process in the tree now. The child's exit status stays available to
     /// [`OwnedChild::wait`]. Ending a tree that already ended is not an error.
     pub fn end_tree(&mut self) -> io::Result<()> {
