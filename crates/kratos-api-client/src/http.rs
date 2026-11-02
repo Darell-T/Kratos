@@ -53,28 +53,38 @@ impl ApiRequest {
         self
     }
 
-    pub(crate) fn names_header(&self, name: &str) -> bool {
+    fn names_header(&self, name: &str) -> bool {
         self.headers
             .iter()
             .any(|(given, _)| given.eq_ignore_ascii_case(name))
     }
 
     /// `Connection: close` lets the client read the reply to the end of the stream.
-    pub(crate) fn encode(&self, authority: &str) -> Vec<u8> {
-        let names_header = |name: &str| self.names_header(name);
+    pub(crate) fn encode(
+        &self,
+        authority: &str,
+        default_headers: &[(&str, Option<&str>)],
+    ) -> Vec<u8> {
         let mut text = format!("{} {} HTTP/1.1\r\n", self.method, self.path);
         for (name, value) in &self.headers {
             text.push_str(&format!("{name}: {value}\r\n"));
         }
-        if !names_header("Host") {
+        for (name, value) in default_headers {
+            if let Some(value) = value
+                && !self.names_header(name)
+            {
+                text.push_str(&format!("{name}: {value}\r\n"));
+            }
+        }
+        if !self.names_header("Host") {
             text.push_str(&format!("Host: {authority}\r\n"));
         }
         if let Some(body) = &self.body
-            && !names_header("Content-Length")
+            && !self.names_header("Content-Length")
         {
             text.push_str(&format!("Content-Length: {}\r\n", body.len()));
         }
-        if !names_header("Connection") {
+        if !self.names_header("Connection") {
             text.push_str("Connection: close\r\n");
         }
         text.push_str("\r\n");

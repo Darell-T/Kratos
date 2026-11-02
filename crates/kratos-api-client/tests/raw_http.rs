@@ -1,8 +1,12 @@
+use std::fs;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 
 use kratos_api_client::{ApiRequest, Client};
+use kratos_protocol::{CLIENT_TOKEN_FILE, ThreadId};
 use serde_json::json;
 
 const FORBIDDEN: &str = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\n\
@@ -27,8 +31,8 @@ fn read_request(connection: &mut TcpStream) -> Vec<u8> {
         let read = connection.read(&mut chunk).unwrap();
         assert!(read > 0, "the client closed before it finished the request");
         request.extend_from_slice(&chunk[..read]);
-        let text = String::from_utf8_lossy(&request).into_owned();
-        if let Some((head, body)) = text.split_once("\r\n\r\n") {
+        if let Some(head_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&request[..head_end]);
             let length = head
                 .lines()
                 .find_map(|line| {
@@ -38,7 +42,7 @@ fn read_request(connection: &mut TcpStream) -> Vec<u8> {
                         .ok()
                 })
                 .unwrap_or(0);
-            if body.len() >= length {
+            if request.len() - head_end - 4 >= length {
                 return request;
             }
         }
@@ -73,6 +77,154 @@ fn sends_the_request_as_given_and_adds_only_what_is_missing() {
     assert_eq!(
         sent,
         format!("GET /api/health HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n")
+    );
+}
+
+struct TokenHome(PathBuf);
+
+impl TokenHome {
+    fn new() -> TokenHome {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        loop {
+            let path = std::env::temp_dir().join(format!(
+                "kratos-api-client-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&path) {
+                Ok(()) => return TokenHome(path),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("cannot create token directory {}: {error}", path.display()),
+            }
+        }
+    }
+}
+
+impl Drop for TokenHome {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0) {
+            eprintln!(
+                "cannot remove token directory {}: {error}",
+                self.0.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn default_credentials_follow_given_headers_without_changing_a_reused_binary_request() {
+    let home = TokenHome::new();
+    fs::write(home.0.join(CLIENT_TOKEN_FILE), "  current-token \r\n").unwrap();
+    let (client, server) = serve_once(FORBIDDEN);
+    let client = client
+        .with_token_from(&home.0)
+        .acting_for(ThreadId::new("default-thread".to_owned()));
+    let request = ApiRequest::new("POST", "/raw//bytes?x=%2F")
+        .header("X-Trace", "first")
+        .header("Host", "manual.host")
+        .body(b"\0\xff\x80\r\n".to_vec());
+
+    client.send(&request).unwrap();
+
+    assert_eq!(
+        server.join().unwrap(),
+        b"POST /raw//bytes?x=%2F HTTP/1.1\r\nX-Trace: first\r\nHost: manual.host\r\n\
+          Authorization: Bearer current-token\r\nKratos-Thread: default-thread\r\n\
+          Content-Length: 5\r\nConnection: close\r\n\r\n\0\xff\x80\r\n"
+    );
+
+    let (bare, server) = serve_once(FORBIDDEN);
+    bare.send(&request).unwrap();
+
+    assert_eq!(
+        server.join().unwrap(),
+        b"POST /raw//bytes?x=%2F HTTP/1.1\r\nX-Trace: first\r\nHost: manual.host\r\n\
+          Content-Length: 5\r\nConnection: close\r\n\r\n\0\xff\x80\r\n"
+    );
+}
+
+#[test]
+fn mixed_case_explicit_headers_keep_their_order_duplicates_and_raw_values() {
+    let home = TokenHome::new();
+    fs::write(home.0.join(CLIENT_TOKEN_FILE), "default-token").unwrap();
+    let (client, server) = serve_once(FORBIDDEN);
+    let client = client
+        .with_token_from(&home.0)
+        .acting_for(ThreadId::new("default-thread".to_owned()));
+    let request = ApiRequest::new("pOsT", "/raw//empty?name=%2F")
+        .header("hOsT", "foreign.example")
+        .header("aUtHoRiZaTiOn", "Bearer explicit-one")
+        .header("AUTHORIZATION", "Bearer explicit-two")
+        .header("kRaToS-tHrEaD", "explicit-thread")
+        .header("Kratos-Thread", "duplicate-thread")
+        .header("cOnTeNt-LeNgTh", "0")
+        .header("cOnNeCtIoN", "keep-alive")
+        .header("X-Raw", "first\r\nX-Injected: second")
+        .body(Vec::new());
+
+    client.send(&request).unwrap();
+
+    assert_eq!(
+        server.join().unwrap(),
+        b"pOsT /raw//empty?name=%2F HTTP/1.1\r\nhOsT: foreign.example\r\n\
+          aUtHoRiZaTiOn: Bearer explicit-one\r\nAUTHORIZATION: Bearer explicit-two\r\n\
+          kRaToS-tHrEaD: explicit-thread\r\nKratos-Thread: duplicate-thread\r\n\
+          cOnTeNt-LeNgTh: 0\r\ncOnNeCtIoN: keep-alive\r\n\
+          X-Raw: first\r\nX-Injected: second\r\n\r\n"
+    );
+}
+
+#[test]
+fn file_tokens_reload_while_pinned_tokens_keep_their_original_presence_and_value() {
+    let home = TokenHome::new();
+    let token_file = home.0.join(CLIENT_TOKEN_FILE);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = Client::new(&format!("http://{}", listener.local_addr().unwrap()))
+        .unwrap()
+        .with_token_from(&home.0);
+    let server = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for _ in 0..7 {
+            let (mut connection, _) = listener.accept().unwrap();
+            requests.push(read_request(&mut connection));
+            connection.write_all(FORBIDDEN.as_bytes()).unwrap();
+        }
+        requests
+    });
+    let request = ApiRequest::new("GET", "/token").header("Host", "manual.host");
+    let pinned_missing = client.clone().with_current_token();
+    fs::write(&token_file, "first-token").unwrap();
+    let pinned = client.clone().with_current_token();
+
+    client.send(&request).unwrap();
+    fs::write(&token_file, " second-token \n").unwrap();
+    client.send(&request).unwrap();
+    pinned.send(&request).unwrap();
+    pinned_missing.send(&request).unwrap();
+    fs::write(&token_file, " \r\n").unwrap();
+    client.send(&request).unwrap();
+    fs::remove_file(&token_file).unwrap();
+    client.send(&request).unwrap();
+    pinned.send(&request).unwrap();
+
+    let first = b"GET /token HTTP/1.1\r\nHost: manual.host\r\n\
+                  Authorization: Bearer first-token\r\nConnection: close\r\n\r\n"
+        .to_vec();
+    let second = b"GET /token HTTP/1.1\r\nHost: manual.host\r\n\
+                   Authorization: Bearer second-token\r\nConnection: close\r\n\r\n"
+        .to_vec();
+    let absent = b"GET /token HTTP/1.1\r\nHost: manual.host\r\nConnection: close\r\n\r\n".to_vec();
+    assert_eq!(
+        server.join().unwrap(),
+        [
+            first.clone(),
+            second,
+            first.clone(),
+            absent.clone(),
+            absent.clone(),
+            absent,
+            first
+        ]
     );
 }
 

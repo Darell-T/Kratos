@@ -123,18 +123,15 @@ impl Client {
     /// `Connection: close` added. An answer that arrives before the body is fully sent, such as a
     /// 413, is still returned.
     pub fn send(&self, request: &ApiRequest) -> Result<ApiReply, ClientError> {
-        let mut request = request.clone();
-        if let Some(bearer) = self.bearer()
-            && !request.names_header("Authorization")
-        {
-            request = request.header("Authorization", &bearer);
-        }
-        if let Some(thread_id) = &self.acting_for
-            && !request.names_header(ACTING_THREAD_HEADER)
-        {
-            request = request.header(ACTING_THREAD_HEADER, thread_id.as_str());
-        }
-        self.send_raw(&request.encode(&self.authority))
+        let bearer = self.bearer();
+        let default_headers = [
+            ("Authorization", bearer.as_deref()),
+            (
+                ACTING_THREAD_HEADER,
+                self.acting_for.as_ref().map(ThreadId::as_str),
+            ),
+        ];
+        self.send_raw(&request.encode(&self.authority, &default_headers))
     }
 
     fn bearer(&self) -> Option<String> {
