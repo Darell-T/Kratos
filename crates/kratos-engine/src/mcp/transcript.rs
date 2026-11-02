@@ -42,16 +42,6 @@ pub fn line(event: &ThreadEventBody) -> Option<String> {
     }
 }
 
-pub fn reply(event: &ThreadEventBody) -> Option<&str> {
-    match event {
-        ThreadEventBody::ItemCompleted {
-            item: AgentItem::Message { text, .. },
-            ..
-        } => Some(text),
-        _ => None,
-    }
-}
-
 pub fn newest(lines: &[String]) -> String {
     let mut used = 0;
     let kept = lines
