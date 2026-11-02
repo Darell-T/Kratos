@@ -59,9 +59,10 @@ impl Actor {
                 thread_id,
                 message_id,
                 input,
+                origin,
                 reply,
             } => {
-                let sent = self.send(&thread_id, message_id, input).await;
+                let sent = self.send(&thread_id, message_id, input, origin).await;
                 let _ = reply.send(sent);
                 self.dispatch(&thread_id).await;
             }
@@ -156,6 +157,7 @@ impl Actor {
         thread_id: &ThreadId,
         message_id: MessageId,
         input: Vec<MessageInput>,
+        origin: MessageOrigin,
     ) -> Result<Sent, ProviderError> {
         self.load(thread_id).await?;
         let enqueued = self
@@ -163,7 +165,7 @@ impl Actor {
                 write.enqueue_message(
                     &message_id,
                     input,
-                    MessageOrigin::User,
+                    origin,
                     QueuePlace::Back,
                     MAX_PENDING_MESSAGES,
                 )
@@ -210,6 +212,11 @@ impl Actor {
                 "Only a queued message can steer the turn; message {message_id} is not queued"
             )));
         }
+        if message.origin.limit().is_some() {
+            return Err(ProviderError::Conflict(
+                "A message from another thread runs in a turn of its own, with no more than that thread's permission".into(),
+            ));
+        }
         let codex = self
             .connection()?
             .ok_or_else(|| ProviderError::Unavailable("Codex is starting".into()))?;
@@ -228,7 +235,7 @@ impl Actor {
             additional_context: None,
             client_user_message_id: Some(message_id.as_str().to_owned()),
             expected_turn_id: turn_id.as_str().to_owned(),
-            input: wire::user_input(&message.input),
+            input: wire::user_input(&message),
             responsesapi_client_metadata: None,
             thread_id: native_id,
         };

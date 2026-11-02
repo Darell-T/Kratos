@@ -3,12 +3,51 @@
 
 use std::time::Duration;
 
-use kratos_protocol::{MessageStatus, PauseReason, ThreadEventBody};
+use kratos_engine::providers::codex::ProviderError;
+use kratos_protocol::{
+    AccessLimit, MessageOrigin, MessageStatus, PauseReason, Permission, ThreadEventBody,
+};
 use serde_json::json;
 
 use crate::harness::{Harness, Options, message_id, text_input};
 
 const THREAD: &str = "thread-A";
+
+#[tokio::test]
+async fn another_thread_s_message_waits_for_a_turn_of_its_own() {
+    // Catches a message from another thread steered into a running turn, where it would run with
+    // that turn's permission instead of no more than its sender's.
+    let mut harness = Harness::start(Options::default()).await;
+    let sender = harness.another_thread("sender").await;
+    harness.running_turn("a", "turn-1").await;
+    let limit = AccessLimit {
+        permission: Permission::AskMe,
+        plan_mode: false,
+    };
+    let origin = MessageOrigin::Thread {
+        thread_id: sender,
+        limit,
+    };
+    harness.send_as("b", "also this", origin).await;
+
+    let steered = harness
+        .provider
+        .steer(harness.thread_id.clone(), message_id("b"))
+        .await;
+
+    assert!(
+        matches!(&steered, Err(ProviderError::Conflict(reason)) if reason.contains("another thread")),
+        "{steered:?}"
+    );
+    assert_eq!(harness.message("b").await.status, MessageStatus::Queued);
+    let requests = harness.turn_requests().await;
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["method"] != "turn/steer"),
+        "{requests:?}"
+    );
+}
 
 #[tokio::test]
 async fn a_steered_message_joins_the_running_turn() {
@@ -218,6 +257,7 @@ async fn at_most_four_threads_wait_on_codex_to_start_a_turn() {
                 thread_id.clone(),
                 message_id(&format!("m{n}")),
                 text_input("go"),
+                MessageOrigin::User,
             )
             .await
             .unwrap();

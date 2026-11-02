@@ -1,3 +1,4 @@
+mod acting;
 mod agents;
 pub mod auth;
 mod json;
@@ -28,6 +29,7 @@ use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
 use crate::usage::scheduler::SchedulerHandle;
 
+pub use acting::ACTING_THREAD_HEADER;
 pub use auth::ClientToken;
 
 /// The largest request body a route reads. One byte more answers 413.
@@ -75,22 +77,52 @@ pub async fn serve(
     }
 }
 
-/// Anything but these routes, including a known path with another method, answers 404
+/// Anything but the routes below, including a known path with another method, answers 404
 /// `{"error":"Not found"}`.
 fn router(state: ServerState) -> Router {
     let token = state.token.clone();
-    let routes = Router::new()
-        .route("/api/health", get(routes::health))
-        .route(
-            "/api/workspaces",
-            get(routes::list_workspaces).post(routes::create_workspace),
-        )
+    let routes = agent_routes()
+        .merge(user_routes().route_layer(middleware::from_fn(acting::refuse_agents)))
+        .fallback(routes::not_found)
+        .method_not_allowed_fallback(routes::not_found)
+        .with_state(state);
+    // An outer service rewrites the URI before the inner router selects a route. Router::layer
+    // on the inner router would run only after that selection.
+    Router::new()
+        .fallback_service(routes)
+        .layer(middleware::from_fn_with_state(
+            token,
+            auth::require_client_token,
+        ))
+        .layer(middleware::from_fn(paths::normalize_http_api_path))
+        // Added last, so the Host and Origin checks run before normalization and every route.
+        .layer(middleware::from_fn(local_only::refuse_other_hosts))
+}
+
+/// The routes Kratos's tools call for a thread's agent, and the only ones a request naming a
+/// thread reaches. Opening a route to agents means moving it here, and its handler must then apply
+/// `Acting`'s rules. The reads need none, since an agent may read every thread.
+fn agent_routes() -> Router<ServerState> {
+    Router::new()
+        .route("/api/workspaces", get(routes::list_workspaces))
         .route(
             "/api/threads",
             get(routes::list_threads).post(routes::create_thread),
         )
         .route("/api/threads/{id}", get(agents::thread_details))
+        .route("/api/threads/{id}/events", get(routes::thread_events))
         .route("/api/threads/{id}/messages", post(agents::post_message))
+        .route("/api/threads/{id}/stop", post(agents::stop))
+        .route("/api/approvals/{id}", post(agents::decide))
+        .route("/api/questions/{id}", post(agents::answer))
+}
+
+/// Every other route. `router` refuses a request naming a thread on all of them, so a new route
+/// stays closed to agents until it moves to [`agent_routes`].
+fn user_routes() -> Router<ServerState> {
+    Router::new()
+        .route("/api/health", get(routes::health))
+        .route("/api/workspaces", post(routes::create_workspace))
         .route(
             "/api/threads/{id}/messages/{message_id}",
             delete(agents::remove_message),
@@ -107,29 +139,12 @@ fn router(state: ServerState) -> Router {
             "/api/threads/{id}/messages/{message_id}/discard",
             post(agents::discard_message),
         )
-        .route("/api/threads/{id}/stop", post(agents::stop))
         .route("/api/threads/{id}/resume", post(agents::resume))
         .route("/api/threads/{id}/settings", put(agents::put_settings))
         .route("/api/threads/{id}/skills", get(agents::skills))
-        .route("/api/approvals/{id}", post(agents::decide))
-        .route("/api/questions/{id}", post(agents::answer))
         .route("/api/continuations/{id}/schedule", post(agents::schedule))
         .route("/api/usage", get(agents::usage))
         .route("/api/events", get(socket::events))
-        .fallback(routes::not_found)
-        .method_not_allowed_fallback(routes::not_found)
-        .with_state(state);
-    // An outer service rewrites the URI before the inner router selects a route. Router::layer
-    // on the inner router would run only after that selection.
-    Router::new()
-        .fallback_service(routes)
-        .layer(middleware::from_fn_with_state(
-            token,
-            auth::require_client_token,
-        ))
-        .layer(middleware::from_fn(paths::normalize_http_api_path))
-        // Added last, so the Host and Origin checks run before normalization and every route.
-        .layer(middleware::from_fn(local_only::refuse_other_hosts))
 }
 
 #[derive(Debug)]

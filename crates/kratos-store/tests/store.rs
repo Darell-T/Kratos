@@ -15,12 +15,13 @@ use rusqlite::types::Value;
 use serde_json::json;
 use tempfile::TempDir;
 
-const STEPS: [&str; 5] = [
+const STEPS: [&str; 6] = [
     include_str!("../migrations/0001_workspaces_and_threads.sql"),
     include_str!("../migrations/0002_codex_threads.sql"),
     include_str!("../migrations/0003_claude_threads.sql"),
     include_str!("../migrations/0004_plan_mode.sql"),
     include_str!("../migrations/0005_thread_sandbox_and_usage.sql"),
+    include_str!("../migrations/0006_messages_from_threads.sql"),
 ];
 
 /// The last schema version the TypeScript engine wrote.

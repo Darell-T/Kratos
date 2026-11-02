@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod hub;
+pub mod mcp;
 pub mod providers;
 pub mod server;
 pub mod store_thread;

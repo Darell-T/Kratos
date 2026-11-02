@@ -1,7 +1,10 @@
 //! What Kratos asks of Codex on every launch, thread, and turn, so the sandbox and the approval
 //! rules hold whatever Codex's own configuration says (D84, D93).
 
-use kratos_protocol::{Permission, ThreadSettings};
+use std::path::PathBuf;
+
+use kratos_engine::providers::codex::McpServer;
+use kratos_protocol::{AccessLimit, MessageOrigin, Permission, ThreadId, ThreadSettings};
 use serde_json::json;
 
 use crate::harness::{Harness, Options};
@@ -14,6 +17,16 @@ fn settings(permission: Permission, plan_mode: bool) -> Options {
             ..ThreadSettings::default()
         },
         ..Options::default()
+    }
+}
+
+fn from_thread(sender: ThreadId, permission: Permission, plan_mode: bool) -> MessageOrigin {
+    MessageOrigin::Thread {
+        thread_id: sender,
+        limit: AccessLimit {
+            permission,
+            plan_mode,
+        },
     }
 }
 
@@ -49,6 +62,82 @@ async fn plan_mode_runs_the_read_only_profile_whatever_the_permission() {
 }
 
 #[tokio::test]
+async fn another_thread_s_message_runs_with_the_narrower_of_the_two_threads_settings() {
+    // Catches a Full access thread that runs an Approve for me sender's request with no sandbox, a
+    // sender whose wider permission widens the receiver's, and a planning sender's request that
+    // writes.
+    for (receiver, (permission, plan_mode), profile, mode) in [
+        (
+            Permission::FullAccess,
+            (Permission::ApproveForMe, false),
+            "kratos-approve",
+            "default",
+        ),
+        (
+            Permission::AskMe,
+            (Permission::FullAccess, false),
+            "kratos-ask",
+            "default",
+        ),
+        (
+            Permission::FullAccess,
+            (Permission::FullAccess, true),
+            "kratos-plan",
+            "plan",
+        ),
+    ] {
+        let mut harness = Harness::start(settings(receiver, false)).await;
+        let sender = harness.another_thread("sender").await;
+
+        harness
+            .send_as("a", "work", from_thread(sender, permission, plan_mode))
+            .await;
+
+        let start = &harness.held("turn/start", 1).await[0]["params"];
+        assert_eq!(
+            (&start["permissions"], &start["collaborationMode"]["mode"]),
+            (&json!(profile), &json!(mode)),
+            "{receiver:?} receiving from {permission:?}, planning {plan_mode}"
+        );
+        let label = start["input"][0]["text"].as_str().unwrap();
+        assert!(label.starts_with("[Message from Kratos thread "), "{label}");
+        assert_eq!(start["input"][1]["text"], "work");
+    }
+}
+
+#[tokio::test]
+async fn the_thread_keeps_the_sender_s_permission_until_the_user_raises_it() {
+    // Catches a limit that ends with the turn, so the user's next message runs with Full access
+    // while the agent still remembers the other thread's request, a lowered permission the thread
+    // does not show, and one the user cannot raise again.
+    let mut harness = Harness::start(settings(Permission::FullAccess, false)).await;
+    let sender = harness.another_thread("sender").await;
+    let origin = from_thread(sender, Permission::AskMe, false);
+    harness.running_turn_as("a", "turn-1", origin).await;
+    assert_eq!(
+        harness.details().await.settings.permission,
+        Permission::AskMe
+    );
+    harness.complete("thread-A", "turn-1", "completed").await;
+
+    harness.send("b", "mine").await;
+    let started = harness.held("turn/start", 2).await;
+    assert_eq!(started[1]["params"]["permissions"], "kratos-ask");
+
+    let full_access = settings(Permission::FullAccess, false).settings;
+    harness
+        .provider
+        .set_settings(harness.thread_id.clone(), full_access)
+        .await
+        .unwrap();
+    harness.settle_start("turn-2", "inProgress").await;
+    harness.complete("thread-A", "turn-2", "completed").await;
+    harness.send("c", "raised").await;
+    let started = harness.held("turn/start", 3).await;
+    assert_eq!(started[2]["params"]["permissions"], ":danger-full-access");
+}
+
+#[tokio::test]
 async fn the_thread_opens_untrusted_and_the_launch_defines_every_profile() {
     // Catches a launch that leaves a profile undefined, which Codex rejects at the first turn, or
     // a profile that lets agents read Kratos's data folder and its client token (D19).
@@ -81,6 +170,40 @@ async fn the_thread_opens_untrusted_and_the_launch_defines_every_profile() {
         );
     }
     assert!(arguments.contains(&"default_permissions=\"kratos-plan\"".to_owned()));
+}
+
+#[tokio::test]
+async fn each_thread_starts_the_kratos_mcp_server_for_its_own_id() {
+    // Catches a thread whose agent gets no Kratos tools, tools that speak for another thread,
+    // tools Codex would ask about before each call, which Kratos answers by cancelling the call,
+    // and a tool timeout that ends a wait before the tool answers it.
+    let server = McpServer {
+        program: PathBuf::from("kratos-engine"),
+        home: PathBuf::from("kratos-home"),
+        port: 4321,
+    };
+    let mut harness = Harness::start(Options {
+        mcp: Some(server),
+        ..settings(Permission::AskMe, false)
+    })
+    .await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+
+    let opened = harness.control("test/threadRequests", json!({})).await;
+    let kratos = &opened[0]["params"]["config"]["mcp_servers"]["kratos"];
+    assert_eq!(kratos["command"], "kratos-engine");
+    assert_eq!(kratos["args"], json!(["mcp"]));
+    assert_eq!(
+        kratos["env"],
+        json!({ "KRATOS_HOME": "kratos-home", "KRATOS_PORT": "4321",
+                "KRATOS_THREAD_ID": harness.thread_id })
+    );
+    assert_eq!(kratos["default_tools_approval_mode"], "approve");
+    assert!(
+        kratos["tool_timeout_sec"].as_u64().unwrap() > kratos_engine::mcp::MAX_WAIT_SECONDS,
+        "Codex must not end a wait the tool would still answer: {kratos}"
+    );
 }
 
 #[tokio::test]

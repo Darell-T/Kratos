@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use kratos_protocol::{
-    Approval, ApprovalDecision, ApprovalOutcome, AskReason, Permission, QuestionOutcome,
-    ThreadEventBody, ThreadSettings,
+    AccessLimit, Approval, ApprovalDecision, ApprovalOutcome, AskReason, MessageOrigin, Permission,
+    QuestionOutcome, ThreadEventBody, ThreadSettings,
 };
 use serde_json::{Value, json};
 
@@ -93,6 +93,34 @@ async fn under_full_access_a_plain_command_runs_without_asking() {
     let answers = harness.answered(1).await;
     assert_eq!(answers[0]["result"], json!({ "decision": "accept" }));
     assert!(harness.details().await.approvals.is_empty());
+}
+
+#[tokio::test]
+async fn a_command_in_another_thread_s_turn_is_decided_by_that_thread_s_permission() {
+    // Catches a turn whose sandbox follows the sender's Ask me while Kratos still approves its
+    // commands as the receiver's Full access would.
+    let mut harness = Harness::start(with_permission(Permission::FullAccess)).await;
+    let sender = harness.another_thread("sender").await;
+    let limit = AccessLimit {
+        permission: Permission::AskMe,
+        plan_mode: false,
+    };
+    let origin = MessageOrigin::Thread {
+        thread_id: sender,
+        limit,
+    };
+    harness.running_turn_as("a", "turn-1", origin).await;
+
+    harness
+        .ask("ask-1", COMMAND, command("item-1", "cargo test"))
+        .await;
+
+    let approval = requested(&mut harness).await;
+    assert_eq!(approval.why, AskReason::AskEveryAction);
+    assert!(
+        harness.answers().await.is_empty(),
+        "Codex waits for the user"
+    );
 }
 
 #[tokio::test]

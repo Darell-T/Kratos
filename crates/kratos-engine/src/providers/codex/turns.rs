@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use kratos_codex_client::{Codex, RequestError, methods, rejected_before_execution, types};
 use kratos_protocol::{
-    Message, MessageId, MessageStatus, PauseReason, ThreadId, TurnId, TurnOutcome,
+    Message, MessageId, MessageStatus, PauseReason, ThreadId, ThreadSettings, TurnId, TurnOutcome,
 };
 use serde_json::json;
 
@@ -117,10 +117,14 @@ impl Actor {
             return;
         };
         let message_id = message.id.clone();
+        let lowered = lowered_settings(&self.threads[thread_id].settings, &message);
         let recorded = self
             .write(thread_id, {
-                let message_id = message_id.clone();
-                move |write| write.set_message_status(&message_id, MessageStatus::Submitting)
+                let (message_id, lowered) = (message_id.clone(), lowered.clone());
+                move |write| {
+                    write.set_message_status(&message_id, MessageStatus::Submitting)?;
+                    lowered.map_or(Ok(()), |settings| write.set_settings(settings))
+                }
             })
             .await;
         if recorded.is_err() {
@@ -132,6 +136,9 @@ impl Actor {
             .threads
             .get_mut(thread_id)
             .expect("dispatch checked the thread");
+        if let Some(lowered) = lowered {
+            thread.settings = lowered;
+        }
         thread.turn = Turn::Starting {
             attempt,
             message_id: message_id.clone(),
@@ -598,15 +605,20 @@ impl Actor {
     }
 }
 
+fn lowered_settings(settings: &ThreadSettings, message: &Message) -> Option<ThreadSettings> {
+    let lowered = settings.limited_to(message.origin.limit()?);
+    (lowered != *settings).then_some(lowered)
+}
+
 fn turn_start_params(
     native_id: String,
     message: &Message,
     model: Option<&str>,
-    settings: &kratos_protocol::ThreadSettings,
+    settings: &ThreadSettings,
 ) -> types::TurnStartParams {
     let mut params: types::TurnStartParams = wire::required(json!({
         "threadId": native_id,
-        "input": wire::user_input(&message.input),
+        "input": wire::user_input(message),
     }));
     params.client_user_message_id = Some(message.id.as_str().to_owned());
     params.model = settings.model.clone();

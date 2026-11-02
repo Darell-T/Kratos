@@ -1,0 +1,3 @@
+-- Never edit this file: databases in the field have already run it.
+-- Version 6 changes no table. Messages may now have the origin `thread`, which an engine at
+-- version 5 cannot read, so this version makes such an engine refuse the database instead.

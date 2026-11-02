@@ -31,7 +31,8 @@ use std::time::Duration;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
-    MessageId, MessageInput, QuestionId, QuestionOutcome, Skill, ThreadId, ThreadSettings,
+    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, Skill, ThreadId,
+    ThreadSettings,
 };
 use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
@@ -66,6 +67,14 @@ pub struct CodexSettings {
     /// The deadline of an ordinary request to Codex.
     pub request_timeout: Duration,
     pub platform: DangerousCommandPlatform,
+    pub mcp: Option<McpServer>,
+}
+
+#[derive(Clone, Debug)]
+pub struct McpServer {
+    pub program: PathBuf,
+    pub home: PathBuf,
+    pub port: u16,
 }
 
 /// What became of a continuation the scheduler sent (D39).
@@ -170,11 +179,13 @@ impl CodexProvider {
         thread_id: ThreadId,
         message_id: MessageId,
         input: Vec<MessageInput>,
+        origin: MessageOrigin,
     ) -> Result<Sent, ProviderError> {
         self.ask(|reply| actor::Command::Send {
             thread_id,
             message_id,
             input,
+            origin,
             reply,
         })
         .await

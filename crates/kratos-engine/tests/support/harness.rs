@@ -10,13 +10,15 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
-use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders, Sent};
+use kratos_engine::providers::codex::{
+    self, CodexProvider, CodexSettings, McpServer, ProtectedFolders, Sent,
+};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::UsageTracker;
 use kratos_engine::usage::scheduler::{self, Clock, LimitStop, SchedulerHandle};
 use kratos_protocol::{
-    CreateThread, CreateWorkspace, Message, MessageId, MessageInput, RequiredText, Seq,
-    ThreadDetails, ThreadEvent, ThreadEventBody, ThreadId, ThreadSettings,
+    CreateThread, CreateWorkspace, Message, MessageId, MessageInput, MessageOrigin, RequiredText,
+    Seq, ThreadDetails, ThreadEvent, ThreadEventBody, ThreadId, ThreadSettings,
 };
 use kratos_store::Store;
 use serde_json::{Value, json};
@@ -34,6 +36,7 @@ pub struct Options {
     pub settings: ThreadSettings,
     /// More arguments for the fake, such as `--state-file`.
     pub fake_args: Vec<OsString>,
+    pub mcp: Option<McpServer>,
 }
 
 impl Default for Options {
@@ -43,6 +46,7 @@ impl Default for Options {
             stop_timeout: Duration::from_secs(5),
             settings: ThreadSettings::default(),
             fake_args: Vec::new(),
+            mcp: None,
         }
     }
 }
@@ -107,6 +111,7 @@ impl Harness {
             stop_timeout: options.stop_timeout,
             request_timeout: Duration::from_secs(10),
             platform: DangerousCommandPlatform::Posix,
+            mcp: options.mcp,
         };
         let (provider, stops) =
             codex::start(settings, hub.clone(), store_thread.clone(), usage.clone())
@@ -166,10 +171,18 @@ impl Harness {
         self.root.path().join("project")
     }
 
-    /// Sends `text` with the message id `id`.
     pub async fn send(&self, id: &str, text: &str) -> Sent {
+        self.send_as(id, text, MessageOrigin::User).await
+    }
+
+    pub async fn send_as(&self, id: &str, text: &str, origin: MessageOrigin) -> Sent {
         self.provider
-            .send(self.thread_id.clone(), message_id(id), text_input(text))
+            .send(
+                self.thread_id.clone(),
+                message_id(id),
+                text_input(text),
+                origin,
+            )
             .await
             .unwrap()
     }
@@ -320,7 +333,11 @@ impl Harness {
     /// Sends message `id` and starts its turn as `turn_id`, which then runs until a test ends it.
     /// The thread must be idle with nothing queued.
     pub async fn running_turn(&mut self, id: &str, turn_id: &str) {
-        self.send(id, "work").await;
+        self.running_turn_as(id, turn_id, MessageOrigin::User).await;
+    }
+
+    pub async fn running_turn_as(&mut self, id: &str, turn_id: &str, origin: MessageOrigin) {
+        self.send_as(id, "work", origin).await;
         let deadline = tokio::time::Instant::now() + WAIT;
         while !self
             .turn_requests()

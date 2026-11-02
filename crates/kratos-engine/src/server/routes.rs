@@ -2,13 +2,17 @@ use std::path::Path as FilePath;
 
 use axum::body::Body;
 use axum::extract::rejection::QueryRejection;
-use axum::extract::{Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
-use kratos_protocol::{CreateThread, CreateWorkspace, Health, ListThreads, Provider};
+use kratos_protocol::{
+    CreateThread, CreateWorkspace, Health, ListEvents, ListThreads, Provider, Seq, ThreadId,
+};
 
+use super::acting::Acting;
 use super::json::read_json;
 use super::{ApiError, ServerState, json_reply};
+use crate::hub::PAGE_BYTES;
 
 pub(super) async fn health() -> Response {
     json_reply(StatusCode::OK, &Health { ok: true })
@@ -56,13 +60,38 @@ pub(super) async fn list_threads(
     Ok(json_reply(StatusCode::OK, &threads))
 }
 
-/// `POST /api/threads`: 201 with the thread. Body (413 or 400), then a Codex thread's settings
-/// (400), then the workspace (404), then the insert.
+/// `GET /api/threads/{id}/events?after=…`: 200 with up to a page of the thread's events after
+/// `after`, oldest first. An empty page means the client has them all. An unknown thread answers
+/// 404.
+pub(super) async fn thread_events(
+    State(state): State<ServerState>,
+    Path(thread_id): Path<String>,
+    query: Result<Query<ListEvents>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    let Query(ListEvents { after }) =
+        query.map_err(|rejection| ApiError::bad_request(rejection.body_text()))?;
+    let thread_id = ThreadId::new(thread_id);
+    let events = state
+        .store
+        .call(move |store| {
+            store.provider_thread(&thread_id)?;
+            store.events_after(&thread_id, after.unwrap_or(Seq::BEFORE_FIRST), PAGE_BYTES)
+        })
+        .await?;
+    Ok(json_reply(StatusCode::OK, &events))
+}
+
+/// `POST /api/threads`: 201 with the thread. Body (413 or 400), then the acting thread's access
+/// (400 or 403), then a Codex thread's settings (400), then the workspace (404), then the insert.
 pub(super) async fn create_thread(
     State(state): State<ServerState>,
+    headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
     let request: CreateThread = read_json(body).await?;
+    if let Some(acting) = Acting::of(&state, &headers).await? {
+        acting.may_create(&request.settings.clone().unwrap_or_default())?;
+    }
     if let (Provider::Codex, Some(settings)) = (request.provider, &request.settings) {
         state.codex()?.check_settings(settings.clone()).await?;
     }

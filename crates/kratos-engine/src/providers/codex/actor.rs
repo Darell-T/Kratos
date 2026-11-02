@@ -10,7 +10,7 @@ use std::time::Duration;
 use kratos_codex_client::{Codex, ConnectError, Incoming, RequestError, types};
 use kratos_protocol::{
     ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId, Message,
-    MessageId, MessageInput, Provider, QuestionId, QuestionOutcome, Skill, ThreadId,
+    MessageId, MessageInput, MessageOrigin, Provider, QuestionId, QuestionOutcome, Skill, ThreadId,
     ThreadSettings, TurnChanges, TurnOutcome,
 };
 use kratos_store::{Settle, StoreError, ThreadWrite};
@@ -35,6 +35,7 @@ pub(super) enum Command {
         thread_id: ThreadId,
         message_id: MessageId,
         input: Vec<MessageInput>,
+        origin: MessageOrigin,
         reply: Reply<Sent>,
     },
     Steer {
