@@ -171,7 +171,7 @@ mod tests {
         );
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let outcome = tokio::task::spawn_blocking(move || {
-            let caller = Caller::new(client, ThreadId::new("caller".to_owned()));
+            let caller = Caller::new(client, ThreadId::new("caller".to_owned())).unwrap();
             let cancelled = AtomicBool::new(false);
             let call = Call {
                 caller: &caller,

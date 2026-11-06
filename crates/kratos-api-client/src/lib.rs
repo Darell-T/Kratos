@@ -76,9 +76,12 @@ impl Client {
     }
 
     /// Pins the token to this engine start so an old agent cannot regain access after a restart.
-    pub fn with_current_token(mut self) -> Client {
-        self.token = self.bearer().map(Token::Fixed);
-        self
+    ///
+    /// # Errors
+    /// Returns an error naming the token file if reading it fails for a reason other than absence.
+    pub fn with_current_token(mut self) -> Result<Client, ClientError> {
+        self.token = self.bearer()?.map(Token::Fixed);
+        Ok(self)
     }
 
     /// Sends every HTTP request as the agent of `thread_id`, as Kratos's tools do. The event socket
@@ -123,7 +126,7 @@ impl Client {
     /// `Connection: close` added. An answer that arrives before the body is fully sent, such as a
     /// 413, is still returned.
     pub fn send(&self, request: &ApiRequest) -> Result<ApiReply, ClientError> {
-        let bearer = self.bearer();
+        let bearer = self.bearer()?;
         let default_headers = [
             ("Authorization", bearer.as_deref()),
             (
@@ -134,13 +137,23 @@ impl Client {
         self.send_raw(&request.encode(&self.authority, &default_headers))
     }
 
-    fn bearer(&self) -> Option<String> {
-        let token = match self.token.as_ref()? {
-            Token::File(path) => std::fs::read_to_string(path).ok()?,
-            Token::Fixed(bearer) => return Some(bearer.clone()),
+    fn bearer(&self) -> Result<Option<String>, ClientError> {
+        let token = match &self.token {
+            Some(Token::File(path)) => match std::fs::read_to_string(path) {
+                Ok(token) => token,
+                Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+                Err(source) => {
+                    return Err(ClientError::TokenRead {
+                        path: path.clone(),
+                        source,
+                    });
+                }
+            },
+            Some(Token::Fixed(bearer)) => return Ok(Some(bearer.clone())),
+            None => return Ok(None),
         };
         let token = token.trim();
-        (!token.is_empty()).then(|| format!("Bearer {token}"))
+        Ok((!token.is_empty()).then(|| format!("Bearer {token}")))
     }
 
     /// Writes `bytes` to a new connection as they are and reads the reply. For a request that
@@ -156,7 +169,7 @@ impl Client {
     /// Opens `/api/events`, adding `headers` (for example an Origin) to the handshake. A refused
     /// handshake is `Err(ClientError::Handshake)` with the engine's status.
     pub fn connect_events(&self, headers: &[(&str, &str)]) -> Result<EventSocket, ClientError> {
-        let bearer = self.bearer();
+        let bearer = self.bearer()?;
         let mut headers = headers.to_vec();
         if let Some(bearer) = &bearer
             && !headers
@@ -194,6 +207,12 @@ impl ApiReply {
 pub enum ClientError {
     #[error("not an http://host:port address: {0}")]
     Address(String),
+    #[error("cannot read the client token at {path}: {source}")]
+    TokenRead {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("cannot reach the engine at {authority}: {source}")]
     Connect {
         authority: String,
