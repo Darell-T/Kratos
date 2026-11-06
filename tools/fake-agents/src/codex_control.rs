@@ -7,12 +7,16 @@
 
 use std::io;
 use std::path::Path;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
 pub const SETTLE_TURN: &str = "test/settleTurn";
 pub const ASK: &str = "test/ask";
 pub const EMIT: &str = "test/emit";
+
+const CONTROL_POLL: Duration = Duration::from_millis(20);
 
 pub struct ControlRequest {
     pub method: &'static str,
@@ -101,4 +105,27 @@ pub fn read_port(control_file: &Path) -> io::Result<u16> {
             format!("{} holds no port: {text:?}", control_file.display()),
         )
     })
+}
+
+/// Waits until the fake publishes a readable, valid control port.
+///
+/// # Errors
+/// Returns TimedOut with the last read error when `within` passes.
+pub fn wait_for_port(control_file: &Path, within: Duration) -> io::Result<u16> {
+    let deadline = Instant::now() + within;
+    loop {
+        match read_port(control_file) {
+            Ok(port) => return Ok(port),
+            Err(error) if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "fake-codex wrote no port to {} within {within:?}: {error}",
+                        control_file.display()
+                    ),
+                ));
+            }
+            Err(_) => thread::sleep(CONTROL_POLL),
+        }
+    }
 }

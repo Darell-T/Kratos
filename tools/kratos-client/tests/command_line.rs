@@ -52,3 +52,19 @@ fn an_unreachable_engine_exits_1_with_a_json_error() {
             .starts_with("cannot reach the engine at 127.0.0.1:9")
     );
 }
+
+#[test]
+fn bench_post_runs_against_the_session_url_like_every_other_command() {
+    // Catches bench-post taking the engine URL as its own argument and ignoring --url, so a lane
+    // that sets --url or KRATOS_URL benchmarks a different engine than the rest of its commands.
+    let output = kratos_client(&["bench-post"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("cannot reach the engine at 127.0.0.1:9")
+    );
+}

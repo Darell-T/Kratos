@@ -624,7 +624,9 @@ dependencies = [
  "kratos-protocol",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "tungstenite",
 ]
 
 [[package]]
