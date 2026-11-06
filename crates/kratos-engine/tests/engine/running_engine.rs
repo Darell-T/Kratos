@@ -148,17 +148,8 @@ impl RunningEngine {
     /// on an error answer.
     pub fn fake_codex(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
         let control = self.fake_codex_control_file();
-        let deadline = Instant::now() + WAIT;
-        let port = loop {
-            if let Ok(port) = codex_control::read_port(&control) {
-                break port;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the engine never started fake-codex"
-            );
-            thread::sleep(Duration::from_millis(20));
-        };
+        let port = codex_control::wait_for_port(&control, WAIT)
+            .expect("the engine never started fake-codex");
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         let request = json!({ "id": 1, "method": method, "params": params });

@@ -266,18 +266,14 @@ impl Harness {
 
     async fn connect(&mut self) -> &mut Control {
         if self.control.is_none() {
-            let deadline = tokio::time::Instant::now() + WAIT;
-            // Codex starts on demand inside this runtime, so the wait sleeps instead of blocking.
-            let port = loop {
-                if let Ok(port) = codex_control::read_port(&self.control_file) {
-                    break port;
-                }
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "fake-codex never started"
-                );
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            };
+            let control_file = self.control_file.clone();
+            // Codex starts inside this runtime, so wait on a blocking worker.
+            let port = tokio::task::spawn_blocking(move || {
+                codex_control::wait_for_port(&control_file, WAIT)
+            })
+            .await
+            .expect("the port wait task finishes")
+            .expect("fake-codex never started");
             let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
             let (reader, writer) = stream.into_split();
             self.control = Some(Control {
