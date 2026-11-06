@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -84,6 +84,7 @@ fn serve_control(fake: Arc<Mutex<Fake>>, path: &str) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a localhost port is free");
     let port = listener.local_addr().expect("the port is known").port();
     codex_control::write_port(Path::new(path), port).expect("the control file is writable");
+    lock(&fake).control_file = Some(path.into());
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
             let fake = fake.clone();
@@ -168,6 +169,8 @@ struct Fake {
     answers: Vec<Value>,
     /// What handling the current message sends, in order.
     outbox: Vec<Out>,
+    /// The file holding the control port, which `test/exit` removes so no reader finds a dead one.
+    control_file: Option<PathBuf>,
 }
 
 struct Held {
@@ -469,11 +472,18 @@ impl Fake {
                 self.reply(id, Value::Null);
             }
             "test/spawnChild" => self.reply(id, json!(spawn_sleeper())),
-            "test/exit" => std::process::exit(params["code"].as_i64().unwrap_or(0) as i32),
+            "test/exit" => self.exit(params["code"].as_i64().unwrap_or(0) as i32),
             // Never answers, so the client has a request in flight when the process goes away.
             "test/hang" => {}
             method => self.fail(id, -32601, &format!("Method not found: {method}")),
         }
+    }
+
+    fn exit(&self, code: i32) -> ! {
+        if let Some(path) = &self.control_file {
+            let _ = std::fs::remove_file(path);
+        }
+        std::process::exit(code)
     }
 
     fn finish_sandbox_setup(&mut self) {
