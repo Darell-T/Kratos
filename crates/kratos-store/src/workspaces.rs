@@ -2,6 +2,7 @@ use kratos_protocol::{CreateWorkspace, Timestamp, Workspace, WorkspaceId};
 use rusqlite::{Row, params};
 use uuid::Uuid;
 
+use crate::columns::timestamp_column;
 use crate::{Store, StoreError};
 
 impl Store {
@@ -43,6 +44,6 @@ fn workspace_from_row(row: &Row<'_>) -> rusqlite::Result<Workspace> {
         id: WorkspaceId::new(row.get(0)?),
         name: row.get(1)?,
         path: row.get(2)?,
-        created_at: Timestamp::from_stored(row.get(3)?),
+        created_at: timestamp_column(row, 3, "created_at")?,
     })
 }

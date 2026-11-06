@@ -1,7 +1,7 @@
 //! How columns hold protocol values: as JSON text, or as one fixed name per enum variant. A value
 //! that no longer parses is a row this build cannot read, and reading fails rather than guess.
 
-use kratos_protocol::{ApprovalDecision, Permission, Provider};
+use kratos_protocol::{ApprovalDecision, Permission, Provider, Timestamp};
 use rusqlite::Row;
 use rusqlite::types::Type;
 use serde::Serialize;
@@ -45,6 +45,34 @@ pub(crate) fn from_stored_name<T: Copy>(
 
 pub(crate) fn unreadable(index: usize, reason: String) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(index, Type::Text, reason.into())
+}
+
+/// The timestamp in `column`, which sits at `index`, or `None` when it is NULL. The error names the
+/// column and the text it held.
+pub(crate) fn optional_timestamp_column(
+    row: &Row<'_>,
+    index: usize,
+    column: &str,
+) -> rusqlite::Result<Option<Timestamp>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|text| {
+            Timestamp::from_stored(text)
+                .map_err(|error| unreadable(index, format!("column {column}: {error}")))
+        })
+        .transpose()
+}
+
+/// [`optional_timestamp_column`] for a column that is never NULL.
+pub(crate) fn timestamp_column(
+    row: &Row<'_>,
+    index: usize,
+    column: &str,
+) -> rusqlite::Result<Timestamp> {
+    optional_timestamp_column(row, index, column)?.ok_or(rusqlite::Error::InvalidColumnType(
+        index,
+        column.to_owned(),
+        Type::Null,
+    ))
 }
 
 pub(crate) fn to_column<T: Serialize>(value: &T) -> String {

@@ -148,9 +148,9 @@ mod tests {
         let paused = ThreadEventBody::ThreadPaused {
             reason: PauseReason::UsageLimit {
                 turn_id: TurnId::new("turn".to_owned()),
-                resets_at: Some(Timestamp::from_stored(
-                    "2026-10-30T12:00:00.000Z".to_owned(),
-                )),
+                resets_at: Some(
+                    Timestamp::from_stored("2026-10-30T12:00:00.000Z".to_owned()).unwrap(),
+                ),
             },
         };
         assert_eq!(

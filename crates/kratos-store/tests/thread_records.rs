@@ -287,6 +287,37 @@ fn an_approval_of_another_thread_is_unknown_to_this_one() {
 }
 
 #[test]
+fn a_damaged_stored_time_fails_the_read_naming_its_column_and_value() {
+    // Catches a time that is not a timestamp being read as if it were one, to be replaced by a
+    // default later.
+    for (table, column) in [("threads", "created_at"), ("thread_events", "at")] {
+        let home = home();
+        let (mut store, thread) = store_with_thread(home.path());
+        enqueue(&mut store, &thread, "hello", QueuePlace::Back);
+        Connection::open(home.path().join("kratos.db"))
+            .unwrap()
+            .execute(&format!("UPDATE {table} SET {column} = 'last tuesday'"), [])
+            .unwrap();
+
+        let error = store
+            .thread_details(&thread)
+            .map(drop)
+            .and_then(|()| {
+                store
+                    .events_after(&thread, Seq::BEFORE_FIRST, usize::MAX)
+                    .map(drop)
+            })
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains(column) && error.contains("last tuesday"),
+            "{table}: {error}"
+        );
+    }
+}
+
+#[test]
 fn an_answered_question_keeps_no_answer_text() {
     // Catches answers written to the records, where a secret answer (a password) would stay.
     let home = home();

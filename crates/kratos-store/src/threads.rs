@@ -6,7 +6,9 @@ use kratos_protocol::{
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::columns::{from_column, from_stored_name, permission_name, provider_name, to_column};
+use crate::columns::{
+    from_column, from_stored_name, permission_name, provider_name, timestamp_column, to_column,
+};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// What a provider needs to run a thread's turns.
@@ -289,7 +291,7 @@ fn thread_from_row(row: &Row<'_>) -> rusqlite::Result<Thread> {
         workspace_id: WorkspaceId::new(row.get(1)?),
         title: row.get(2)?,
         provider: from_stored_name(Provider::ALL, provider_name, &provider, 3, "provider")?,
-        created_at: Timestamp::from_stored(row.get(4)?),
-        updated_at: Timestamp::from_stored(row.get(5)?),
+        created_at: timestamp_column(row, 4, "created_at")?,
+        updated_at: timestamp_column(row, 5, "updated_at")?,
     })
 }
