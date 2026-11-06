@@ -133,8 +133,9 @@ fn await_completion(
         let text = match socket.next_incoming(remaining)? {
             Some(Incoming::Text(text)) => text,
             Some(Incoming::Closed(code)) => {
+                let code = code.map_or("no close code".to_owned(), |code| format!("code {code}"));
                 return Err(BenchError::Failed(format!(
-                    "the engine closed the event socket (code {code:?}) before turn {turn_id} completed"
+                    "the engine closed the event socket ({code}) before turn {turn_id} completed"
                 )));
             }
             None => return Err(ClientError::TimedOut(WAIT).into()),
@@ -294,28 +295,41 @@ mod tests {
 
     #[test]
     fn a_closed_event_socket_is_reported_as_closed_not_as_a_timeout() {
-        // Catches a crashed engine reading as a slow one, because a socket the engine closed was
-        // reported as "nothing arrived".
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut socket = tungstenite::accept(stream).unwrap();
-            socket.close(None).unwrap();
-            while socket.read().is_ok() {}
-        });
-        let mut socket = Client::new(&format!("http://{address}"))
-            .unwrap()
-            .connect_events(&[])
-            .unwrap();
+        // Catches a received close frame being reported as a timeout or with debug Option codes.
+        use tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
 
-        let error = await_completion(&mut socket, &ThreadId::new("thread".to_owned()), "turn")
-            .unwrap_err()
-            .to_string();
+        for (frame, diagnostic) in [
+            (None, "(no close code)"),
+            (
+                Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "".into(),
+                }),
+                "(code 1000)",
+            ),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut socket = tungstenite::accept(stream).unwrap();
+                socket.close(frame).unwrap();
+                while socket.read().is_ok() {}
+            });
+            let mut socket = Client::new(&format!("http://{address}"))
+                .unwrap()
+                .connect_events(&[])
+                .unwrap();
 
-        drop(socket);
-        server.join().unwrap();
-        assert!(error.contains("closed"), "{error}");
-        assert!(!error.contains("nothing arrived"), "{error}");
+            let error = await_completion(&mut socket, &ThreadId::new("thread".to_owned()), "turn")
+                .unwrap_err()
+                .to_string();
+
+            drop(socket);
+            server.join().unwrap();
+            assert!(error.contains("closed"), "{error}");
+            assert!(!error.contains("nothing arrived"), "{error}");
+            assert!(error.contains(diagnostic), "{error}");
+        }
     }
 }
