@@ -84,7 +84,7 @@ impl Tree {
 /// makes the wait future non-`Send`.
 fn leader_exited(leader: libc::id_t) -> io::Result<bool> {
     #[allow(unsafe_code, reason = "waitid requires a siginfo_t output buffer")]
-    // SAFETY: zero is a valid initial value for every field of siginfo_t.
+    // SAFETY: zero is valid for siginfo_t and keeps si_pid zero when WNOHANG finds no status.
     let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
     loop {
         #[allow(unsafe_code, reason = "waitid has no safe wrapper in std")]
@@ -109,8 +109,12 @@ fn leader_exited(leader: libc::id_t) -> io::Result<bool> {
         unsafe_code,
         reason = "siginfo_t exposes si_pid through an unsafe accessor"
     )]
-    // SAFETY: waitid initialized info as SIGCHLD data, including si_pid.
-    Ok(unsafe { info.si_pid() } != 0)
+    // SAFETY: info was zeroed and waitid succeeded, so si_pid is initialized even without a status.
+    Ok(unsafe { info.si_pid() } != 0
+        && matches!(
+            info.si_code,
+            libc::CLD_EXITED | libc::CLD_KILLED | libc::CLD_DUMPED
+        ))
 }
 
 #[cfg(test)]
@@ -140,6 +144,46 @@ mod tests {
         drop(owner);
 
         SIGNALLED.with_borrow(|groups| assert_eq!(groups.as_slice(), &[id as libc::pid_t]));
+    }
+
+    #[tokio::test]
+    async fn a_stopped_leader_does_not_end_its_live_group() {
+        // Catches a stopped-child waitid report being treated as an exit and killing the group.
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 300 & echo $!; wait"])
+            .stdout(Stdio::piped());
+        let mut owner = OwnedChild::spawn(command).unwrap();
+        let leader = owner.child().id().unwrap();
+        let stdout = owner.child().stdout.take().unwrap();
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).await.unwrap();
+        let grandchild: u32 = line.trim().parse().unwrap();
+        assert!(
+            Command::new("kill")
+                .args(["-STOP", &leader.to_string()])
+                .status()
+                .await
+                .unwrap()
+                .success()
+        );
+
+        let waited =
+            tokio::time::timeout(std::time::Duration::from_millis(300), owner.wait()).await;
+
+        let alive = fake_agents::process_is_running(grandchild);
+        owner.end_tree().unwrap();
+        owner.wait().await.unwrap();
+        assert!(
+            waited.is_err(),
+            "a stopped leader ended its group: {waited:?}"
+        );
+        assert!(
+            alive,
+            "the stopped leader's grandchild {grandchild} was killed"
+        );
     }
 
     #[tokio::test]
