@@ -30,8 +30,12 @@ impl TaskView {
     ) -> Result<(Box<TaskView>, Turn), Rejection> {
         match self.take_phase() {
             Phase::Active {
-                activity: Activity::Turn { turn },
-            } if turn.awaits(message) => Ok((self, turn)),
+                activity:
+                    Activity::Turn {
+                        turn,
+                        hold: None | Some(Hold::Scheduled { .. }),
+                    },
+            } if turn.message == *message => Ok((self, turn)),
             other => {
                 let waiting = other.waiting_message().cloned();
                 self.phase = other;
@@ -150,14 +154,9 @@ impl TaskView {
         }
         turn.retries.push(cause);
         let follows = (cause != Retry::Lost).then(|| turn.message.clone());
-        let hold = turn.hold.take();
         turn.resend(seq, follows);
-        // FIXME: a kept `Hold::Scheduled` names a continuation that will never carry this
-        // correction, so `next_step` waits on the engine and the step stalls. Dropping the hold
-        // changes behavior, so it goes with the fix that moves the hold onto `Activity::Turn`.
-        turn.hold = hold;
         turn.note = Some(note);
-        self.active(Activity::Turn { turn })
+        self.active(Activity::Turn { turn, hold: None })
     }
 
     /// Pauses with the turn to run again in `left`.
@@ -167,7 +166,7 @@ impl TaskView {
         turn: Turn,
         detail: String,
     ) -> Box<TaskView> {
-        self.pause_in_trouble(why, detail, Activity::Turn { turn })
+        self.pause_in_trouble(why, detail, Activity::Turn { turn, hold: None })
     }
 
     fn turn_lost(mut self: Box<Self>, turn: Turn, reason: String, seq: FactSeq) -> Box<TaskView> {
@@ -183,28 +182,33 @@ impl TaskView {
 
     /// The provider stopped the turn at a usage limit. The step keeps its identity and goes to the
     /// one scheduler. With account handoff on, the user is asked first, every time (D40).
-    fn hold_turn(self: Box<Self>, mut turn: Turn, delivered: bool) -> Box<TaskView> {
+    fn hold_turn(self: Box<Self>, turn: Turn, delivered: bool) -> Box<TaskView> {
         let stop = Stop {
             message: turn.message.clone(),
             delivered,
             user_accepted_wait: false,
         };
         if self.policy.account_handoff {
-            turn.hold = None;
             let ask = UsageLimitAsk::Handoff;
             return self.waiting(Waiting::UsageLimit { turn, stop, ask });
         }
-        turn.hold = Some(Hold::ToScheduler { stop });
-        self.active(Activity::Turn { turn })
+        self.active(Activity::Turn {
+            turn,
+            hold: Some(Hold::ToScheduler { stop }),
+        })
     }
 
     /// The active turn with this step id. The caller checks that the turn has the hold the fact
     /// needs.
-    fn held_turn(&self, step: StepId, fact: &'static str) -> Result<Turn, Rejection> {
+    fn held_turn(&self, step: StepId, fact: &'static str) -> Result<(Turn, Hold), Rejection> {
         match &self.phase {
             Phase::Active {
-                activity: Activity::Turn { turn },
-            } if turn.step == step => Ok(turn.clone()),
+                activity:
+                    Activity::Turn {
+                        turn,
+                        hold: Some(hold),
+                    },
+            } if turn.step == step => Ok((turn.clone(), hold.clone())),
             _ => Err(self.misfit(fact)),
         }
     }
@@ -218,8 +222,8 @@ impl TaskView {
         message: MessageId,
         resumes_at: Option<UnixMillis>,
     ) -> Result<Box<TaskView>, Rejection> {
-        let mut turn = self.held_turn(step, "continuation_scheduled")?;
-        let Some(Hold::ToScheduler { stop }) = &turn.hold else {
+        let (mut turn, hold) = self.held_turn(step, "continuation_scheduled")?;
+        let Hold::ToScheduler { stop } = hold else {
             return Err(self.misfit("continuation_scheduled"));
         };
         if stop.message == message {
@@ -228,11 +232,11 @@ impl TaskView {
             )));
         }
         turn.message = message;
-        turn.hold = Some(Hold::Scheduled {
+        let hold = Some(Hold::Scheduled {
             continuation,
             resumes_at,
         });
-        Ok(self.active(Activity::Turn { turn }))
+        Ok(self.active(Activity::Turn { turn, hold }))
     }
 
     /// The scheduler will not resume by itself, so the user decides (D41).
@@ -241,8 +245,8 @@ impl TaskView {
         step: StepId,
         why: Declined,
     ) -> Result<Box<TaskView>, Rejection> {
-        let mut turn = self.held_turn(step, "continuation_declined")?;
-        let Some(Hold::ToScheduler { stop }) = turn.hold.take() else {
+        let (turn, hold) = self.held_turn(step, "continuation_declined")?;
+        let Hold::ToScheduler { stop } = hold else {
             return Err(self.misfit("continuation_declined"));
         };
         let ask = UsageLimitAsk::LongWait { why };
@@ -256,15 +260,18 @@ impl TaskView {
         step: StepId,
         outcome: HandoffOutcome,
     ) -> Result<Box<TaskView>, Rejection> {
-        let mut turn = self.held_turn(step, "account_handoff")?;
-        let Some(Hold::HandOff { stop }) = turn.hold.take() else {
+        let (mut turn, hold) = self.held_turn(step, "account_handoff")?;
+        let Hold::HandOff { stop } = hold else {
             return Err(self.misfit("account_handoff"));
         };
-        match outcome {
-            HandoffOutcome::HandedOff => turn.resend(seq, None),
-            HandoffOutcome::Unavailable { .. } => turn.hold = Some(Hold::ToScheduler { stop }),
-        }
-        Ok(self.active(Activity::Turn { turn }))
+        let hold = match outcome {
+            HandoffOutcome::HandedOff => {
+                turn.resend(seq, None);
+                None
+            }
+            HandoffOutcome::Unavailable { .. } => Some(Hold::ToScheduler { stop }),
+        };
+        Ok(self.active(Activity::Turn { turn, hold }))
     }
 
     // Questions (D31, D90, D91) and plan-change requests (D32).
@@ -330,7 +337,7 @@ impl TaskView {
         let follows = Some(turn.message.clone());
         turn.resend(seq, follows);
         turn.note = None;
-        Ok(self.active(Activity::Turn { turn }))
+        Ok(self.active(Activity::Turn { turn, hold: None }))
     }
 
     /// The planner answered. The step that asked resumes with the answer.

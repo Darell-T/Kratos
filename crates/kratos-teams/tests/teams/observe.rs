@@ -53,7 +53,7 @@ fn phase_name(view: &TaskView) -> &'static str {
     match &view.phase {
         Phase::Active { activity } => match activity {
             Activity::Preparing { .. } => "preparing",
-            Activity::Turn { turn } => match turn.work {
+            Activity::Turn { turn, .. } => match turn.work {
                 Work::Review { .. } => "reviewing",
                 _ => "implementing",
             },

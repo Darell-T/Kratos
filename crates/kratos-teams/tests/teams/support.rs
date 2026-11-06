@@ -277,7 +277,7 @@ impl ScriptedTask {
     fn continuation_result(&mut self, view: &TaskView, message: MessageId) -> Fact {
         let role = match &view.phase {
             Phase::Active {
-                activity: Activity::Turn { turn },
+                activity: Activity::Turn { turn, .. },
             } => turn.work.role(),
             _ => panic!("a continuation waits in a turn"),
         };

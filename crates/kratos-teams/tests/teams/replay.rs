@@ -104,6 +104,7 @@ fn samples(view: &TaskView) -> Vec<Decision> {
                             work: Work::Rule { disputed, .. },
                             ..
                         },
+                    ..
                 },
             ..
         }) => disputed.clone(),
