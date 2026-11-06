@@ -219,7 +219,7 @@ impl Done {
             Done::UsageRead {
                 reply: Some(reply), ..
             } => drop(reply.send(Err(process_exited()))),
-            Done::Interrupted { stopper, .. } => stopper.tell(|| Err(process_exited())),
+            Done::Interrupted { stopper, .. } => stopper.tell(|| Ok(())),
             Done::Connected { result: Err(_) }
             | Done::UsageRead { reply: None, .. }
             | Done::Account { .. }

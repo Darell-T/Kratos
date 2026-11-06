@@ -680,10 +680,7 @@ async fn a_late_stop_answers_its_waiter() {
 
     let result = stopped.await.unwrap();
     harness.close().await;
-    assert!(
-        matches!(&result, Err(ProviderError::Unavailable(why)) if why == "The Codex process that handled this request has exited"),
-        "{result:?}"
-    );
+    assert!(result.is_ok(), "{result:?}");
 }
 
 #[tokio::test]
