@@ -128,8 +128,7 @@ impl Command {
     }
 }
 
-/// Work the actor started, finished. Each names the thread, turn, or attempt it belongs to, so the
-/// actor can tell a stale one.
+/// Finished work that changes actor state, fenced by its process generation in `Completion`.
 pub(super) enum Done {
     Connected {
         result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
@@ -191,45 +190,18 @@ pub(super) enum Done {
     },
 }
 
-/// Work that only answers a caller, so a stale one fails the caller and changes no state.
-pub(super) enum Response {
-    SkillsListed {
-        result: Result<Vec<Skill>, ProviderError>,
-        reply: Reply<Vec<Skill>>,
-    },
-    CommandRan {
-        result: CommandResult,
-        reply: Reply<CommandResult>,
-    },
-}
-
 /// Finished work tagged with the server generation that started it.
 pub(super) struct Completion {
     generation: u64,
-    work: Work,
-}
-
-enum Work {
-    Update(Done),
-    Reply(Response),
-}
-
-impl Response {
-    fn send(self, current: Result<(), ProviderError>) {
-        match self {
-            Self::SkillsListed { result, reply } => drop(reply.send(current.and(result))),
-            Self::CommandRan { result, reply } => drop(reply.send(current.map(|()| result))),
-        }
-    }
+    done: Done,
 }
 
 impl Completion {
     async fn apply(self, actor: &mut Actor) {
-        match (self.generation == actor.generation, self.work) {
-            (true, Work::Update(done)) => actor.on_done(done).await,
-            (true, Work::Reply(response)) => response.send(Ok(())),
-            (false, Work::Update(done)) => done.discard_stale().await,
-            (false, Work::Reply(response)) => response.send(Err(process_exited())),
+        if self.generation == actor.generation {
+            actor.on_done(self.done).await;
+        } else {
+            self.done.discard_stale().await;
         }
     }
 }
@@ -352,21 +324,7 @@ impl Actor {
             // The actor holds the receiver for as long as it runs.
             let _ = done.send(Completion {
                 generation,
-                work: Work::Update(work.await),
-            });
-        });
-    }
-
-    pub(super) fn respond<F>(&self, work: F)
-    where
-        F: Future<Output = Response> + Send + 'static,
-    {
-        let done = self.done.clone();
-        let generation = self.generation;
-        tokio::spawn(async move {
-            let _ = done.send(Completion {
-                generation,
-                work: Work::Reply(work.await),
+                done: work.await,
             });
         });
     }

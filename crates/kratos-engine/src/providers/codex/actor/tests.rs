@@ -78,7 +78,7 @@ impl Harness {
                 .await
                 .unwrap()
                 .unwrap();
-            if matches!(done.work, Work::Update(Done::Attached { .. })) {
+            if matches!(done.done, Done::Attached { .. }) {
                 return done;
             }
             done.apply(&mut self.actor).await;
@@ -319,7 +319,7 @@ async fn a_start_reply_after_exit_cannot_accept_a_message_or_start_a_turn() {
             .await
             .unwrap()
             .unwrap();
-        if matches!(done.work, Work::Update(Done::StartAnswered { .. })) {
+        if matches!(done.done, Done::StartAnswered { .. }) {
             break done;
         }
         done.apply(&mut harness.actor).await;
@@ -461,44 +461,8 @@ async fn exit_settlement_rolls_back_the_turn_if_the_steer_cannot_be_settled() {
 }
 
 #[tokio::test]
-async fn a_late_skills_reply_reports_the_exited_process() {
-    // Catches a direct skills reply bypassing the actor's process generation.
-    let mut harness = Harness::start().await;
-    let attached = harness.attached_reply().await;
-    attached.apply(&mut harness.actor).await;
-    let (reply, listed) = oneshot::channel();
-    harness
-        .actor
-        .on_command(Command::Skills {
-            thread_id: harness.thread_id.clone(),
-            reply,
-        })
-        .await;
-    let old_reply = loop {
-        let done = tokio::time::timeout(WAIT, harness.actor.completions.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        if matches!(done.work, Work::Reply(Response::SkillsListed { .. })) {
-            break done;
-        }
-        done.apply(&mut harness.actor).await;
-    };
-
-    harness.exit().await;
-    old_reply.apply(&mut harness.actor).await;
-
-    let result = listed.await.unwrap();
-    harness.close().await;
-    assert!(
-        matches!(result, Err(ProviderError::Unavailable(_))),
-        "{result:?}"
-    );
-}
-
-#[tokio::test]
-async fn a_late_command_reply_reports_the_exited_process() {
-    // Catches a direct command reply reporting success after its Codex process exited.
+async fn a_finished_command_answers_without_an_actor_update() {
+    // Catches a true caller-only result held behind the actor's state-change fence.
     let mut harness = Harness::start().await;
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
@@ -516,24 +480,16 @@ async fn a_late_command_reply_reports_the_exited_process() {
     harness.control("test/settleTurn", json!({
         "method": "command/exec", "result": { "exitCode": 0, "stdout": "work", "stderr": "" },
     })).await;
-    let old_reply = loop {
-        let done = tokio::time::timeout(WAIT, harness.actor.completions.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        if matches!(done.work, Work::Reply(Response::CommandRan { .. })) {
-            break done;
-        }
-        done.apply(&mut harness.actor).await;
-    };
 
-    harness.exit().await;
-    old_reply.apply(&mut harness.actor).await;
-
-    let result = ran.await.unwrap();
+    let result = tokio::time::timeout(WAIT, ran).await;
     harness.close().await;
-    assert!(
-        matches!(result, Err(ProviderError::Unavailable(_))),
-        "{result:?}"
+
+    let result = result
+        .expect("a command result does not require an actor update")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(result).unwrap(),
+        json!({"kind": "exited", "exitCode": 0, "stdout": "work", "stderr": ""})
     );
 }
