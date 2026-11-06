@@ -18,6 +18,8 @@ use crate::bench::temp_workspace;
 use crate::{BenchError, BenchReport};
 
 const WAIT: Duration = Duration::from_secs(10);
+/// How often `Control::connect` looks for the port file while Codex starts.
+const CONTROL_POLL: Duration = Duration::from_millis(20);
 const THREADS: usize = 10;
 const TURNS: usize = 200;
 
@@ -177,7 +179,19 @@ struct Control(BufReader<TcpStream>);
 
 impl Control {
     fn connect(control_file: &Path) -> Result<Self, BenchError> {
-        let port = codex_control::read_port(control_file)?;
+        let deadline = Instant::now() + WAIT;
+        let port = loop {
+            match codex_control::read_port(control_file) {
+                Ok(port) => break port,
+                Err(error) if Instant::now() >= deadline => {
+                    return Err(BenchError::Failed(format!(
+                        "fake-codex wrote no port to {} within {WAIT:?}: {error}",
+                        control_file.display()
+                    )));
+                }
+                Err(_) => thread::sleep(CONTROL_POLL),
+            }
+        };
         let stream = TcpStream::connect(("127.0.0.1", port))?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(WAIT))?;
@@ -258,6 +272,26 @@ mod tests {
     use kratos_protocol::ThreadId;
 
     use super::*;
+
+    #[test]
+    fn control_waits_for_a_fake_codex_that_starts_late() {
+        // Catches a benchmark that fails when Codex has not yet written its control port, because
+        // it read the port file once.
+        let dir = tempfile::tempdir().unwrap();
+        let control_file = dir.path().join("fake-codex-control");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let late_file = control_file.clone();
+        let starter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            codex_control::write_port(&late_file, port).unwrap();
+        });
+
+        let connected = Control::connect(&control_file);
+
+        starter.join().unwrap();
+        assert!(connected.is_ok(), "{:?}", connected.err());
+    }
 
     #[test]
     fn a_closed_event_socket_is_reported_as_closed_not_as_a_timeout() {
