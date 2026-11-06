@@ -59,7 +59,7 @@ fn socket_messages_match_the_typescript_json() {
         event: ThreadEvent {
             thread_id: ThreadId::new("t".into()),
             seq: Seq::new(1),
-            at: Timestamp::from_stored("2030-01-01T00:00:00.000Z".into()).unwrap(),
+            at: Timestamp::try_from("2030-01-01T00:00:00.000Z".to_owned()).unwrap(),
             event: ThreadEventBody::UserMessage {
                 text: "hi \"there\"\n\u{2028}é🚀".into(),
             },

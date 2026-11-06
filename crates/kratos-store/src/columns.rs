@@ -56,7 +56,7 @@ pub(crate) fn optional_timestamp_column(
 ) -> rusqlite::Result<Option<Timestamp>> {
     row.get::<_, Option<String>>(index)?
         .map(|text| {
-            Timestamp::from_stored(text)
+            Timestamp::try_from(text)
                 .map_err(|error| unreadable(index, format!("column {column}: {error}")))
         })
         .transpose()

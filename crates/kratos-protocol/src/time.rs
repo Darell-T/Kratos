@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// Stored and sent as text. Text of this one shape sorts in time order, which the `ORDER BY
 /// created_at` listings rely on, so [`Timestamp::at`] is the only place Rust formats a time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+#[serde(try_from = "String")]
 pub struct Timestamp(String);
 
 /// Text that is not a timestamp.
@@ -40,24 +40,23 @@ impl Timestamp {
         Timestamp(humantime::format_rfc3339_millis(time).to_string())
     }
 
-    /// The instant the text names. `None` for text that is not a timestamp, such as a damaged row.
+    /// The instant the text names.
     pub fn instant(&self) -> Option<SystemTime> {
         humantime::parse_rfc3339(&self.0).ok()
     }
 
-    /// A timestamp read back from storage, kept as written.
-    ///
-    /// # Errors
-    ///
-    /// [`TimestampError`] when `text` is not an RFC 3339 time, as a damaged row is not.
-    pub fn from_stored(text: String) -> Result<Timestamp, TimestampError> {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for Timestamp {
+    type Error = TimestampError;
+
+    fn try_from(text: String) -> Result<Timestamp, TimestampError> {
         match humantime::parse_rfc3339(&text) {
             Ok(_) => Ok(Timestamp(text)),
             Err(_) => Err(TimestampError { text }),
         }
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
     }
 }

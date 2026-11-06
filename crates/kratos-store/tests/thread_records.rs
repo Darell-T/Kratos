@@ -318,6 +318,44 @@ fn a_damaged_stored_time_fails_the_read_naming_its_column_and_value() {
 }
 
 #[test]
+fn a_damaged_time_in_a_stored_pause_fails_the_read() {
+    // Catches an invalid reset time in JSON entering the scheduler as a valid pause reason.
+    let home = home();
+    let (store, thread) = store_with_thread(home.path());
+    let pause = json!({"reason": "usageLimit", "turnId": "turn-1", "resetsAt": "last tuesday"});
+    Connection::open(home.path().join("kratos.db"))
+        .unwrap()
+        .execute("UPDATE threads SET paused = ?1", [pause.to_string()])
+        .unwrap();
+
+    let error = store.thread_details(&thread).unwrap_err().to_string();
+
+    assert!(error.contains("last tuesday"), "{error}");
+}
+
+#[test]
+fn a_damaged_time_in_a_stored_event_fails_the_read() {
+    // Catches invalid nested timestamps in event bodies being replayed as valid protocol values.
+    let home = home();
+    let (mut store, thread) = store_with_thread(home.path());
+    enqueue(&mut store, &thread, "hello", QueuePlace::Back);
+    let event = json!({"kind": "thread.paused", "reason": "usageLimit", "turnId": "turn-1",
+                       "resetsAt": "last tuesday"});
+    Connection::open(home.path().join("kratos.db"))
+        .unwrap()
+        .execute("UPDATE thread_events SET event = ?1", [event.to_string()])
+        .unwrap();
+
+    let result = store.events_after(&thread, Seq::BEFORE_FIRST, usize::MAX);
+
+    assert!(
+        matches!(&result, Err(StoreError::UnreadableEvent { .. })),
+        "{result:?}"
+    );
+    assert!(result.unwrap_err().to_string().contains("last tuesday"));
+}
+
+#[test]
 fn an_answered_question_keeps_no_answer_text() {
     // Catches answers written to the records, where a secret answer (a password) would stay.
     let home = home();

@@ -592,7 +592,7 @@ mod tests {
         UsageWindow {
             used_percent,
             window_minutes: Some(minutes),
-            resets_at: Some(Timestamp::from_stored(resets_at.into()).unwrap()),
+            resets_at: Some(Timestamp::try_from(resets_at.to_owned()).unwrap()),
         }
     }
 

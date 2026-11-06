@@ -149,7 +149,7 @@ mod tests {
             reason: PauseReason::UsageLimit {
                 turn_id: TurnId::new("turn".to_owned()),
                 resets_at: Some(
-                    Timestamp::from_stored("2026-10-30T12:00:00.000Z".to_owned()).unwrap(),
+                    Timestamp::try_from("2026-10-30T12:00:00.000Z".to_owned()).unwrap(),
                 ),
             },
         };
