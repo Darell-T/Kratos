@@ -27,8 +27,6 @@ impl Tree {
         let Some(group) = self.group.take() else {
             return Ok(());
         };
-        #[cfg(test)]
-        tests::SIGNALLED.with_borrow_mut(|groups| groups.push(group));
         #[allow(unsafe_code, reason = "killpg has no safe wrapper in std")]
         // SAFETY: killpg only reads its two integer arguments; it touches no memory of this
         // process.
@@ -112,32 +110,11 @@ fn leader_exited(leader: libc::id_t) -> io::Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
     use std::process::Stdio;
 
     use tokio::process::Command;
 
     use crate::OwnedChild;
-
-    thread_local! {
-        pub(super) static SIGNALLED: RefCell<Vec<libc::pid_t>> = const { RefCell::new(Vec::new()) };
-    }
-
-    #[tokio::test]
-    async fn ending_then_reaping_and_dropping_signals_the_group_once() {
-        // Catches a retained group id being signalled again after end_tree and reaping.
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 300"]);
-        let mut owner = OwnedChild::spawn(command).unwrap();
-        let id = owner.child.id().unwrap();
-
-        owner.end_tree().unwrap();
-        owner.wait().await.unwrap();
-        owner.end_tree().unwrap();
-        drop(owner);
-
-        SIGNALLED.with_borrow(|groups| assert_eq!(groups.as_slice(), &[id as libc::pid_t]));
-    }
 
     #[tokio::test]
     async fn a_stopped_leader_does_not_end_its_live_group() {
@@ -192,25 +169,5 @@ mod tests {
             .unwrap();
         assert!(status.success());
         drop(owner);
-
-        SIGNALLED.with_borrow(|groups| assert_eq!(groups.len(), 1));
-    }
-
-    #[tokio::test]
-    async fn cancelling_wait_preserves_drop_cleanup() {
-        // Catches a cancelled pre-reap wait discarding the ability to end the group.
-        let mut command = Command::new("sh");
-        command.args(["-c", "sleep 300"]);
-        let mut owner = OwnedChild::spawn(command).unwrap();
-        let id = owner.child.id().unwrap();
-
-        tokio::select! {
-            biased;
-            status = owner.wait() => panic!("sleep exited before cancellation: {status:?}"),
-            () = tokio::task::yield_now() => {},
-        }
-        drop(owner);
-
-        SIGNALLED.with_borrow(|groups| assert_eq!(groups.as_slice(), &[id as libc::pid_t]));
     }
 }

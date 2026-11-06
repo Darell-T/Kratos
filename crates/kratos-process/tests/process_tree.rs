@@ -69,6 +69,22 @@ async fn dropping_the_owner_ends_the_grandchild_too() {
 }
 
 #[tokio::test]
+async fn cancelling_wait_preserves_drop_cleanup() {
+    // Catches a cancelled wait discarding ownership before Drop can end the child's whole tree.
+    let mut owner = OwnedChild::spawn(parent_of_a_sleeper()).unwrap();
+    let grandchild = grandchild_id(&mut owner).await;
+
+    tokio::select! {
+        biased;
+        status = owner.wait() => panic!("the sleeper exited before cancellation: {status:?}"),
+        () = tokio::task::yield_now() => {},
+    }
+    drop(owner);
+
+    assert_ends(grandchild).await;
+}
+
+#[tokio::test]
 async fn ending_the_tree_still_reports_the_child_exit() {
     let mut owner = OwnedChild::spawn(parent_of_a_sleeper()).unwrap();
     let grandchild = grandchild_id(&mut owner).await;
