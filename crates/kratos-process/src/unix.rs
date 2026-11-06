@@ -61,35 +61,12 @@ impl Tree {
         // Subscribe before checking exit so an intervening SIGCHLD cannot be missed.
         let mut exited = signal(SignalKind::child())?;
         loop {
-            #[allow(unsafe_code, reason = "waitid requires a siginfo_t output buffer")]
-            // SAFETY: zero is a valid initial value for every field of siginfo_t.
-            let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
-            #[allow(unsafe_code, reason = "waitid has no safe wrapper in std")]
-            // SAFETY: info is writable for the entire call. WNOWAIT keeps the leader unreaped.
-            let result = unsafe {
-                libc::waitid(
-                    libc::P_PID,
-                    leader,
-                    &raw mut info,
-                    libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
-                )
-            };
-            if result != 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
+            let done = leader_exited(leader).inspect_err(|error| {
                 if error.raw_os_error() == Some(libc::ECHILD) {
                     self.group = None;
                 }
-                return Err(error);
-            }
-            #[allow(
-                unsafe_code,
-                reason = "siginfo_t exposes si_pid through an unsafe accessor"
-            )]
-            // SAFETY: waitid initialized info as SIGCHLD data, including si_pid.
-            if unsafe { info.si_pid() } != 0 {
+            })?;
+            if done {
                 break;
             }
             exited
@@ -100,6 +77,40 @@ impl Tree {
         self.end(child)?;
         child.wait().await
     }
+}
+
+/// Reports whether the leader has exited, without reaping it. This is a plain function so the
+/// `siginfo_t` it holds, which contains raw pointers, never lives in an async state machine and
+/// makes the wait future non-`Send`.
+fn leader_exited(leader: libc::id_t) -> io::Result<bool> {
+    #[allow(unsafe_code, reason = "waitid requires a siginfo_t output buffer")]
+    // SAFETY: zero is a valid initial value for every field of siginfo_t.
+    let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
+    loop {
+        #[allow(unsafe_code, reason = "waitid has no safe wrapper in std")]
+        // SAFETY: info is writable for the entire call. WNOWAIT keeps the leader unreaped.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                leader,
+                &raw mut info,
+                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+            )
+        };
+        if result == 0 {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    #[allow(
+        unsafe_code,
+        reason = "siginfo_t exposes si_pid through an unsafe accessor"
+    )]
+    // SAFETY: waitid initialized info as SIGCHLD data, including si_pid.
+    Ok(unsafe { info.si_pid() } != 0)
 }
 
 #[cfg(test)]

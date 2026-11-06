@@ -79,3 +79,12 @@ impl Drop for OwnedChild {
         let _ = self.end_tree();
     }
 }
+
+/// Pins that the future [`OwnedChild::wait`] returns is `Send`, since callers spawn it on the
+/// multi-threaded runtime. A non-`Send` value held across an await in any platform's `Tree::wait`
+/// fails this build.
+#[allow(dead_code, reason = "exists only to be type-checked")]
+fn wait_future_is_send(child: &mut OwnedChild) {
+    fn assert_send<T: Send>(_: T) {}
+    assert_send(child.wait());
+}
