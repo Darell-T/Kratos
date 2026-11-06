@@ -8,7 +8,7 @@ use kratos_codex_client::{Codex, methods, types};
 use kratos_protocol::{CommandResult, Skill, ThreadId};
 use serde_json::json;
 
-use super::actor::{Actor, Command, Reply};
+use super::actor::{Actor, Command, Reply, Response};
 use super::profiles::Profile;
 use super::{ProviderError, wire};
 
@@ -137,8 +137,11 @@ impl Actor {
             }
         };
         let folder = self.threads[&thread_id].folder.clone();
-        tokio::spawn(async move {
-            let _ = reply.send(list_skills(&codex, folder).await);
+        self.respond(async move {
+            Response::SkillsListed {
+                result: list_skills(&codex, folder).await,
+                reply,
+            }
         });
     }
 
@@ -172,8 +175,11 @@ impl Actor {
         let thread = &self.threads[&thread_id];
         let profile = Profile::for_settings(&thread.settings).id().to_owned();
         let folder = thread.folder.clone();
-        tokio::spawn(async move {
-            let _ = reply.send(Ok(exec(&codex, command, folder, profile, timeout).await));
+        self.respond(async move {
+            Response::CommandRan {
+                result: exec(&codex, command, folder, profile, timeout).await,
+                reply,
+            }
         });
     }
 }

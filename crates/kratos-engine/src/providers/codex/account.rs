@@ -9,7 +9,7 @@ use super::{ProviderError, wire};
 
 impl Actor {
     /// Reads the plan that pays for the account (D24) and the account's usage (D38).
-    pub(super) fn read_account(&self, generation: u64, codex: Codex) {
+    pub(super) fn read_account(&self, codex: Codex) {
         let reader = codex.clone();
         self.spawn(async move {
             let plan = match reader
@@ -19,15 +19,9 @@ impl Actor {
                 Ok(read) => wire::plan(&read),
                 Err(_) => None,
             };
-            Done::Account { generation, plan }
+            Done::Account { plan }
         });
         self.read_usage(codex, None);
-    }
-
-    pub(super) fn on_account(&mut self, generation: u64, plan: Option<String>) {
-        if generation == self.generation {
-            self.plan = plan;
-        }
     }
 
     pub(super) fn refresh_usage(&mut self, reply: Reply<()>) {

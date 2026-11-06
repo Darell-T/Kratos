@@ -43,7 +43,7 @@ pub(super) enum Stopper {
 }
 
 impl Stopper {
-    fn tell(self, result: impl Fn() -> Result<(), ProviderError>) {
+    pub(super) fn tell(self, result: impl Fn() -> Result<(), ProviderError>) {
         if let Stopper::Users(waiters) = self {
             for waiter in waiters {
                 let _ = waiter.send(result());
@@ -505,7 +505,7 @@ impl Actor {
     }
 
     /// Leaves the starting state, answering any stop that waited for the start.
-    fn end_start(&mut self, thread_id: &ThreadId, for_stop: Result<(), ProviderError>) {
+    pub(super) fn end_start(&mut self, thread_id: &ThreadId, for_stop: Result<(), ProviderError>) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
