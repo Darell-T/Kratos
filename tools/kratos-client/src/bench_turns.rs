@@ -130,8 +130,14 @@ fn await_completion(
     let deadline = Instant::now() + WAIT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let Some(Incoming::Text(text)) = socket.next_incoming(remaining)? else {
-            return Err(ClientError::TimedOut(WAIT).into());
+        let text = match socket.next_incoming(remaining)? {
+            Some(Incoming::Text(text)) => text,
+            Some(Incoming::Closed(code)) => {
+                return Err(BenchError::Failed(format!(
+                    "the engine closed the event socket (code {code:?}) before turn {turn_id} completed"
+                )));
+            }
+            None => return Err(ClientError::TimedOut(WAIT).into()),
         };
         let message: ServerMessage =
             serde_json::from_str(&text).map_err(|source| ClientError::Json {
@@ -146,8 +152,7 @@ fn await_completion(
                     ..
                 } = event.event
                 {
-                    if &event.thread_id != thread_id
-                        || completed_id.as_str() != turn_id
+                    if (&event.thread_id, completed_id.as_str()) != (thread_id, turn_id)
                         || outcome != TurnOutcome::Completed
                     {
                         return Err(BenchError::Failed(format!(
@@ -245,5 +250,39 @@ impl Observer {
 impl Drop for Observer {
     fn drop(&mut self) {
         let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kratos_protocol::ThreadId;
+
+    use super::*;
+
+    #[test]
+    fn a_closed_event_socket_is_reported_as_closed_not_as_a_timeout() {
+        // Catches a crashed engine reading as a slow one, because a socket the engine closed was
+        // reported as "nothing arrived".
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut socket = tungstenite::accept(stream).unwrap();
+            socket.close(None).unwrap();
+            while socket.read().is_ok() {}
+        });
+        let mut socket = Client::new(&format!("http://{address}"))
+            .unwrap()
+            .connect_events(&[])
+            .unwrap();
+
+        let error = await_completion(&mut socket, &ThreadId::new("thread".to_owned()), "turn")
+            .unwrap_err()
+            .to_string();
+
+        drop(socket);
+        server.join().unwrap();
+        assert!(error.contains("closed"), "{error}");
+        assert!(!error.contains("nothing arrived"), "{error}");
     }
 }
