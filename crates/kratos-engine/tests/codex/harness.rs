@@ -494,3 +494,30 @@ async fn an_exited_fake_leaves_no_control_port_to_read() {
         "the dead fake's port is still readable: {left:?}"
     );
 }
+
+#[tokio::test]
+async fn dropping_the_harness_ends_the_fake() {
+    // Catches a failing test, which drops its harness while unwinding, leaving a fake Codex
+    // running to hold a piped `cargo test` open.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    let pid = harness
+        .control("test/pid", json!({}))
+        .await
+        .as_u64()
+        .unwrap();
+    let pid = u32::try_from(pid).unwrap();
+    assert!(fake_agents::process_is_running(pid));
+
+    drop(harness);
+
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while fake_agents::process_is_running(pid) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "fake-codex {pid} outlived its harness"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
