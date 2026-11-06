@@ -1,7 +1,7 @@
 //! A thread's settings: replacing them, and which ones Codex can honor, judged by the context
 //! windows Codex reports (D76, D87).
 
-use kratos_protocol::{ThreadId, ThreadSettings};
+use kratos_protocol::{ContextLimit, RequiredText, ThreadId, ThreadSettings};
 
 use super::ProviderError;
 use super::actor::Actor;
@@ -29,8 +29,8 @@ impl Actor {
         Ok(())
     }
 
-    /// Refuses a blank model, and a context window outside the floor and the window the model
-    /// reported with no setting of Kratos's in force. Kratos never claims a window larger than the
+    /// Refuses a context window outside the floor and the window the model reported with no
+    /// setting of Kratos's in force. Kratos never claims a window larger than the
     /// model's (D76). `loaded_model` is the model Codex runs the thread with when the settings
     /// name none.
     pub(super) fn check_settings(
@@ -38,19 +38,14 @@ impl Actor {
         settings: &ThreadSettings,
         loaded_model: Option<&str>,
     ) -> Result<(), ProviderError> {
-        if settings
-            .model
-            .as_deref()
-            .is_some_and(|model| model.trim().is_empty())
-        {
-            return Err(ProviderError::Unsupported(
-                "model: must not be blank".into(),
-            ));
-        }
-        let Some(limit) = settings.context_limit_tokens else {
+        let Some(limit) = settings.context_limit_tokens.map(ContextLimit::get) else {
             return Ok(());
         };
-        let model = settings.model.as_deref().or(loaded_model);
+        let model = settings
+            .model
+            .as_ref()
+            .map(RequiredText::as_str)
+            .or(loaded_model);
         let window = model.and_then(|model| self.windows.get(model)).copied();
         match window {
             _ if limit < MIN_CONTEXT_TOKENS => Err(ProviderError::Unsupported(format!(

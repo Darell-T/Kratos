@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
-    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContinuationId,
-    Message, MessageId, MessageInput, MessageOrigin, MessageStatus, QuestionId, QuestionOutcome,
-    Skill, ThreadId, ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, CommandResult, ContextLimit,
+    ContinuationId, Message, MessageId, MessageInput, MessageOrigin, MessageStatus, QuestionId,
+    QuestionOutcome, Skill, ThreadId, ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -143,7 +143,7 @@ pub(super) enum Done {
         thread_id: ThreadId,
         generation: u64,
         /// The context limit the thread was loaded with (D76).
-        context_limit: Option<u64>,
+        context_limit: Option<ContextLimit>,
         access: AccessLimit,
         result: Result<Opened, RequestError>,
     },

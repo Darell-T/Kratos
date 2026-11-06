@@ -784,7 +784,10 @@ fn turn_start_params(
         "input": wire::user_input(message),
     }));
     params.client_user_message_id = Some(message.id.as_str().to_owned());
-    params.model = settings.model.clone();
+    params.model = settings
+        .model
+        .as_ref()
+        .map(|model| model.as_str().to_owned());
     params.approval_policy = Some(policy::APPROVAL_POLICY);
     params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
     params.permissions = Some(Profile::for_settings(settings).id().to_owned());
