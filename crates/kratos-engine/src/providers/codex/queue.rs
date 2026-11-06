@@ -256,8 +256,9 @@ impl Actor {
         self.dispatch(&thread_id).await;
     }
 
-    /// Lets a paused queue run again. Refused while a message holds the queue, because only the
-    /// user may settle it (D11). An open continuation is cancelled: the user took over (D39).
+    /// Lets a paused queue run again. Refused while a message is still being sent, which the user
+    /// can only wait out, and while a message holds the queue, because only the user may settle it
+    /// (D11). An open continuation is cancelled: the user took over (D39).
     pub(super) async fn resume(&mut self, thread_id: &ThreadId) -> Result<(), ProviderError> {
         self.load(thread_id).await?;
         let resumed = self
@@ -267,7 +268,7 @@ impl Actor {
                     message.status == MessageStatus::Submitting || holds_queue(&message.status)
                 });
                 if let Some(held) = held {
-                    return Ok(Err(held.id));
+                    return Ok(Err(held));
                 }
                 if let Some(open) = write.open_continuation()? {
                     write.update_continuation(
@@ -283,9 +284,16 @@ impl Actor {
             })
             .await?;
         resumed.map_err(|held| {
-            ProviderError::Conflict(format!(
-                "Settle message {held} before resuming: retry or remove it if it failed, discard it if its delivery is uncertain"
-            ))
+            let message_id = held.id;
+            let error = match held.status {
+                MessageStatus::Submitting => format!(
+                    "Wait for message {message_id} to finish sending before resuming"
+                ),
+                _ => format!(
+                    "Settle message {message_id} before resuming: retry or remove it if it failed, discard it if its delivery is uncertain"
+                ),
+            };
+            ProviderError::Conflict(error)
         })
     }
 
