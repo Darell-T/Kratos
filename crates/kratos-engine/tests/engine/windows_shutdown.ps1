@@ -41,6 +41,9 @@ public sealed class ConsoleEngine : IDisposable {
         Check(SetHandleInformation(startup.stdin, 1, 1));
         Check(SetHandleInformation(startup.stdout, 1, 1));
         Check(SetHandleInformation(startup.stderr, 1, 1));
+        // A process inherits "ignore Ctrl+C" from its parent, and a test runner started by a tool that
+        // ignores it passes that down to the engine, which then never sees the signal.
+        Check(SetConsoleCtrlHandler(IntPtr.Zero, false));
         // CREATE_NEW_CONSOLE, STARTF_USESHOWWINDOW + STARTF_USESTDHANDLES, SW_HIDE.
         Check(CreateProcess(executable, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, true,
             0x10, IntPtr.Zero, null, ref startup, out process));
