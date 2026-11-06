@@ -193,10 +193,30 @@ enum CodexMissing {
     Engine(#[source] io::Error),
 }
 
+#[cfg(not(windows))]
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         eprintln!("cannot listen for Ctrl+C: {error}");
         std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(windows)]
+async fn shutdown_signal() {
+    let signals = (
+        tokio::signal::windows::ctrl_c(),
+        tokio::signal::windows::ctrl_break(),
+    );
+    let (mut ctrl_c, mut ctrl_break) = match signals {
+        (Ok(ctrl_c), Ok(ctrl_break)) => (ctrl_c, ctrl_break),
+        (Err(error), _) | (_, Err(error)) => {
+            eprintln!("cannot listen for console shutdown signals: {error}");
+            return std::future::pending().await;
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c.recv() => {},
+        _ = ctrl_break.recv() => {},
     }
 }
 
