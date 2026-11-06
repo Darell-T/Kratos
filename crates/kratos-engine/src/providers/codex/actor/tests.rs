@@ -11,8 +11,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::providers::codex::ProtectedFolders;
 use crate::providers::codex::threads::{Link, Turn};
+use crate::providers::codex::{ProtectedFolders, queue};
 use crate::store_thread;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -78,14 +78,40 @@ impl Harness {
     async fn attached_reply_for(&mut self, thread_id: &ThreadId) -> Completion {
         loop {
             self.actor.attached(thread_id).await.unwrap();
-            let done = tokio::time::timeout(WAIT, self.actor.completions.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            let done = self
+                .completion(|done| matches!(done, Done::Connected { .. } | Done::Attached { .. }))
+                .await;
             if matches!(done.done, Done::Attached { .. }) {
                 return done;
             }
             done.apply(&mut self.actor).await;
+        }
+    }
+
+    async fn send(&mut self, message_id: &MessageId) {
+        self.actor
+            .send(
+                &self.thread_id,
+                message_id.clone(),
+                vec![MessageInput::Text {
+                    text: RequiredText::new("work").unwrap(),
+                }],
+                MessageOrigin::User,
+            )
+            .await
+            .unwrap();
+    }
+
+    async fn completion(&mut self, matches: impl Fn(&Done) -> bool) -> Completion {
+        loop {
+            let completion = tokio::time::timeout(WAIT, self.actor.completions.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if matches(&completion.done) {
+                return completion;
+            }
+            completion.apply(&mut self.actor).await;
         }
     }
 
@@ -225,7 +251,7 @@ async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
             {
                 break;
             }
-            let done = harness.actor.completions.recv().await.unwrap();
+            let done = harness.completion(|_| true).await;
             done.apply(&mut harness.actor).await;
         }
     })
@@ -341,18 +367,7 @@ async fn exit_pauses_a_message_waiting_for_attachment_without_sending_it() {
     // Catches a stale attach reply being ignored without reporting why queued work cannot run.
     let mut harness = Harness::start().await;
     let message_id = MessageId::new("waiting".into());
-    harness
-        .actor
-        .send(
-            &harness.thread_id,
-            message_id.clone(),
-            vec![MessageInput::Text {
-                text: RequiredText::new("work").unwrap(),
-            }],
-            MessageOrigin::User,
-        )
-        .await
-        .unwrap();
+    harness.send(&message_id).await;
     let old_reply = harness.attached_reply().await;
 
     harness.exit().await;
@@ -399,18 +414,7 @@ async fn exit_settles_a_pending_start_and_its_stop_without_waiting_for_a_reply()
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
     let message_id = MessageId::new("pending".into());
-    harness
-        .actor
-        .send(
-            &harness.thread_id,
-            message_id.clone(),
-            vec![MessageInput::Text {
-                text: RequiredText::new("work").unwrap(),
-            }],
-            MessageOrigin::User,
-        )
-        .await
-        .unwrap();
+    harness.send(&message_id).await;
     harness.actor.dispatch(&harness.thread_id).await;
     harness.held("turn/start").await;
     let (reply, mut stopped) = oneshot::channel();
@@ -442,33 +446,15 @@ async fn a_start_reply_after_exit_cannot_accept_a_message_or_start_a_turn() {
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
     let message_id = MessageId::new("pending".into());
-    harness
-        .actor
-        .send(
-            &harness.thread_id,
-            message_id.clone(),
-            vec![MessageInput::Text {
-                text: RequiredText::new("work").unwrap(),
-            }],
-            MessageOrigin::User,
-        )
-        .await
-        .unwrap();
+    harness.send(&message_id).await;
     harness.actor.dispatch(&harness.thread_id).await;
     harness.held("turn/start").await;
     harness.control("test/settleTurn", json!({
         "method": "turn/start", "result": { "turn": { "id": "old-turn", "items": [], "status": "inProgress" } },
     })).await;
-    let old_reply = loop {
-        let done = tokio::time::timeout(WAIT, harness.actor.completions.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        if matches!(done.done, Done::StartAnswered { .. }) {
-            break done;
-        }
-        done.apply(&mut harness.actor).await;
-    };
+    let old_reply = harness
+        .completion(|done| matches!(done, Done::StartAnswered { .. }))
+        .await;
 
     harness.exit().await;
     old_reply.apply(&mut harness.actor).await;
@@ -499,46 +485,19 @@ async fn pending_steer() -> (Harness, MessageId) {
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
     let first = MessageId::new("first".into());
-    harness
-        .actor
-        .send(
-            &harness.thread_id,
-            first,
-            vec![MessageInput::Text {
-                text: RequiredText::new("work").unwrap(),
-            }],
-            MessageOrigin::User,
-        )
-        .await
-        .unwrap();
+    harness.send(&first).await;
     harness.actor.dispatch(&harness.thread_id).await;
     harness.held("turn/start").await;
     harness.control("test/settleTurn", json!({
         "method": "turn/start", "result": { "turn": { "id": "old-turn", "items": [], "status": "inProgress" } },
     })).await;
-    while !matches!(
-        harness.actor.threads[&harness.thread_id].turn,
-        Turn::Running { .. }
-    ) {
-        let done = tokio::time::timeout(WAIT, harness.actor.completions.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        done.apply(&mut harness.actor).await;
-    }
-    let message_id = MessageId::new("steer".into());
     harness
-        .actor
-        .send(
-            &harness.thread_id,
-            message_id.clone(),
-            vec![MessageInput::Text {
-                text: RequiredText::new("more work").unwrap(),
-            }],
-            MessageOrigin::User,
-        )
+        .completion(|done| matches!(done, Done::StartAnswered { .. }))
         .await
-        .unwrap();
+        .apply(&mut harness.actor)
+        .await;
+    let message_id = MessageId::new("steer".into());
+    harness.send(&message_id).await;
     harness
         .actor
         .steer(&harness.thread_id, message_id.clone())
@@ -636,5 +595,185 @@ async fn a_finished_command_answers_without_an_actor_update() {
     assert_eq!(
         serde_json::to_value(result).unwrap(),
         json!({"kind": "exited", "exitCode": 0, "stdout": "work", "stderr": ""})
+    );
+}
+
+#[tokio::test]
+async fn a_late_steer_cannot_close_a_replacement_process() {
+    // Catches a dead process's steer acting on a replacement turn and closing its live Codex.
+    let (mut harness, message_id) = pending_steer().await;
+    harness
+        .control(
+            "test/settleTurn",
+            json!({ "method": "turn/steer", "result": { "turnId": "old-turn" } }),
+        )
+        .await;
+    let old_reply = harness
+        .completion(|done| matches!(done, Done::Steered { .. }))
+        .await;
+    harness.exit().await;
+    assert!(matches!(harness.actor.server, Server::Down));
+    harness.actor.restarts = Default::default();
+    let settled = message_id.clone();
+    harness
+        .actor
+        .write(&harness.thread_id, move |write| {
+            write.set_message_status(&settled, MessageStatus::Cancelled)?;
+            write.resume()
+        })
+        .await
+        .unwrap();
+    let replacement = MessageId::new("replacement".into());
+    harness.send(&replacement).await;
+    let attached = harness.attached_reply().await;
+    attached.apply(&mut harness.actor).await;
+    harness.held("turn/start").await;
+    harness
+        .control(
+            "test/settleTurn",
+            json!({ "method": "turn/start", "result": {
+        "turn": { "id": "old-turn", "items": [], "status": "inProgress" }
+    } }),
+        )
+        .await;
+    harness
+        .completion(|done| matches!(done, Done::StartAnswered { .. }))
+        .await
+        .apply(&mut harness.actor)
+        .await;
+    let pid = harness
+        .control("test/pid", json!({}))
+        .await
+        .as_u64()
+        .unwrap() as u32;
+    rusqlite::Connection::open(harness.root.path().join("kratos/kratos.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE thread_messages")
+        .unwrap();
+
+    old_reply.apply(&mut harness.actor).await;
+
+    let running = fake_agents::process_is_running(pid);
+    harness.close().await;
+    assert!(running, "the old steer closed replacement process {pid}");
+}
+
+#[tokio::test]
+async fn a_late_stop_answers_its_waiter() {
+    // Catches a stop waiter abandoned or answered by the dead process's reply.
+    let (mut harness, _) = pending_steer().await;
+    let (reply, stopped) = oneshot::channel();
+    harness.actor.stop(&harness.thread_id, reply).await;
+    harness.held("turn/interrupt").await;
+    harness
+        .control(
+            "test/settleTurn",
+            json!({ "method": "turn/interrupt", "code": -32000, "error": "old interrupt refused" }),
+        )
+        .await;
+    let old_reply = harness
+        .completion(|done| matches!(done, Done::Interrupted { .. }))
+        .await;
+
+    harness.exit().await;
+    old_reply.apply(&mut harness.actor).await;
+
+    let result = stopped.await.unwrap();
+    harness.close().await;
+    assert!(
+        matches!(&result, Err(ProviderError::Unavailable(why)) if why == "The Codex process that handled this request has exited"),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_late_delivery_check_cannot_accept_an_uncertain_message() {
+    // Catches old history changing the delivery state after exit already settled the message.
+    let (mut harness, message_id) = pending_steer().await;
+    harness
+        .control(
+            "test/settleTurn",
+            json!({ "method": "turn/steer", "result": { "turnId": "old-turn" } }),
+        )
+        .await;
+    let mut steer = harness
+        .completion(|done| matches!(done, Done::Steered { .. }))
+        .await;
+    let Done::Steered { result, .. } = &mut steer.done else {
+        unreachable!("the completion predicate selected a steer")
+    };
+    *result = Err(RequestError::Rpc {
+        code: -32000,
+        message: "acknowledgement lost".into(),
+    });
+    steer.apply(&mut harness.actor).await;
+    let old_reply = harness
+        .completion(|done| matches!(done, Done::DeliveryChecked { .. }))
+        .await;
+    assert!(matches!(
+        &old_reply.done,
+        Done::DeliveryChecked { found: Some(_), .. }
+    ));
+
+    harness.exit().await;
+    old_reply.apply(&mut harness.actor).await;
+
+    let message = harness
+        .actor
+        .message(&harness.thread_id, &message_id)
+        .await
+        .unwrap();
+    harness.close().await;
+    assert!(
+        matches!(message.status, MessageStatus::Unknown { .. }),
+        "{:?}",
+        message.status
+    );
+}
+
+#[tokio::test]
+async fn a_late_discard_cannot_cancel_an_uncertain_message() {
+    // Catches a dead process's history committing a discard after its generation ended.
+    let mut harness = Harness::start().await;
+    let attached = harness.attached_reply().await;
+    attached.apply(&mut harness.actor).await;
+    let message_id = MessageId::new("uncertain".into());
+    harness.send(&message_id).await;
+    let uncertain = message_id.clone();
+    harness
+        .actor
+        .write(&harness.thread_id, move |write| {
+            write.set_message_status(&uncertain, MessageStatus::Submitting)?;
+            queue::mark_uncertain(write, uncertain, "lost acknowledgement".into())
+        })
+        .await
+        .unwrap();
+    let (reply, discarded) = oneshot::channel();
+    harness
+        .actor
+        .discard(harness.thread_id.clone(), message_id.clone(), reply)
+        .await;
+    let old_reply = harness
+        .completion(|done| matches!(done, Done::HistoryForDiscard { .. }))
+        .await;
+
+    harness.exit().await;
+    old_reply.apply(&mut harness.actor).await;
+
+    let result = discarded.await.unwrap();
+    let message = harness
+        .actor
+        .message(&harness.thread_id, &message_id)
+        .await
+        .unwrap();
+    harness.close().await;
+    assert!(
+        matches!(result, Err(ProviderError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert!(
+        matches!(message.status, MessageStatus::Unknown { .. }),
+        "{:?}",
+        message.status
     );
 }
