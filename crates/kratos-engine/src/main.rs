@@ -72,6 +72,8 @@ fn mcp(config: &Config) -> Result<(), StartError> {
 }
 
 fn serve(config: &Config) -> Result<(), StartError> {
+    #[cfg(windows)]
+    kratos_process::contain_current_process()?;
     let store = Store::open(&config.home)?;
     if let Some(backup) = store.backup_taken() {
         println!(

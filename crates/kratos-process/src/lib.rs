@@ -29,6 +29,9 @@ use unix::Tree;
 #[cfg(windows)]
 use windows::Tree;
 
+#[cfg(windows)]
+pub use windows::contain_current_process;
+
 /// A child process and its process tree. Dropping it ends the tree.
 #[derive(Debug)]
 pub struct OwnedChild {

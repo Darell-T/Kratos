@@ -20,11 +20,26 @@ use windows_sys::Win32::System::JobObjects::{
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, GetCurrentProcess, OpenThread, ResumeThread,
+    THREAD_SUSPEND_RESUME,
 };
 
 /// The exit code every process in the tree gets when the owner ends it.
 const ENDED_BY_OWNER: u32 = 1;
+
+/// Keeps future children in a kill-on-close job owned until this process exits.
+///
+/// Call before starting children. An incompatible enclosing job makes this fail.
+pub fn contain_current_process() -> io::Result<()> {
+    let job = new_job()?;
+    // SAFETY: the job is open and GetCurrentProcess returns this process's valid pseudo-handle.
+    if unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Closing this job would kill us too. Windows closes the non-inherited handle at process exit.
+    std::mem::forget(job);
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct Tree {

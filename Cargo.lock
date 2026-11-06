@@ -672,6 +672,7 @@ dependencies = [
  "kratos-client",
  "kratos-codex-client",
  "kratos-command-safety",
+ "kratos-process",
  "kratos-protocol",
  "kratos-store",
  "serde",
