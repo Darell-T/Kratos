@@ -17,7 +17,7 @@
 use std::io;
 use std::process::ExitStatus;
 
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 #[cfg(unix)]
 mod unix;
@@ -45,14 +45,19 @@ impl OwnedChild {
         Ok(OwnedChild { tree, child })
     }
 
-    /// The child process, for its pipes and its exit status. Killing it through this handle ends
-    /// only the child; [`OwnedChild::end_tree`] ends the tree.
-    ///
-    /// On Unix, reaping the child through this handle skips the tree cleanup that
-    /// [`OwnedChild::wait`] does, and the tree is never signalled afterwards. Use
-    /// [`OwnedChild::wait`] to reap the child.
-    pub fn child(&mut self) -> &mut Child {
-        &mut self.child
+    /// Takes the child's stdin pipe, if stdin was piped.
+    pub fn take_stdin(&mut self) -> Option<ChildStdin> {
+        self.child.stdin.take()
+    }
+
+    /// Takes the child's stdout pipe, if stdout was piped.
+    pub fn take_stdout(&mut self) -> Option<ChildStdout> {
+        self.child.stdout.take()
+    }
+
+    /// Takes the child's stderr pipe, if stderr was piped.
+    pub fn take_stderr(&mut self) -> Option<ChildStderr> {
+        self.child.stderr.take()
     }
 
     /// Ends every process in the tree now. The child's exit status stays available to
@@ -61,7 +66,7 @@ impl OwnedChild {
     /// On Unix, the group is signalled at most once and never after its leader has been reaped,
     /// so a later call does nothing.
     pub fn end_tree(&mut self) -> io::Result<()> {
-        self.tree.end(&self.child)
+        self.tree.end()
     }
 
     /// Waits for the child to exit and returns its status. On Unix, once the child has exited

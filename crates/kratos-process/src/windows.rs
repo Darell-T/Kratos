@@ -45,8 +45,7 @@ impl Tree {
         Ok((Tree { job }, child))
     }
 
-    /// The job object outlives the process ids in it, so `child` is not consulted.
-    pub fn end(&mut self, _child: &Child) -> io::Result<()> {
+    pub fn end(&mut self) -> io::Result<()> {
         // SAFETY: `self.job` is a job handle this value owns and keeps open.
         if unsafe { TerminateJobObject(self.job.0, ENDED_BY_OWNER) } == 0 {
             return Err(io::Error::last_os_error());

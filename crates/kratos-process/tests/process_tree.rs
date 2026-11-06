@@ -35,7 +35,7 @@ fn parent_of_a_sleeper() -> Command {
 }
 
 async fn grandchild_id(owner: &mut OwnedChild) -> u32 {
-    let stdout = owner.child().stdout.take().expect("stdout is piped");
+    let stdout = owner.take_stdout().expect("stdout is piped");
     let mut line = String::new();
     BufReader::new(stdout)
         .read_line(&mut line)

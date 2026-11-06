@@ -23,13 +23,10 @@ impl Tree {
     }
 
     /// Attempts to kill the group once, only while its leader has not been reaped.
-    pub fn end(&mut self, child: &Child) -> io::Result<()> {
+    pub fn end(&mut self) -> io::Result<()> {
         let Some(group) = self.group.take() else {
             return Ok(());
         };
-        if child.id() != u32::try_from(group).ok() {
-            return Ok(());
-        }
         #[cfg(test)]
         tests::SIGNALLED.with_borrow_mut(|groups| groups.push(group));
         #[allow(unsafe_code, reason = "killpg has no safe wrapper in std")]
@@ -49,11 +46,7 @@ impl Tree {
 
     pub async fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
         drop(child.stdin.take());
-        let Some(group) = self
-            .group
-            .filter(|group| child.id() == u32::try_from(*group).ok())
-        else {
-            self.group = None;
+        let Some(group) = self.group else {
             return child.wait().await;
         };
         let leader = libc::id_t::try_from(group)
@@ -74,7 +67,7 @@ impl Tree {
                 .await
                 .ok_or_else(|| io::Error::other("the SIGCHLD listener closed"))?;
         }
-        self.end(child)?;
+        self.end()?;
         child.wait().await
     }
 }
@@ -136,7 +129,7 @@ mod tests {
         let mut command = Command::new("sh");
         command.args(["-c", "sleep 300"]);
         let mut owner = OwnedChild::spawn(command).unwrap();
-        let id = owner.child().id().unwrap();
+        let id = owner.child.id().unwrap();
 
         owner.end_tree().unwrap();
         owner.wait().await.unwrap();
@@ -156,8 +149,8 @@ mod tests {
             .args(["-c", "sleep 300 & echo $!; wait"])
             .stdout(Stdio::piped());
         let mut owner = OwnedChild::spawn(command).unwrap();
-        let leader = owner.child().id().unwrap();
-        let stdout = owner.child().stdout.take().unwrap();
+        let leader = owner.child.id().unwrap();
+        let stdout = owner.take_stdout().unwrap();
         let mut line = String::new();
         BufReader::new(stdout).read_line(&mut line).await.unwrap();
         let grandchild: u32 = line.trim().parse().unwrap();
@@ -187,21 +180,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn raw_wait_retires_the_group_without_signalling_it() {
-        // Catches end_tree or Drop signalling a group after the raw child handle reaped its leader.
-        let mut command = Command::new("sh");
-        command.args(["-c", "exit 0"]);
-        let mut owner = OwnedChild::spawn(command).unwrap();
-
-        assert!(owner.child().wait().await.unwrap().success());
-        owner.end_tree().unwrap();
-        drop(owner);
-
-        SIGNALLED
-            .with_borrow(|groups| assert!(groups.is_empty(), "unexpected signals: {groups:?}"));
-    }
-
-    #[tokio::test]
     async fn waiting_closes_stdin_before_observing_exit() {
         // Catches a pre-reap wait keeping stdin open while the child waits for EOF.
         let mut command = Command::new("sh");
@@ -224,7 +202,7 @@ mod tests {
         let mut command = Command::new("sh");
         command.args(["-c", "sleep 300"]);
         let mut owner = OwnedChild::spawn(command).unwrap();
-        let id = owner.child().id().unwrap();
+        let id = owner.child.id().unwrap();
 
         tokio::select! {
             biased;
