@@ -264,37 +264,43 @@ impl Actor {
         let resumed = self
             .write(thread_id, |write| {
                 // Unlike held_message, a message still being sent refuses the resume too.
-                let held = write.pending_messages()?.into_iter().find(|message| {
-                    message.status == MessageStatus::Submitting || holds_queue(&message.status)
+                let refusal = write.pending_messages()?.into_iter().find_map(|message| {
+                    let message_id = message.id;
+                    match message.status {
+                        MessageStatus::Submitting => Some(format!(
+                            "Wait for message {message_id} to finish sending before resuming"
+                        )),
+                        MessageStatus::Failed { .. } => Some(format!(
+                            "Retry or remove message {message_id} before resuming"
+                        )),
+                        MessageStatus::Unknown { .. } => {
+                            Some(format!("Discard message {message_id} before resuming"))
+                        }
+                        MessageStatus::Queued
+                        | MessageStatus::Accepted { .. }
+                        | MessageStatus::Cancelled => None,
+                    }
                 });
-                if let Some(held) = held {
-                    return Ok(Err(held));
+                if let Some(refusal) = refusal {
+                    return Ok(Err(refusal));
                 }
-                if let Some(open) = write.open_continuation()? {
-                    write.update_continuation(
-                        &open.id,
-                        open.resets_at,
-                        ContinuationState::Cancelled {
-                            reason: "The user resumed the thread".into(),
-                        },
-                    )?;
-                }
+                write
+                    .open_continuation()?
+                    .map(|open| {
+                        write.update_continuation(
+                            &open.id,
+                            open.resets_at,
+                            ContinuationState::Cancelled {
+                                reason: "The user resumed the thread".into(),
+                            },
+                        )
+                    })
+                    .transpose()?;
                 write.resume()?;
                 Ok(Ok(()))
             })
             .await?;
-        resumed.map_err(|held| {
-            let message_id = held.id;
-            let error = match held.status {
-                MessageStatus::Submitting => format!(
-                    "Wait for message {message_id} to finish sending before resuming"
-                ),
-                _ => format!(
-                    "Settle message {message_id} before resuming: retry or remove it if it failed, discard it if its delivery is uncertain"
-                ),
-            };
-            ProviderError::Conflict(error)
-        })
+        resumed.map_err(ProviderError::Conflict)
     }
 
     /// Queues the continuation's message ahead of the waiting ones, marks it sent, and lets the

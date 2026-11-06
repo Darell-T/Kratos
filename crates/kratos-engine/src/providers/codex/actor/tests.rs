@@ -170,6 +170,45 @@ impl Harness {
 }
 
 #[tokio::test]
+async fn a_resume_refusal_names_the_action_for_its_message_status() {
+    // Catches a resume refusal suggesting actions that cannot settle the blocking message.
+    for (status, expected) in [
+        (
+            MessageStatus::Failed {
+                error: "refused".into(),
+            },
+            "Retry or remove message held before resuming",
+        ),
+        (
+            MessageStatus::Unknown {
+                error: "lost".into(),
+            },
+            "Discard message held before resuming",
+        ),
+    ] {
+        let mut harness = Harness::start().await;
+        let message_id = MessageId::new("held".into());
+        harness.send(&message_id).await;
+        harness
+            .actor
+            .write(&harness.thread_id, move |write| {
+                write.set_message_status(&message_id, MessageStatus::Submitting)?;
+                write.set_message_status(&message_id, status)
+            })
+            .await
+            .unwrap();
+
+        let result = harness.actor.resume(&harness.thread_id).await;
+
+        harness.close().await;
+        let Err(ProviderError::Conflict(error)) = result else {
+            panic!("a held message must refuse resumption")
+        };
+        assert_eq!(error, expected);
+    }
+}
+
+#[tokio::test]
 async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
     // Catches exit-time pauses stranding work that lost neither a start nor a running turn.
     let mut harness = Harness::start().await;
