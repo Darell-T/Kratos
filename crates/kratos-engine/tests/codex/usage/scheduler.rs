@@ -281,6 +281,50 @@ async fn a_reset_that_finds_the_limit_still_spent_waits_for_the_next_reset() {
 }
 
 #[tokio::test]
+async fn a_locked_store_keeps_the_continuation_timer_until_the_update_succeeds() {
+    // Catches a failed wait-again or hand-to-user write silently consuming the only timer.
+    for account in ["account-1", "account-2"] {
+        let clock = ManualClock::starting_at(at(RESET - HOUR));
+        let mut harness = Harness::start(Options::default()).await;
+        harness.start_scheduler(clock.clone()).await;
+        stop_at_the_limit(&mut harness, spent()).await;
+        let scheduled = next_continuation(&mut harness).await;
+        clock.wait_for_wake_up_at(at(RESET)).await;
+        harness
+            .control(
+                "test/rateLimits",
+                read(account, false, five_hour_window(100, RESET + HOUR)),
+            )
+            .await;
+        let connection =
+            rusqlite::Connection::open(harness.root.path().join("kratos/kratos.db")).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        clock.advance_to(at(RESET));
+
+        clock.wait_for_wake_up_at(at(RESET + 1)).await;
+        connection.execute_batch("ROLLBACK").unwrap();
+        clock.advance_to(at(RESET + 1));
+        let updated = next_continuation(&mut harness).await;
+        assert_eq!(updated.id, scheduled.id);
+        if account == "account-1" {
+            assert_eq!(updated.state, ContinuationState::Scheduled);
+            clock.wait_for_wake_up_at(at(RESET + HOUR)).await;
+            harness.control("test/rateLimits", free()).await;
+            clock.advance_to(at(RESET + HOUR));
+            continuation_starts(&mut harness).await;
+            assert_eq!(harness.turn_requests().await.len(), 2);
+        } else {
+            assert!(matches!(
+                updated.state,
+                ContinuationState::AwaitingUser { .. }
+            ));
+            assert_eq!(harness.turn_requests().await.len(), 1);
+        }
+        harness.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn a_weekly_limit_waits_for_the_user_s_go() {
     // Catches Kratos resuming on its own after a wait longer than the five-hour window (D41).
     let clock = ManualClock::starting_at(at(RESET - HOUR));

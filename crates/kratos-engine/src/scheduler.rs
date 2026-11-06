@@ -32,6 +32,8 @@ const AUTOMATIC_WINDOW_MINUTES: i64 = 300;
 const RECHECK_AFTER: Duration = Duration::from_secs(5 * 60);
 /// Checks in a row without a usable answer before the user decides.
 const MAX_UNANSWERED_CHECKS: u32 = 3;
+/// The first wait before trying again after the store failed. Each further failure doubles it.
+const STORE_RETRY_BASE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SchedulerError {
@@ -219,6 +221,8 @@ struct Scheduler {
     clock: Arc<dyn Clock>,
     /// Checks in a row without a usable answer, by continuation.
     unanswered: HashMap<ContinuationId, u32>,
+    /// Store failures in a row, by continuation, which set how long its next retry waits.
+    store_failures: HashMap<ContinuationId, u32>,
     due: mpsc::UnboundedSender<ContinuationId>,
 }
 
@@ -240,6 +244,7 @@ pub async fn start(
         provider,
         clock,
         unanswered: HashMap::new(),
+        store_failures: HashMap::new(),
         due,
     };
     for (_, continuation) in store.call(|store| store.open_continuations()).await? {
@@ -290,6 +295,10 @@ impl Scheduler {
         let at = at
             .and_then(Timestamp::instant)
             .unwrap_or_else(|| self.clock.now() + RECHECK_AFTER);
+        self.arm_at(id, at);
+    }
+
+    fn arm_at(&self, id: &ContinuationId, at: SystemTime) {
         let (sleep, due, id) = (self.clock.sleep_until(at), self.due.clone(), id.clone());
         tokio::spawn(async move {
             sleep.await;
@@ -340,17 +349,55 @@ impl Scheduler {
     /// decision to the user.
     async fn on_due(&mut self, id: ContinuationId) {
         let lookup = id.clone();
-        let Ok(Some((thread_id, continuation))) = self
+        let found = match self
             .store
             .call(move |store| store.continuation(&lookup))
             .await
-        else {
+        {
+            Ok(found) => found,
+            Err(error) => return self.retry_after_store_failure(&id, None, &error),
+        };
+        let Some((thread_id, continuation)) = found else {
             return;
         };
         if continuation.state != ContinuationState::Scheduled {
             // Cancelled, sent, or back with the user since it was armed: the timer is obsolete.
             return;
         }
+        match self.resume_or_wait(&thread_id, &continuation).await {
+            Ok(()) => {
+                self.store_failures.remove(&id);
+            }
+            Err(error) => self.retry_after_store_failure(&id, Some(&thread_id), &error),
+        }
+    }
+
+    /// The timer is the only thing that wakes a scheduled continuation, so a failed store call
+    /// must arm it again or the thread never resumes. The wait doubles with each failure in a row,
+    /// up to the recheck wait.
+    fn retry_after_store_failure(
+        &mut self,
+        id: &ContinuationId,
+        thread_id: Option<&ThreadId>,
+        error: &StoreError,
+    ) {
+        let failures = self.store_failures.entry(id.clone()).or_default();
+        let wait = STORE_RETRY_BASE
+            .saturating_mul(2u32.saturating_pow(*failures))
+            .min(RECHECK_AFTER);
+        *failures = failures.saturating_add(1);
+        eprintln!(
+            "cannot update continuation {id} of thread {}, trying again in {wait:?}: {error}",
+            thread_id.map_or_else(|| "(not read yet)".to_owned(), ToString::to_string),
+        );
+        self.arm_at(id, self.clock.now() + wait);
+    }
+
+    async fn resume_or_wait(
+        &mut self,
+        thread_id: &ThreadId,
+        continuation: &Continuation,
+    ) -> Result<(), StoreError> {
         let refreshed = self.provider.refresh_usage().await;
         let account = self.usage.account(continuation.waits_on.provider);
         let readiness = match refreshed {
@@ -358,39 +405,44 @@ impl Scheduler {
             Err(_) => Readiness::Unanswered,
         };
         match readiness {
-            Readiness::Ready => self.send(&thread_id, &continuation).await,
+            Readiness::Ready => self.send(thread_id, continuation).await,
             Readiness::StillSpent => {
-                self.wait_again(&thread_id, &continuation, account.as_ref())
+                self.wait_again(thread_id, continuation, account.as_ref())
                     .await
             }
             Readiness::Unanswered => {
                 self.unanswered(
-                    &thread_id,
-                    &continuation,
+                    thread_id,
+                    continuation,
                     "Codex did not say whether the account may run",
                 )
-                .await;
+                .await
             }
             Readiness::AccountChanged => {
-                self.hand_to_user(&thread_id, &continuation, "The signed-in account changed")
-                    .await;
+                self.hand_to_user(thread_id, continuation, "The signed-in account changed")
+                    .await
             }
         }
     }
 
-    async fn send(&mut self, thread_id: &ThreadId, continuation: &Continuation) {
+    async fn send(
+        &mut self,
+        thread_id: &ThreadId,
+        continuation: &Continuation,
+    ) -> Result<(), StoreError> {
         self.forget(&continuation.id);
         let sent = self
             .provider
             .continue_thread(thread_id.clone(), continuation.id.clone())
             .await;
         match sent {
-            Ok(Continued::Queued | Continued::NotOpen) => {}
-            Ok(Continued::NeedsUser(why)) => {
-                self.hand_to_user(thread_id, continuation, &why).await;
-            }
+            Ok(Continued::Queued | Continued::NotOpen) => Ok(()),
+            Ok(Continued::NeedsUser(why)) => self.hand_to_user(thread_id, continuation, &why).await,
             // Nothing was queued, so trying again later reuses this continuation's id.
-            Err(_) => self.arm(&continuation.id, None),
+            Err(_) => {
+                self.arm(&continuation.id, None);
+                Ok(())
+            }
         }
     }
 
@@ -399,7 +451,7 @@ impl Scheduler {
         thread_id: &ThreadId,
         continuation: &Continuation,
         account: Option<&AccountUsage>,
-    ) {
+    ) -> Result<(), StoreError> {
         let planned = plan(continuation.waits_on.provider, account);
         let has_reset_passed = planned
             .resets_at
@@ -409,38 +461,48 @@ impl Scheduler {
         if has_reset_passed {
             // A timer armed at this reset would fire at once, so the read says nothing about when
             // to ask again.
-            self.unanswered(
-                thread_id,
-                continuation,
-                "Codex still reports the limit spent after its reset time",
-            )
-            .await;
-            return;
+            return self
+                .unanswered(
+                    thread_id,
+                    continuation,
+                    "Codex still reports the limit spent after its reset time",
+                )
+                .await;
         }
         self.forget(&continuation.id);
         let is_scheduled = planned.state == ContinuationState::Scheduled;
         let resets_at = planned.resets_at.clone();
-        if self
+        let is_open = self
             .update(thread_id, continuation, planned.resets_at, planned.state)
-            .await
-            && is_scheduled
-        {
+            .await?;
+        if is_open && is_scheduled {
             self.arm(&continuation.id, resets_at.as_ref());
         }
+        Ok(())
     }
 
-    async fn unanswered(&mut self, thread_id: &ThreadId, continuation: &Continuation, why: &str) {
+    async fn unanswered(
+        &mut self,
+        thread_id: &ThreadId,
+        continuation: &Continuation,
+        why: &str,
+    ) -> Result<(), StoreError> {
         let checks = self.unanswered.entry(continuation.id.clone()).or_default();
         *checks += 1;
         if *checks < MAX_UNANSWERED_CHECKS {
             self.arm(&continuation.id, None);
-            return;
+            return Ok(());
         }
         self.forget(&continuation.id);
-        self.hand_to_user(thread_id, continuation, why).await;
+        self.hand_to_user(thread_id, continuation, why).await
     }
 
-    async fn hand_to_user(&self, thread_id: &ThreadId, continuation: &Continuation, why: &str) {
+    async fn hand_to_user(
+        &self,
+        thread_id: &ThreadId,
+        continuation: &Continuation,
+        why: &str,
+    ) -> Result<(), StoreError> {
         let state = ContinuationState::AwaitingUser {
             why: why.to_owned(),
         };
@@ -450,7 +512,8 @@ impl Scheduler {
             continuation.resets_at.clone(),
             state,
         )
-        .await;
+        .await?;
+        Ok(())
     }
 
     /// Writes the continuation's new state. False when it is no longer open.
@@ -460,15 +523,15 @@ impl Scheduler {
         continuation: &Continuation,
         resets_at: Option<Timestamp>,
         state: ContinuationState,
-    ) -> bool {
+    ) -> Result<bool, StoreError> {
         let id = continuation.id.clone();
         let updated = self
             .hub
             .write(thread_id.clone(), move |write| {
                 write.update_continuation(&id, resets_at, state)
             })
-            .await;
-        matches!(updated, Ok(written) if written.value.is_some())
+            .await?;
+        Ok(updated.value.is_some())
     }
 
     fn forget(&mut self, id: &ContinuationId) {
