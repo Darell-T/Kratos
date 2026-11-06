@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use kratos_command_safety::DangerousCommandPlatform;
-use kratos_protocol::{CreateThread, CreateWorkspace, MessageOrigin, MessageStatus, RequiredText};
+use kratos_protocol::{
+    CreateThread, CreateWorkspace, MessageOrigin, MessageStatus, RequiredText, TurnId,
+};
 use kratos_store::Store;
 use serde_json::json;
 use tempfile::TempDir;
@@ -347,9 +349,7 @@ async fn a_start_reply_after_exit_cannot_accept_a_message_or_start_a_turn() {
     assert_eq!(details.running_turn, None);
 }
 
-#[tokio::test]
-async fn exit_settles_a_pending_steer_without_waiting_for_a_reply() {
-    // Catches process fencing leaving a steered message submitting and blocking the thread.
+async fn pending_steer() -> (Harness, MessageId) {
     let mut harness = Harness::start().await;
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
@@ -401,6 +401,14 @@ async fn exit_settles_a_pending_steer_without_waiting_for_a_reply() {
         .unwrap();
     harness.held("turn/steer").await;
 
+    (harness, message_id)
+}
+
+#[tokio::test]
+async fn exit_settles_a_pending_steer_without_waiting_for_a_reply() {
+    // Catches process fencing leaving a steered message submitting and blocking the thread.
+    let (mut harness, message_id) = pending_steer().await;
+
     harness.exit().await;
 
     let message = harness
@@ -418,6 +426,38 @@ async fn exit_settles_a_pending_steer_without_waiting_for_a_reply() {
         message.status
     );
     assert!(no_steer, "process exit ends the pending steer");
+}
+
+#[tokio::test]
+async fn exit_settlement_rolls_back_the_turn_if_the_steer_cannot_be_settled() {
+    // Catches a failed uncertain-message write leaving an already committed turn end behind.
+    let (mut harness, message_id) = pending_steer().await;
+    rusqlite::Connection::open(harness.root.path().join("kratos/kratos.db"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_uncertain BEFORE UPDATE OF status ON thread_messages
+             WHEN NEW.status = 'unknown' BEGIN SELECT RAISE(ABORT, 'refuse uncertain'); END;",
+        )
+        .unwrap();
+
+    harness.exit().await;
+
+    let thread_id = harness.thread_id.clone();
+    let details = harness
+        .actor
+        .store
+        .call(move |store| store.thread_details(&thread_id))
+        .await
+        .unwrap();
+    let message = harness
+        .actor
+        .message(&harness.thread_id, &message_id)
+        .await
+        .unwrap();
+    harness.close().await;
+    assert_eq!(details.running_turn, Some(TurnId::new("old-turn".into())));
+    assert_eq!(details.paused, None);
+    assert_eq!(message.status, MessageStatus::Submitting);
 }
 
 #[tokio::test]

@@ -17,8 +17,8 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::actor::{Actor, Done, Opened, Server};
-use super::approvals::settle_closed;
 use super::profiles::Profile;
+use super::recovery::{self, EndReason, EndingTurn, Unfinished};
 use super::threads::{Link, ThreadState, Turn};
 use super::{CodexSettings, ProviderError, policy, queue, wire};
 use crate::mcp::{self, McpServer};
@@ -441,44 +441,31 @@ impl Actor {
             if let Turn::Starting { message_id, .. } = &thread.turn {
                 sending.insert(message_id.clone());
             }
-            let ended = thread.turn.end_running();
-            self.end_start(thread_id, Ok(()));
-            if let Some((turn_id, work)) = ended {
-                let outcome = TurnOutcome::Failed {
-                    error: error.clone(),
-                };
-                let pause = PauseReason::TurnFailed {
-                    turn_id: turn_id.clone(),
-                    error: error.clone(),
-                };
-                let _ = self
-                    .record_turn_end(
-                        thread_id,
+            let mut unfinished = Unfinished {
+                sending: sending.into_iter().collect(),
+                requests: self.requests.close(thread_id, |_| true),
+                ..Unfinished::default()
+            };
+            if let Some((turn_id, work)) = thread.turn.end_running() {
+                unfinished.running_turn = Some(EndingTurn {
+                    id: turn_id.clone(),
+                    changes: work.changes.finish(),
+                    context: work.context,
+                    outcome: TurnOutcome::Failed {
+                        error: error.clone(),
+                    },
+                    pause: PauseReason::TurnFailed {
                         turn_id,
-                        outcome,
-                        work,
-                        super::turns::After::PauseIfWaiting(pause),
-                    )
-                    .await;
+                        error: error.clone(),
+                    },
+                });
             }
-            let error = error.clone();
+            thread.file_items.clear();
+            self.end_start(thread_id, Ok(()));
+            let reason = EndReason::Exited(error.clone());
             let _ = self
                 .write(thread_id, move |write| {
-                    for message_id in sending {
-                        queue::mark_uncertain(write, message_id, error.clone())?;
-                    }
-                    if write.provider_thread()?.paused.is_none() {
-                        queue::pause_if_waiting(write, PauseReason::Unavailable { error })?;
-                    }
-                    Ok(())
-                })
-                .await;
-        }
-        for thread_id in self.requests.threads() {
-            let closed = self.requests.close(&thread_id, |_| true);
-            let _ = self
-                .write(&thread_id, move |write| {
-                    settle_closed(write, &closed, "Codex exited")
+                    recovery::settle(write, unfinished, reason)
                 })
                 .await;
         }
