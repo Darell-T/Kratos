@@ -28,9 +28,9 @@ pub(super) enum After {
     Pause(PauseReason),
 }
 
-/// The request whose answer was lost: a start, by its attempt, or a steer.
+/// The request whose answer was lost: a start or a steer.
 pub(super) enum Delivery {
-    Start { attempt: u64 },
+    Start,
     Steer,
 }
 
@@ -146,8 +146,6 @@ impl Actor {
         if recorded.is_err() {
             return;
         }
-        let attempt = self.next_attempt;
-        self.next_attempt += 1;
         let thread = self
             .threads
             .get_mut(thread_id)
@@ -156,7 +154,6 @@ impl Actor {
             thread.settings = lowered;
         }
         thread.turn = Turn::Starting {
-            attempt,
             message_id: message_id.clone(),
             early_completion: None,
             stop_waiters: Vec::new(),
@@ -181,7 +178,6 @@ impl Actor {
             };
             Done::StartAnswered {
                 thread_id,
-                attempt,
                 result: result.map(|started| Box::new(started.turn)),
             }
         });
@@ -190,20 +186,13 @@ impl Actor {
     pub(super) async fn on_start_answered(
         &mut self,
         thread_id: ThreadId,
-        attempt: u64,
         result: Result<Box<types::Turn>, RequestError>,
     ) {
-        let Some(Turn::Starting {
-            attempt: current,
-            message_id,
-            ..
-        }) = self.threads.get(&thread_id).map(|thread| &thread.turn)
+        let Some(Turn::Starting { message_id, .. }) =
+            self.threads.get(&thread_id).map(|thread| &thread.turn)
         else {
             return;
         };
-        if *current != attempt {
-            return;
-        }
         let message_id = message_id.clone();
         match result {
             Ok(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
@@ -211,12 +200,7 @@ impl Actor {
                 self.refuse_start(&thread_id, &message_id, message).await;
             }
             Err(error) => {
-                self.check_delivery(
-                    &thread_id,
-                    &message_id,
-                    Delivery::Start { attempt },
-                    error.to_string(),
-                );
+                self.check_delivery(&thread_id, &message_id, Delivery::Start, error.to_string());
             }
         }
         self.start_ready().await;
@@ -392,22 +376,13 @@ impl Actor {
         found: Option<Box<types::Turn>>,
     ) {
         match delivery {
-            Delivery::Start { attempt } => {
-                let is_current = matches!(
-                    self.threads.get(&thread_id).map(|thread| &thread.turn),
-                    Some(Turn::Starting { attempt: current, .. }) if *current == attempt
-                );
-                if !is_current {
-                    return;
+            Delivery::Start => match found {
+                Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
+                None => {
+                    self.end_start(&thread_id, Ok(()));
+                    self.record_uncertain(&thread_id, message_id, error).await;
                 }
-                match found {
-                    Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
-                    None => {
-                        self.end_start(&thread_id, Ok(()));
-                        self.record_uncertain(&thread_id, message_id, error).await;
-                    }
-                }
-            }
+            },
             Delivery::Steer => {
                 if let Some(thread) = self.threads.get_mut(&thread_id) {
                     thread.steering.remove(&message_id);

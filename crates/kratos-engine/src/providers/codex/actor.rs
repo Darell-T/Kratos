@@ -145,7 +145,6 @@ pub(super) enum Done {
     },
     StartAnswered {
         thread_id: ThreadId,
-        attempt: u64,
         result: Result<Box<types::Turn>, RequestError>,
     },
     /// The history read after an uncertain `turn/start` or `turn/steer`: the turn that took the
@@ -271,7 +270,6 @@ pub(crate) struct Actor {
     pub(super) requests: Requests,
     /// Threads waiting for a start slot, oldest first.
     pub(super) ready: VecDeque<ThreadId>,
-    pub(super) next_attempt: u64,
     pub(super) deferred: Vec<Command>,
     /// Threads to load once the app-server is up, so its history settles their uncertain messages.
     pub(super) reconcile: Vec<ThreadId>,
@@ -342,11 +340,9 @@ impl Actor {
                 self.on_attached(thread_id, context_limit, access, result)
                     .await
             }
-            Done::StartAnswered {
-                thread_id,
-                attempt,
-                result,
-            } => self.on_start_answered(thread_id, attempt, result).await,
+            Done::StartAnswered { thread_id, result } => {
+                self.on_start_answered(thread_id, result).await
+            }
             Done::DeliveryChecked {
                 thread_id,
                 message_id,

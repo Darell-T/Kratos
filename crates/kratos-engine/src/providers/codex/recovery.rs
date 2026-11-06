@@ -98,7 +98,6 @@ impl Actor {
             threads: HashMap::new(),
             requests: Requests::default(),
             ready: Default::default(),
-            next_attempt: 0,
             deferred: Vec::new(),
             reconcile: Vec::new(),
             done,
