@@ -347,11 +347,18 @@ impl Actor {
             .ok_or_else(|| ProviderError::UnknownMessage(message_id.clone()))
     }
 
-    /// Pauses the thread for `reason` when messages wait in its queue, so the user sees why
-    /// nothing starts (L7).
-    pub(super) async fn pause_if_waiting(&mut self, thread_id: &ThreadId, reason: PauseReason) {
+    pub(super) async fn pause_unavailable_if_waiting(
+        &mut self,
+        thread_id: &ThreadId,
+        error: String,
+    ) {
         let _ = self
-            .write(thread_id, move |write| pause_if_waiting(write, reason))
+            .write(thread_id, move |write| {
+                if write.provider_thread()?.paused.is_none() {
+                    pause_if_waiting(write, PauseReason::Unavailable { error })?;
+                }
+                Ok(())
+            })
             .await;
     }
 }

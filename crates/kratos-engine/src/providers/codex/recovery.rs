@@ -128,11 +128,6 @@ pub(super) fn settle(
     work.sending.into_iter().try_for_each(|message_id| {
         queue::mark_uncertain(write, message_id, uncertain_reason.to_owned())
     })?;
-    if let EndReason::Exited(error) = reason
-        && write.provider_thread()?.paused.is_none()
-    {
-        queue::pause_if_waiting(write, PauseReason::Unavailable { error })?;
-    }
     Ok(())
 }
 

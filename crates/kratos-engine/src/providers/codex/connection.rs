@@ -47,6 +47,11 @@ pub(super) struct Restarts {
 }
 
 impl Restarts {
+    #[cfg(test)]
+    pub(super) fn settled_start(&mut self) {
+        self.started_at = Some(Instant::now() - SETTLED_AFTER);
+    }
+
     /// `Err` with the wait left while the last failure's backoff runs.
     fn may_start(&self) -> Result<(), Duration> {
         match self.not_before {
@@ -186,13 +191,8 @@ impl Actor {
                 }
                 let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
                 for thread_id in threads {
-                    self.pause_if_waiting(
-                        &thread_id,
-                        PauseReason::Unavailable {
-                            error: message.clone(),
-                        },
-                    )
-                    .await;
+                    self.pause_unavailable_if_waiting(&thread_id, message.clone())
+                        .await;
                 }
             }
         }
@@ -303,8 +303,7 @@ impl Actor {
                 let message = format!("Codex could not load the thread: {error}");
                 thread.link = Link::Detached;
                 fail_discards(thread, &message);
-                self.pause_if_waiting(&thread_id, PauseReason::Unavailable { error: message })
-                    .await;
+                self.pause_unavailable_if_waiting(&thread_id, message).await;
             }
         }
     }
@@ -426,7 +425,7 @@ impl Actor {
     /// Ends the generation first, so replies still in flight from this process are dropped. Then
     /// every thread detaches and its running turn ends. A start or steer Codex never answered is
     /// uncertain, since the process may have taken it. Waiting stops and requests are answered, and
-    /// waiting work pauses as Unavailable unless a pause already holds it.
+    /// untouched queued work requests a replacement process, respecting the restart backoff.
     pub(super) async fn on_exit(&mut self, exit: Exit) {
         self.generation += 1;
         self.server = Server::Down;
@@ -470,6 +469,17 @@ impl Actor {
                 .await;
         }
         self.ready.clear();
+        for thread_id in &thread_ids {
+            if self.next_to_start(thread_id).await.is_some() {
+                if let Err(error) = self.connection() {
+                    for thread_id in &thread_ids {
+                        self.pause_unavailable_if_waiting(thread_id, error.to_string())
+                            .await;
+                    }
+                }
+                break;
+            }
+        }
     }
 
     /// Closes the app-server and waits for it to end; its exit arrives as usual.

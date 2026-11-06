@@ -72,8 +72,12 @@ impl Harness {
     }
 
     async fn attached_reply(&mut self) -> Completion {
+        self.attached_reply_for(&self.thread_id.clone()).await
+    }
+
+    async fn attached_reply_for(&mut self, thread_id: &ThreadId) -> Completion {
         loop {
-            self.actor.attached(&self.thread_id).await.unwrap();
+            self.actor.attached(thread_id).await.unwrap();
             let done = tokio::time::timeout(WAIT, self.actor.completions.recv())
                 .await
                 .unwrap()
@@ -137,6 +141,147 @@ impl Harness {
         .await
         .unwrap();
     }
+}
+
+#[tokio::test]
+async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
+    // Catches exit-time pauses stranding work that lost neither a start nor a running turn.
+    let mut harness = Harness::start().await;
+    let mut threads = vec![harness.thread_id.clone()];
+    let more = harness
+        .actor
+        .store
+        .call(|store| {
+            let workspace = store.list_workspaces().unwrap().remove(0).id;
+            (0..MAX_STARTING)
+                .map(|index| {
+                    let request: CreateThread = serde_json::from_value(json!({
+                "workspaceId": workspace, "title": format!("chat-{index}"), "provider": "codex",
+            })).unwrap();
+                    store.create_thread(&request).unwrap().id
+                })
+                .collect::<Vec<_>>()
+        })
+        .await;
+    threads.extend(more);
+    let message_id = MessageId::new("waiting".into());
+    for thread_id in &threads {
+        harness
+            .actor
+            .send(
+                thread_id,
+                message_id.clone(),
+                vec![MessageInput::Text {
+                    text: RequiredText::new("work").unwrap(),
+                }],
+                MessageOrigin::User,
+            )
+            .await
+            .unwrap();
+        let attached = harness.attached_reply_for(thread_id).await;
+        attached.apply(&mut harness.actor).await;
+        harness.actor.dispatch(thread_id).await;
+    }
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let requests = harness.control("test/turnRequests", json!({})).await;
+            if requests
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|request| request["method"] == "turn/start")
+                .count()
+                == MAX_STARTING
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let waiting_thread = threads.last().unwrap().clone();
+    assert_eq!(
+        harness
+            .actor
+            .message(&waiting_thread, &message_id)
+            .await
+            .unwrap()
+            .status,
+        MessageStatus::Queued
+    );
+    harness.actor.restarts.settled_start();
+
+    harness.exit().await;
+
+    let started = tokio::time::timeout(WAIT, async {
+        loop {
+            if harness
+                .actor
+                .message(&waiting_thread, &message_id)
+                .await
+                .unwrap()
+                .status
+                == MessageStatus::Submitting
+            {
+                break;
+            }
+            let done = harness.actor.completions.recv().await.unwrap();
+            done.apply(&mut harness.actor).await;
+        }
+    })
+    .await;
+    if started.is_ok() {
+        harness.held("turn/start").await;
+    }
+    harness.close().await;
+    assert!(
+        started.is_ok(),
+        "the extra queued thread never reached the replacement Codex"
+    );
+}
+
+#[tokio::test]
+async fn an_unavailable_connection_keeps_an_existing_usage_pause() {
+    // Catches reconnect refusal overwriting the usage pause that owns a continuation.
+    let mut harness = Harness::start().await;
+    let thread_id = harness.thread_id.clone();
+    harness
+        .actor
+        .send(
+            &thread_id,
+            MessageId::new("waiting".into()),
+            vec![MessageInput::Text {
+                text: RequiredText::new("work").unwrap(),
+            }],
+            MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+    let pause = kratos_protocol::PauseReason::UsageLimit {
+        turn_id: TurnId::new("limited".into()),
+        resets_at: None,
+    };
+    let expected = pause.clone();
+    harness
+        .actor
+        .write(&thread_id, move |write| write.pause(pause))
+        .await
+        .unwrap();
+
+    harness
+        .actor
+        .on_connected(Err(StartError::Connect(
+            kratos_codex_client::ConnectError::NotFound("missing-codex".into()),
+        )))
+        .await;
+
+    let paused = harness
+        .actor
+        .store
+        .call(move |store| store.thread_details(&thread_id).unwrap().paused)
+        .await;
+    harness.close().await;
+    assert_eq!(paused, Some(expected));
 }
 
 #[tokio::test]

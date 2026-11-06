@@ -72,8 +72,7 @@ impl Actor {
             Ok(None) => return,
             Err(error) => {
                 let error = error.to_string();
-                self.pause_if_waiting(thread_id, PauseReason::Unavailable { error })
-                    .await;
+                self.pause_unavailable_if_waiting(thread_id, error).await;
                 return;
             }
         };
@@ -96,7 +95,7 @@ impl Actor {
 
     /// The thread's first waiting message when it may start: the queue is not paused, and the
     /// message is queued. A failed or uncertain message holds the queue until the user settles it.
-    async fn next_to_start(&self, thread_id: &ThreadId) -> Option<Message> {
+    pub(super) async fn next_to_start(&self, thread_id: &ThreadId) -> Option<Message> {
         let thread_id = thread_id.clone();
         let next = self
             .store
