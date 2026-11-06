@@ -323,6 +323,53 @@ fn no_ask() -> Value {
 }
 
 #[test]
+fn added_probe_destinations_must_stay_inside_the_repository_when_reports_are_read() {
+    // Catches unchecked probe destinations entering Teams under either probe policy.
+    for destination in [
+        "",
+        "../x",
+        "tests/../../x",
+        "/outside/x",
+        r"C:\x",
+        r"C:x",
+        r"\\server\x",
+        r"\x",
+    ] {
+        let mut report = implementer_json("done", no_ask());
+        report["added_probes"] = json!([{ "from": "probes/a.rs", "to": destination }]);
+        assert!(
+            invalid(&parse(ReportKind::Implementer, report))
+                .is_some_and(|error| error.contains("probe destination")),
+            "accepted destination {destination:?}"
+        );
+        let persisted = json!({"from": "probes/a.rs", "to": destination});
+        assert!(
+            serde_json::from_value::<kratos_teams::reports::AddedProbe>(persisted).is_err(),
+            "accepted persisted destination {destination:?}"
+        );
+    }
+}
+
+#[test]
+fn a_checked_probe_destination_keeps_the_string_wire_shape_and_normalizes_separators() {
+    // Catches valid probe reports becoming unreadable after destination validation.
+    let mut report = implementer_json("done", no_ask());
+    report["added_probes"] = json!([{ "from": "probes/a.rs", "to": r"./tests\a.rs" }]);
+    let Reported::Implementer {
+        report: Report::Finished { done },
+        ..
+    } = parse(ReportKind::Implementer, report)
+    else {
+        panic!("a valid destination must parse");
+    };
+    assert_eq!(done.added_probes[0].to.as_str(), "tests/a.rs");
+    assert_eq!(
+        serde_json::to_value(&done.added_probes[0]).unwrap(),
+        json!({ "from": "probes/a.rs", "to": "tests/a.rs" })
+    );
+}
+
+#[test]
 fn an_implementer_can_finish_block_ask_or_request_a_plan_change() {
     let blocked = parse(
         ReportKind::Implementer,

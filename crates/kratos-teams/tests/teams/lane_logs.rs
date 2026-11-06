@@ -322,7 +322,7 @@ fn probes() -> ScriptedTask {
                     responses: vec![fixed(1)],
                     added_probes: vec![AddedProbe {
                         from: probe.to_owned(),
-                        to: "tests/null_session.rs".to_owned(),
+                        to: kratos_teams::paths::RepoPath::new("tests/null_session.rs").unwrap(),
                     }],
                     ..done()
                 },

@@ -2,6 +2,41 @@
 //! each spell a path their own way, so every rule that compares paths reads them through here.
 
 use globset::{Glob, GlobBuilder};
+use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// A checked destination relative to the repository root, without parent traversal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(transparent)]
+pub struct RepoPath(String);
+
+impl RepoPath {
+    /// Normalizes separators and refuses rooted paths and parent traversal.
+    ///
+    /// # Errors
+    /// Returns an error when the path is empty, rooted, or contains `..`.
+    pub fn new(raw: &str) -> Result<Self, InvalidRepoPath> {
+        parse_repo_path(raw)
+            .map(Self)
+            .map_err(|_| InvalidRepoPath(raw.to_owned()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// A destination that cannot be used as a repository-relative path.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("probe destination `{0}` must be relative to the repository root without parent traversal")]
+pub struct InvalidRepoPath(String);
+
+impl<'de> Deserialize<'de> for RepoPath {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::new(&raw).map_err(serde::de::Error::custom)
+    }
+}
 
 /// Reviewers write `src\a.rs` or `./src/a.rs`. Git names the same file `src/a.rs`.
 pub fn repo_path(raw: &str) -> String {
