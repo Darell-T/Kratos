@@ -9,9 +9,10 @@
 //!   runs, so even its first grandchild is in the job. The job forbids breaking away. Closing the
 //!   job's handle ends every process in it, and Windows closes a process's handles when it dies, so
 //!   the tree also ends when the engine crashes.
-//! - Unix: the child leads a new process group, and dropping kills the group. A process that leaves
-//!   the group, or an engine killed with SIGKILL, leaves processes behind. Proving macOS and Linux
-//!   isolation is later work (D17).
+//! - Unix: the child leads a new process group, and dropping kills the group. The group is
+//!   signalled at most once, and only while its leader is unreaped, because a reaped leader's group
+//!   id can pass to an unrelated program. A process that leaves the group, or an engine killed with
+//!   SIGKILL, leaves processes behind. Proving macOS and Linux isolation is later work (D17).
 
 use std::io;
 use std::process::ExitStatus;
@@ -46,18 +47,28 @@ impl OwnedChild {
 
     /// The child process, for its pipes and its exit status. Killing it through this handle ends
     /// only the child; [`OwnedChild::end_tree`] ends the tree.
+    ///
+    /// On Unix, reaping the child through this handle skips the tree cleanup that
+    /// [`OwnedChild::wait`] does, and the tree is never signalled afterwards. Use
+    /// [`OwnedChild::wait`] to reap the child.
     pub fn child(&mut self) -> &mut Child {
         &mut self.child
     }
 
     /// Ends every process in the tree now. The child's exit status stays available to
     /// [`OwnedChild::wait`]. Ending a tree that already ended is not an error.
+    ///
+    /// On Unix, the group is signalled at most once and never after its leader has been reaped,
+    /// so a later call does nothing.
     pub fn end_tree(&mut self) -> io::Result<()> {
-        self.tree.end()
+        self.tree.end(&self.child)
     }
 
+    /// Waits for the child to exit and returns its status. On Unix, once the child has exited
+    /// this ends the rest of its group before reaping the child, since the group id is only safe
+    /// to signal until then.
     pub async fn wait(&mut self) -> io::Result<ExitStatus> {
-        self.child.wait().await
+        self.tree.wait(&mut self.child).await
     }
 }
 
@@ -65,6 +76,6 @@ impl Drop for OwnedChild {
     fn drop(&mut self) {
         // Nothing can report an error from a drop, and a tree that already ended is the common
         // case.
-        let _ = self.tree.end();
+        let _ = self.end_tree();
     }
 }

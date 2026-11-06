@@ -83,3 +83,26 @@ async fn ending_the_tree_still_reports_the_child_exit() {
     assert_ends(grandchild).await;
     owner.end_tree().unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn waiting_for_the_leader_also_ends_its_surviving_grandchild() {
+    // Catches reaping a naturally exited leader before safely ending its remaining group.
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-c",
+            "sleep 300 </dev/null >/dev/null 2>&1 & echo $!; exit 0",
+        ])
+        .stdout(std::process::Stdio::piped());
+    let mut owner = OwnedChild::spawn(command).unwrap();
+    let grandchild = grandchild_id(&mut owner).await;
+
+    let status = tokio::time::timeout(GONE_WITHIN, owner.wait())
+        .await
+        .expect("the leader has exited")
+        .unwrap();
+
+    assert!(status.success());
+    assert_ends(grandchild).await;
+}

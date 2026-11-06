@@ -7,6 +7,7 @@
 
 use std::io;
 use std::mem::size_of;
+use std::process::ExitStatus;
 
 use tokio::process::{Child, Command};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
@@ -44,12 +45,17 @@ impl Tree {
         Ok((Tree { job }, child))
     }
 
-    pub fn end(&mut self) -> io::Result<()> {
+    /// The job object outlives the process ids in it, so `child` is not consulted.
+    pub fn end(&mut self, _child: &Child) -> io::Result<()> {
         // SAFETY: `self.job` is a job handle this value owns and keeps open.
         if unsafe { TerminateJobObject(self.job.0, ENDED_BY_OWNER) } == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    pub async fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+        child.wait().await
     }
 }
 
