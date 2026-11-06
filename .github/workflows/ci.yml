@@ -18,8 +18,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Windows is where Kratos runs today and where the sandbox tests prove real blocking (D99).
-        os: [windows-latest, ubuntu-latest]
+        # Exercise all host paths; the real sandbox blocking tests run separately on Windows (D99).
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     env:
