@@ -1,6 +1,7 @@
 mod acting;
 mod agents;
 pub mod auth;
+mod follows;
 mod json;
 mod local_only;
 mod socket;
