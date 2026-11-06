@@ -247,6 +247,32 @@ fn blank_text_the_schema_cannot_forbid_is_refused_with_the_field_that_holds_it()
 }
 
 #[test]
+fn teams_refuses_a_bom_only_summary_like_the_protocol_does() {
+    // Catches Teams accepting U+FEFF text that RequiredText refuses as blank.
+    let mut report = plan_json("done");
+    report["summary"] = json!("\u{feff}");
+    assert!(kratos_protocol::RequiredText::new("\u{feff}").is_none());
+    assert_eq!(
+        invalid(&parse(ReportKind::Plan, report)),
+        Some("summary: must not be blank")
+    );
+}
+
+#[test]
+fn teams_accepts_a_next_line_only_summary_like_the_protocol_does() {
+    // Catches Teams refusing U+0085 text that RequiredText accepts as nonblank.
+    let mut report = plan_json("done");
+    report["summary"] = json!("\u{85}");
+    assert!(kratos_protocol::RequiredText::new("\u{85}").is_some());
+    assert!(matches!(
+        parse(ReportKind::Plan, report),
+        Reported::Plan {
+            report: Report::Finished { .. }
+        }
+    ));
+}
+
+#[test]
 fn a_finished_plan_needs_checkable_statements_and_a_scope_that_is_a_valid_glob_inside_the_repo() {
     let mut no_statements = plan_json("done");
     no_statements["done_means"] = json!([]);

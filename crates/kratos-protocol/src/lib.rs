@@ -62,7 +62,7 @@ pub use messages::{
 };
 pub use skills::{Skill, ThreadSkills};
 pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};
-pub use text::RequiredText;
+pub use text::{RequiredText, is_javascript_whitespace};
 pub use threads::{
     AccessLimit, CreateThread, ListEvents, ListThreads, OutsideWrites, Permission, Provider,
     Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
