@@ -14,7 +14,7 @@ impl RepoPath {
     /// Normalizes separators and refuses rooted paths and parent traversal.
     ///
     /// # Errors
-    /// Returns an error when the path is empty, rooted, or contains `..`.
+    /// Returns an error for an empty, rooted, climbing, or unusable path.
     pub fn new(raw: &str) -> Result<Self, RepoPathError> {
         let path = repo_path(raw);
         let bytes = path.as_bytes();
@@ -25,6 +25,13 @@ impl RepoPath {
         }
         if path.split('/').any(|part| part == "..") {
             return Err(RepoPathError::Climbs(raw.to_owned()));
+        }
+        if path.bytes().any(|byte| byte.is_ascii_control())
+            || path
+                .split('/')
+                .any(|part| matches!(part, "" | ".") || part.ends_with(['.', ' ']))
+        {
+            return Err(RepoPathError::InvalidComponent(raw.to_owned()));
         }
         Ok(Self(path))
     }
@@ -41,6 +48,8 @@ pub enum RepoPathError {
     Rooted(String),
     #[error("{0:?} climbs out of the repository")]
     Climbs(String),
+    #[error("{0:?} has an invalid repository path component")]
+    InvalidComponent(String),
 }
 
 impl TryFrom<String> for RepoPath {

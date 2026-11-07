@@ -33,6 +33,8 @@ const OUTPUT_TAIL_CHARS: usize = 4000;
 /// Why a finding's location is refused. The text is written for the reviewer.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LocationProblem {
+    #[error(transparent)]
+    InvalidPath(RepoPathError),
     #[error("{0} is not a path relative to the repository root.")]
     NotRelative(String),
     #[error("{0} leaves the repository.")]
@@ -53,6 +55,9 @@ pub fn location_problem(location: &Location, file_text: Option<&str>) -> Option<
         }
         Err(RepoPathError::Climbs(_)) => {
             return Some(LocationProblem::LeavesRepository(location.path.clone()));
+        }
+        Err(error @ RepoPathError::InvalidComponent(_)) => {
+            return Some(LocationProblem::InvalidPath(error));
         }
     };
     let path = String::from(path);

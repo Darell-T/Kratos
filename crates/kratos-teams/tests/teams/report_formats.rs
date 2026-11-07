@@ -360,6 +360,14 @@ fn added_probe_destinations_must_stay_inside_the_repository_when_reports_are_rea
         r"C:x",
         r"\\server\x",
         r"\x",
+        "tests/a\0.rs",
+        "tests/a\n.rs",
+        ".",
+        "tests/./a.rs",
+        "tests//a.rs",
+        "tests/",
+        "tests/a.rs.",
+        "tests/a.rs ",
     ] {
         let mut report = implementer_json("done", no_ask());
         report["added_probes"] = json!([{ "from": "probes/a.rs", "to": destination }]);
