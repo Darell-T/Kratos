@@ -7,6 +7,7 @@
 
 use std::io;
 use std::mem::size_of;
+use std::process::ExitStatus;
 
 use tokio::process::{Child, Command};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
@@ -50,6 +51,10 @@ impl Tree {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    pub async fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+        child.wait().await
     }
 }
 

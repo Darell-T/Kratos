@@ -268,9 +268,9 @@ pub async fn connect(
     capabilities: types::InitializeCapabilities,
 ) -> Result<(Codex, mpsc::Receiver<Incoming>), ConnectError> {
     let mut child = spawn(&launch)?;
-    let stdin = child.child().stdin.take().expect("stdin is piped");
-    let stdout = child.child().stdout.take().expect("stdout is piped");
-    let stderr = child.child().stderr.take().expect("stderr is piped");
+    let stdin = child.take_stdin().expect("stdin is piped");
+    let stdout = child.take_stdout().expect("stdout is piped");
+    let stderr = child.take_stderr().expect("stderr is piped");
 
     let (writer, writes) = mpsc::unbounded_channel();
     let (tree_ended_sender, tree_ended) = watch::channel(false);
