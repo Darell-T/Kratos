@@ -1,6 +1,7 @@
 //! `kratos-engine` serves until Ctrl+C. `kratos-engine restore <backup-id>` makes a migration
 //! backup the live database again; it is refused while an engine runs on the same data directory.
 //! `kratos-engine mcp` is the MCP server Codex starts for each thread (see `kratos_engine::mcp`).
+//! On Windows, the serving engine joins its own kill-on-close job, so every child ends with it.
 //!
 //! Two threads. The main thread owns the store and runs its jobs (see `store_thread`). The server
 //! and its tokio runtime run on a second thread. So a panic in the store ends the process, and the

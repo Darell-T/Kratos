@@ -1,6 +1,6 @@
-//! The job object that holds a child's process tree.
+//! Job objects that contain this process for its lifetime and each child's process tree.
 //!
-//! Every function here is a thin call into kernel32. Each unsafe block states the invariant that
+//! Each unsafe block states the invariant that
 //! makes its call sound; none of them reads or writes memory that Rust does not own for the whole
 //! call.
 #![allow(unsafe_code, reason = "the job object API has no safe wrapper in std")]
