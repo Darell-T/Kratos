@@ -28,6 +28,29 @@ fn a_patch_through_a_directory_link_still_asks_before_changing_protected_files()
         ..ThreadSettings::default()
     };
     let folders = ProtectedFolders::new(protected.clone(), None, None);
+    #[cfg(unix)]
+    {
+        // Catches missing/.. bypassing resolution of the real alias into protected files.
+        let change = FileChange {
+            path: "missing/../alias/new.txt".into(),
+            kind: FileChangeKind::Add,
+            diff: CappedText::new("test", 100),
+        };
+        assert_eq!(
+            decide_patch(&settings, Some(&[change]), false, &project, &folders),
+            Verdict::Ask(AskReason::Unchecked)
+        );
+    }
+    // Catches the missing-parent guard refusing an ordinary new file without traversal.
+    let change = FileChange {
+        path: "missing/plain/new.txt".into(),
+        kind: FileChangeKind::Add,
+        diff: CappedText::new("test", 100),
+    };
+    assert_eq!(
+        decide_patch(&settings, Some(&[change]), false, &project, &folders),
+        Verdict::Accept
+    );
     for (path, kind) in [
         ("alias/new.txt", FileChangeKind::Add),
         (

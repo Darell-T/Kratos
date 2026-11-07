@@ -185,6 +185,12 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
                 let Some(part) = ancestor.components().next_back() else {
                     return Err(error);
                 };
+                if part == Component::ParentDir {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "a patch path climbs through a missing parent",
+                    ));
+                }
                 suffix.push(part.as_os_str().to_os_string());
                 if !ancestor.pop() {
                     return Err(error);
@@ -244,9 +250,11 @@ mod tests {
 
     #[test]
     fn a_path_that_climbs_back_into_a_protected_folder_is_still_inside_it() {
-        // Catches a check that compares text, which `project/../../.ssh/config` would pass.
-        let folders = folders();
-        let home = folders.kratos_home().parent().unwrap().to_path_buf();
+        // Catches a text-only check missing work/../.ssh/config through an existing folder.
+        let root = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir(home.join("work")).unwrap();
+        let folders = ProtectedFolders::new(home.join(".kratos"), None, Some(home.clone()));
 
         let climbing = home.join("work").join("..").join(".ssh").join("config");
         let lookalike = home.join(".sshkeys").join("config");
