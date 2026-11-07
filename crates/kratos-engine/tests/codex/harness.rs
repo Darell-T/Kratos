@@ -86,6 +86,8 @@ impl Harness {
     /// Starts on `root`'s records, as an engine restarted on the same data directory does.
     /// `thread_id` names the thread to follow when the records already hold it.
     pub async fn start_in(root: TempDir, options: Options, thread_id: Option<ThreadId>) -> Harness {
+        #[cfg(windows)]
+        kratos_process::contain_current_process().unwrap();
         let folder = root.path().join("project");
         std::fs::create_dir_all(&folder).unwrap();
         let store = Store::open(&root.path().join("kratos")).unwrap();
