@@ -365,7 +365,7 @@ fn added_probe_destinations_must_stay_inside_the_repository_when_reports_are_rea
         report["added_probes"] = json!([{ "from": "probes/a.rs", "to": destination }]);
         assert!(
             invalid(&parse(ReportKind::Implementer, report))
-                .is_some_and(|error| error.contains("probe destination")),
+                .is_some_and(|error| error.contains("repository")),
             "accepted destination {destination:?}"
         );
         let persisted = json!({"from": "probes/a.rs", "to": destination});
@@ -373,6 +373,20 @@ fn added_probe_destinations_must_stay_inside_the_repository_when_reports_are_rea
             serde_json::from_value::<kratos_teams::reports::AddedProbe>(persisted).is_err(),
             "accepted persisted destination {destination:?}"
         );
+    }
+}
+
+#[test]
+fn a_repository_path_error_keeps_its_value_and_reason() {
+    // Catches a general repository-path error losing the rooted or climbing reason to a probe label.
+    for (path, reason) in [("/outside/x", "is not relative"), ("../x", "climbs out")] {
+        let error = kratos_teams::paths::RepoPath::new(path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains(reason), "{error}");
+        assert!(error.contains(&format!("{path:?}")), "{error}");
+        assert!(!error.contains("probe destination"), "{error}");
     }
 }
 
