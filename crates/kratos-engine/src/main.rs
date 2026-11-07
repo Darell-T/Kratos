@@ -73,7 +73,7 @@ fn mcp(config: &Config) -> Result<(), StartError> {
 
 fn serve(config: &Config) -> Result<(), StartError> {
     #[cfg(windows)]
-    kratos_process::contain_current_process()?;
+    kratos_process::contain_current_process().map_err(StartError::Contain)?;
     let store = Store::open(&config.home)?;
     if let Some(backup) = store.backup_taken() {
         println!(
@@ -221,6 +221,11 @@ fn restore(config: &Config, id: &BackupId) -> Result<(), StartError> {
 
 #[derive(Debug, thiserror::Error)]
 enum StartError {
+    #[cfg(windows)]
+    #[error(
+        "cannot put the engine in a Windows job object; refusing to start because agent processes could outlive it: {0}"
+    )]
+    Contain(#[source] io::Error),
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]
