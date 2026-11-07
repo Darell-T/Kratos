@@ -15,15 +15,21 @@ pub struct Timestamp {
     instant: SystemTime,
 }
 
-/// Text that is not a timestamp.
+/// Invalid timestamp text or a system time outside the supported years 1970 to 9999.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TimestampError {
-    text: String,
+pub enum TimestampError {
+    InvalidText { text: String },
+    OutOfRange { time: SystemTime },
 }
 
 impl fmt::Display for TimestampError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{:?} is not a timestamp", self.text)
+        match self {
+            Self::InvalidText { text } => write!(formatter, "{text:?} is not a timestamp"),
+            Self::OutOfRange { time } => {
+                write!(formatter, "the time {time:?} is outside 1970 to 9999")
+            }
+        }
     }
 }
 
@@ -47,18 +53,14 @@ impl Timestamp {
     /// Returns TimestampError when `time` cannot be represented in the supported RFC 3339 range.
     pub fn at(time: SystemTime) -> Result<Timestamp, TimestampError> {
         if time < SystemTime::UNIX_EPOCH {
-            return Err(TimestampError {
-                text: format!("{time:?}"),
-            });
+            return Err(TimestampError::OutOfRange { time });
         }
         let mut text = String::new();
         fmt::write(
             &mut text,
             format_args!("{}", humantime::format_rfc3339_millis(time)),
         )
-        .map_err(|_| TimestampError {
-            text: format!("{time:?}"),
-        })?;
+        .map_err(|_| TimestampError::OutOfRange { time })?;
         Self::try_from(text)
     }
 
@@ -78,7 +80,7 @@ impl TryFrom<String> for Timestamp {
     fn try_from(text: String) -> Result<Timestamp, TimestampError> {
         match humantime::parse_rfc3339(&text) {
             Ok(instant) => Ok(Timestamp { text, instant }),
-            Err(_) => Err(TimestampError { text }),
+            Err(_) => Err(TimestampError::InvalidText { text }),
         }
     }
 }
