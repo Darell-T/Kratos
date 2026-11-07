@@ -28,6 +28,7 @@ uuid.workspace = true
 [dev-dependencies]
 fake-agents.workspace = true
 kratos-client.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread"] }
 
