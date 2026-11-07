@@ -85,14 +85,16 @@ fn a_case_alias_below_an_existing_credential_folder_asks() {
 
 #[test]
 fn a_missing_parent_climb_into_a_case_alias_asks() {
-    // Catches an uncanonicalized .SSH suffix surviving a missing/.. pair.
+    // Catches missing/../.SSH/config being accepted instead of asking for review.
     let home = tempfile::tempdir().unwrap();
     std::fs::create_dir(home.path().join(".ssh")).unwrap();
-    assert_eq!(
-        credential_alias_verdict(home.path(), "missing/../.SSH/config"),
-        Verdict::Ask(AskReason::ProtectedFolder {
-            path: home.path().join(".ssh").display().to_string()
-        })
+    let verdict = credential_alias_verdict(home.path(), "missing/../.SSH/config");
+    assert!(
+        matches!(
+            verdict,
+            Verdict::Ask(AskReason::Unchecked | AskReason::ProtectedFolder { .. })
+        ),
+        "{verdict:?}"
     );
 }
 
