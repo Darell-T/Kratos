@@ -6,9 +6,9 @@ use std::path::Path;
 
 use kratos_protocol::{
     Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest, AskReason,
-    Continuation, ContinuationId, ContinuationState, CreateThread, CreateWorkspace, ExtraAccess,
-    MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason, Permission, Provider,
-    Question, QuestionId, QuestionOutcome, RequiredText, Seq, ThreadEventBody, ThreadId,
+    ContextLimit, Continuation, ContinuationId, ContinuationState, CreateThread, CreateWorkspace,
+    ExtraAccess, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason, Permission,
+    Provider, Question, QuestionId, QuestionOutcome, RequiredText, Seq, ThreadEventBody, ThreadId,
     ThreadSettings, TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
 use kratos_store::{Enqueued, QueuePlace, Settle, Store, StoreError, restore};
@@ -481,16 +481,87 @@ fn a_continuation_cannot_send_after_its_source_pause_changes() {
 }
 
 #[test]
+fn a_thread_cannot_send_another_threads_continuation() {
+    // Catches a continuation planned for one thread queueing its message on a thread that is
+    // paused at the same turn id, which a timer or a stale request could name.
+    let home = home();
+    let (mut store, owner) = store_with_thread(home.path());
+    let workspace_id = store.provider_thread(&owner).unwrap().thread.workspace_id;
+    let other = store
+        .create_thread(
+            &serde_json::from_value(
+                json!({ "workspaceId": workspace_id, "title": "other", "provider": "codex" }),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .id;
+    for thread in [&owner, &other] {
+        let mut write = store.write_thread(thread).unwrap();
+        write
+            .pause(PauseReason::UsageLimit {
+                turn_id: TurnId::new("turn-1".into()),
+                resets_at: None,
+            })
+            .unwrap();
+        write.commit().unwrap();
+    }
+    let mut write = store.write_thread(&owner).unwrap();
+    write
+        .add_continuation(continuation("c-1", ContinuationState::Scheduled))
+        .unwrap();
+    write.commit().unwrap();
+
+    let mut write = store.write_thread(&other).unwrap();
+    let sent = write.send_continuation(
+        &ContinuationId::new("c-1".into()),
+        &id("stray"),
+        text("continue"),
+        MAX_PENDING,
+    );
+
+    assert!(
+        matches!(&sent, Err(StoreError::UnknownContinuation(unknown)) if unknown.as_str() == "c-1"),
+        "{sent:?}"
+    );
+    drop(write);
+    assert!(queue(&store, &other).is_empty());
+    assert_eq!(store.open_continuations().unwrap().len(), 1);
+}
+
+#[test]
+fn a_thread_stored_with_a_blank_model_still_loads_with_the_default_model() {
+    // Catches a thread written before the engine checked every provider's settings becoming
+    // unreadable, which would take its details and its events out of reach.
+    let home = home();
+    let (store, thread) = store_with_thread(home.path());
+    drop(store);
+    Connection::open(home.path().join("kratos.db"))
+        .unwrap()
+        .execute(
+            "UPDATE threads SET model = '  ', context_limit_tokens = 5000 WHERE id = ?1",
+            [thread.as_str()],
+        )
+        .unwrap();
+
+    let store = Store::open(home.path()).unwrap();
+    let settings = store.provider_thread(&thread).unwrap().settings;
+
+    assert_eq!(settings.model, None);
+    assert_eq!(settings.context_limit_tokens, ContextLimit::new(5000));
+}
+
+#[test]
 fn settings_pauses_and_running_turns_survive_reopening() {
     // Catches state kept only in memory: after a restart the engine must know a turn was running
     // (L1), why the queue waits, and what the next turn runs with (D87).
     let home = home();
     let (mut store, thread) = store_with_thread(home.path());
     let settings = ThreadSettings {
-        model: Some("gpt-test".into()),
+        model: RequiredText::new("gpt-test"),
         permission: Permission::FullAccess,
         plan_mode: true,
-        context_limit_tokens: Some(100_000),
+        context_limit_tokens: ContextLimit::new(100_000),
     };
     let reason = PauseReason::TimedOut {
         turn_id: TurnId::new("turn-0".into()),

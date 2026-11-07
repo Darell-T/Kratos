@@ -6,12 +6,12 @@
 
 use kratos_protocol::{
     AccessLimit, AgentItem, Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason,
-    CappedText, ContextUsage, Continuation, ContinuationId, ContinuationState, ExtraAccess,
-    FileChange, FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId, MessageInput,
-    MessageOrigin, MessageStatus, NetworkAccess, PathAccess, PathAccessMode, PauseReason,
-    Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption, ReplySoFar,
-    RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId, ThreadSettings, Timestamp,
-    TurnChanges, TurnId, TurnOutcome, UsageWait,
+    CappedText, ContextLimit, ContextUsage, Continuation, ContinuationId, ContinuationState,
+    ExtraAccess, FileChange, FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId,
+    MessageInput, MessageOrigin, MessageStatus, NetworkAccess, PathAccess, PathAccessMode,
+    PauseReason, Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption,
+    ReplySoFar, RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId,
+    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
 use std::fmt::Debug;
 
@@ -387,10 +387,10 @@ fn thread_and_provider_events_keep_their_stored_shape() {
     assert_wire(
         ThreadEventBody::SettingsChanged {
             settings: ThreadSettings {
-                model: Some("gpt-5.4-mini".into()),
+                model: RequiredText::new("gpt-5.4-mini"),
                 permission: Permission::ApproveForMe,
                 plan_mode: false,
-                context_limit_tokens: Some(200000),
+                context_limit_tokens: ContextLimit::new(200_000),
             },
         },
         r#"{"kind":"settings.changed","settings":{"model":"gpt-5.4-mini","permission":"approveForMe","planMode":false,"contextLimitTokens":200000}}"#,

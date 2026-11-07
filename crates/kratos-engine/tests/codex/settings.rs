@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use kratos_engine::providers::codex::ProviderError;
 use kratos_protocol::{
-    AccessLimit, AskReason, MessageOrigin, Permission, ThreadEventBody, ThreadSettings,
+    AccessLimit, AskReason, ContextLimit, MessageOrigin, Permission, ThreadEventBody,
+    ThreadSettings,
 };
 use serde_json::json;
 
@@ -235,7 +236,9 @@ async fn every_permission_writes_only_the_thread_s_own_workspace() {
 
 fn with_limit(limit: u64) -> ThreadSettings {
     ThreadSettings {
-        context_limit_tokens: Some(limit),
+        context_limit_tokens: Some(
+            ContextLimit::new(limit).expect("a limit within the protocol's range"),
+        ),
         ..ThreadSettings::default()
     }
 }
@@ -400,24 +403,4 @@ async fn a_permission_changed_mid_turn_applies_from_the_next_turn() {
     let started = harness.held("turn/start", 2).await;
     assert_eq!(started[1]["params"]["permissions"], ":danger-full-access");
     tokio::time::sleep(Duration::from_millis(50)).await;
-}
-
-#[tokio::test]
-async fn a_blank_model_is_refused() {
-    // Catches a setting Codex would reject at the next turn, after the user has moved on.
-    let harness = Harness::start(Options::default()).await;
-    let blank = ThreadSettings {
-        model: Some("  ".into()),
-        ..ThreadSettings::default()
-    };
-
-    let refused = harness
-        .provider
-        .set_settings(harness.thread_id.clone(), blank)
-        .await;
-
-    assert!(
-        matches!(refused, Err(ProviderError::Unsupported(_))),
-        "{refused:?}"
-    );
 }

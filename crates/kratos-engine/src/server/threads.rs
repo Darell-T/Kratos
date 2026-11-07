@@ -3,7 +3,7 @@
 
 use axum::body::Body;
 use axum::extract::rejection::QueryRejection;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
@@ -95,12 +95,12 @@ pub(super) async fn details(
 /// 404.
 pub(super) async fn thread_events(
     State(state): State<ServerState>,
-    Path(thread_id): Path<String>,
+    id: ThreadPath,
     query: Result<Query<ListEvents>, QueryRejection>,
 ) -> Result<Response, ApiError> {
+    let thread_id = path(id)?;
     let Query(ListEvents { after }) =
         query.map_err(|rejection| ApiError::bad_request(rejection.body_text()))?;
-    let thread_id = ThreadId::new(thread_id);
     let events = state
         .store
         .call(move |store| {

@@ -4,7 +4,9 @@
 use std::path::PathBuf;
 
 use kratos_engine::mcp::McpServer;
-use kratos_protocol::{AccessLimit, MessageOrigin, Permission, ThreadId, ThreadSettings};
+use kratos_protocol::{
+    AccessLimit, MessageOrigin, Permission, RequiredText, ThreadId, ThreadSettings,
+};
 use serde_json::json;
 
 use crate::harness::{Harness, Options};
@@ -210,7 +212,7 @@ async fn each_thread_starts_the_kratos_mcp_server_for_its_own_id() {
 async fn a_thread_with_a_model_starts_codex_on_that_model() {
     // Catches the thread's model setting ignored when Codex opens the thread.
     let mut options = settings(Permission::AskMe, false);
-    options.settings.model = Some("other-model".into());
+    options.settings.model = RequiredText::new("other-model");
     let mut harness = Harness::start(options).await;
 
     harness.send("a", "first").await;

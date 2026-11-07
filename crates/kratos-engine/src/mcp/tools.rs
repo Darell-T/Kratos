@@ -189,7 +189,7 @@ fn create_thread(call: &Call, arguments: Value) -> Answer {
     let settings = ThreadSettings {
         permission: request.permission.unwrap_or(me.settings.permission),
         plan_mode: request.plan_mode.unwrap_or(me.settings.plan_mode),
-        model: request.model.map(RequiredText::into_string),
+        model: request.model,
         ..ThreadSettings::default()
     };
     let workspace_id = match request.workspace_id {

@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use kratos_codex_client::types;
 use kratos_protocol::{
-    AccessLimit, ContextUsage, FileChange, Message, MessageId, ThreadSettings, TurnId,
+    AccessLimit, ContextLimit, ContextUsage, FileChange, Message, MessageId, ThreadSettings, TurnId,
 };
 
 use super::actor::Reply;
@@ -59,7 +59,7 @@ impl ThreadState {
     /// The model Codex runs the thread's turns with: the setting, else the one Codex chose.
     pub fn model(&self) -> Option<&str> {
         match (&self.settings.model, &self.link) {
-            (Some(model), _) => Some(model),
+            (Some(model), _) => Some(model.as_str()),
             (None, Link::Attached { model, .. }) => Some(model),
             (None, _) => None,
         }
@@ -77,7 +77,7 @@ pub(super) enum Link {
         native_id: String,
         model: String,
         /// The context limit Codex loaded the thread with (D76).
-        context_limit: Option<u64>,
+        context_limit: Option<ContextLimit>,
         /// The access under which this session may have cached approval grants.
         access: AccessLimit,
     },

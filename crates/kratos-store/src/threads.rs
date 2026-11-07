@@ -1,12 +1,14 @@
 use kratos_protocol::{
-    ContextUsage, CreateThread, PauseReason, Permission, Provider, Thread, ThreadDetails,
-    ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, Timestamp, TurnChanges, TurnId,
-    TurnOutcome, WorkspaceId,
+    ContextLimit, ContextUsage, CreateThread, PauseReason, Permission, Provider, RequiredText,
+    Thread, ThreadDetails, ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, Timestamp,
+    TurnChanges, TurnId, TurnOutcome, WorkspaceId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
-use crate::columns::{from_column, from_stored_name, permission_name, provider_name, to_column};
+use crate::columns::{
+    from_column, from_stored_name, permission_name, provider_name, to_column, unreadable,
+};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// What a provider needs to run a thread's turns.
@@ -52,10 +54,10 @@ impl Store {
                 provider_name(thread.provider),
                 thread.created_at.as_str(),
                 thread.updated_at.as_str(),
-                settings.model,
+                settings.model.as_ref().map(RequiredText::as_str),
                 permission_name(settings.permission),
                 settings.plan_mode,
-                settings.context_limit_tokens,
+                settings.context_limit_tokens.map(i64::from),
             ],
         )?;
         if inserted == 0 {
@@ -129,10 +131,10 @@ impl ThreadWrite<'_> {
             "UPDATE threads SET model = ?1, permission = ?2, plan_mode = ?3, context_limit_tokens = ?4
              WHERE id = ?5",
             params![
-                settings.model,
+                settings.model.as_ref().map(RequiredText::as_str),
                 permission_name(settings.permission),
                 settings.plan_mode,
-                settings.context_limit_tokens,
+                settings.context_limit_tokens.map(i64::from),
                 self.thread_id().as_str(),
             ],
         )?;
@@ -265,10 +267,18 @@ fn provider_thread_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderThread> {
 }
 
 /// Columns 7 to 10: `model, permission, plan_mode, context_limit_tokens`.
+///
+/// A stored blank model loads as unset, which runs the provider's default, so a thread written
+/// before every provider's settings were checked stays readable. A stored limit that
+/// `ContextLimit` refuses is a row this build cannot read, and reading fails. The column's `CHECK`
+/// and its integer type keep every stored limit inside the range, so this is a guard for a
+/// database written by something else.
 fn settings_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadSettings> {
     let permission: String = row.get(8)?;
     Ok(ThreadSettings {
-        model: row.get(7)?,
+        model: row
+            .get::<_, Option<String>>(7)?
+            .and_then(|model| RequiredText::new(&model)),
         permission: from_stored_name(
             Permission::ALL,
             permission_name,
@@ -277,7 +287,13 @@ fn settings_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadSettings> {
             "permission",
         )?,
         plan_mode: row.get(9)?,
-        context_limit_tokens: row.get(10)?,
+        context_limit_tokens: row
+            .get::<_, Option<i64>>(10)?
+            .map(|tokens| {
+                ContextLimit::from_stored(tokens)
+                    .ok_or_else(|| unreadable(10, format!("context limit {tokens} out of range")))
+            })
+            .transpose()?,
     })
 }
 
