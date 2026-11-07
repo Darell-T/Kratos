@@ -270,7 +270,7 @@ async fn a_reset_that_finds_the_limit_still_spent_waits_for_the_next_reset() {
     let rescheduled = next_continuation(&mut harness).await;
     assert_eq!(rescheduled.state, ContinuationState::Scheduled);
     assert_eq!(
-        rescheduled.resets_at.and_then(|reset| reset.instant()),
+        rescheduled.resets_at.map(|reset| reset.instant()),
         Some(at(RESET + HOUR))
     );
     assert_eq!(harness.turn_requests().await.len(), 1);

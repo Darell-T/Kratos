@@ -1,7 +1,7 @@
 use kratos_protocol::{
     ContextUsage, CreateThread, PauseReason, Permission, Provider, Thread, ThreadDetails,
-    ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, Timestamp, TurnChanges, TurnId,
-    TurnOutcome, WorkspaceId,
+    ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, TurnChanges, TurnId, TurnOutcome,
+    WorkspaceId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
@@ -31,7 +31,7 @@ impl Store {
     /// settings or the defaults. `Err(UnknownWorkspace)` when the workspace does not exist; nothing
     /// is written then.
     pub fn create_thread(&self, request: &CreateThread) -> Result<Thread, StoreError> {
-        let now = Timestamp::now();
+        let now = crate::columns::timestamp_now()?;
         let thread = Thread {
             id: ThreadId::new(Uuid::new_v4().to_string()),
             workspace_id: request.workspace_id.clone(),

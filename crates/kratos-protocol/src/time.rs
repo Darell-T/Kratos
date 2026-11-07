@@ -9,8 +9,11 @@ use serde::{Deserialize, Serialize};
 /// Stored and sent as text. Text of this one shape sorts in time order, which the `ORDER BY
 /// created_at` listings rely on, so [`Timestamp::at`] is the only place Rust formats a time.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String")]
-pub struct Timestamp(String);
+#[serde(try_from = "String", into = "String")]
+pub struct Timestamp {
+    text: String,
+    instant: SystemTime,
+}
 
 /// Text that is not a timestamp.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,22 +34,30 @@ impl Timestamp {
     ///
     /// Wall-clock time can step backwards, so a timestamp orders listings for display only. Event
     /// order comes from [`crate::Seq`].
-    pub fn now() -> Timestamp {
+    pub fn now() -> Result<Timestamp, TimestampError> {
         Timestamp::at(SystemTime::now())
     }
 
     /// `time`, truncated to milliseconds.
-    pub fn at(time: SystemTime) -> Timestamp {
-        Timestamp(humantime::format_rfc3339_millis(time).to_string())
+    pub fn at(time: SystemTime) -> Result<Timestamp, TimestampError> {
+        let mut text = String::new();
+        fmt::write(
+            &mut text,
+            format_args!("{}", humantime::format_rfc3339_millis(time)),
+        )
+        .map_err(|_| TimestampError {
+            text: format!("{time:?}"),
+        })?;
+        Self::try_from(text)
     }
 
     /// The instant the text names.
-    pub fn instant(&self) -> Option<SystemTime> {
-        humantime::parse_rfc3339(&self.0).ok()
+    pub fn instant(&self) -> SystemTime {
+        self.instant
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.text
     }
 }
 
@@ -55,8 +66,14 @@ impl TryFrom<String> for Timestamp {
 
     fn try_from(text: String) -> Result<Timestamp, TimestampError> {
         match humantime::parse_rfc3339(&text) {
-            Ok(_) => Ok(Timestamp(text)),
+            Ok(instant) => Ok(Timestamp { text, instant }),
             Err(_) => Err(TimestampError { text }),
         }
+    }
+}
+
+impl From<Timestamp> for String {
+    fn from(timestamp: Timestamp) -> String {
+        timestamp.text
     }
 }

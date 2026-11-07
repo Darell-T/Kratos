@@ -290,10 +290,10 @@ pub async fn start(
 }
 
 impl Scheduler {
-    /// Wakes the scheduler for `id` at `at`, or after the recheck wait when `at` is unknown.
+    /// Wakes at the provider's reset time, or after the recheck wait when no reset time was given.
     fn arm(&self, id: &ContinuationId, at: Option<&Timestamp>) {
         let at = at
-            .and_then(Timestamp::instant)
+            .map(Timestamp::instant)
             .unwrap_or_else(|| self.clock.now() + RECHECK_AFTER);
         self.arm_at(id, at);
     }
@@ -456,7 +456,7 @@ impl Scheduler {
         let has_reset_passed = planned
             .resets_at
             .as_ref()
-            .and_then(Timestamp::instant)
+            .map(Timestamp::instant)
             .is_some_and(|reset| reset <= self.clock.now());
         if has_reset_passed {
             // A timer armed at this reset would fire at once, so the read says nothing about when
@@ -603,7 +603,7 @@ mod tests {
             plan: Some("plus".into()),
             allowance,
             buckets,
-            read_at: Timestamp::now(),
+            read_at: Timestamp::now().unwrap(),
         }
     }
 

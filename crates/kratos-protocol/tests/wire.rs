@@ -199,7 +199,7 @@ fn ids_follow_the_typescript_schemas() {
 fn timestamps_have_the_javascript_iso_shape() {
     // Catches `YYYY-MM-DDTHH:MM:SSZ` or nanosecond precision, which would sort wrongly against the
     // rows the TypeScript engine wrote and differ from what `Date.toISOString()` produces.
-    let now = Timestamp::now();
+    let now = Timestamp::now().unwrap();
     let text = now.as_str();
     assert_eq!(text.len(), 24, "{text}");
     for (index, character) in text.bytes().enumerate() {

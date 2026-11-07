@@ -47,6 +47,10 @@ pub(crate) fn unreadable(index: usize, reason: String) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(index, Type::Text, reason.into())
 }
 
+pub(crate) fn timestamp_now() -> rusqlite::Result<Timestamp> {
+    Timestamp::now().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+}
+
 /// The timestamp in `column`, which sits at `index`, or `None` when it is NULL. The error names the
 /// column and the text it held.
 pub(crate) fn optional_timestamp_column(
