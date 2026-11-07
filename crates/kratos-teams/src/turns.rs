@@ -17,7 +17,7 @@ use crate::task_plan::{PlanChangeRequest, TaskPlan};
 use crate::view::{
     Activity, AfterCommit, Answerer, Hold, MAX_QUESTIONS_PER_STEP, Note, Pending, Phase, PlanState,
     Question, Resolution, Retry, Stop, Suspended, TaskView, Trouble, Turn, UsageLimitAsk, Waiting,
-    Work,
+    Work, awaits_result,
 };
 
 impl TaskView {
@@ -30,12 +30,8 @@ impl TaskView {
     ) -> Result<(Box<TaskView>, Turn), Rejection> {
         match self.take_phase() {
             Phase::Active {
-                activity:
-                    Activity::Turn {
-                        turn,
-                        hold: None | Some(Hold::Scheduled { .. }),
-                    },
-            } if turn.message == *message => Ok((self, turn)),
+                activity: Activity::Turn { turn, hold },
+            } if turn.message == *message && awaits_result(hold.as_ref()) => Ok((self, turn)),
             other => {
                 let waiting = other.waiting_message().cloned();
                 self.phase = other;

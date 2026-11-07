@@ -472,6 +472,11 @@ pub enum Hold {
     },
 }
 
+/// A scheduled continuation awaits its result; scheduler and handoff holds await the engine.
+pub(crate) fn awaits_result(hold: Option<&Hold>) -> bool {
+    matches!(hold, None | Some(Hold::Scheduled { .. }))
+}
+
 /// What the user or the planner settled for a step that had suspended, in the order it happened. It
 /// goes in the step's next message.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -892,12 +897,8 @@ impl Phase {
     pub fn waiting_message(&self) -> Option<&MessageId> {
         match self {
             Phase::Active {
-                activity:
-                    Activity::Turn {
-                        turn,
-                        hold: None | Some(Hold::Scheduled { .. }),
-                    },
-            } => Some(&turn.message),
+                activity: Activity::Turn { turn, hold },
+            } if awaits_result(hold.as_ref()) => Some(&turn.message),
             _ => None,
         }
     }
