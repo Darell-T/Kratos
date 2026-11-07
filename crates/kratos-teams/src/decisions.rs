@@ -233,7 +233,7 @@ fn waiting_decisions(view: &TaskView, waiting: &Waiting) -> Vec<DecisionKind> {
 fn trouble_decisions(left: &Activity) -> Vec<DecisionKind> {
     use DecisionKind::*;
     let work = match left {
-        Activity::Turn { turn } => Some(&turn.work),
+        Activity::Turn { turn, .. } => Some(&turn.work),
         _ => None,
     };
     let fits: &[DecisionKind] = match (left, work) {
@@ -411,7 +411,7 @@ fn rule(
     let (disputed, commit) = match waiting {
         Waiting::Ruling { disputed, commit } => (disputed.clone(), commit.clone()),
         Waiting::Trouble {
-            left: Activity::Turn { turn },
+            left: Activity::Turn { turn, .. },
             ..
         } => {
             let Work::Rule { disputed, commit } = &turn.work else {
@@ -587,10 +587,12 @@ fn usage_limit_turn(view: &TaskView, decision: DecisionKind) -> Result<(Turn, St
 }
 
 fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
-    let (mut turn, mut stop) = usage_limit_turn(&view, DecisionKind::KeepWaiting)?;
+    let (turn, mut stop) = usage_limit_turn(&view, DecisionKind::KeepWaiting)?;
     stop.user_accepted_wait = true;
-    turn.hold = Some(Hold::ToScheduler { stop });
-    Ok(view.active(Activity::Turn { turn }))
+    Ok(view.active(Activity::Turn {
+        turn,
+        hold: Some(Hold::ToScheduler { stop }),
+    }))
 }
 
 fn handoff(view: Box<TaskView>, approved: bool) -> Result<Box<TaskView>, Rejection> {
@@ -599,13 +601,13 @@ fn handoff(view: Box<TaskView>, approved: bool) -> Result<Box<TaskView>, Rejecti
     } else {
         DecisionKind::DeclineHandoff
     };
-    let (mut turn, stop) = usage_limit_turn(&view, decision)?;
-    turn.hold = Some(if approved {
+    let (turn, stop) = usage_limit_turn(&view, decision)?;
+    let hold = Some(if approved {
         Hold::HandOff { stop }
     } else {
         Hold::ToScheduler { stop }
     });
-    Ok(view.active(Activity::Turn { turn }))
+    Ok(view.active(Activity::Turn { turn, hold }))
 }
 
 // The approval report.

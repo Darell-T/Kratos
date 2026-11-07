@@ -55,5 +55,6 @@ mod user_messages;
 /// Whether text holds nothing but whitespace. Every rule that refuses blank text asks this, so the
 /// whitespace set is chosen in one place.
 pub(crate) fn is_blank(text: &str) -> bool {
-    text.trim().is_empty()
+    text.trim_matches(kratos_protocol::is_javascript_whitespace)
+        .is_empty()
 }

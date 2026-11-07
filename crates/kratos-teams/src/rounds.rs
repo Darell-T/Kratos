@@ -47,7 +47,9 @@ impl TaskView {
     pub(crate) fn responses_problem(&self, responses: &[Response]) -> Option<String> {
         let open: Vec<FindingId> = self.open_findings().map(|finding| finding.id).collect();
         let Coverage {
-            missing, repeated, ..
+            missing,
+            repeated,
+            strangers,
         } = coverage(&open, responses.iter().map(|r| r.finding));
         let is_blank_dispute = |response: &Response| matches!(&response.outcome, ResponseOutcome::Disputed { reason } if crate::is_blank(reason));
         let unexplained: Vec<FindingId> = open
@@ -70,6 +72,12 @@ impl TaskView {
                 format!(
                     "Answer each finding once. Answered more than once: {}.",
                     id_list(&repeated)
+                )
+            }),
+            (!strangers.is_empty()).then(|| {
+                format!(
+                    "Answer only open findings. Not open: {}.",
+                    id_list(&strangers)
                 )
             }),
             (!unexplained.is_empty())

@@ -13,7 +13,7 @@ use std::fmt;
 use globset::GlobMatcher;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::paths::{PatternError, compile, parse_repo_path, repo_path};
+use crate::paths::{PatternError, RepoPath, compile, repo_path};
 
 /// A glob relative to the repository root that names files a task may change: `src/auth/**`,
 /// `docs/*.md`, `Cargo.toml`. A folder needs an explicit `/**`, because Kratos cannot tell a file
@@ -23,21 +23,19 @@ use crate::paths::{PatternError, compile, parse_repo_path, repo_path};
 /// inside the repository.
 #[derive(Clone)]
 pub struct ScopePattern {
-    text: String,
+    text: RepoPath,
     matcher: GlobMatcher,
 }
 
 impl ScopePattern {
     pub fn new(glob: &str) -> Result<ScopePattern, PatternError> {
-        let text = parse_repo_path(glob.trim()).map_err(|_| PatternError::OutsideRepository {
-            pattern: glob.to_owned(),
-        })?;
-        let matcher = compile(&text)?.compile_matcher();
+        let text = RepoPath::new(glob.trim())?;
+        let matcher = compile(text.as_str())?.compile_matcher();
         Ok(ScopePattern { text, matcher })
     }
 
     pub fn as_str(&self) -> &str {
-        &self.text
+        self.text.as_str()
     }
 
     /// Whether `path`, written as a reviewer or git writes it, is covered.
@@ -48,7 +46,7 @@ impl ScopePattern {
 
 impl fmt::Debug for ScopePattern {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "ScopePattern({:?})", self.text)
+        write!(formatter, "ScopePattern({:?})", self.text.as_str())
     }
 }
 
@@ -62,7 +60,7 @@ impl Eq for ScopePattern {}
 
 impl Serialize for ScopePattern {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.text)
+        serializer.serialize_str(self.text.as_str())
     }
 }
 
