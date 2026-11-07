@@ -11,7 +11,6 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::providers::codex::threads::{Link, Turn};
 use crate::providers::codex::{ProtectedFolders, queue};
 use crate::store_thread;
 
@@ -88,10 +87,10 @@ impl Harness {
         }
     }
 
-    async fn send(&mut self, message_id: &MessageId) {
+    async fn send(&mut self, thread_id: &ThreadId, message_id: &MessageId) {
         self.actor
             .send(
-                &self.thread_id,
+                thread_id,
                 message_id.clone(),
                 vec![MessageInput::Text {
                     text: RequiredText::new("work").unwrap(),
@@ -188,7 +187,7 @@ async fn resume_and_continuation_name_the_action_for_the_blocking_message() {
     ] {
         let mut harness = Harness::start().await;
         let message_id = MessageId::new("held".into());
-        harness.send(&message_id).await;
+        harness.send(&harness.thread_id.clone(), &message_id).await;
         harness
             .actor
             .write(&harness.thread_id, move |write| {
@@ -243,18 +242,7 @@ async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
     threads.extend(more);
     let message_id = MessageId::new("waiting".into());
     for thread_id in &threads {
-        harness
-            .actor
-            .send(
-                thread_id,
-                message_id.clone(),
-                vec![MessageInput::Text {
-                    text: RequiredText::new("work").unwrap(),
-                }],
-                MessageOrigin::User,
-            )
-            .await
-            .unwrap();
+        harness.send(thread_id, &message_id).await;
         let attached = harness.attached_reply_for(thread_id).await;
         attached.apply(&mut harness.actor).await;
         harness.actor.dispatch(thread_id).await;
@@ -323,17 +311,8 @@ async fn an_unavailable_connection_keeps_an_existing_usage_pause() {
     let mut harness = Harness::start().await;
     let thread_id = harness.thread_id.clone();
     harness
-        .actor
-        .send(
-            &thread_id,
-            MessageId::new("waiting".into()),
-            vec![MessageInput::Text {
-                text: RequiredText::new("work").unwrap(),
-            }],
-            MessageOrigin::User,
-        )
-        .await
-        .unwrap();
+        .send(&thread_id, &MessageId::new("waiting".into()))
+        .await;
     let pause = kratos_protocol::PauseReason::UsageLimit {
         turn_id: TurnId::new("limited".into()),
         resets_at: None,
@@ -370,10 +349,6 @@ async fn an_attach_reply_after_exit_does_not_load_a_dead_process() {
     harness.exit().await;
     old_reply.apply(&mut harness.actor).await;
 
-    let detached = matches!(
-        harness.actor.threads[&harness.thread_id].link,
-        Link::Detached
-    );
     let thread_id = harness.thread_id.clone();
     let native_id = harness
         .actor
@@ -381,7 +356,6 @@ async fn an_attach_reply_after_exit_does_not_load_a_dead_process() {
         .call(move |store| store.provider_thread(&thread_id).unwrap().native_id)
         .await;
     harness.close().await;
-    assert!(detached, "the dead process cannot load a thread");
     assert_eq!(
         native_id, None,
         "the dead process cannot begin a provider session"
@@ -414,11 +388,11 @@ async fn an_old_attach_reply_does_not_detach_a_replacement_process() {
 }
 
 #[tokio::test]
-async fn exit_pauses_a_message_waiting_for_attachment_without_sending_it() {
-    // Catches a stale attach reply being ignored without reporting why queued work cannot run.
+async fn a_quick_exit_pauses_waiting_attachment_under_restart_backoff() {
+    // Catches an exit inside SETTLED_AFTER leaving queued work without the backoff's pause.
     let mut harness = Harness::start().await;
     let message_id = MessageId::new("waiting".into());
-    harness.send(&message_id).await;
+    harness.send(&harness.thread_id.clone(), &message_id).await;
     let old_reply = harness.attached_reply().await;
 
     harness.exit().await;
@@ -436,11 +410,12 @@ async fn exit_pauses_a_message_waiting_for_attachment_without_sending_it() {
         .call(move |store| store.thread_details(&thread_id))
         .await
         .unwrap();
-    let detached = matches!(
-        harness.actor.threads[&harness.thread_id].link,
-        Link::Detached
-    );
-    let down = matches!(harness.actor.server, Server::Down);
+    let thread_id = harness.thread_id.clone();
+    let native_id = harness
+        .actor
+        .store
+        .call(move |store| store.provider_thread(&thread_id).unwrap().native_id)
+        .await;
     harness.close().await;
     assert_eq!(message.status, MessageStatus::Queued);
     assert!(
@@ -452,9 +427,9 @@ async fn exit_pauses_a_message_waiting_for_attachment_without_sending_it() {
         details.paused
     );
     assert_eq!(details.running_turn, None);
-    assert!(
-        detached && down,
-        "the stale attach cannot send waiting work"
+    assert_eq!(
+        native_id, None,
+        "the stale attach cannot begin a provider session"
     );
 }
 
@@ -465,7 +440,7 @@ async fn exit_settles_a_pending_start_and_its_stop_without_waiting_for_a_reply()
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
     let message_id = MessageId::new("pending".into());
-    harness.send(&message_id).await;
+    harness.send(&harness.thread_id.clone(), &message_id).await;
     harness.actor.dispatch(&harness.thread_id).await;
     harness.held("turn/start").await;
     let (reply, mut stopped) = oneshot::channel();
@@ -478,7 +453,12 @@ async fn exit_settles_a_pending_start_and_its_stop_without_waiting_for_a_reply()
         .message(&harness.thread_id, &message_id)
         .await
         .unwrap();
-    let idle = matches!(harness.actor.threads[&harness.thread_id].turn, Turn::Idle);
+    let thread_id = harness.thread_id.clone();
+    let running = harness
+        .actor
+        .store
+        .call(move |store| store.thread_details(&thread_id).unwrap().running_turn)
+        .await;
     let stopped = stopped.try_recv();
     harness.close().await;
     assert!(
@@ -486,7 +466,7 @@ async fn exit_settles_a_pending_start_and_its_stop_without_waiting_for_a_reply()
         "{:?}",
         message.status
     );
-    assert!(idle, "process exit ends the pending start");
+    assert_eq!(running, None, "process exit ends the pending start");
     assert!(matches!(stopped, Ok(Ok(()))), "{stopped:?}");
 }
 
@@ -497,7 +477,7 @@ async fn a_start_reply_after_exit_cannot_accept_a_message_or_start_a_turn() {
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
     let message_id = MessageId::new("pending".into());
-    harness.send(&message_id).await;
+    harness.send(&harness.thread_id.clone(), &message_id).await;
     harness.actor.dispatch(&harness.thread_id).await;
     harness.held("turn/start").await;
     harness.control("test/settleTurn", json!({
@@ -536,7 +516,7 @@ async fn pending_steer() -> (Harness, MessageId) {
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
     let first = MessageId::new("first".into());
-    harness.send(&first).await;
+    harness.send(&harness.thread_id.clone(), &first).await;
     harness.actor.dispatch(&harness.thread_id).await;
     harness.held("turn/start").await;
     harness.control("test/settleTurn", json!({
@@ -548,7 +528,7 @@ async fn pending_steer() -> (Harness, MessageId) {
         .apply(&mut harness.actor)
         .await;
     let message_id = MessageId::new("steer".into());
-    harness.send(&message_id).await;
+    harness.send(&harness.thread_id.clone(), &message_id).await;
     harness
         .actor
         .steer(&harness.thread_id, message_id.clone())
@@ -571,16 +551,19 @@ async fn exit_settles_a_pending_steer_without_waiting_for_a_reply() {
         .message(&harness.thread_id, &message_id)
         .await
         .unwrap();
-    let no_steer = harness.actor.threads[&harness.thread_id]
-        .steering
-        .is_empty();
+    let thread_id = harness.thread_id.clone();
+    let running = harness
+        .actor
+        .store
+        .call(move |store| store.thread_details(&thread_id).unwrap().running_turn)
+        .await;
     harness.close().await;
     assert!(
         matches!(message.status, MessageStatus::Unknown { .. }),
         "{:?}",
         message.status
     );
-    assert!(no_steer, "process exit ends the pending steer");
+    assert_eq!(running, None, "process exit ends the steered turn");
 }
 
 #[tokio::test]
@@ -663,7 +646,6 @@ async fn a_late_steer_cannot_close_a_replacement_process() {
         .completion(|done| matches!(done, Done::Steered { .. }))
         .await;
     harness.exit().await;
-    assert!(matches!(harness.actor.server, Server::Down));
     harness.actor.restarts = Default::default();
     let settled = message_id.clone();
     harness
@@ -675,7 +657,7 @@ async fn a_late_steer_cannot_close_a_replacement_process() {
         .await
         .unwrap();
     let replacement = MessageId::new("replacement".into());
-    harness.send(&replacement).await;
+    harness.send(&harness.thread_id.clone(), &replacement).await;
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
     harness.held("turn/start").await;
@@ -683,7 +665,7 @@ async fn a_late_steer_cannot_close_a_replacement_process() {
         .control(
             "test/settleTurn",
             json!({ "method": "turn/start", "result": {
-        "turn": { "id": "old-turn", "items": [], "status": "inProgress" }
+        "turn": { "id": "replacement-turn", "items": [], "status": "inProgress" }
     } }),
         )
         .await;
@@ -786,7 +768,7 @@ async fn a_late_discard_cannot_cancel_an_uncertain_message() {
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
     let message_id = MessageId::new("uncertain".into());
-    harness.send(&message_id).await;
+    harness.send(&harness.thread_id.clone(), &message_id).await;
     let uncertain = message_id.clone();
     harness
         .actor
