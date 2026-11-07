@@ -353,6 +353,7 @@ impl Actor {
             .ok_or_else(|| ProviderError::UnknownMessage(message_id.clone()))
     }
 
+    /// Pauses waiting work while keeping any existing pause and its continuation.
     pub(super) async fn pause_unavailable_if_waiting(
         &mut self,
         thread_id: &ThreadId,

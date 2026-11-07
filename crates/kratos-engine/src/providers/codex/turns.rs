@@ -95,7 +95,7 @@ impl Actor {
 
     /// The thread's first waiting message when it may start: the queue is not paused, and the
     /// message is queued. A failed or uncertain message holds the queue until the user settles it.
-    pub(super) async fn next_to_start(&self, thread_id: &ThreadId) -> Option<Message> {
+    async fn next_to_start(&self, thread_id: &ThreadId) -> Option<Message> {
         let thread_id = thread_id.clone();
         let next = self
             .store

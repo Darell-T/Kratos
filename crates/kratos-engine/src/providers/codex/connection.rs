@@ -470,15 +470,7 @@ impl Actor {
         }
         self.ready.clear();
         for thread_id in &thread_ids {
-            if self.next_to_start(thread_id).await.is_some() {
-                if let Err(error) = self.connection() {
-                    for thread_id in &thread_ids {
-                        self.pause_unavailable_if_waiting(thread_id, error.to_string())
-                            .await;
-                    }
-                }
-                break;
-            }
+            self.dispatch(thread_id).await;
         }
     }
 
