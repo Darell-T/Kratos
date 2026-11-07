@@ -1,7 +1,8 @@
-use kratos_protocol::{CreateWorkspace, Timestamp, Workspace, WorkspaceId};
+use kratos_protocol::{CreateWorkspace, Workspace, WorkspaceId};
 use rusqlite::{Row, params};
 use uuid::Uuid;
 
+use crate::columns::{timestamp_column, timestamp_now};
 use crate::{Store, StoreError};
 
 impl Store {
@@ -13,7 +14,7 @@ impl Store {
             id: WorkspaceId::new(Uuid::new_v4().to_string()),
             name: request.name.as_str().to_owned(),
             path: request.path.as_str().to_owned(),
-            created_at: Timestamp::now(),
+            created_at: timestamp_now()?,
         };
         self.connection.execute(
             "INSERT INTO workspaces (id, name, path, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -43,6 +44,6 @@ fn workspace_from_row(row: &Row<'_>) -> rusqlite::Result<Workspace> {
         id: WorkspaceId::new(row.get(0)?),
         name: row.get(1)?,
         path: row.get(2)?,
-        created_at: Timestamp::from_stored(row.get(3)?),
+        created_at: timestamp_column(row, 3, "created_at")?,
     })
 }

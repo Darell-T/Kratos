@@ -59,7 +59,7 @@ fn socket_messages_match_the_typescript_json() {
         event: ThreadEvent {
             thread_id: ThreadId::new("t".into()),
             seq: Seq::new(1),
-            at: Timestamp::from_stored("2030-01-01T00:00:00.000Z".into()),
+            at: Timestamp::try_from("2030-01-01T00:00:00.000Z".to_owned()).unwrap(),
             event: ThreadEventBody::UserMessage {
                 text: "hi \"there\"\n\u{2028}é🚀".into(),
             },
@@ -199,7 +199,7 @@ fn ids_follow_the_typescript_schemas() {
 fn timestamps_have_the_javascript_iso_shape() {
     // Catches `YYYY-MM-DDTHH:MM:SSZ` or nanosecond precision, which would sort wrongly against the
     // rows the TypeScript engine wrote and differ from what `Date.toISOString()` produces.
-    let now = Timestamp::now();
+    let now = Timestamp::now().unwrap();
     let text = now.as_str();
     assert_eq!(text.len(), 24, "{text}");
     for (index, character) in text.bytes().enumerate() {

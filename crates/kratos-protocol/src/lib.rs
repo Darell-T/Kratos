@@ -67,7 +67,7 @@ pub use threads::{
     AccessLimit, CreateThread, ListEvents, ListThreads, OutsideWrites, Permission, Provider,
     Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
 };
-pub use time::Timestamp;
+pub use time::{Timestamp, TimestampError};
 pub use turns::{
     AgentItem, CappedText, CommandResult, ContextUsage, FileChange, FileChangeKind, ItemStatus,
     TurnChanges, TurnId, TurnOutcome,
