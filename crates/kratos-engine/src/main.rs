@@ -201,6 +201,7 @@ async fn shutdown_signal() {
     }
 }
 
+// A launcher that starts the engine in a new process group can stop it only with Ctrl+Break.
 #[cfg(windows)]
 async fn shutdown_signal() {
     let signals = (
