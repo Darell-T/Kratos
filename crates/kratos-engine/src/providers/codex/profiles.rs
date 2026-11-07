@@ -82,6 +82,7 @@ impl ProtectedFolders {
 
     /// Resolves existing links before checking a patch's destination, including new files below
     /// a linked directory. An unreadable or dangling link cannot establish a safe destination.
+    /// Neither can a path that climbs out of a folder that does not exist yet.
     pub fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
         let path = resolve_destination(path)?;
         for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
@@ -176,7 +177,7 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
                 for part in suffix.iter().rev() {
                     resolved.push(part);
                 }
-                return Ok(normalize(&resolved));
+                return Ok(resolved);
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 if std::fs::symlink_metadata(&ancestor).is_ok() {
@@ -199,21 +200,6 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
             Err(error) => return Err(error),
         }
     }
-}
-
-/// Only the not-yet-created suffix needs lexical normalization; existing links are resolved first.
-fn normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 fn is_within(path: &Path, folder: &Path) -> bool {
