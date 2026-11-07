@@ -25,7 +25,7 @@ use kratos_protocol::routes::{
     THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE, WORKSPACES,
 };
 use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
-use kratos_store::StoreError;
+use kratos_store::{Refusal, StoreError};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -275,19 +275,10 @@ impl ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> ApiError {
-        match error {
-            StoreError::UnknownThread(_)
-            | StoreError::UnknownWorkspace(_)
-            | StoreError::UnknownMessage { .. }
-            | StoreError::UnknownApproval(_)
-            | StoreError::UnknownQuestion(_)
-            | StoreError::UnknownContinuation(_) => ApiError::new(StatusCode::NOT_FOUND, error),
-            StoreError::MessageIdTaken(_) | StoreError::MessageTransition { .. } => {
-                ApiError::new(StatusCode::CONFLICT, error)
-            }
-            StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => {
-                ApiError::internal(&error)
-            }
+        match error.refusal() {
+            Some(Refusal::Unknown) => ApiError::new(StatusCode::NOT_FOUND, error),
+            Some(Refusal::Conflict) => ApiError::new(StatusCode::CONFLICT, error),
+            None => ApiError::internal(&error),
         }
     }
 }
