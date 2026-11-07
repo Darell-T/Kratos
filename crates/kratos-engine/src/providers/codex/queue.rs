@@ -28,6 +28,18 @@ pub(super) fn holds_queue(status: &MessageStatus) -> bool {
     )
 }
 
+fn settling_action(message: &Message) -> Option<String> {
+    let message_id = &message.id;
+    match message.status {
+        MessageStatus::Submitting => {
+            Some(format!("Wait for message {message_id} to finish sending"))
+        }
+        MessageStatus::Failed { .. } => Some(format!("Retry or remove message {message_id}")),
+        MessageStatus::Unknown { .. } => Some(format!("Discard message {message_id}")),
+        MessageStatus::Queued | MessageStatus::Accepted { .. } | MessageStatus::Cancelled => None,
+    }
+}
+
 pub(super) fn held_message(write: &ThreadWrite<'_>) -> Result<Option<Message>, StoreError> {
     Ok(write
         .pending_messages()?
@@ -264,38 +276,19 @@ impl Actor {
         let resumed = self
             .write(thread_id, |write| {
                 // Unlike held_message, a message still being sent refuses the resume too.
-                let refusal = write.pending_messages()?.into_iter().find_map(|message| {
-                    let message_id = message.id;
-                    match message.status {
-                        MessageStatus::Submitting => Some(format!(
-                            "Wait for message {message_id} to finish sending before resuming"
-                        )),
-                        MessageStatus::Failed { .. } => Some(format!(
-                            "Retry or remove message {message_id} before resuming"
-                        )),
-                        MessageStatus::Unknown { .. } => {
-                            Some(format!("Discard message {message_id} before resuming"))
-                        }
-                        MessageStatus::Queued
-                        | MessageStatus::Accepted { .. }
-                        | MessageStatus::Cancelled => None,
-                    }
-                });
+                let refusal = write.pending_messages()?.iter().find_map(settling_action);
                 if let Some(refusal) = refusal {
-                    return Ok(Err(refusal));
+                    return Ok(Err(format!("{refusal} before resuming")));
                 }
-                write
-                    .open_continuation()?
-                    .map(|open| {
-                        write.update_continuation(
-                            &open.id,
-                            open.resets_at,
-                            ContinuationState::Cancelled {
-                                reason: "The user resumed the thread".into(),
-                            },
-                        )
-                    })
-                    .transpose()?;
+                if let Some(open) = write.open_continuation()? {
+                    write.update_continuation(
+                        &open.id,
+                        open.resets_at,
+                        ContinuationState::Cancelled {
+                            reason: "The user resumed the thread".into(),
+                        },
+                    )?;
+                }
                 write.resume()?;
                 Ok(Ok(()))
             })
@@ -374,10 +367,7 @@ impl Actor {
 /// or the queue is paused for something the reset does not fix.
 fn blocks_continuation(write: &mut ThreadWrite<'_>) -> Result<Option<String>, StoreError> {
     if let Some(held) = held_message(write)? {
-        return Ok(Some(format!(
-            "Message {} waits for you to retry, remove, or discard it",
-            held.id
-        )));
+        return Ok(settling_action(&held));
     }
     Ok(match write.provider_thread()?.paused {
         None | Some(PauseReason::UsageLimit { .. } | PauseReason::Unavailable { .. }) => None,

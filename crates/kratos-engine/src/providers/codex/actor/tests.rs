@@ -170,20 +170,20 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn a_resume_refusal_names_the_action_for_its_message_status() {
-    // Catches a resume refusal suggesting actions that cannot settle the blocking message.
+async fn resume_and_continuation_name_the_action_for_the_blocking_message() {
+    // Catches resume or continuation suggesting actions that cannot settle the blocking message.
     for (status, expected) in [
         (
             MessageStatus::Failed {
                 error: "refused".into(),
             },
-            "Retry or remove message held before resuming",
+            "Retry or remove message held",
         ),
         (
             MessageStatus::Unknown {
                 error: "lost".into(),
             },
-            "Discard message held before resuming",
+            "Discard message held",
         ),
     ] {
         let mut harness = Harness::start().await;
@@ -199,12 +199,24 @@ async fn a_resume_refusal_names_the_action_for_its_message_status() {
             .unwrap();
 
         let result = harness.actor.resume(&harness.thread_id).await;
+        let continued = harness
+            .actor
+            .continue_thread(
+                &harness.thread_id,
+                kratos_protocol::ContinuationId::new("held-continuation".into()),
+            )
+            .await
+            .unwrap();
 
         harness.close().await;
         let Err(ProviderError::Conflict(error)) = result else {
             panic!("a held message must refuse resumption")
         };
-        assert_eq!(error, expected);
+        assert_eq!(error, format!("{expected} before resuming"));
+        assert!(
+            matches!(continued, super::super::Continued::NeedsUser(ref why) if why == expected),
+            "{continued:?}"
+        );
     }
 }
 
