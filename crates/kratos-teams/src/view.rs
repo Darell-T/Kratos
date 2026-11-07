@@ -10,7 +10,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kratos_protocol::Provider;
 use serde::Serialize;
 
 use crate::evidence::{DropReason, EvidenceCheck, Rerun};
@@ -864,11 +863,6 @@ impl TaskView {
             }) => Some(request),
             _ => None,
         }
-    }
-
-    /// The provider of the member who holds `role`, for the branch name and for prompts.
-    pub fn provider_of(&self, role: Role) -> Option<Provider> {
-        self.bindings.member(role).map(|member| member.provider)
     }
 
     /// The commit the next round diffs from. It is the last round's, or the base.
