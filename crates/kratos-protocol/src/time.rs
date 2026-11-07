@@ -3,11 +3,11 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-/// A UTC instant as the engines write it: `2026-10-22T18:45:12.345Z`, the exact text of
-/// JavaScript's `Date.toISOString()`.
+/// A UTC instant and the text accepted by `humantime::parse_rfc3339`.
 ///
-/// Stored and sent as text. Text of this one shape sorts in time order, which the `ORDER BY
-/// created_at` listings rely on, so [`Timestamp::at`] is the only place Rust formats a time.
+/// Parsing keeps text verbatim, without assuming it sorts in time order. [`Timestamp::at`]
+/// formats the sortable JavaScript `Date.toISOString()` millisecond shape. Ordered storage
+/// columns are written from that formatter through [`Timestamp::now`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Timestamp {
@@ -34,11 +34,17 @@ impl Timestamp {
     ///
     /// Wall-clock time can step backwards, so a timestamp orders listings for display only. Event
     /// order comes from [`crate::Seq`].
+    ///
+    /// # Errors
+    /// Returns TimestampError when the system clock is outside the supported RFC 3339 range.
     pub fn now() -> Result<Timestamp, TimestampError> {
         Timestamp::at(SystemTime::now())
     }
 
     /// `time`, truncated to milliseconds.
+    ///
+    /// # Errors
+    /// Returns TimestampError when `time` cannot be represented in the supported RFC 3339 range.
     pub fn at(time: SystemTime) -> Result<Timestamp, TimestampError> {
         let mut text = String::new();
         fmt::write(
