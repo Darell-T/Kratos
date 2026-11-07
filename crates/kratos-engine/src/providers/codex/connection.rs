@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use kratos_codex_client::{
     Codex, ConnectError, Exit, Incoming, Launch, RequestError, connect, methods, types,
 };
-use kratos_protocol::{MessageStatus, PauseReason, Provider, ThreadId, TurnId, TurnOutcome};
+use kratos_protocol::{MessageStatus, Provider, ThreadId, TurnId};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -447,16 +447,9 @@ impl Actor {
             };
             if let Some((turn_id, work)) = thread.turn.end_running() {
                 unfinished.running_turn = Some(EndingTurn {
-                    id: turn_id.clone(),
+                    id: turn_id,
                     changes: work.changes.finish(),
                     context: work.context,
-                    outcome: TurnOutcome::Failed {
-                        error: error.clone(),
-                    },
-                    pause: PauseReason::TurnFailed {
-                        turn_id,
-                        error: error.clone(),
-                    },
                 });
             }
             thread.file_items.clear();

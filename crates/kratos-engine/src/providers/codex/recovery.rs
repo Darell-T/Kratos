@@ -1,4 +1,4 @@
-//! What an engine that stopped left unfinished, settled before the actor serves anything (L1).
+//! Settling unfinished Codex work after an engine restart or a runtime process exit (L1).
 //!
 //! No Codex process outlives the engine that started it, so after a restart nothing runs: a turn
 //! the log shows running ended, a message being sent may or may not have reached Codex, and every
@@ -54,8 +54,6 @@ pub(super) struct EndingTurn {
     pub id: TurnId,
     pub changes: TurnChanges,
     pub context: Option<ContextUsage>,
-    pub outcome: TurnOutcome,
-    pub pause: PauseReason,
 }
 
 pub(super) enum EndReason {
@@ -121,8 +119,20 @@ pub(super) fn settle(
     };
     settle_closed(write, &work.requests, request_reason)?;
     if let Some(turn) = work.running_turn {
-        write.complete_turn(turn.id, turn.outcome, turn.changes, turn.context)?;
-        queue::pause_if_waiting(write, turn.pause)?;
+        let (outcome, pause) = match &reason {
+            EndReason::Restarted => (TurnOutcome::Interrupted, PauseReason::Interrupted),
+            EndReason::Exited(error) => (
+                TurnOutcome::Failed {
+                    error: error.clone(),
+                },
+                PauseReason::TurnFailed {
+                    turn_id: turn.id.clone(),
+                    error: error.clone(),
+                },
+            ),
+        };
+        write.complete_turn(turn.id, outcome, turn.changes, turn.context)?;
+        queue::pause_if_waiting(write, pause)?;
     }
     work.sending.into_iter().try_for_each(|message_id| {
         queue::mark_uncertain(write, message_id, uncertain_reason.to_owned())
@@ -138,8 +148,6 @@ fn unfinished_codex_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfinis
             id: turn_id,
             changes,
             context: None,
-            outcome: TurnOutcome::Interrupted,
-            pause: PauseReason::Interrupted,
         });
     }
     for (thread_id, message_id) in store.submitting_messages()? {
