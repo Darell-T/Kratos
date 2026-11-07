@@ -85,7 +85,7 @@ fn leader_exited(leader: libc::id_t) -> io::Result<bool> {
                 libc::P_PID,
                 leader,
                 &raw mut info,
-                libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+                libc::WEXITED | libc::WSTOPPED | libc::WCONTINUED | libc::WNOWAIT | libc::WNOHANG,
             )
         };
         if result == 0 {
