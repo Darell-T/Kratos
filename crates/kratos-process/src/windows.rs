@@ -8,7 +8,7 @@
 use std::io;
 use std::mem::size_of;
 use std::process::ExitStatus;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use tokio::process::{Child, Command};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
@@ -28,13 +28,16 @@ use windows_sys::Win32::System::Threading::{
 /// The exit code every process in the tree gets when the owner ends it.
 const ENDED_BY_OWNER: u32 = 1;
 
-static CONTAINED: AtomicBool = AtomicBool::new(false);
+static CONTAINED: Mutex<bool> = Mutex::new(false);
 
 /// Keeps future children in a kill-on-close job owned until this process exits.
 ///
 /// Call before starting children. An incompatible enclosing job makes this fail.
 pub fn contain_current_process() -> io::Result<()> {
-    if CONTAINED.load(Ordering::Acquire) {
+    let mut contained = CONTAINED
+        .lock()
+        .map_err(|_| io::Error::other("the process containment lock is poisoned"))?;
+    if *contained {
         return Ok(());
     }
     let job = new_job()?;
@@ -44,7 +47,7 @@ pub fn contain_current_process() -> io::Result<()> {
     }
     // Closing this job would kill us too. Windows closes the non-inherited handle at process exit.
     std::mem::forget(job);
-    CONTAINED.store(true, Ordering::Release);
+    *contained = true;
     Ok(())
 }
 
@@ -57,7 +60,10 @@ impl Tree {
     /// Starts the child suspended, puts it in a new kill-on-close job, then lets it run. A failure
     /// at any step ends the child before returning, so no process runs outside a job.
     pub fn spawn(command: &mut Command) -> io::Result<(Tree, Child)> {
-        if !CONTAINED.load(Ordering::Acquire) {
+        if !*CONTAINED
+            .lock()
+            .map_err(|_| io::Error::other("the process containment lock is poisoned"))?
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "call contain_current_process before spawning an owned child",
