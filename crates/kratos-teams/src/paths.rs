@@ -44,11 +44,11 @@ impl RepoPath {
 /// Why text cannot name a path inside the repository.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RepoPathError {
-    #[error("{0:?} is not relative to the repository root")]
+    #[error("{0:?} is not relative to the repository root.")]
     Rooted(String),
-    #[error("{0:?} climbs out of the repository")]
+    #[error("{0:?} climbs out of the repository.")]
     Climbs(String),
-    #[error("{0:?} has an invalid repository path component")]
+    #[error("{0:?} has an invalid repository path component.")]
     InvalidComponent(String),
 }
 

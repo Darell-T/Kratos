@@ -34,11 +34,7 @@ const OUTPUT_TAIL_CHARS: usize = 4000;
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LocationProblem {
     #[error(transparent)]
-    InvalidPath(RepoPathError),
-    #[error("{0} is not a path relative to the repository root.")]
-    NotRelative(String),
-    #[error("{0} leaves the repository.")]
-    LeavesRepository(String),
+    InvalidPath(#[from] RepoPathError),
     #[error("{0} does not exist in the reviewed commit.")]
     NoSuchFile(String),
     #[error("{path} has no line {line}. It has {lines}.")]
@@ -50,15 +46,7 @@ pub enum LocationProblem {
 pub fn location_problem(location: &Location, file_text: Option<&str>) -> Option<LocationProblem> {
     let path = match RepoPath::new(&location.path) {
         Ok(path) => path,
-        Err(RepoPathError::Rooted(_)) => {
-            return Some(LocationProblem::NotRelative(location.path.clone()));
-        }
-        Err(RepoPathError::Climbs(_)) => {
-            return Some(LocationProblem::LeavesRepository(location.path.clone()));
-        }
-        Err(error @ RepoPathError::InvalidComponent(_)) => {
-            return Some(LocationProblem::InvalidPath(error));
-        }
+        Err(error) => return Some(error.into()),
     };
     let path = String::from(path);
     let Some(text) = file_text else {
