@@ -435,7 +435,7 @@ async fn a_quick_exit_pauses_waiting_attachment_under_restart_backoff() {
 
 #[tokio::test]
 async fn exit_settles_a_pending_start_and_its_stop_without_waiting_for_a_reply() {
-    // Catches process fencing leaving a start submitting forever and its stop unanswered.
+    // Catches an unanswered start blocking replacement work or leaving its stop unanswered after exit.
     let mut harness = Harness::start().await;
     let attached = harness.attached_reply().await;
     attached.apply(&mut harness.actor).await;
@@ -453,21 +453,38 @@ async fn exit_settles_a_pending_start_and_its_stop_without_waiting_for_a_reply()
         .message(&harness.thread_id, &message_id)
         .await
         .unwrap();
-    let thread_id = harness.thread_id.clone();
-    let running = harness
-        .actor
-        .store
-        .call(move |store| store.thread_details(&thread_id).unwrap().running_turn)
-        .await;
     let stopped = stopped.try_recv();
+    harness
+        .actor
+        .write(&harness.thread_id, move |write| {
+            write.set_message_status(&message_id, MessageStatus::Cancelled)?;
+            write.resume()
+        })
+        .await
+        .unwrap();
+    harness.actor.restarts = Default::default();
+    let replacement = MessageId::new("after-exit".into());
+    harness.send(&harness.thread_id.clone(), &replacement).await;
+    let attached = harness.attached_reply().await;
+    attached.apply(&mut harness.actor).await;
+    harness.held("turn/start").await;
+    let requests = harness.control("test/turnRequests", json!({})).await;
     harness.close().await;
     assert!(
         matches!(message.status, MessageStatus::Unknown { .. }),
         "{:?}",
         message.status
     );
-    assert_eq!(running, None, "process exit ends the pending start");
     assert!(matches!(stopped, Ok(Ok(()))), "{stopped:?}");
+    assert!(
+        requests
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|request| request["method"] == "turn/start"
+                && request["params"]["clientUserMessageId"] == replacement.as_str()),
+        "{requests:?}"
+    );
 }
 
 #[tokio::test]
