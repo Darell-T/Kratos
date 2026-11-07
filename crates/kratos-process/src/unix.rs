@@ -78,6 +78,7 @@ fn leader_exited(leader: libc::id_t) -> io::Result<bool> {
     // SAFETY: zero is valid for siginfo_t and keeps si_pid zero when WNOHANG finds no status.
     let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
     loop {
+        // Darwin can report stops for WEXITED alone; requesting stops and continues everywhere lets Linux CI test the si_code guard.
         #[allow(unsafe_code, reason = "waitid has no safe wrapper in std")]
         // SAFETY: info is writable for the entire call. WNOWAIT keeps the leader unreaped.
         let result = unsafe {
