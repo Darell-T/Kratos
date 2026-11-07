@@ -290,9 +290,7 @@ fn settings_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadSettings> {
         context_limit_tokens: row
             .get::<_, Option<i64>>(10)?
             .map(|tokens| {
-                u64::try_from(tokens)
-                    .ok()
-                    .and_then(ContextLimit::new)
+                ContextLimit::from_stored(tokens)
                     .ok_or_else(|| unreadable(10, format!("context limit {tokens} out of range")))
             })
             .transpose()?,

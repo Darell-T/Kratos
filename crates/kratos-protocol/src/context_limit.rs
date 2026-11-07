@@ -15,11 +15,16 @@ impl ContextLimit {
     pub fn new(tokens: u64) -> Option<ContextLimit> {
         i64::try_from(tokens)
             .ok()
-            .filter(|tokens| *tokens > 0)
-            .map(ContextLimit)
+            .and_then(ContextLimit::from_stored)
+    }
+
+    /// Reads the signed storage representation, refusing counts below 1.
+    pub fn from_stored(tokens: i64) -> Option<ContextLimit> {
+        (tokens > 0).then_some(ContextLimit(tokens))
     }
 
     pub fn get(self) -> u64 {
+        // Both constructors require a positive i64, so unsigned_abs never discards a sign.
         self.0.unsigned_abs()
     }
 }
@@ -35,5 +40,21 @@ impl<'de> Deserialize<'de> for ContextLimit {
         let tokens = u64::deserialize(deserializer)?;
         ContextLimit::new(tokens)
             .ok_or_else(|| D::Error::custom(format!("must be between 1 and {}", i64::MAX)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ContextLimit;
+
+    #[test]
+    fn stored_context_limits_keep_the_positive_signed_range() {
+        // Catches negative or zero stored counts becoming valid unsigned limits.
+        assert_eq!(ContextLimit::from_stored(-1), None);
+        assert_eq!(ContextLimit::from_stored(0), None);
+        assert_eq!(ContextLimit::from_stored(1).unwrap().get(), 1);
+        let largest = ContextLimit::from_stored(i64::MAX).unwrap();
+        assert_eq!(i64::from(largest), i64::MAX);
+        assert_eq!(largest.get(), 9_223_372_036_854_775_807);
     }
 }
