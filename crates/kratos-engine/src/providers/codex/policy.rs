@@ -235,12 +235,19 @@ mod tests {
     fn a_patch_into_a_protected_folder_asks_whatever_the_permission() {
         // Catches the measured gap: an approved patch writes into a read-only protected folder,
         // and a move counts as a write to its destination.
-        let folder = Path::new("/work/repo");
-        let into_ssh = [change("/home/u/.ssh/config", FileChangeKind::Add)];
+        let root = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(root.path()).unwrap();
+        let folder = home.join("work/repo");
+        std::fs::create_dir_all(&folder).unwrap();
+        let protected = ProtectedFolders::new(home.join(".kratos"), None, Some(home.clone()));
+        let into_ssh = [change(
+            &home.join(".ssh/config").to_string_lossy(),
+            FileChangeKind::Add,
+        )];
         let moved_into_kratos = [change(
             "notes.md",
             FileChangeKind::Update {
-                move_path: Some("../../home/u/.kratos/notes.md".into()),
+                move_path: Some("../../.kratos/notes.md".into()),
             },
         )];
         for changes in [&into_ssh[..], &moved_into_kratos] {
@@ -248,8 +255,8 @@ mod tests {
                 &settings(Permission::FullAccess, false),
                 Some(changes),
                 false,
-                folder,
-                &protected(),
+                &folder,
+                &protected,
             );
             assert!(
                 matches!(verdict, Verdict::Ask(AskReason::ProtectedFolder { .. })),
