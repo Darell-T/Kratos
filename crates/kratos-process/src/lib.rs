@@ -4,7 +4,9 @@
 //! prototype left four. [`OwnedChild::spawn`] starts the child so that dropping the [`OwnedChild`]
 //! ends every process the child started too.
 //!
-//! - Windows: the child starts suspended, joins a new job object marked kill-on-close, and only
+//! - Windows: hosts must call `contain_current_process` before spawning; the spawn enforces this.
+//!   Its process-lifetime job covers the gap between child creation and per-child assignment.
+//!   The child starts suspended, joins a new job object marked kill-on-close, and only
 //!   then
 //!   runs, so even its first grandchild is in the job. The job forbids breaking away. Closing the
 //!   job's handle ends every process in it, and Windows closes a process's handles when it dies, so
@@ -28,6 +30,9 @@ mod windows;
 use unix::Tree;
 #[cfg(windows)]
 use windows::Tree;
+
+#[cfg(windows)]
+pub use windows::contain_current_process;
 
 /// A child process and its process tree. Dropping it ends the tree.
 #[derive(Debug)]

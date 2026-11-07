@@ -20,6 +20,8 @@ use tokio::sync::mpsc;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn launch(args: &[&str]) -> Launch {
+    #[cfg(windows)]
+    kratos_process::contain_current_process().unwrap();
     Launch {
         program: fake_agents::executable("fake-codex"),
         args: args.iter().map(OsString::from).collect(),

@@ -37,6 +37,8 @@ impl Harness {
     /// The home must be an empty, dedicated test home provisioned with the pinned CLI's
     /// `sandbox setup --elevated --current-user --codex-home <home>`. Run these tests serially.
     pub async fn start(settings: ThreadSettings, replies: Vec<Reply>) -> Self {
+        #[cfg(windows)]
+        kratos_process::contain_current_process().unwrap();
         let program = PathBuf::from(
             std::env::var_os("KRATOS_REAL_CODEX_EXE")
                 .expect("set KRATOS_REAL_CODEX_EXE to the pinned native Codex binary"),

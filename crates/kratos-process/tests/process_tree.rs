@@ -12,6 +12,8 @@ const GONE_WITHIN: Duration = Duration::from_secs(20);
 /// A shell that starts a grandchild sleeping for five minutes, prints the grandchild's process id,
 /// and waits for it.
 fn parent_of_a_sleeper() -> Command {
+    #[cfg(windows)]
+    kratos_process::contain_current_process().unwrap();
     #[cfg(unix)]
     let mut command = {
         let mut command = Command::new("sh");
@@ -121,4 +123,105 @@ async fn waiting_for_the_leader_also_ends_its_surviving_grandchild() {
 
     assert!(status.success());
     assert_ends(grandchild).await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_process_without_its_own_containment_cannot_spawn_owned_children() {
+    // Catches a host starting an owned child without process-lifetime containment.
+    use std::os::windows::process::CommandExt;
+    const HELPER: &str = "KRATOS_TEST_UNCONTAINED_OWNER";
+    let executable = std::env::current_exe().unwrap();
+    if std::env::var_os(HELPER).is_some() {
+        let mut command = Command::new(executable);
+        command.arg("--list").stdout(std::process::Stdio::null());
+        let error = OwnedChild::spawn(command).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            error.to_string().contains("contain_current_process"),
+            "{error}"
+        );
+        return;
+    }
+    kratos_process::contain_current_process().unwrap();
+    let output = std::process::Command::new(executable)
+        .args([
+            "--exact",
+            "a_process_without_its_own_containment_cannot_spawn_owned_children",
+            "--nocapture",
+        ])
+        .env(HELPER, "1")
+        .creation_flags(0x0800_0000)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_suspended_child_ends_with_its_process_inside_an_existing_job() {
+    // Catches a child orphaned between its suspended creation and assignment to its own job.
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    const HELPER: &str = "KRATOS_TEST_SUSPENDED_CHILD";
+    kratos_process::contain_current_process().unwrap();
+    let executable = std::env::current_exe().unwrap();
+    if std::env::var_os(HELPER).is_some() {
+        let child = std::process::Command::new(executable)
+            .arg("--list")
+            .creation_flags(0x0800_0004) // CREATE_NO_WINDOW | CREATE_SUSPENDED.
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        println!("suspended child: {}", child.id());
+        std::io::stdout().flush().unwrap();
+        std::io::stdin().read_line(&mut String::new()).unwrap();
+        std::process::exit(0);
+    }
+
+    let mut command = Command::new(executable);
+    command
+        .args([
+            "--exact",
+            "a_suspended_child_ends_with_its_process_inside_an_existing_job",
+            "--nocapture",
+        ])
+        .env(HELPER, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    // The outer owner models a runner's existing job and cleans up even when the assertion fails.
+    let mut owner = OwnedChild::spawn(command).unwrap();
+    let stdout = owner.take_stdout().unwrap();
+    let mut lines = BufReader::new(stdout).lines();
+    let child = tokio::time::timeout(GONE_WITHIN, async {
+        loop {
+            let line = lines
+                .next_line()
+                .await
+                .unwrap()
+                .expect("the helper prints its child id");
+            if let Some((_, id)) = line.split_once("suspended child: ") {
+                break id.trim().parse::<u32>().unwrap();
+            }
+        }
+    })
+    .await
+    .expect("the helper starts its suspended child");
+    assert!(process_is_running(child));
+
+    owner.take_stdin().unwrap().write_all(b"\n").await.unwrap();
+    let status = tokio::time::timeout(GONE_WITHIN, owner.wait())
+        .await
+        .expect("the helper exits without Rust cleanup")
+        .unwrap();
+    assert!(status.success());
+
+    assert_ends(child).await;
 }
