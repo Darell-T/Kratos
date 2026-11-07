@@ -154,9 +154,11 @@ async fn the_thread_opens_untrusted_and_the_launch_defines_every_profile() {
 
     let environment = harness.control("test/environment", json!({})).await;
     let arguments: Vec<String> = serde_json::from_value(environment["arguments"].clone()).unwrap();
+    let reported = PathBuf::from(environment["cwd"].as_str().unwrap());
     assert_eq!(
-        environment["cwd"],
-        json!(harness.root.path().join("server"))
+        reported.canonicalize().unwrap(),
+        harness.root.path().join("server").canonicalize().unwrap(),
+        "Codex runs in the server folder"
     );
     let kratos_home = serde_json::to_string(&harness.root.path().join("kratos")).unwrap();
     for profile in ["kratos-plan", "kratos-ask", "kratos-approve"] {
