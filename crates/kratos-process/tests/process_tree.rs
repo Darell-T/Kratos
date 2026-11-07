@@ -169,8 +169,8 @@ async fn a_suspended_child_ends_with_its_process_inside_an_existing_job() {
                 .await
                 .unwrap()
                 .expect("the helper prints its child id");
-            if let Some(id) = line.strip_prefix("suspended child: ") {
-                break id.parse::<u32>().unwrap();
+            if let Some((_, id)) = line.split_once("suspended child: ") {
+                break id.trim().parse::<u32>().unwrap();
             }
         }
     })
