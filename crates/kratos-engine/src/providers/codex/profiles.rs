@@ -82,6 +82,7 @@ impl ProtectedFolders {
 
     /// Resolves existing links before checking a patch's destination, including new files below
     /// a linked directory. An unreadable or dangling link cannot establish a safe destination.
+    /// Neither can a missing-parent climb or a new name the disk may interpret differently.
     pub fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
         let path = resolve_destination(path)?;
         for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
@@ -173,41 +174,32 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
     loop {
         match std::fs::canonicalize(&ancestor) {
             Ok(mut resolved) => {
-                for part in suffix.iter().rev() {
-                    resolved.push(part);
-                }
-                return Ok(normalize(&resolved));
+                resolved.extend(suffix.iter().rev());
+                return Ok(resolved);
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if std::fs::symlink_metadata(&ancestor).is_ok() {
+            Err(error) => {
+                if error.kind() != io::ErrorKind::NotFound
+                    || std::fs::symlink_metadata(&ancestor).is_ok()
+                {
                     return Err(error);
                 }
-                let Some(part) = ancestor.components().next_back() else {
+                let Some(Component::Normal(part)) = ancestor.components().next_back() else {
                     return Err(error);
                 };
-                suffix.push(part.as_os_str().to_os_string());
-                if !ancestor.pop() {
-                    return Err(error);
+                let name = part.as_encoded_bytes();
+                let invalid_folder = !suffix.is_empty()
+                    && (!name.is_ascii() || matches!(name.last(), Some(b'.' | b' ')));
+                if name.contains(&b':') || invalid_folder {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "an unresolved patch name may have a filesystem alias",
+                    ));
                 }
+                suffix.push(part.to_os_string());
+                ancestor.pop();
             }
-            Err(error) => return Err(error),
         }
     }
-}
-
-/// Only the not-yet-created suffix needs lexical normalization; existing links are resolved first.
-fn normalize(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-            other => normalized.push(other.as_os_str()),
-        }
-    }
-    normalized
 }
 
 fn is_within(path: &Path, folder: &Path) -> bool {
@@ -244,9 +236,11 @@ mod tests {
 
     #[test]
     fn a_path_that_climbs_back_into_a_protected_folder_is_still_inside_it() {
-        // Catches a check that compares text, which `project/../../.ssh/config` would pass.
-        let folders = folders();
-        let home = folders.kratos_home().parent().unwrap().to_path_buf();
+        // Catches a text-only check missing work/../.ssh/config through an existing folder.
+        let root = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(root.path()).unwrap();
+        std::fs::create_dir(home.join("work")).unwrap();
+        let folders = ProtectedFolders::new(home.join(".kratos"), None, Some(home.clone()));
 
         let climbing = home.join("work").join("..").join(".ssh").join("config");
         let lookalike = home.join(".sshkeys").join("config");
