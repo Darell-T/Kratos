@@ -82,7 +82,7 @@ impl ProtectedFolders {
 
     /// Resolves existing links before checking a patch's destination, including new files below
     /// a linked directory. An unreadable or dangling link cannot establish a safe destination.
-    /// Neither can a path that climbs out of a folder that does not exist yet.
+    /// Neither can a missing-parent climb or a new name the disk may interpret differently.
     pub fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
         let path = resolve_destination(path)?;
         for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
@@ -174,30 +174,30 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
     loop {
         match std::fs::canonicalize(&ancestor) {
             Ok(mut resolved) => {
-                for part in suffix.iter().rev() {
-                    resolved.push(part);
-                }
+                resolved.extend(suffix.iter().rev());
                 return Ok(resolved);
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                if std::fs::symlink_metadata(&ancestor).is_ok() {
+            Err(error) => {
+                if error.kind() != io::ErrorKind::NotFound
+                    || std::fs::symlink_metadata(&ancestor).is_ok()
+                {
                     return Err(error);
                 }
-                let Some(part) = ancestor.components().next_back() else {
+                let Some(Component::Normal(part)) = ancestor.components().next_back() else {
                     return Err(error);
                 };
-                if part == Component::ParentDir {
+                let name = part.as_encoded_bytes();
+                let invalid_folder = !suffix.is_empty()
+                    && (!name.is_ascii() || matches!(name.last(), Some(b'.' | b' ')));
+                if name.contains(&b':') || invalid_folder {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidInput,
-                        "a patch path climbs through a missing parent",
+                        "an unresolved patch name may have a filesystem alias",
                     ));
                 }
-                suffix.push(part.as_os_str().to_os_string());
-                if !ancestor.pop() {
-                    return Err(error);
-                }
+                suffix.push(part.to_os_string());
+                ancestor.pop();
             }
-            Err(error) => return Err(error),
         }
     }
 }
