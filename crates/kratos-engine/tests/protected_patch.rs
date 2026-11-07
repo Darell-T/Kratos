@@ -59,6 +59,44 @@ fn a_new_unicode_file_in_an_existing_folder_is_accepted() {
 }
 
 #[test]
+fn a_case_alias_of_a_missing_credential_folder_asks() {
+    // Catches a new .AWS folder bypassing the protected .aws path before it exists.
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        credential_alias_verdict(home.path(), ".AWS/config"),
+        Verdict::Ask(AskReason::ProtectedFolder {
+            path: home.path().join(".aws").display().to_string()
+        })
+    );
+}
+
+#[test]
+fn a_case_alias_below_an_existing_credential_folder_asks() {
+    // Catches .SSH writing through an existing .ssh directory on a case-insensitive disk.
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join(".ssh")).unwrap();
+    assert_eq!(
+        credential_alias_verdict(home.path(), ".SSH/new-key"),
+        Verdict::Ask(AskReason::ProtectedFolder {
+            path: home.path().join(".ssh").display().to_string()
+        })
+    );
+}
+
+#[test]
+fn a_missing_parent_climb_into_a_case_alias_asks() {
+    // Catches an uncanonicalized .SSH suffix surviving a missing/.. pair.
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join(".ssh")).unwrap();
+    assert_eq!(
+        credential_alias_verdict(home.path(), "missing/../.SSH/config"),
+        Verdict::Ask(AskReason::ProtectedFolder {
+            path: home.path().join(".ssh").display().to_string()
+        })
+    );
+}
+
+#[test]
 fn a_patch_through_a_directory_link_still_asks_before_changing_protected_files() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");

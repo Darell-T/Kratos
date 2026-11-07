@@ -203,42 +203,15 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn is_within(path: &Path, folder: &Path) -> bool {
-    if cfg!(windows) {
-        let lower = |path: &Path| path.to_string_lossy().to_lowercase().replace('/', "\\");
-        let (path, folder) = (lower(path), lower(folder));
-        let folder = folder.trim_end_matches('\\');
-        path == folder || path.starts_with(&format!("{folder}\\"))
-    } else {
-        path.starts_with(folder)
-    }
+    let lower = |path: &Path| path.to_string_lossy().to_lowercase().replace('/', "\\");
+    let (path, folder) = (lower(path), lower(folder));
+    let folder = folder.trim_end_matches('\\');
+    path == folder || path.starts_with(&format!("{folder}\\"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn protected_folder_aliases_follow_the_disks_case_rule() {
-        // Catches a differently cased alias bypassing protection on a case-insensitive Mac disk.
-        let home = tempfile::tempdir().unwrap();
-        let protected = home.path().join(".ssh");
-        std::fs::create_dir(&protected).unwrap();
-        let alias = home.path().join(".SSH");
-        let same_folder = alias.try_exists().unwrap();
-        let folders =
-            ProtectedFolders::new(home.path().join(".kratos"), None, Some(home.path().into()));
-
-        let containing = folders.containing(&alias.join("new-key")).unwrap();
-
-        assert_eq!(containing, same_folder.then_some(protected.as_path()));
-        assert_eq!(
-            folders
-                .containing(&home.path().join(".sshkeys/key"))
-                .unwrap(),
-            None
-        );
-    }
 
     #[cfg(windows)]
     #[test]
