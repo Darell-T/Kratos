@@ -99,6 +99,22 @@ fn a_missing_parent_climb_into_a_case_alias_asks() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn an_existing_unicode_credential_alias_asks_on_either_disk_case_rule() {
+    // Catches realpath missing an alias on insensitive disks, or the new-name guard missing it on sensitive disks.
+    let home = tempfile::tempdir().unwrap();
+    std::fs::create_dir(home.path().join(".aws")).unwrap();
+    let verdict = credential_alias_verdict(home.path(), ".aw\u{17f}/config");
+    assert!(
+        matches!(
+            verdict,
+            Verdict::Ask(AskReason::Unchecked | AskReason::ProtectedFolder { .. })
+        ),
+        "{verdict:?}"
+    );
+}
+
+#[test]
 fn a_patch_through_a_directory_link_still_asks_before_changing_protected_files() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("project");
