@@ -45,3 +45,16 @@ fn a_formatted_timestamp_caches_its_serialized_millisecond_instant() {
         serde_json::from_value(serde_json::to_value(&timestamp).unwrap()).unwrap();
     assert_eq!(restored, timestamp);
 }
+
+#[test]
+fn unsupported_system_times_are_refused_without_panicking() {
+    // Catches public SystemTime construction panicking before it can refuse unsupported dates.
+    let before_epoch = SystemTime::UNIX_EPOCH
+        .checked_sub(Duration::from_secs(1))
+        .unwrap();
+    let year_10000 = SystemTime::UNIX_EPOCH
+        .checked_add(Duration::from_secs(253_402_300_800))
+        .unwrap();
+    assert!(Timestamp::at(before_epoch).is_err());
+    assert!(Timestamp::at(year_10000).is_err());
+}

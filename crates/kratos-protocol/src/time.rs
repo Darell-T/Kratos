@@ -46,6 +46,11 @@ impl Timestamp {
     /// # Errors
     /// Returns TimestampError when `time` cannot be represented in the supported RFC 3339 range.
     pub fn at(time: SystemTime) -> Result<Timestamp, TimestampError> {
+        if time < SystemTime::UNIX_EPOCH {
+            return Err(TimestampError {
+                text: format!("{time:?}"),
+            });
+        }
         let mut text = String::new();
         fmt::write(
             &mut text,
