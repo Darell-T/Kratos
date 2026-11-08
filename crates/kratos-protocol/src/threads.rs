@@ -4,7 +4,8 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, Message, PauseReason, Question, RequiredText, Seq, Timestamp, TurnId, WorkspaceId,
+    Approval, ContextLimit, Message, PauseReason, Question, RequiredText, Seq, Timestamp, TurnId,
+    WorkspaceId,
 };
 
 string_id! {
@@ -101,13 +102,13 @@ const _: () = match Permission::AskMe {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThreadSettings {
     /// `None` runs the provider's default model.
-    pub model: Option<String>,
+    pub model: Option<RequiredText>,
     pub permission: Permission,
     /// The agent plans and changes nothing until the plan is approved.
     pub plan_mode: bool,
     /// How many tokens of context the agent may fill before the provider compacts it (D76).
     /// `None` keeps the provider's own limit. Never above the window the provider reported.
-    pub context_limit_tokens: Option<u64>,
+    pub context_limit_tokens: Option<ContextLimit>,
 }
 
 impl Default for ThreadSettings {

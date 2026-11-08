@@ -169,21 +169,33 @@ pub enum StoreError {
     Sqlite(#[from] rusqlite::Error),
 }
 
+/// Why a request was refused without changing the records.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Unknown,
+    Conflict,
+}
+
 impl StoreError {
     /// Whether the store refused the request for what it asked, such as an unknown id or a move
-    /// the queue forbids, and wrote nothing. Otherwise the store itself failed. A new variant must
-    /// be classified here.
+    /// the queue forbids, and wrote nothing. Otherwise the store itself failed.
     pub fn is_refusal(&self) -> bool {
+        self.refusal().is_some()
+    }
+
+    /// The request refusal, or None for a store failure. Classify every new error variant here.
+    pub fn refusal(&self) -> Option<Refusal> {
         match self {
             StoreError::UnknownWorkspace(_)
             | StoreError::UnknownThread(_)
             | StoreError::UnknownMessage { .. }
             | StoreError::UnknownApproval(_)
             | StoreError::UnknownQuestion(_)
-            | StoreError::UnknownContinuation(_)
-            | StoreError::MessageTransition { .. }
-            | StoreError::MessageIdTaken(_) => true,
-            StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => false,
+            | StoreError::UnknownContinuation(_) => Some(Refusal::Unknown),
+            StoreError::MessageTransition { .. } | StoreError::MessageIdTaken(_) => {
+                Some(Refusal::Conflict)
+            }
+            StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => None,
         }
     }
 }

@@ -26,7 +26,7 @@ use kratos_protocol::routes::{
     THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE, WORKSPACES,
 };
 use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
-use kratos_store::StoreError;
+use kratos_store::{Refusal, StoreError};
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -276,21 +276,10 @@ impl ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> ApiError {
-        match error {
-            StoreError::UnknownThread(_) | StoreError::UnknownWorkspace(_) => {
-                ApiError::new(StatusCode::NOT_FOUND, error)
-            }
-            StoreError::MessageIdTaken(_) => ApiError::new(StatusCode::CONFLICT, error),
-            // FIXME: these refusals are the caller's doing yet answer 500 like a store failure.
-            // The statuses are kept until someone decides them.
-            StoreError::UnknownMessage { .. }
-            | StoreError::UnknownApproval(_)
-            | StoreError::UnknownQuestion(_)
-            | StoreError::UnknownContinuation(_)
-            | StoreError::MessageTransition { .. } => ApiError::internal(&error),
-            StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => {
-                ApiError::internal(&error)
-            }
+        match error.refusal() {
+            Some(Refusal::Unknown) => ApiError::new(StatusCode::NOT_FOUND, error),
+            Some(Refusal::Conflict) => ApiError::new(StatusCode::CONFLICT, error),
+            None => ApiError::internal(&error),
         }
     }
 }
@@ -344,4 +333,41 @@ pub fn json_reply<T: Serialize>(status: StatusCode, body: &T) -> Response {
         json,
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use kratos_protocol::{ApprovalId, ContinuationId, MessageStatus, QuestionId};
+
+    use super::*;
+
+    fn status_of(error: StoreError) -> StatusCode {
+        ApiError::from(error).status
+    }
+
+    #[test]
+    fn a_store_refusal_answers_the_status_of_what_the_caller_got_wrong() {
+        // Catches a caller's unknown id or forbidden queue move answering 500 as if the store had
+        // failed.
+        let message_id = MessageId::new("message".to_owned());
+        let unknown = [
+            StoreError::UnknownMessage {
+                thread_id: ThreadId::new("thread".to_owned()),
+                message_id: message_id.clone(),
+            },
+            StoreError::UnknownApproval(ApprovalId::new("approval".to_owned())),
+            StoreError::UnknownQuestion(QuestionId::new("question".to_owned())),
+            StoreError::UnknownContinuation(ContinuationId::new("continuation".to_owned())),
+        ];
+        for error in unknown {
+            let text = error.to_string();
+            assert_eq!(status_of(error), StatusCode::NOT_FOUND, "{text}");
+        }
+        let forbidden_move = StoreError::MessageTransition {
+            message_id,
+            from: MessageStatus::Submitting,
+            to: MessageStatus::Queued,
+        };
+        assert_eq!(status_of(forbidden_move), StatusCode::CONFLICT);
+    }
 }

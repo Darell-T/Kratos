@@ -83,6 +83,7 @@ impl ThreadWrite<'_> {
 
     /// Queues the continuation's message ahead of every waiting message and marks it sent, in this
     /// one write. Returns `None`, writing nothing, when the continuation is no longer open.
+    /// `Err(UnknownContinuation)` when this thread has no such continuation.
     pub fn send_continuation(
         &mut self,
         id: &ContinuationId,
@@ -90,7 +91,9 @@ impl ThreadWrite<'_> {
         input: Vec<MessageInput>,
         max_pending: usize,
     ) -> Result<Option<Enqueued>, StoreError> {
-        let Some((_, open)) = continuation(&self.transaction, id)? else {
+        let Some((_, open)) =
+            continuation(&self.transaction, id)?.filter(|(owner, _)| owner == self.thread_id())
+        else {
             return Err(StoreError::UnknownContinuation(id.clone()));
         };
         if !is_open(&open.state) {

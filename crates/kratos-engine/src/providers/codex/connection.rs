@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use kratos_codex_client::{
     Codex, ConnectError, Exit, Incoming, Launch, RequestError, connect, methods, types,
 };
-use kratos_protocol::{MessageStatus, Provider, ThreadId, TurnId};
+use kratos_protocol::{ContextLimit, MessageStatus, Provider, RequiredText, ThreadId, TurnId};
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -90,13 +90,13 @@ impl Restarts {
 const MCP_TOOL_TIMEOUT_SECONDS: u64 = mcp::MAX_WAIT_SECONDS + 100;
 
 fn thread_config(
-    context_limit: Option<u64>,
+    context_limit: Option<ContextLimit>,
     mcp: Option<&McpServer>,
     thread_id: &ThreadId,
 ) -> Option<serde_json::Value> {
     let mut config = serde_json::Map::new();
     if let Some(tokens) = context_limit {
-        config.insert("model_context_window".to_owned(), json!(tokens));
+        config.insert("model_context_window".to_owned(), json!(tokens.get()));
     }
     if let Some(mcp) = mcp {
         let mut kratos = mcp.launch(thread_id);
@@ -238,7 +238,12 @@ impl Actor {
         let profile = Profile::for_settings(&thread.settings).id().to_owned();
         let context_limit = thread.settings.context_limit_tokens;
         let config = thread_config(context_limit, self.settings.mcp.as_ref(), thread_id);
-        let (folder, model) = (thread.folder.clone(), thread.settings.model.clone());
+        let folder = thread.folder.clone();
+        let model = thread
+            .settings
+            .model
+            .as_ref()
+            .map(|model| model.as_str().to_owned());
         let thread_id = thread_id.clone();
         self.spawn(async move {
             if let Some(native_id) = reload {
@@ -262,7 +267,7 @@ impl Actor {
     pub(super) async fn on_attached(
         &mut self,
         thread_id: ThreadId,
-        context_limit: Option<u64>,
+        context_limit: Option<ContextLimit>,
         access: kratos_protocol::AccessLimit,
         result: Result<Opened, RequestError>,
     ) {
@@ -339,7 +344,7 @@ impl Actor {
         params.approval_policy = Some(policy::APPROVAL_POLICY);
         params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
         params.permissions = Some(Profile::for_settings(&settings).id().to_owned());
-        params.model = settings.model;
+        params.model = settings.model.map(RequiredText::into_string);
         params.config = thread_config(context_limit, self.settings.mcp.as_ref(), thread_id)
             .and_then(|config| config.as_object().cloned());
         let native_id = native_id.clone();
