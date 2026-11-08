@@ -48,7 +48,6 @@ impl ThreadState {
         self.turn_settings.as_ref().unwrap_or(&self.settings)
     }
 
-    /// The thread's Codex id, when it is loaded in the running app-server.
     pub(super) fn native_id(&self) -> Option<&str> {
         match &self.link {
             Link::Attached { native_id, .. } => Some(native_id),
@@ -66,12 +65,10 @@ impl ThreadState {
     }
 }
 
-/// Whether the thread is loaded in the running app-server.
 pub(super) enum Link {
     /// Not loaded. A load that failed leaves the thread here, and the pause says why. Kratos does
     /// not start a new Codex thread in its place (L7), and the next use tries again.
     Detached,
-    /// `thread/start` or `thread/resume` is out.
     Attaching,
     Attached {
         native_id: String,

@@ -57,7 +57,6 @@ async fn control_request(codex: &Codex, request: ControlRequest) {
     control(codex, request.method, request.params).await;
 }
 
-/// The next message that is not one of the fake's own `test/answered` reports.
 async fn next(incoming: &mut mpsc::Receiver<Incoming>) -> Incoming {
     tokio::time::timeout(Duration::from_secs(10), incoming.recv())
         .await
@@ -65,8 +64,7 @@ async fn next(incoming: &mut mpsc::Receiver<Incoming>) -> Incoming {
         .expect("the stream is open")
 }
 
-/// What the fake reports the client answered to its last `test/ask`.
-async fn answer_seen(incoming: &mut mpsc::Receiver<Incoming>) -> Value {
+async fn next_answer_report(incoming: &mut mpsc::Receiver<Incoming>) -> Value {
     loop {
         if let Incoming::Notification(Notification::Other { method, params }) = next(incoming).await
             && method == "test/answered"
@@ -300,7 +298,7 @@ async fn answers_a_server_request_under_its_own_id() {
     assert!(request.answer(answers(&[("choice", "Yes")])));
 
     assert_eq!(
-        answer_seen(&mut incoming).await,
+        next_answer_report(&mut incoming).await,
         json!({ "result": { "answers": { "choice": { "answers": ["Yes"] } } } })
     );
     codex.close().await;
@@ -326,7 +324,7 @@ async fn refuses_to_send_an_answer_to_another_kind_of_request() {
     assert!(!request.answer(ServerResponse::CommandApproval(decision)));
 
     assert_eq!(
-        answer_seen(&mut incoming).await,
+        next_answer_report(&mut incoming).await,
         json!({ "error": { "code": -32603, "message": "Kratos answered item/tool/requestUserInput with an answer to item/commandExecution/requestApproval" } })
     );
     codex.close().await;
@@ -341,13 +339,13 @@ async fn answers_unknown_methods_and_unreadable_requests_itself() {
         codex_control::ask(None, "test/unhandled", json!({})),
     )
     .await;
-    let unknown = answer_seen(&mut incoming).await;
+    let unknown = next_answer_report(&mut incoming).await;
     control_request(
         &codex,
         codex_control::ask(None, "item/tool/requestUserInput", json!({ "threadId": 7 })),
     )
     .await;
-    let unreadable = answer_seen(&mut incoming).await;
+    let unreadable = next_answer_report(&mut incoming).await;
 
     assert_eq!(
         unknown,
@@ -372,7 +370,7 @@ async fn answers_a_dropped_request_with_an_internal_error() {
     drop(request);
 
     assert_eq!(
-        answer_seen(&mut incoming).await,
+        next_answer_report(&mut incoming).await,
         json!({ "error": { "code": -32603, "message": "Kratos dropped the request unanswered" } })
     );
     codex.close().await;

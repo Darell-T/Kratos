@@ -123,7 +123,6 @@ impl TaskPlan {
         })
     }
 
-    /// Every text a requirement quote may come from.
     pub(crate) fn quotable(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.build.as_str()).chain(self.done_means.iter().map(String::as_str))
     }

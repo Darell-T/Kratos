@@ -118,14 +118,11 @@ pub const DEFAULT_PATTERNS: [&str; 7] = [
     // starts a task, out of the first pattern.
     r"child_process|\bexeca\b|(?<!::)\bspawn(?:Sync)?\(|\bexecFile(?:Sync)?\(|\bexecSync\(|(?<!\.)\bexec\(|\bsubprocess\.|\bos\.system\(",
     r"\bCommand::new\(|\b(?:std|tokio)::process::(?:Command|Child|Stdio)\b|\btokio::process\b",
-    // Network.
     r"\bfetch\(|\bhttps?\.(?:request|get)\(|\bnew WebSocket\(|\bnet\.(?:connect|createConnection)\(|\bcreateServer\(|\baxios\b|XMLHttpRequest",
     r"\b(?:reqwest|hyper|ureq|isahc|surf|tungstenite)::|\bTcpStream::connect\b|\bTcpListener::bind\b|\bUdpSocket::bind\b|\btokio::net::|\bstd::net::(?:Tcp|Udp)|\bconnect_async\(|\baxum::serve\b",
     // Filesystem changes in Rust. Reads are not triggers.
     r"\bfs::(?:remove_dir_all|remove_file|remove_dir|write|rename|copy|create_dir_all|hard_link)\b|\btokio::fs::(?:remove|write|rename|copy|create)|\bOpenOptions::new\(|\bFile::create\(|\bsymlink(?:_file|_dir)?\(",
-    // Credentials.
     r"(?i:password|passwd|secret|api[_-]?key|access[_-]?token|auth[_-]?token|private[_-]?key|credential)",
-    // Permissions and sandboxes.
     r"(?i:permission|sandbox|canUseTool|approval|chmod|setuid|\bsudo\b)",
 ];
 

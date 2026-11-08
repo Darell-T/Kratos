@@ -27,7 +27,6 @@ pub enum ActionKind {
     Command,
 }
 
-/// Where an action lands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Place {
     InsideWorktree,
@@ -56,7 +55,6 @@ pub struct Action {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Approval {
     Allow,
-    /// The user decides.
     Ask,
     /// Not allowed for this role, whatever the user says.
     Deny,

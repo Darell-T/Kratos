@@ -51,8 +51,6 @@ pub(crate) fn timestamp_now() -> rusqlite::Result<Timestamp> {
     Timestamp::now().map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
 }
 
-/// The timestamp in `column`, which sits at `index`, or `None` when it is NULL. The error names the
-/// column and the text it held.
 pub(crate) fn optional_timestamp_column(
     row: &Row<'_>,
     index: usize,
@@ -66,7 +64,6 @@ pub(crate) fn optional_timestamp_column(
         .transpose()
 }
 
-/// [`optional_timestamp_column`] for a column that is never NULL.
 pub(crate) fn timestamp_column(
     row: &Row<'_>,
     index: usize,
@@ -83,7 +80,6 @@ pub(crate) fn to_column<T: Serialize>(value: &T) -> String {
     serde_json::to_string(value).expect("protocol values serialize")
 }
 
-/// The column at `index` as `T`, or `None` when it is NULL.
 pub(crate) fn from_column<T: DeserializeOwned>(
     row: &Row<'_>,
     index: usize,
@@ -96,7 +92,6 @@ pub(crate) fn from_column<T: DeserializeOwned>(
         .map_err(|error| rusqlite::Error::FromSqlConversionFailure(index, Type::Text, error.into()))
 }
 
-/// The column at `index` as `T`, for a column that is never NULL.
 pub(crate) fn required_column<T: DeserializeOwned>(
     row: &Row<'_>,
     index: usize,

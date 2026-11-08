@@ -33,7 +33,6 @@ pub(crate) const MAX_QUESTIONS_PER_STEP: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TaskView {
-    // Frozen when the task started.
     pub request: String,
     pub constraints: Vec<String>,
     pub explicit_scope: Vec<ScopePattern>,
@@ -55,7 +54,6 @@ pub struct TaskView {
     /// step-back requests and replanning, separately from messages addressed to one member.
     pub requirements: Vec<String>,
 
-    // The record.
     pub rounds: Vec<Round>,
     pub findings: Vec<Finding>,
     pub rulings: Vec<RulingRecord>,
@@ -101,8 +99,6 @@ pub enum PlanState {
         conditions: Option<String>,
     },
 }
-
-// Phases.
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -241,8 +237,6 @@ pub enum ApprovedBy {
     Reviewer,
     User,
 }
-
-// Turns. Each is one piece of agent work.
 
 /// What a member is asked to do. Each variant carries only its own inputs.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -510,7 +504,6 @@ pub struct Turn {
     pub retries: Vec<Retry>,
     pub note: Option<Note>,
     pub resolutions: Vec<Resolution>,
-    /// Questions this step has asked so far.
     pub questions_asked: u32,
 }
 
@@ -581,8 +574,6 @@ pub enum Pending {
     PlanChange { request: PlanChangeRequest },
 }
 
-// The record.
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Round {
     pub n: u32,
@@ -614,7 +605,6 @@ pub struct Finding {
     pub status: FindingStatus,
 }
 
-/// A finding is in exactly one status.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FindingStatus {
@@ -731,15 +721,12 @@ pub enum DirectionStatus {
     Dropped,
 }
 
-// Questions the other modules ask of the view.
-
 impl TaskView {
     /// A Team with a planner always plans first. Otherwise the stored setting decides (D28).
     pub(crate) fn plans_first(&self) -> bool {
         self.bindings.has_planner() || self.policy.plan_first
     }
 
-    /// Who writes the plan. The planner does, or the implementer in a two-member Team.
     pub(crate) fn plan_author(&self) -> Role {
         if self.bindings.has_planner() {
             Role::Planner

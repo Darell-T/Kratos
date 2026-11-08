@@ -168,8 +168,6 @@ impl Decision {
     }
 }
 
-// What is allowed.
-
 /// The decisions the task accepts now, in a stable order. Empty once the task is closing or closed.
 ///
 /// | The task is                          | It accepts                                      |
@@ -246,7 +244,6 @@ fn trouble_decisions(left: &Activity) -> Vec<DecisionKind> {
     [&[Resume], fits, &[Cancel]].concat()
 }
 
-/// `KeepProbes` is offered only while the user decides and a probe still waits for a choice.
 fn probes_offered(view: &TaskView) -> bool {
     matches!(view.policy.probes, ProbePolicy::UserDecides)
         && view
@@ -254,8 +251,6 @@ fn probes_offered(view: &TaskView) -> bool {
             .iter()
             .any(|probe| probe.status == ProbeStatus::Offered)
 }
-
-// What each decision does.
 
 /// | Decision       | Effect |
 /// | -------------- | ------ |
@@ -401,8 +396,6 @@ fn answer(
     view.resume_step(resolution, seq)
 }
 
-/// The user rules on the disputed findings. The same path serves a Team with no planner and a
-/// planner that failed to rule.
 fn rule(
     mut view: Box<TaskView>,
     not_bug: &[FindingId],
@@ -603,8 +596,6 @@ fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
         Hold::ToScheduler { stop }
     })
 }
-
-// The approval report.
 
 /// What the user reads before the final call. It is built from the view, so it cannot leave
 /// anything out.

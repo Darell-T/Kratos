@@ -104,8 +104,6 @@ pub struct CheckStep {
     /// reviewer diffed against. `None` in the first standard review, where every confirmed finding
     /// counts as inside.
     pub ranges_base: Option<Sha>,
-    /// New findings, each to run through `evidence::start_check`. A nit, a pre-existing problem, or
-    /// a design opinion comes back from `start_check` as nothing to check.
     pub candidates: Vec<Candidate>,
     /// Open bugs whose commands Kratos reruns on `commit`. The exit code decides if they are fixed.
     pub recheck: Vec<Candidate>,

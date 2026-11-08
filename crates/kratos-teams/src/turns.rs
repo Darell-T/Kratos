@@ -61,7 +61,6 @@ impl TaskView {
         }
     }
 
-    /// A report is valid only for the work it answers.
     fn on_reported(
         mut self: Box<Self>,
         seq: FactSeq,
@@ -131,8 +130,6 @@ impl TaskView {
         }
     }
 
-    // Corrections and trouble.
-
     /// Sends the step's next message with the same step, a new message id, and a correction note.
     /// The first time a cause occurs it is retried, and the second time the task pauses.
     pub(crate) fn retry_turn(
@@ -155,7 +152,6 @@ impl TaskView {
         self.active(Activity::Turn { turn, hold: None })
     }
 
-    /// Pauses with the turn to run again in `left`.
     pub(crate) fn pause_turn(
         self: Box<Self>,
         why: Trouble,
@@ -249,7 +245,6 @@ impl TaskView {
         Ok(self.waiting(Waiting::UsageLimit { turn, stop, ask }))
     }
 
-    /// `HandedOff` sends the step again as a fresh session. `Unavailable` goes on to the scheduler.
     pub(crate) fn on_account_handoff(
         self: Box<Self>,
         seq: FactSeq,
@@ -336,7 +331,6 @@ impl TaskView {
         Ok(self.active(Activity::Turn { turn, hold: None }))
     }
 
-    /// The planner answered. The step that asked resumes with the answer.
     fn on_answer_done(
         self: Box<Self>,
         seq: FactSeq,
@@ -350,8 +344,6 @@ impl TaskView {
         };
         self.resume_step(resolution, seq)
     }
-
-    // Finished work that is not a review or a commit.
 
     /// The plan is written and waits for the user's approval (D37).
     fn on_plan_done(

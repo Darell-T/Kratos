@@ -77,7 +77,6 @@ struct BindingsData {
 #[error("member {0:?} holds two roles")]
 pub struct SharedMember(pub MemberId);
 
-/// Why a requested role change cannot be applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum RebindProblem {
     #[error("a role change moves roles between the Team's own members and adds none")]

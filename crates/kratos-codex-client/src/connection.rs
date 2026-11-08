@@ -166,7 +166,7 @@ struct Responder {
 
 impl Responder {
     fn send(&self, id: &RequestId, outcome: Result<Value, (i64, String)>) -> bool {
-        if !self.shared.state().unanswered.remove(id) {
+        if !self.shared.state().awaiting_answer.remove(id) {
             return false;
         }
         let message = match outcome {
@@ -202,10 +202,8 @@ struct Shared {
 
 #[derive(Debug, Default)]
 struct State {
-    /// Requests sent and not yet answered, by id.
-    pending: HashMap<i64, oneshot::Sender<Result<Value, RequestError>>>,
-    /// Server requests forwarded and not yet answered or withdrawn.
-    unanswered: HashSet<RequestId>,
+    awaiting_reply: HashMap<i64, oneshot::Sender<Result<Value, RequestError>>>,
+    awaiting_answer: HashSet<RequestId>,
     /// Set once the server ended. Every later request fails with it.
     ended: Option<Exit>,
 }
@@ -382,23 +380,23 @@ impl Codex {
         let (settle, settled) = oneshot::channel();
         {
             // Checked under the same lock the reader holds when it records the exit, so a request
-            // either sees the exit or is in `pending` when the reader fails every pending request.
+            // either sees the exit or is in `awaiting_reply` when the reader fails every pending request.
             let mut state = self.shared.state();
             if let Some(exit) = &state.ended {
                 return Err(RequestError::Exited(exit.clone()));
             }
-            state.pending.insert(id, settle);
+            state.awaiting_reply.insert(id, settle);
         }
         let message = json!({ "id": id, "method": method, "params": params });
         if !self.shared.write(&message) {
-            self.shared.state().pending.remove(&id);
+            self.shared.state().awaiting_reply.remove(&id);
             return Err(self.ended());
         }
         match tokio::time::timeout(timeout, settled).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_dropped)) => Err(self.ended()),
             Err(_elapsed) => {
-                self.shared.state().pending.remove(&id);
+                self.shared.state().awaiting_reply.remove(&id);
                 Err(RequestError::Timeout {
                     method: method.to_owned(),
                     after: timeout,
@@ -536,7 +534,7 @@ impl Reader {
     async fn server_request(&self, id: RequestId, method: &str, params: Value) {
         match ServerRequest::parse(method, params) {
             Ok(request) => {
-                self.shared.state().unanswered.insert(id.clone());
+                self.shared.state().awaiting_answer.insert(id.clone());
                 let request = IncomingRequest {
                     id,
                     request,
@@ -567,7 +565,7 @@ impl Reader {
         if let Notification::ServerRequestResolved(resolved) = &notification {
             self.shared
                 .state()
-                .unanswered
+                .awaiting_answer
                 .remove(&RequestId::from(&resolved.request_id));
         }
         let _ = self
@@ -577,7 +575,7 @@ impl Reader {
     }
 
     fn settle(&self, id: i64, message: Value) {
-        let Some(settle) = self.shared.state().pending.remove(&id) else {
+        let Some(settle) = self.shared.state().awaiting_reply.remove(&id) else {
             // Its request already timed out.
             return;
         };
@@ -611,8 +609,8 @@ impl Reader {
         let pending = {
             let mut state = self.shared.state();
             state.ended = Some(exit.clone());
-            state.unanswered.clear();
-            std::mem::take(&mut state.pending)
+            state.awaiting_answer.clear();
+            std::mem::take(&mut state.awaiting_reply)
         };
         for settle in pending.into_values() {
             let _ = settle.send(Err(RequestError::Exited(exit.clone())));

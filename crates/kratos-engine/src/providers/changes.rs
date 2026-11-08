@@ -2,7 +2,6 @@
 
 use kratos_protocol::{AgentItem, FileChangeKind, ItemStatus, TurnChanges};
 
-/// What a turn changed, recorded from its finished items as they arrive.
 #[derive(Debug, Default)]
 pub(crate) struct ChangesRecorder {
     files: Vec<String>,

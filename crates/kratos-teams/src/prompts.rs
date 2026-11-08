@@ -93,8 +93,6 @@ fn sections<I: IntoIterator<Item = Option<String>>>(parts: I) -> String {
 /// Kratos's own step-back prompt, so the user can send it with one click.
 pub const STEP_BACK_TEXT: &str = "The work has not converged, so the approach may be wrong. Before you change more code, step back. Reread the task and the findings, write down what your earlier fixes had in common and why they did not hold, then choose a different approach.";
 
-// Corrections.
-
 fn correction(note: &Note) -> String {
     match note {
         Note::InvalidReport { error } => format!(
@@ -124,8 +122,6 @@ fn verdict_correction(verdict: Verdict, findings: &[Finding]) -> String {
         ),
     }
 }
-
-// Pieces every role reads.
 
 fn task_section(view: &TaskView) -> String {
     format!("# Task\n\n{}", view.request.trim())
@@ -163,7 +159,6 @@ fn instructions(view: &TaskView) -> Option<String> {
     rules_section("# Project instructions", &view.rules.instruction_files())
 }
 
-/// The approved plan with the conditions the user attached and the amended scope.
 fn plan_section(view: &TaskView) -> Option<String> {
     let PlanState::Approved {
         plan, conditions, ..
@@ -285,8 +280,6 @@ fn tail(text: &str, limit: usize) -> String {
     format!("...{kept}")
 }
 
-// Resolutions and carried messages. They record what happened to this step while it was suspended.
-
 fn resolutions_text(resolutions: &[Resolution]) -> Option<String> {
     if resolutions.is_empty() {
         return None;
@@ -344,8 +337,6 @@ fn carried_text(carried: &[Direction]) -> Option<String> {
     ))
 }
 
-// Plan.
-
 const NEVER_GUESS: &str = "Never guess. When something is unclear or outside what you may decide, end your turn with status question and ask the user.";
 
 fn plan_message(view: &TaskView, author: Role, feedback: Option<&str>) -> String {
@@ -383,8 +374,6 @@ fn plan_message(view: &TaskView, author: Role, feedback: Option<&str>) -> String
 }
 
 const PLAN_FORMAT: &str = "# Your report\n\nExplore the code, then end your turn with the plan:\n- status: done when the plan is ready, blocked when something outside your control stops you, or question when you need an answer first.\n- build: what to build.\n- done_means: short statements a reviewer can check.\n- files_in_scope: the files the work may touch, as globs relative to the repository root such as src/login/**. Write ** only when every file is in scope.\nThe user reads the plan and approves it before any code is written.";
-
-// Implement.
 
 const IMPLEMENTER_INTRO: &str = "You are the implementer on a Kratos Team. A separate reviewer checks your work, and Kratos carries every message between you.";
 
@@ -597,8 +586,6 @@ fn probe_text(probe: &Probe) -> String {
     format!("Probe {}{showed}{content}", probe.path)
 }
 
-// Answer and rule, the planner's jobs after the plan.
-
 fn answer_message(view: &TaskView, question: &Question) -> String {
     let record = (question.role == Role::Reviewer)
         .then(|| implementer_record(view))
@@ -667,8 +654,6 @@ fn ruling_message(view: &TaskView, disputed: &[FindingId]) -> String {
         Some(format!("# Your report\n\nEnd your turn with status done and one entry in rulings for each disputed finding, with a reason. {NEVER_GUESS}")),
     ])
 }
-
-// Review.
 
 const REVIEWER_INTRO: &str = "You are the reviewer on a Kratos Team. Review one commit against the task, what the user said, and the approved plan. You see the implementer's work, never its conversation. If you need the implementer's reasons, ask a question. Do not guess at them.";
 

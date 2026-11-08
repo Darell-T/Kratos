@@ -222,8 +222,6 @@ impl Actor {
             .await;
     }
 
-    /// Adds a queued message to the running turn. Answers once Codex has the request; the outcome
-    /// arrives as the message's status.
     pub(super) async fn steer(
         &mut self,
         thread_id: &ThreadId,
@@ -583,7 +581,6 @@ impl Actor {
         Ok(())
     }
 
-    /// Sets the running turn's deadline again, from now.
     pub(super) fn arm_deadline(&mut self, thread_id: &ThreadId) {
         let Some(Turn::Running {
             turn_id,
@@ -648,7 +645,6 @@ impl Actor {
         }
     }
 
-    /// Asks Codex to stop the running turn.
     pub(super) fn interrupt(&mut self, thread_id: &ThreadId, stopper: Stopper) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;

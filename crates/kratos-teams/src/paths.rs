@@ -41,7 +41,6 @@ impl RepoPath {
     }
 }
 
-/// Why text cannot name a path inside the repository.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RepoPathError {
     #[error("{0:?} is not relative to the repository root.")]

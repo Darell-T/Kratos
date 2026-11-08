@@ -251,7 +251,6 @@ pub(crate) fn status_name(status: &MessageStatus) -> &'static str {
     }
 }
 
-/// The `turn_id` and `error` columns of a status.
 fn status_details(status: &MessageStatus) -> (Option<&str>, Option<&str>) {
     match status {
         MessageStatus::Accepted { turn_id } => (Some(turn_id.as_str()), None),

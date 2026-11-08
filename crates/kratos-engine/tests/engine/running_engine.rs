@@ -149,7 +149,6 @@ impl RunningEngine {
         self.port
     }
 
-    /// The client token this engine issued at its start.
     pub fn token(&self) -> String {
         std::fs::read_to_string(self.home.join(CLIENT_TOKEN_FILE)).unwrap()
     }

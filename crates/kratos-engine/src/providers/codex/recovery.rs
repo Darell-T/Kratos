@@ -41,10 +41,8 @@ fn add_waiting_requests(
 const UNCONFIRMED: &str = "Kratos stopped before Codex confirmed it had the message";
 const RESTARTED: &str = "Kratos restarted, and the Codex process that asked is gone";
 
-/// One thread's unfinished work.
 #[derive(Default)]
 pub(super) struct Unfinished {
-    /// The turn the log shows running, and what its recorded items changed.
     pub running_turn: Option<EndingTurn>,
     pub sending: Vec<MessageId>,
     pub requests: Closed,

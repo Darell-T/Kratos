@@ -48,7 +48,6 @@ impl ThreadWrite<'_> {
         &self.thread_id
     }
 
-    /// The time every row and event of this write records.
     pub(crate) fn at(&self) -> &Timestamp {
         &self.at
     }

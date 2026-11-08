@@ -38,7 +38,6 @@ fn jsonl(log: &[StoredFact]) -> String {
         .collect()
 }
 
-/// The facts of a lane file, read back.
 fn read_lane(name: &str) -> Vec<StoredFact> {
     let path = folder().join(format!("{name}.jsonl"));
     let text =
@@ -63,8 +62,6 @@ fn text_for(view: &TaskView) -> String {
     };
     message(view, &run, &context)
 }
-
-// The scenarios.
 
 fn invalid_report() -> ScriptedTask {
     let mut task = Task::two().script(script(
@@ -399,8 +396,6 @@ fn every_lane_file_replays_with_each_next_action_valid_and_no_finished_step_repe
         assert_log_replayable(&read_lane(name));
     }
 }
-
-// What each lane asks for, checked against the file.
 
 #[test]
 fn lane_2_a_report_that_is_invalid_twice_pauses_the_task_for_the_user_after_the_second() {

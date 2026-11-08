@@ -247,7 +247,6 @@ fn is_open(state: &ContinuationState) -> bool {
     )
 }
 
-/// The `state`, `detail`, and `message_id` columns of a state.
 fn state_columns(state: &ContinuationState) -> (&'static str, Option<&str>, Option<&str>) {
     match state {
         ContinuationState::Scheduled => ("scheduled", None, None),

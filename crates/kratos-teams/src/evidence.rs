@@ -28,8 +28,6 @@ pub(crate) const MIN_QUOTE_LEN: usize = 12;
 /// The tail of a command's output that the record keeps.
 const OUTPUT_TAIL_CHARS: usize = 4000;
 
-// Location, quote, and command rules.
-
 /// Why a finding's location is refused. The text is written for the reviewer.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LocationProblem {
@@ -137,8 +135,6 @@ fn tail(text: &str) -> String {
     text.chars().skip(skipped).collect()
 }
 
-// What Kratos records about each finding.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DropWhy {
@@ -219,8 +215,6 @@ pub struct ProbeCapture {
     pub content: Option<String>,
     pub truncated: bool,
 }
-
-// The check protocol.
 
 /// What the engine has already observed for one finding.
 pub struct Seen<'a> {

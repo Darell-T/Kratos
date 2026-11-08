@@ -30,7 +30,6 @@ fn assert_cancellable(mut task: ScriptedTask) {
 
 #[test]
 fn the_user_can_cancel_in_every_pause() {
-    // Plan approval.
     let mut planning = Task::three().script(Script {
         planner: vec![plan_ready()].into(),
         ..Script::default()
@@ -38,12 +37,10 @@ fn the_user_can_cancel_in_every_pause() {
     planning.run();
     assert_cancellable(planning);
 
-    // A question for the user.
     let mut asking = Task::two().script(script(vec![implementer_asks("Which database?")], vec![]));
     asking.run();
     assert_cancellable(asking);
 
-    // A dispute with nobody to rule but the user.
     let mut script_ = script(
         vec![implements(), implements_answering(vec![disputed(1, "No.")])],
         vec![requests_changes(vec![bug("null-deref", "cmd1")])],
@@ -53,7 +50,6 @@ fn the_user_can_cancel_in_every_pause() {
     ruling.run();
     assert_cancellable(ruling);
 
-    // A plan-change request.
     let mut changing = Task::two().script(script(
         vec![implementer_wants_plan_change(
             "Needs more files.",
@@ -64,12 +60,10 @@ fn the_user_can_cancel_in_every_pause() {
     changing.run();
     assert_cancellable(changing);
 
-    // Trouble.
     let mut troubled = Task::two().script(script(vec![lost(), lost()], vec![]));
     troubled.run();
     assert_cancellable(troubled);
 
-    // The round cap.
     let mut script_ = script(
         vec![implements()],
         vec![requests_changes(vec![bug("null-deref", "cmd1")])],
@@ -79,7 +73,6 @@ fn the_user_can_cancel_in_every_pause() {
     capped.run();
     assert_cancellable(capped);
 
-    // A usage limit that waits for the user.
     let mut limited_script = script(vec![hits_usage_limit()], vec![]);
     limited_script.scheduler = vec![Scheduler::Declines(Declined::NoResetTime)].into();
     let mut limited = Task::two().script(limited_script);
@@ -92,7 +85,6 @@ fn the_user_can_cancel_in_every_pause() {
     handoff.run();
     assert_cancellable(handoff);
 
-    // Approval.
     let mut approved_task = Task::two().script(script(vec![implements()], vec![approves()]));
     approved_task.run();
     assert_cancellable(approved_task);

@@ -387,7 +387,6 @@ fn path_name(path: &types::FileSystemPath) -> String {
     }
 }
 
-/// The turn of `turns` that holds the user message Kratos sent as `message_id`.
 pub(super) fn turn_with_message<'a>(
     turns: &'a [types::Turn],
     message_id: &str,

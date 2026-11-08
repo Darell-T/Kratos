@@ -180,7 +180,6 @@ pub(crate) enum Readiness {
     AccountChanged,
 }
 
-/// Commands the API sends the scheduler.
 enum Request {
     /// The user's go for a continuation that waits on them (D41).
     Schedule {
@@ -290,7 +289,6 @@ pub async fn start(
 }
 
 impl Scheduler {
-    /// Wakes at the provider's reset time, or after the recheck wait when no reset time was given.
     fn arm(&self, id: &ContinuationId, at: Option<&Timestamp>) {
         let at = at
             .map(Timestamp::instant)

@@ -31,8 +31,6 @@ use serde_json::Value;
 
 use crate::task_plan::{PlanChangeRequest, ScopePattern, TaskPlan};
 
-// Findings.
-
 /// `F1`, `F2`, and so on. Kratos assigns them from the record, so "the same finding" is a fact
 /// Kratos can check and not something a reviewer asserts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -52,7 +50,6 @@ impl FindingId {
         self.0.get()
     }
 
-    /// The id of the finding at zero-based `position` in the record.
     pub(crate) fn nth(position: usize) -> FindingId {
         let number = u32::try_from(position.saturating_add(1)).unwrap_or(u32::MAX);
         FindingId(NonZeroU32::new(number).unwrap_or(NonZeroU32::MAX))
@@ -159,8 +156,6 @@ impl FindingReport {
     }
 }
 
-// Finished reports, one per kind of work.
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Check {
@@ -262,8 +257,6 @@ pub struct Ruling {
 pub struct RulingsDone {
     pub rulings: Vec<Ruling>,
 }
-
-// The typed outcome of any turn's final reply.
 
 /// How a member's final reply parsed. Every kind of work shares these five outcomes, so the
 /// question, blocked, plan-change, and invalid-report handling is written once, in the fold.
@@ -407,8 +400,6 @@ fn reply_json(reply: &FinalReply) -> Result<Value, String> {
     }
 }
 
-// Wire shapes. They are private, and nothing outside this module names them.
-
 // The statuses every kind of report shares. Their meaning is on the `status` field of each report.
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -432,17 +423,14 @@ struct AskWire {
     plan_change_scope: Vec<String>,
 }
 
-/// The wire fields of one kind of report that decide how it ends.
 struct Ending {
     status: Status,
     summary: String,
     ask: AskWire,
-    /// Whether this kind of work may ask to change the plan.
     can_change_plan: bool,
 }
 
 impl Ending {
-    /// Everything but the finished case, which each kind builds itself.
     fn report<T>(self, finished: impl FnOnce() -> Result<T, String>) -> Result<Report<T>, String> {
         require_text("summary", &self.summary)?;
         let Ending {
@@ -771,8 +759,6 @@ impl RulingsWire {
 fn from_value<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, String> {
     serde_json::from_value(value).map_err(|error| error.to_string())
 }
-
-// Schemas and the strict-subset check.
 
 /// Why a derived schema is outside the subset both CLIs accept.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]

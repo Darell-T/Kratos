@@ -174,7 +174,6 @@ fn rows_of(contents: &[String], table: &str) -> Vec<String> {
         .collect()
 }
 
-/// The rows of `table`, each as its column values in order.
 fn rows(database: &Path, table: &str) -> Vec<Vec<Value>> {
     let connection = Connection::open(database).unwrap();
     let mut statement = connection

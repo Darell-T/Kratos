@@ -105,8 +105,6 @@ notifications! {
     WindowsSandboxSetupCompleted = "windowsSandbox/setupCompleted": types::WindowsSandboxSetupCompletedNotification;
 }
 
-/// Why a server request reached no handler: its method is not one Kratos answers, or its
-/// parameters did not parse.
 pub(crate) enum Unhandled {
     UnknownMethod,
     BadParams(String),
