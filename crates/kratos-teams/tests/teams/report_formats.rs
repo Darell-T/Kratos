@@ -247,6 +247,32 @@ fn blank_text_the_schema_cannot_forbid_is_refused_with_the_field_that_holds_it()
 }
 
 #[test]
+fn teams_refuses_a_bom_only_summary_like_the_protocol_does() {
+    // Catches Teams accepting U+FEFF text that RequiredText refuses as blank.
+    let mut report = plan_json("done");
+    report["summary"] = json!("\u{feff}");
+    assert!(kratos_protocol::RequiredText::new("\u{feff}").is_none());
+    assert_eq!(
+        invalid(&parse(ReportKind::Plan, report)),
+        Some("summary: must not be blank")
+    );
+}
+
+#[test]
+fn teams_accepts_a_next_line_only_summary_like_the_protocol_does() {
+    // Catches Teams refusing U+0085 text that RequiredText accepts as nonblank.
+    let mut report = plan_json("done");
+    report["summary"] = json!("\u{85}");
+    assert!(kratos_protocol::RequiredText::new("\u{85}").is_some());
+    assert!(matches!(
+        parse(ReportKind::Plan, report),
+        Reported::Plan {
+            report: Report::Finished { .. }
+        }
+    ));
+}
+
+#[test]
 fn a_finished_plan_needs_checkable_statements_and_a_scope_that_is_a_valid_glob_inside_the_repo() {
     let mut no_statements = plan_json("done");
     no_statements["done_means"] = json!([]);
@@ -320,6 +346,75 @@ fn implementer_json(status: &str, ask: Value) -> Value {
 
 fn no_ask() -> Value {
     json!({"question": "", "plan_change_reason": "", "plan_change_scope": []})
+}
+
+#[test]
+fn added_probe_destinations_must_stay_inside_the_repository_when_reports_are_read() {
+    // Catches unchecked probe destinations entering Teams under either probe policy.
+    for destination in [
+        "",
+        "../x",
+        "tests/../../x",
+        "/outside/x",
+        r"C:\x",
+        r"C:x",
+        r"\\server\x",
+        r"\x",
+        "tests/a\0.rs",
+        "tests/a\n.rs",
+        ".",
+        "tests/./a.rs",
+        "tests//a.rs",
+        "tests/",
+        "tests/a.rs.",
+        "tests/a.rs ",
+    ] {
+        let mut report = implementer_json("done", no_ask());
+        report["added_probes"] = json!([{ "from": "probes/a.rs", "to": destination }]);
+        assert!(
+            invalid(&parse(ReportKind::Implementer, report))
+                .is_some_and(|error| error.contains("repository")),
+            "accepted destination {destination:?}"
+        );
+        let persisted = json!({"from": "probes/a.rs", "to": destination});
+        assert!(
+            serde_json::from_value::<kratos_teams::reports::AddedProbe>(persisted).is_err(),
+            "accepted persisted destination {destination:?}"
+        );
+    }
+}
+
+#[test]
+fn a_repository_path_error_keeps_its_value_and_reason() {
+    // Catches a general repository-path error losing the rooted or climbing reason to a probe label.
+    for (path, reason) in [("/outside/x", "is not relative"), ("../x", "climbs out")] {
+        let error = kratos_teams::paths::RepoPath::new(path)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains(reason), "{error}");
+        assert!(error.contains(&format!("{path:?}")), "{error}");
+        assert!(!error.contains("probe destination"), "{error}");
+    }
+}
+
+#[test]
+fn a_checked_probe_destination_keeps_the_string_wire_shape_and_normalizes_separators() {
+    // Catches valid probe reports becoming unreadable after destination validation.
+    let mut report = implementer_json("done", no_ask());
+    report["added_probes"] = json!([{ "from": "probes/a.rs", "to": r"./tests\a.rs" }]);
+    let Reported::Implementer {
+        report: Report::Finished { done },
+        ..
+    } = parse(ReportKind::Implementer, report)
+    else {
+        panic!("a valid destination must parse");
+    };
+    assert_eq!(done.added_probes[0].to.as_str(), "tests/a.rs");
+    assert_eq!(
+        serde_json::to_value(&done.added_probes[0]).unwrap(),
+        json!({ "from": "probes/a.rs", "to": "tests/a.rs" })
+    );
 }
 
 #[test]

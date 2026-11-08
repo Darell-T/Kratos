@@ -277,7 +277,7 @@ impl ScriptedTask {
     fn continuation_result(&mut self, view: &TaskView, message: MessageId) -> Fact {
         let role = match &view.phase {
             Phase::Active {
-                activity: Activity::Turn { turn },
+                activity: Activity::Turn { turn, .. },
             } => turn.work.role(),
             _ => panic!("a continuation waits in a turn"),
         };
@@ -512,9 +512,7 @@ impl Task {
                 claude_md: None,
                 review_md: Some("Check the goal first.".to_owned()),
             },
-            triggers: vec![Trigger::Code {
-                pattern: "spawn".to_owned(),
-            }],
+            triggers: vec![Trigger::code("spawn").expect("a valid regex")],
             policy: TaskPolicy {
                 plan_first: false,
                 security_pass: false,

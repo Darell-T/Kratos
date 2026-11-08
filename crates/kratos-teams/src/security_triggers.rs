@@ -16,16 +16,65 @@ use serde::{Deserialize, Serialize};
 use crate::diff::DiffFile;
 use crate::paths::compile;
 
-/// One trigger, as parsed from `REVIEW.md` or taken from the defaults. It is stored as text in the
-/// task's first fact and compiled each time it is matched.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A validated trigger, stored as text and compiled once when constructed or read from a fact.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "TriggerText", into = "TriggerText")]
+pub struct Trigger(Compiled);
+
+#[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Trigger {
-    /// A glob matched against the paths the task changed.
+enum TriggerText {
     Path { glob: String },
-    /// A regular expression in fancy-regex syntax, so look-behind works, matched against added
-    /// lines.
     Code { pattern: String },
+}
+
+impl Trigger {
+    /// Compiles a glob to match paths the task changed.
+    ///
+    /// # Errors
+    /// Returns an error when the glob is invalid.
+    pub fn path(glob: &str) -> Result<Self, TriggerError> {
+        TriggerText::Path {
+            glob: glob.to_owned(),
+        }
+        .try_into()
+    }
+
+    /// Compiles a fancy-regex pattern to match added lines with a bounded backtracking budget.
+    ///
+    /// # Errors
+    /// Returns an error when the regular expression is invalid.
+    pub fn code(pattern: &str) -> Result<Self, TriggerError> {
+        TriggerText::Code {
+            pattern: pattern.to_owned(),
+        }
+        .try_into()
+    }
+}
+
+impl PartialEq for Trigger {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Compiled::Path { glob: left, .. }, Compiled::Path { glob: right, .. }) => {
+                left == right
+            }
+            (Compiled::Code { pattern: left, .. }, Compiled::Code { pattern: right, .. }) => {
+                left == right
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Trigger {}
+
+impl From<Trigger> for TriggerText {
+    fn from(trigger: Trigger) -> Self {
+        match trigger.0 {
+            Compiled::Path { glob, .. } => Self::Path { glob },
+            Compiled::Code { pattern, .. } => Self::Code { pattern },
+        }
+    }
 }
 
 /// Why a trigger fired, with enough for the security reviewer to see what to read.
@@ -81,12 +130,12 @@ pub const DEFAULT_PATTERNS: [&str; 7] = [
 ];
 
 pub fn default_triggers() -> Vec<Trigger> {
-    let paths = DEFAULT_PATHS.iter().map(|glob| Trigger::Path {
-        glob: (*glob).to_owned(),
-    });
-    let patterns = DEFAULT_PATTERNS.iter().map(|pattern| Trigger::Code {
-        pattern: (*pattern).to_owned(),
-    });
+    let paths = DEFAULT_PATHS
+        .iter()
+        .map(|glob| Trigger::path(glob).expect("default globs are valid"));
+    let patterns = DEFAULT_PATTERNS
+        .iter()
+        .map(|pattern| Trigger::code(pattern).expect("default regexes are valid"));
     paths.chain(patterns).collect()
 }
 
@@ -100,10 +149,8 @@ pub enum TriggerError {
         problem: LineProblem,
         text: String,
     },
-    /// A stored trigger that no longer compiles. Possible only if the regex engine changed under an
-    /// old task.
-    #[error("trigger `{trigger}` no longer compiles: {reason}")]
-    Stale { trigger: String, reason: String },
+    #[error("invalid trigger `{trigger}`: {reason}")]
+    Invalid { trigger: String, reason: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -184,19 +231,12 @@ fn parse_line(line: &str) -> Result<Trigger, LineProblem> {
         return Err(LineProblem::Empty);
     }
     if kind == "path" {
-        compile(value).map_err(|_| LineProblem::NotAGlob)?;
-        return Ok(Trigger::Path {
-            glob: value.to_owned(),
-        });
+        return Trigger::path(value).map_err(|_| LineProblem::NotAGlob);
     }
-    RegexBuilder::new(value)
-        .build()
-        .map_err(|_| LineProblem::NotARegex)?;
-    Ok(Trigger::Code {
-        pattern: value.to_owned(),
-    })
+    Trigger::code(value).map_err(|_| LineProblem::NotARegex)
 }
 
+#[derive(Clone, Debug)]
 enum Compiled {
     Path {
         glob: String,
@@ -208,50 +248,47 @@ enum Compiled {
     },
 }
 
-fn compile_trigger(trigger: &Trigger) -> Result<Compiled, TriggerError> {
-    let stale = |reason: String| TriggerError::Stale {
-        trigger: match trigger {
-            Trigger::Path { glob } => glob.clone(),
-            Trigger::Code { pattern } => pattern.clone(),
-        },
-        reason,
-    };
-    match trigger {
-        Trigger::Path { glob } => Ok(Compiled::Path {
-            glob: glob.clone(),
-            matcher: compile(glob)
-                .map_err(|error| stale(error.to_string()))?
-                .compile_matcher(),
-        }),
-        Trigger::Code { pattern } => Ok(Compiled::Code {
-            pattern: pattern.clone(),
-            regex: RegexBuilder::new(pattern)
-                .backtrack_limit(BACKTRACK_LIMIT)
-                .build()
-                .map_err(|error| stale(error.to_string()))?,
-        }),
+impl TryFrom<TriggerText> for Trigger {
+    type Error = TriggerError;
+
+    fn try_from(source: TriggerText) -> Result<Self, Self::Error> {
+        let compiled = match source {
+            TriggerText::Path { glob } => {
+                let matcher = compile(&glob)
+                    .map_err(|error| TriggerError::Invalid {
+                        trigger: glob.clone(),
+                        reason: error.to_string(),
+                    })?
+                    .compile_matcher();
+                Compiled::Path { glob, matcher }
+            }
+            TriggerText::Code { pattern } => {
+                let regex = RegexBuilder::new(&pattern)
+                    .backtrack_limit(BACKTRACK_LIMIT)
+                    .build()
+                    .map_err(|error| TriggerError::Invalid {
+                        trigger: pattern.clone(),
+                        reason: error.to_string(),
+                    })?;
+                Compiled::Code { pattern, regex }
+            }
+        };
+        Ok(Self(compiled))
     }
 }
 
 /// Path globs match changed files, and code patterns match added lines. A scan reports at most
 /// `MAX_HITS` hits, in file order and then trigger order.
-pub fn match_triggers(
-    triggers: &[Trigger],
-    files: &[DiffFile],
-) -> Result<Vec<TriggerHit>, TriggerError> {
-    let compiled = triggers
-        .iter()
-        .map(compile_trigger)
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(files
+pub fn match_triggers(triggers: &[Trigger], files: &[DiffFile]) -> Vec<TriggerHit> {
+    files
         .iter()
         .flat_map(|file| {
-            compiled
+            triggers
                 .iter()
-                .filter_map(move |trigger| hit(trigger, file))
+                .filter_map(move |trigger| hit(&trigger.0, file))
         })
         .take(MAX_HITS)
-        .collect())
+        .collect()
 }
 
 fn hit(trigger: &Compiled, file: &DiffFile) -> Option<TriggerHit> {

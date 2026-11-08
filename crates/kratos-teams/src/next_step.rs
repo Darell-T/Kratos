@@ -129,7 +129,7 @@ pub fn next_step(view: &TaskView) -> Step {
 fn active_step(view: &TaskView, activity: &Activity) -> Step {
     match activity {
         Activity::Preparing { .. } => Step::Prepare,
-        Activity::Turn { turn } => turn_step(view, turn),
+        Activity::Turn { turn, hold } => turn_step(view, turn, hold.as_ref()),
         Activity::Committing { step, then } => commit_step(view, *step, then),
         Activity::Checking { turn, job, report } => check_step(view, turn.step, job, report),
         Activity::Rebinding { to, .. } => Step::ApplyRoles {
@@ -141,8 +141,8 @@ fn active_step(view: &TaskView, activity: &Activity) -> Step {
 
 /// A turn is ready to run unless the engine owns its next move after a usage-limit stop. The rules
 /// never send a stopped message again.
-fn turn_step(view: &TaskView, turn: &Turn) -> Step {
-    match &turn.hold {
+fn turn_step(view: &TaskView, turn: &Turn, hold: Option<&Hold>) -> Step {
+    match hold {
         None => Step::Run {
             run: Box::new(view.run_of(turn)),
         },

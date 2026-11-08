@@ -2,6 +2,69 @@
 //! each spell a path their own way, so every rule that compares paths reads them through here.
 
 use globset::{Glob, GlobBuilder};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+/// A checked path relative to the repository root, without parent traversal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(try_from = "String", into = "String")]
+pub struct RepoPath(String);
+
+impl RepoPath {
+    /// Normalizes separators and refuses rooted paths and parent traversal.
+    ///
+    /// # Errors
+    /// Returns an error for an empty, rooted, climbing, or unusable path.
+    pub fn new(raw: &str) -> Result<Self, RepoPathError> {
+        let path = repo_path(raw);
+        let bytes = path.as_bytes();
+        let has_drive =
+            bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
+        if path.is_empty() || path.starts_with('/') || has_drive {
+            return Err(RepoPathError::Rooted(raw.to_owned()));
+        }
+        if path.split('/').any(|part| part == "..") {
+            return Err(RepoPathError::Climbs(raw.to_owned()));
+        }
+        if path.bytes().any(|byte| byte.is_ascii_control())
+            || path
+                .split('/')
+                .any(|part| matches!(part, "" | ".") || part.ends_with(['.', ' ']))
+        {
+            return Err(RepoPathError::InvalidComponent(raw.to_owned()));
+        }
+        Ok(Self(path))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Why text cannot name a path inside the repository.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum RepoPathError {
+    #[error("{0:?} is not relative to the repository root.")]
+    Rooted(String),
+    #[error("{0:?} climbs out of the repository.")]
+    Climbs(String),
+    #[error("{0:?} has an invalid repository path component.")]
+    InvalidComponent(String),
+}
+
+impl TryFrom<String> for RepoPath {
+    type Error = RepoPathError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        Self::new(&raw)
+    }
+}
+
+impl From<RepoPath> for String {
+    fn from(path: RepoPath) -> Self {
+        path.0
+    }
+}
 
 /// Reviewers write `src\a.rs` or `./src/a.rs`. Git names the same file `src/a.rs`.
 pub fn repo_path(raw: &str) -> String {
@@ -12,36 +75,12 @@ pub fn repo_path(raw: &str) -> String {
     path
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PathProblem {
-    /// It is empty, or it starts at the root or at a drive.
-    Rooted,
-    Climbs,
-}
-
-pub(crate) fn parse_repo_path(raw: &str) -> Result<String, PathProblem> {
-    let path = repo_path(raw);
-    let bytes = path.as_bytes();
-    let has_drive =
-        bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
-    // A path that went through repo_path has no place to start when it is empty, begins at the
-    // root, or begins at a drive.
-    if path.is_empty() || path.starts_with('/') || has_drive {
-        return Err(PathProblem::Rooted);
-    }
-    // A path that went through repo_path climbs out of its folder with a `..`.
-    if path.split('/').any(|part| part == "..") {
-        return Err(PathProblem::Climbs);
-    }
-    Ok(path)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PatternError {
     #[error("`{pattern}` is not a valid glob: {reason}")]
     NotAGlob { pattern: String, reason: String },
-    #[error("`{pattern}` must be relative to the repository root and stay inside it")]
-    OutsideRepository { pattern: String },
+    #[error(transparent)]
+    InvalidPath(#[from] RepoPathError),
 }
 
 /// Compiles a glob with `*` kept inside one path component, as in `.gitignore`.
