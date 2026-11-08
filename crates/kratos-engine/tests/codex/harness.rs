@@ -473,3 +473,20 @@ fn uuid_like() -> String {
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
 }
+
+#[tokio::test]
+async fn an_exited_fake_leaves_no_control_port_to_read() {
+    // Catches `connect` reading the port a dead fake wrote and meeting a refused connection, or
+    // another process's listener, before the restarted fake writes its own.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+
+    harness.exit_fake(1).await;
+
+    let left = codex_control::read_port(&harness.control_file);
+    assert!(
+        left.is_err(),
+        "the dead fake's port is still readable: {left:?}"
+    );
+}
