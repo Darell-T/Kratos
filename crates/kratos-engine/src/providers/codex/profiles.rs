@@ -203,14 +203,10 @@ fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn is_within(path: &Path, folder: &Path) -> bool {
-    if cfg!(windows) {
-        let lower = |path: &Path| path.to_string_lossy().to_lowercase().replace('/', "\\");
-        let (path, folder) = (lower(path), lower(folder));
-        let folder = folder.trim_end_matches('\\');
-        path == folder || path.starts_with(&format!("{folder}\\"))
-    } else {
-        path.starts_with(folder)
-    }
+    let lower = |path: &Path| path.to_string_lossy().to_lowercase().replace('/', "\\");
+    let (path, folder) = (lower(path), lower(folder));
+    let folder = folder.trim_end_matches('\\');
+    path == folder || path.starts_with(&format!("{folder}\\"))
 }
 
 #[cfg(test)]
