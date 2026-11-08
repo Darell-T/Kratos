@@ -19,7 +19,7 @@ use crate::reports::{FindingId, RulingVerdict};
 use crate::task_plan::Amendment;
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, Finding, FindingStatus, Hold, Phase,
-    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, Stop, TaskView, Turn,
+    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, Stop, TaskView,
     UsageLimitAsk, Waiting, Work,
 };
 
@@ -308,8 +308,12 @@ pub(crate) fn apply_decision(
         Decision::KeepProbes { keep } => keep_probes(view, &keep, seq, &invalid),
         Decision::ReassignRoles { to } => reassign(view, to, &invalid),
         Decision::KeepWaiting => keep_waiting(view),
-        Decision::ApproveHandoff => handoff(view, true),
-        Decision::DeclineHandoff => handoff(view, false),
+        Decision::ApproveHandoff => hold_limited_turn(view, DecisionKind::ApproveHandoff, |stop| {
+            Hold::HandOff { stop }
+        }),
+        Decision::DeclineHandoff => hold_limited_turn(view, DecisionKind::DeclineHandoff, |stop| {
+            Hold::ToScheduler { stop }
+        }),
     }
 }
 
@@ -577,37 +581,28 @@ fn reassign(
     Ok(view)
 }
 
-fn usage_limit_turn(view: &TaskView, decision: DecisionKind) -> Result<(Turn, Stop), Rejection> {
-    match &view.phase {
-        Phase::Waiting {
-            waiting: Waiting::UsageLimit { turn, stop, .. },
-        } => Ok((turn.clone(), stop.clone())),
-        _ => Err(not_allowed(view, decision)),
-    }
+/// Makes the turn that stopped on a usage limit active again, held as `hold` says.
+fn hold_limited_turn(
+    view: Box<TaskView>,
+    decision: DecisionKind,
+    hold: impl FnOnce(Stop) -> Hold,
+) -> Result<Box<TaskView>, Rejection> {
+    let Phase::Waiting {
+        waiting: Waiting::UsageLimit { turn, stop, .. },
+    } = &view.phase
+    else {
+        return Err(not_allowed(&view, decision));
+    };
+    let turn = turn.clone();
+    let hold = Some(hold(stop.clone()));
+    Ok(view.active(Activity::Turn { turn, hold }))
 }
 
 fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
-    let (turn, mut stop) = usage_limit_turn(&view, DecisionKind::KeepWaiting)?;
-    stop.user_accepted_wait = true;
-    Ok(view.active(Activity::Turn {
-        turn,
-        hold: Some(Hold::ToScheduler { stop }),
-    }))
-}
-
-fn handoff(view: Box<TaskView>, approved: bool) -> Result<Box<TaskView>, Rejection> {
-    let decision = if approved {
-        DecisionKind::ApproveHandoff
-    } else {
-        DecisionKind::DeclineHandoff
-    };
-    let (turn, stop) = usage_limit_turn(&view, decision)?;
-    let hold = Some(if approved {
-        Hold::HandOff { stop }
-    } else {
+    hold_limited_turn(view, DecisionKind::KeepWaiting, |mut stop| {
+        stop.user_accepted_wait = true;
         Hold::ToScheduler { stop }
-    });
-    Ok(view.active(Activity::Turn { turn, hold }))
+    })
 }
 
 // The approval report.
