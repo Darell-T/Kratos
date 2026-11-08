@@ -398,9 +398,9 @@ const IMPLEMENTER_REPORT: &str = "# Your report\n\nEnd your turn with your repor
 fn implement_message(view: &TaskView, brief: &Brief, ctx: &PromptContext<'_>) -> String {
     let fresh = ctx.session == Session::Fresh;
     match brief {
-        Brief::Start => start_text(view, None),
+        Brief::Start => new_session_text(view, None),
         Brief::Planned if fresh => sections([
-            Some(start_text(view, plan_section(view))),
+            Some(new_session_text(view, plan_section(view))),
             Some("The user approved the plan. Carry it out.".to_owned()),
         ]),
         Brief::Planned => sections([
@@ -429,9 +429,7 @@ fn work_rules(view: &TaskView) -> String {
     )
 }
 
-/// The first message of a new implementer session. It holds the task, how to work, and `plan`
-/// when there is one.
-fn start_text(view: &TaskView, plan: Option<String>) -> String {
+fn new_session_text(view: &TaskView, plan: Option<String>) -> String {
     sections([
         Some(IMPLEMENTER_INTRO.to_owned()),
         Some(task_section(view)),
@@ -457,7 +455,7 @@ fn takeover(view: &TaskView) -> String {
 }
 
 /// The brief of a step that is not the first one. `Start` and `Planned` are written by
-/// `start_text`.
+/// `new_session_text`.
 fn brief_text(view: &TaskView, brief: &Brief) -> String {
     match brief {
         Brief::Start | Brief::Planned => String::new(),

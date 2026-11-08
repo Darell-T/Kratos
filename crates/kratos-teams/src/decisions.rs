@@ -581,7 +581,6 @@ fn reassign(
     Ok(view)
 }
 
-/// Makes the turn that stopped on a usage limit active again, held as `hold` says.
 fn hold_limited_turn(
     view: Box<TaskView>,
     decision: DecisionKind,
