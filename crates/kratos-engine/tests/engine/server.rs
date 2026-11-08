@@ -189,10 +189,11 @@ fn normalized_routes_keep_the_origin_guards_and_the_exact_socket_upgrade_path() 
 #[test]
 #[cfg(windows)]
 fn shuts_down_with_an_incomplete_upload_still_connected() {
+    use crate::running_engine::ShutdownSignal;
     use std::io::{BufRead, BufReader};
 
     let home = tempfile::tempdir().unwrap();
-    let mut engine = RunningEngine::start_for_shutdown(home.path());
+    let mut engine = RunningEngine::start_for_shutdown(home.path(), ShutdownSignal::CtrlC);
     let port = engine.port();
     let mut stalled = TcpStream::connect(("127.0.0.1", port)).unwrap();
     stalled.set_read_timeout(Some(WAIT)).unwrap();
@@ -215,6 +216,22 @@ fn shuts_down_with_an_incomplete_upload_still_connected() {
         restarted.client().get("/api/workspaces").unwrap().body,
         json!([])
     );
+}
+
+#[test]
+#[cfg(windows)]
+fn shuts_down_gracefully_on_control_break() {
+    // Catches a launcher's Ctrl+Break being consumed without completing engine shutdown.
+    use crate::running_engine::ShutdownSignal;
+
+    let home = tempfile::tempdir().unwrap();
+    let mut engine = RunningEngine::start_for_shutdown(home.path(), ShutdownSignal::CtrlBreak);
+    assert_eq!(engine.client().get("/api/health").unwrap().status, 200);
+
+    engine.shutdown();
+
+    let restarted = RunningEngine::start(home.path());
+    assert_eq!(restarted.client().get("/api/health").unwrap().status, 200);
 }
 
 #[test]
