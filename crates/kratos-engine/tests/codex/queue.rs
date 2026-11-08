@@ -12,6 +12,37 @@ use crate::harness::{Harness, Options, message_id};
 const THREAD: &str = "thread-A";
 
 #[tokio::test]
+async fn resuming_while_a_message_is_being_sent_tells_the_user_to_wait() {
+    // Catches resume telling the user to retry or discard a message still being sent.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness.send("b", "second").await;
+    let before = harness.details().await;
+
+    let error = harness
+        .provider
+        .resume(harness.thread_id.clone())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ProviderError::Conflict(_)), "{error:?}");
+    let error = error.to_string();
+    assert_eq!(
+        error,
+        "Wait for message a to finish sending before resuming"
+    );
+    assert_eq!(harness.details().await.paused, before.paused);
+    assert_eq!(harness.message("a").await.status, MessageStatus::Submitting);
+    assert_eq!(harness.message("b").await.status, MessageStatus::Queued);
+    assert_eq!(harness.turn_requests().await.len(), 1);
+
+    harness.settle_start("turn-1", "completed").await;
+    let starts = harness.held("turn/start", 2).await;
+    assert_eq!(starts[1]["params"]["clientUserMessageId"], "b");
+}
+
+#[tokio::test]
 async fn runs_queued_messages_one_at_a_time_in_the_order_sent() {
     // Catches a queue that starts the next message before the turn before it is confirmed
     // finished (D11), or out of order.

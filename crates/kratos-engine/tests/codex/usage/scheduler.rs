@@ -810,7 +810,7 @@ async fn a_message_waiting_on_the_user_holds_the_continuation() {
 
     let handed = next_continuation(&mut harness).await;
     assert!(
-        matches!(handed.state, ContinuationState::AwaitingUser { ref why } if why.contains("Message b")),
+        matches!(handed.state, ContinuationState::AwaitingUser { ref why } if why == "Discard message b"),
         "{handed:?}"
     );
     assert_eq!(

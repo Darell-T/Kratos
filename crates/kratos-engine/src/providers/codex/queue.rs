@@ -28,6 +28,18 @@ pub(super) fn holds_queue(status: &MessageStatus) -> bool {
     )
 }
 
+fn settling_action(message: &Message) -> Option<String> {
+    let message_id = &message.id;
+    match message.status {
+        MessageStatus::Submitting => {
+            Some(format!("Wait for message {message_id} to finish sending"))
+        }
+        MessageStatus::Failed { .. } => Some(format!("Retry or remove message {message_id}")),
+        MessageStatus::Unknown { .. } => Some(format!("Discard message {message_id}")),
+        MessageStatus::Queued | MessageStatus::Accepted { .. } | MessageStatus::Cancelled => None,
+    }
+}
+
 pub(super) fn held_message(write: &ThreadWrite<'_>) -> Result<Option<Message>, StoreError> {
     Ok(write
         .pending_messages()?
@@ -256,18 +268,17 @@ impl Actor {
         self.dispatch(&thread_id).await;
     }
 
-    /// Lets a paused queue run again. Refused while a message holds the queue, because only the
-    /// user may settle it (D11). An open continuation is cancelled: the user took over (D39).
+    /// Lets a paused queue run again. Refused while a message is still being sent, which the user
+    /// can only wait out, and while a message holds the queue, because only the user may settle it
+    /// (D11). An open continuation is cancelled: the user took over (D39).
     pub(super) async fn resume(&mut self, thread_id: &ThreadId) -> Result<(), ProviderError> {
         self.load(thread_id).await?;
         let resumed = self
             .write(thread_id, |write| {
                 // Unlike held_message, a message still being sent refuses the resume too.
-                let held = write.pending_messages()?.into_iter().find(|message| {
-                    message.status == MessageStatus::Submitting || holds_queue(&message.status)
-                });
-                if let Some(held) = held {
-                    return Ok(Err(held.id));
+                let refusal = write.pending_messages()?.iter().find_map(settling_action);
+                if let Some(refusal) = refusal {
+                    return Ok(Err(format!("{refusal} before resuming")));
                 }
                 if let Some(open) = write.open_continuation()? {
                     write.update_continuation(
@@ -282,11 +293,7 @@ impl Actor {
                 Ok(Ok(()))
             })
             .await?;
-        resumed.map_err(|held| {
-            ProviderError::Conflict(format!(
-                "Settle message {held} before resuming: retry or remove it if it failed, discard it if its delivery is uncertain"
-            ))
-        })
+        resumed.map_err(ProviderError::Conflict)
     }
 
     /// Queues the continuation's message ahead of the waiting ones, marks it sent, and lets the
@@ -339,11 +346,19 @@ impl Actor {
             .ok_or_else(|| ProviderError::UnknownMessage(message_id.clone()))
     }
 
-    /// Pauses the thread for `reason` when messages wait in its queue, so the user sees why
-    /// nothing starts (L7).
-    pub(super) async fn pause_if_waiting(&mut self, thread_id: &ThreadId, reason: PauseReason) {
+    /// Pauses waiting work while keeping any existing pause and its continuation.
+    pub(super) async fn pause_unavailable_if_waiting(
+        &mut self,
+        thread_id: &ThreadId,
+        error: String,
+    ) {
         let _ = self
-            .write(thread_id, move |write| pause_if_waiting(write, reason))
+            .write(thread_id, move |write| {
+                if write.provider_thread()?.paused.is_none() {
+                    pause_if_waiting(write, PauseReason::Unavailable { error })?;
+                }
+                Ok(())
+            })
             .await;
     }
 }
@@ -352,10 +367,7 @@ impl Actor {
 /// or the queue is paused for something the reset does not fix.
 fn blocks_continuation(write: &mut ThreadWrite<'_>) -> Result<Option<String>, StoreError> {
     if let Some(held) = held_message(write)? {
-        return Ok(Some(format!(
-            "Message {} waits for you to retry, remove, or discard it",
-            held.id
-        )));
+        return Ok(settling_action(&held));
     }
     Ok(match write.provider_thread()?.paused {
         None | Some(PauseReason::UsageLimit { .. } | PauseReason::Unavailable { .. }) => None,

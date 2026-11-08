@@ -1,4 +1,4 @@
-//! What an engine that stopped left unfinished, settled before the actor serves anything (L1).
+//! Settling unfinished Codex work after an engine restart or a runtime process exit (L1).
 //!
 //! No Codex process outlives the engine that started it, so after a restart nothing runs: a turn
 //! the log shows running ended, a message being sent may or may not have reached Codex, and every
@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use kratos_protocol::{
-    MessageId, PauseReason, Provider, Seq, ThreadEventBody, ThreadId, TurnChanges, TurnId,
-    TurnOutcome,
+    ContextUsage, MessageId, PauseReason, Provider, Seq, ThreadEventBody, ThreadId, TurnChanges,
+    TurnId, TurnOutcome,
 };
 use kratos_store::{Store, StoreError, ThreadWrite};
 use tokio::sync::mpsc;
@@ -43,11 +43,22 @@ const RESTARTED: &str = "Kratos restarted, and the Codex process that asked is g
 
 /// One thread's unfinished work.
 #[derive(Default)]
-struct Unfinished {
+pub(super) struct Unfinished {
     /// The turn the log shows running, and what its recorded items changed.
-    running_turn: Option<(TurnId, TurnChanges)>,
-    sending: Vec<MessageId>,
-    requests: Closed,
+    pub running_turn: Option<EndingTurn>,
+    pub sending: Vec<MessageId>,
+    pub requests: Closed,
+}
+
+pub(super) struct EndingTurn {
+    pub id: TurnId,
+    pub changes: TurnChanges,
+    pub context: Option<ContextUsage>,
+}
+
+pub(super) enum EndReason {
+    Restarted,
+    Exited(String),
 }
 
 impl Actor {
@@ -66,8 +77,10 @@ impl Actor {
             if !work.sending.is_empty() {
                 uncertain.push(thread_id.clone());
             }
-            hub.write(thread_id, move |write| settle(write, work))
-                .await?;
+            hub.write(thread_id, move |write| {
+                settle(write, work, EndReason::Restarted)
+            })
+            .await?;
         }
         let (done, completions) = mpsc::unbounded_channel();
         let actor = Actor {
@@ -83,7 +96,6 @@ impl Actor {
             threads: HashMap::new(),
             requests: Requests::default(),
             ready: Default::default(),
-            next_attempt: 0,
             deferred: Vec::new(),
             reconcile: Vec::new(),
             done,
@@ -94,17 +106,37 @@ impl Actor {
     }
 }
 
-/// Closes the thread's waiting requests, ends its running turn as interrupted, and marks each
+/// Closes the thread's waiting requests, ends its running turn, and marks each
 /// message being sent as uncertain, in one write.
-fn settle(write: &mut ThreadWrite<'_>, work: Unfinished) -> Result<(), StoreError> {
-    settle_closed(write, &work.requests, RESTARTED)?;
-    if let Some((turn_id, changes)) = work.running_turn {
-        write.complete_turn(turn_id, TurnOutcome::Interrupted, changes, None)?;
-        queue::pause_if_waiting(write, PauseReason::Interrupted)?;
+pub(super) fn settle(
+    write: &mut ThreadWrite<'_>,
+    work: Unfinished,
+    reason: EndReason,
+) -> Result<(), StoreError> {
+    let (request_reason, uncertain_reason) = match &reason {
+        EndReason::Restarted => (RESTARTED, UNCONFIRMED),
+        EndReason::Exited(error) => ("Codex exited", error.as_str()),
+    };
+    settle_closed(write, &work.requests, request_reason)?;
+    if let Some(turn) = work.running_turn {
+        let (outcome, pause) = match &reason {
+            EndReason::Restarted => (TurnOutcome::Interrupted, PauseReason::Interrupted),
+            EndReason::Exited(error) => (
+                TurnOutcome::Failed {
+                    error: error.clone(),
+                },
+                PauseReason::TurnFailed {
+                    turn_id: turn.id.clone(),
+                    error: error.clone(),
+                },
+            ),
+        };
+        write.complete_turn(turn.id, outcome, turn.changes, turn.context)?;
+        queue::pause_if_waiting(write, pause)?;
     }
-    for message_id in work.sending {
-        queue::mark_uncertain(write, message_id, UNCONFIRMED.to_owned())?;
-    }
+    work.sending.into_iter().try_for_each(|message_id| {
+        queue::mark_uncertain(write, message_id, uncertain_reason.to_owned())
+    })?;
     Ok(())
 }
 
@@ -112,7 +144,11 @@ fn unfinished_codex_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfinis
     let mut unfinished: BTreeMap<ThreadId, Unfinished> = BTreeMap::new();
     for (thread_id, turn_id) in store.threads_with_running_turns()? {
         let changes = recorded_changes(store, &thread_id, &turn_id)?;
-        unfinished.entry(thread_id).or_default().running_turn = Some((turn_id, changes));
+        unfinished.entry(thread_id).or_default().running_turn = Some(EndingTurn {
+            id: turn_id,
+            changes,
+            context: None,
+        });
     }
     for (thread_id, message_id) in store.submitting_messages()? {
         unfinished

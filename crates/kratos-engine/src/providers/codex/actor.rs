@@ -128,20 +128,16 @@ impl Command {
     }
 }
 
-/// Work the actor started, finished. Each names the thread, turn, or attempt it belongs to, so the
-/// actor can tell a stale one.
+/// Finished work that changes actor state, fenced by its process generation in `Completion`.
 pub(super) enum Done {
     Connected {
-        generation: u64,
         result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     },
     Account {
-        generation: u64,
         plan: Option<String>,
     },
     Attached {
         thread_id: ThreadId,
-        generation: u64,
         /// The context limit the thread was loaded with (D76).
         context_limit: Option<u64>,
         access: AccessLimit,
@@ -149,7 +145,6 @@ pub(super) enum Done {
     },
     StartAnswered {
         thread_id: ThreadId,
-        attempt: u64,
         result: Result<Box<types::Turn>, RequestError>,
     },
     /// The history read after an uncertain `turn/start` or `turn/steer`: the turn that took the
@@ -194,6 +189,50 @@ pub(super) enum Done {
     },
 }
 
+/// Finished work tagged with the server generation that started it.
+pub(super) struct Completion {
+    generation: u64,
+    done: Done,
+}
+
+impl Completion {
+    async fn apply(self, actor: &mut Actor) {
+        if self.generation == actor.generation {
+            actor.on_done(self.done).await;
+        } else {
+            self.done.discard_stale().await;
+        }
+    }
+}
+
+fn process_exited() -> ProviderError {
+    ProviderError::Unavailable("The Codex process that handled this request has exited".into())
+}
+
+impl Done {
+    async fn discard_stale(self) {
+        match self {
+            Done::Connected {
+                result: Ok((codex, _)),
+            } => codex.close().await,
+            Done::HistoryForDiscard { reply, .. } => drop(reply.send(Err(process_exited()))),
+            Done::UsageRead {
+                reply: Some(reply), ..
+            } => drop(reply.send(Err(process_exited()))),
+            Done::Interrupted { stopper, .. } => stopper.tell(|| Ok(())),
+            Done::Connected { result: Err(_) }
+            | Done::UsageRead { reply: None, .. }
+            | Done::Account { .. }
+            | Done::Attached { .. }
+            | Done::StartAnswered { .. }
+            | Done::DeliveryChecked { .. }
+            | Done::Steered { .. }
+            | Done::StopExpired { .. }
+            | Done::Deadline { .. } => {}
+        }
+    }
+}
+
 /// A thread Codex loaded, and whether it is new.
 pub(super) struct Opened {
     pub native_id: String,
@@ -218,7 +257,8 @@ pub(crate) struct Actor {
     pub(super) store: StoreThread,
     pub(super) usage: UsageTracker,
     pub(super) server: Server,
-    /// Counts app-server starts. A completion from an earlier server is stale.
+    /// Advances on each app-server start and exit; `Completion::apply` drops work from an older
+    /// generation, because the process that was to answer it is gone.
     pub(super) generation: u64,
     pub(super) restarts: super::connection::Restarts,
     /// Each model's own context window, as Codex reported it with no setting of Kratos's in force
@@ -230,12 +270,11 @@ pub(crate) struct Actor {
     pub(super) requests: Requests,
     /// Threads waiting for a start slot, oldest first.
     pub(super) ready: VecDeque<ThreadId>,
-    pub(super) next_attempt: u64,
     pub(super) deferred: Vec<Command>,
     /// Threads to load once the app-server is up, so its history settles their uncertain messages.
     pub(super) reconcile: Vec<ThreadId>,
-    pub(super) done: mpsc::UnboundedSender<Done>,
-    pub(super) completions: mpsc::UnboundedReceiver<Done>,
+    pub(super) done: mpsc::UnboundedSender<Completion>,
+    pub(super) completions: mpsc::UnboundedReceiver<Completion>,
     /// Where usage-limit stops go: the scheduler owns continuation (D39).
     pub(super) limit_stops: mpsc::UnboundedSender<crate::usage::LimitStop>,
 }
@@ -266,7 +305,7 @@ impl Actor {
                         return;
                     }
                 },
-                Some(done) = self.completions.recv() => self.on_done(done).await,
+                Some(done) = self.completions.recv() => done.apply(&mut self).await,
                 incoming = next_incoming(&mut self.server) => self.on_incoming(incoming).await,
             }
         }
@@ -278,31 +317,32 @@ impl Actor {
         F: Future<Output = Done> + Send + 'static,
     {
         let done = self.done.clone();
+        let generation = self.generation;
         tokio::spawn(async move {
             // The actor holds the receiver for as long as it runs.
-            let _ = done.send(work.await);
+            let _ = done.send(Completion {
+                generation,
+                done: work.await,
+            });
         });
     }
 
     async fn on_done(&mut self, done: Done) {
         match done {
-            Done::Connected { generation, result } => self.on_connected(generation, result).await,
-            Done::Account { generation, plan } => self.on_account(generation, plan),
+            Done::Connected { result } => self.on_connected(result).await,
+            Done::Account { plan } => self.plan = plan,
             Done::Attached {
                 thread_id,
-                generation,
                 context_limit,
                 access,
                 result,
             } => {
-                self.on_attached(thread_id, generation, context_limit, access, result)
+                self.on_attached(thread_id, context_limit, access, result)
                     .await
             }
-            Done::StartAnswered {
-                thread_id,
-                attempt,
-                result,
-            } => self.on_start_answered(thread_id, attempt, result).await,
+            Done::StartAnswered { thread_id, result } => {
+                self.on_start_answered(thread_id, result).await
+            }
             Done::DeliveryChecked {
                 thread_id,
                 message_id,
@@ -404,3 +444,6 @@ async fn next_incoming(server: &mut Server) -> Incoming {
         Server::Down | Server::Starting => std::future::pending().await,
     }
 }
+
+#[cfg(test)]
+mod tests;
