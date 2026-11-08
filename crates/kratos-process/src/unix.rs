@@ -171,4 +171,22 @@ mod tests {
         assert!(status.success());
         drop(owner);
     }
+
+    #[tokio::test]
+    async fn ending_a_tree_whose_leader_already_exited_is_not_an_error() {
+        // Catches a group holding only its exited, unreaped leader failing to end on macOS.
+        let mut owner = OwnedChild::spawn(Command::new("true")).unwrap();
+        let leader = libc::id_t::try_from(owner.child.id().unwrap()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !super::leader_exited(leader).unwrap() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the leader exits");
+
+        owner.end_tree().unwrap();
+        assert!(owner.wait().await.unwrap().success());
+    }
 }
