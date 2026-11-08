@@ -18,20 +18,20 @@ use serde_json::Value;
 
 /// The most of a command's output a stored event keeps (L3). A proposal until measured on real
 /// sessions: Codex already shortens what it shows the model.
-pub const OUTPUT_BYTES: usize = 16 * 1024;
+pub(super) const OUTPUT_BYTES: usize = 16 * 1024;
 /// The most of one file's diff a stored event keeps (L3), also a proposal.
-pub const DIFF_BYTES: usize = 32 * 1024;
+pub(super) const DIFF_BYTES: usize = 32 * 1024;
 
 /// A request type with required fields, built from them alone so every optional field is unset.
 /// The caller then sets the optional fields it needs by name, so the compiler checks them.
-pub fn required<T: DeserializeOwned>(fields: Value) -> T {
+pub(super) fn required<T: DeserializeOwned>(fields: Value) -> T {
     serde_json::from_value(fields).expect("the required fields match the generated type")
 }
 
 /// A message's parts as Codex input. Codex has no file part, so a file goes in as text naming it,
 /// the way Codex's own composer inserts a file's path. A message from another thread opens with
 /// a label that names the sender and what this thread may now do.
-pub fn user_input(message: &Message) -> Vec<types::UserInput> {
+pub(super) fn user_input(message: &Message) -> Vec<types::UserInput> {
     let label = match &message.origin {
         MessageOrigin::Thread { thread_id, limit } => {
             Some(text_input(&sender_label(thread_id, *limit)))
@@ -76,7 +76,7 @@ fn text_input(text: &str) -> types::UserInput {
 
 /// A finished or started item as Kratos records it. `None` for items Kratos records another way:
 /// the user's own message is the queued message, and reasoning is not shown.
-pub fn agent_item(item: &types::ThreadItem) -> Option<AgentItem> {
+pub(super) fn agent_item(item: &types::ThreadItem) -> Option<AgentItem> {
     use types::ThreadItem as Item;
     Some(match item {
         Item::UserMessage { .. } | Item::HookPrompt { .. } | Item::Reasoning { .. } => return None,
@@ -126,7 +126,7 @@ pub fn agent_item(item: &types::ThreadItem) -> Option<AgentItem> {
     })
 }
 
-pub fn file_changes(changes: &[types::FileUpdateChange]) -> Vec<FileChange> {
+pub(super) fn file_changes(changes: &[types::FileUpdateChange]) -> Vec<FileChange> {
     changes
         .iter()
         .map(|change| FileChange {
@@ -162,7 +162,7 @@ fn patch_status(status: &types::PatchApplyStatus) -> ItemStatus {
 }
 
 /// How a turn Codex reports finished ended. `None` while it is still in progress.
-pub fn turn_outcome(turn: &types::Turn) -> Option<TurnOutcome> {
+pub(super) fn turn_outcome(turn: &types::Turn) -> Option<TurnOutcome> {
     Some(match turn.status {
         types::TurnStatus::InProgress => return None,
         types::TurnStatus::Completed => TurnOutcome::Completed,
@@ -178,7 +178,7 @@ pub fn turn_outcome(turn: &types::Turn) -> Option<TurnOutcome> {
 
 /// The context one turn used: Codex's `last` counts are the latest request's, which is what fills
 /// the window (D76).
-pub fn context_usage(usage: &types::ThreadTokenUsage) -> ContextUsage {
+pub(super) fn context_usage(usage: &types::ThreadTokenUsage) -> ContextUsage {
     let last = &usage.last;
     ContextUsage {
         input_tokens: last.input_tokens,
@@ -190,7 +190,7 @@ pub fn context_usage(usage: &types::ThreadTokenUsage) -> ContextUsage {
     }
 }
 
-pub fn question(id: QuestionId, params: &types::ToolRequestUserInputParams) -> Question {
+pub(super) fn question(id: QuestionId, params: &types::ToolRequestUserInputParams) -> Question {
     Question {
         id,
         turn_id: TurnId::new(params.turn_id.clone()),
@@ -218,7 +218,9 @@ pub fn question(id: QuestionId, params: &types::ToolRequestUserInputParams) -> Q
     }
 }
 
-pub fn answers(answers: BTreeMap<String, Vec<String>>) -> types::ToolRequestUserInputResponse {
+pub(super) fn answers(
+    answers: BTreeMap<String, Vec<String>>,
+) -> types::ToolRequestUserInputResponse {
     types::ToolRequestUserInputResponse {
         answers: answers
             .into_iter()
@@ -227,7 +229,7 @@ pub fn answers(answers: BTreeMap<String, Vec<String>>) -> types::ToolRequestUser
     }
 }
 
-pub fn command_decision(
+pub(super) fn command_decision(
     decision: ApprovalDecision,
 ) -> types::CommandExecutionRequestApprovalResponse {
     use types::CommandExecutionApprovalDecision as Codex;
@@ -240,7 +242,7 @@ pub fn command_decision(
     types::CommandExecutionRequestApprovalResponse { decision }
 }
 
-pub fn file_change_decision(
+pub(super) fn file_change_decision(
     decision: ApprovalDecision,
 ) -> types::FileChangeRequestApprovalResponse {
     use types::FileChangeApprovalDecision as Codex;
@@ -255,7 +257,7 @@ pub fn file_change_decision(
 
 /// Codex's answer to a request for extra permissions: what it asked for, for this turn or the
 /// session, or nothing.
-pub fn permissions_decision(
+pub(super) fn permissions_decision(
     decision: ApprovalDecision,
     requested: &types::RequestPermissionProfile,
 ) -> types::PermissionsRequestApprovalResponse {
@@ -278,7 +280,7 @@ pub fn permissions_decision(
     }
 }
 
-pub fn refusal(request: &ServerRequest) -> ServerResponse {
+pub(super) fn refusal(request: &ServerRequest) -> ServerResponse {
     match request {
         ServerRequest::CommandApproval(_) => {
             ServerResponse::CommandApproval(command_decision(ApprovalDecision::Cancel))
@@ -303,13 +305,13 @@ pub fn refusal(request: &ServerRequest) -> ServerResponse {
 
 /// What accepting a request for extra permissions grants. Accepting answers Codex with
 /// `requested` itself, so the user sees what Codex gets.
-pub fn permissions_access(requested: &types::RequestPermissionProfile) -> ExtraAccess {
+pub(super) fn permissions_access(requested: &types::RequestPermissionProfile) -> ExtraAccess {
     extra_access(requested.file_system.as_ref(), requested.network.as_ref())
 }
 
 /// What accepting a command's approval lets the command use beyond the sandbox: the extra
 /// permissions it asks for, and the network host it wants to reach.
-pub fn command_access(params: &types::CommandExecutionRequestApprovalParams) -> ExtraAccess {
+pub(super) fn command_access(params: &types::CommandExecutionRequestApprovalParams) -> ExtraAccess {
     let mut access = params
         .additional_permissions
         .as_ref()
@@ -385,8 +387,7 @@ fn path_name(path: &types::FileSystemPath) -> String {
     }
 }
 
-/// The turn of `turns` that holds the user message Kratos sent as `message_id`.
-pub fn turn_with_message<'a>(
+pub(super) fn turn_with_message<'a>(
     turns: &'a [types::Turn],
     message_id: &str,
 ) -> Option<&'a types::Turn> {
@@ -398,7 +399,7 @@ pub fn turn_with_message<'a>(
 }
 
 /// The plan that pays for the signed-in account (D24). Never its email.
-pub fn plan(read: &types::GetAccountResponse) -> Option<String> {
+pub(super) fn plan(read: &types::GetAccountResponse) -> Option<String> {
     match &read.account {
         Some(types::Account::Chatgpt { plan_type, .. }) => Some(plan_type.to_string()),
         Some(types::Account::ApiKey) => Some("apiKey".to_owned()),
@@ -409,7 +410,7 @@ pub fn plan(read: &types::GetAccountResponse) -> Option<String> {
 
 /// A full usage read (D38). `ordinaryUsageAllowed` alone says whether the account may run: no
 /// answer is unavailable, never allowed.
-pub fn account_usage(
+pub(super) fn account_usage(
     read: &types::GetAccountRateLimitsResponse,
     plan: Option<String>,
 ) -> Result<AccountUsage, TimestampError> {
@@ -445,7 +446,7 @@ pub fn account_usage(
 }
 
 /// One bucket of a read or a rolling update. A bucket without an id is Codex's default, `codex`.
-pub fn usage_bucket(snapshot: &types::RateLimitSnapshot) -> UsageBucket {
+pub(super) fn usage_bucket(snapshot: &types::RateLimitSnapshot) -> UsageBucket {
     UsageBucket {
         limit_id: snapshot
             .limit_id
@@ -476,7 +477,9 @@ fn usage_window(window: &types::RateLimitWindow) -> UsageWindow {
 /// How a `command/exec` ended. Measured on Codex 0.159.1: a command that runs out of time ends with
 /// exit code 124 on Linux, as `timeout` reports it, and on Windows fails the request with a
 /// message that says it timed out.
-pub fn command_outcome(result: Result<types::CommandExecResponse, RequestError>) -> CommandResult {
+pub(super) fn command_outcome(
+    result: Result<types::CommandExecResponse, RequestError>,
+) -> CommandResult {
     match result {
         Ok(done) if cfg!(unix) && done.exit_code == 124 => CommandResult::TimedOut {
             output: format!("{}{}", done.stdout, done.stderr),

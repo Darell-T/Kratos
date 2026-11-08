@@ -36,9 +36,6 @@ use crate::observe::tag_of;
 /// No scenario needs more steps than this from one helper call, so more means the rules loop.
 const MAX_STEPS: usize = 300;
 
-// The script says what the agents, git, and the sandbox would do.
-
-/// How the scheduler answers a step handed to it.
 pub enum Scheduler {
     Schedules,
     Declines(Declined),
@@ -157,13 +154,10 @@ fn diff_covering(report: &FindingReport, outside: &[String]) -> Diff {
     Diff::parse(&text)
 }
 
-// The runner.
-
 pub struct ScriptedTask {
     log: Vec<StoredFact>,
     continuations: u32,
     pub script: Script,
-    /// Every step the loop ran, in order.
     pub steps: Vec<Step>,
     commands_ran: CommandsRan,
 }
@@ -208,7 +202,6 @@ impl ScriptedTask {
         Ok(())
     }
 
-    /// A task that restarted from the first facts of an earlier log.
     pub fn restart_from(log: &[StoredFact], script: Script) -> ScriptedTask {
         ScriptedTask {
             log: log.to_vec(),
@@ -219,7 +212,6 @@ impl ScriptedTask {
         }
     }
 
-    /// The step the rules name next.
     pub fn next(&self) -> Step {
         next_step(&self.view())
     }
@@ -424,8 +416,6 @@ pub fn probe_run(from: &str, failed_before_fix: bool, passed_after_fix: bool) ->
     }
 }
 
-// Fixtures. They are the same small world every scenario starts from.
-
 pub fn sha(n: u64) -> Sha {
     Sha::parse(&format!("{n:040x}")).expect("40 hex digits")
 }
@@ -470,7 +460,6 @@ pub fn three_members() -> Bindings {
     .expect("distinct members")
 }
 
-/// The same two members with their jobs swapped.
 pub fn swapped_members() -> Bindings {
     Bindings::two(
         member("claude-1", Provider::Claude),
@@ -579,8 +568,6 @@ impl Task {
 pub fn pattern(glob: &str) -> ScopePattern {
     ScopePattern::new(glob).expect("a valid glob")
 }
-
-// Scripted turn endings.
 
 pub fn reported(reported: Reported) -> Ended {
     Ended::Reported { reported }
@@ -827,7 +814,6 @@ pub fn requests_changes(findings: Vec<FindingReport>) -> Ended {
     review(Verdict::ChangesRequested, findings, Vec::new())
 }
 
-/// A reviewer who says an earlier finding is still open.
 pub fn still_open(finding: u32, diagnosis: &str) -> Ended {
     let claim = StillOpen {
         finding: fid(finding),
@@ -869,8 +855,6 @@ fn question_report<T>(summary: &str, question: &str) -> Report<T> {
         question: question.to_owned(),
     }
 }
-
-// Findings.
 
 fn finding(severity: Severity, kind: Kind, class: &str, evidence: &str) -> FindingReport {
     FindingReport {

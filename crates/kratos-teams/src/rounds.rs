@@ -21,27 +21,20 @@ use crate::view::{
     RulingRecord, TaskView, Turn, Waiting, Work,
 };
 
-/// A report of the reviewer, taken out of the view for checking.
 struct Checking {
     turn: Turn,
     job: ReviewJob,
     report: ReviewDone,
 }
 
-/// Every finding after a review, and which of them block.
 struct Judged {
-    /// Every finding, with this review's findings added and the earlier open ones settled.
-    findings: Vec<Finding>,
-    /// The findings this review spoke to, which are the earlier open ones and its new ones.
-    reviewed: Vec<Finding>,
-    /// Only the findings this review reported.
-    added: Vec<Finding>,
+    all: Vec<Finding>,
+    spoken_to: Vec<Finding>,
+    reported: Vec<Finding>,
     blocking: Vec<FindingId>,
 }
 
 impl TaskView {
-    // The handoff check.
-
     /// `None` when the responses answer every open finding exactly once, and each dispute has a
     /// reason.
     pub(crate) fn responses_problem(&self, responses: &[Response]) -> Option<String> {
@@ -84,8 +77,6 @@ impl TaskView {
                 .then(|| format!("Give a reason for each dispute: {}.", id_list(&unexplained))),
         ])
     }
-
-    // Commits.
 
     /// Records the round. After a handoff, each open finding gains an attempt and the response the
     /// implementer gave it. A dispute goes to whoever rules, and otherwise the review begins.
@@ -134,8 +125,6 @@ impl TaskView {
         }
     }
 
-    /// A dispute goes to the planner, or to the user when there is no planner. With no dispute, the
-    /// review of the commit begins.
     fn after_handoff(
         self: Box<Self>,
         seq: FactSeq,
@@ -260,8 +249,6 @@ impl TaskView {
         )
     }
 
-    // Checking a review.
-
     fn take_checking(mut self: Box<Self>) -> Result<(Box<TaskView>, Checking), Rejection> {
         match self.take_phase() {
             Phase::Active {
@@ -293,12 +280,12 @@ impl TaskView {
             view.merge_probes(&checked, &[]);
             let note = Note::VerdictMismatch {
                 verdict: report.verdict,
-                findings: judged.reviewed,
+                findings: judged.spoken_to,
             };
             return Ok(view.retry_turn(turn, note, seq));
         }
-        view.merge_probes(&checked, &judged.added);
-        view.findings = judged.findings;
+        view.merge_probes(&checked, &judged.reported);
+        view.findings = judged.all;
         if job.pass.kind() == PassKind::Standard {
             view.last_reviewed = Some(job.commit.clone());
         }
@@ -352,9 +339,9 @@ impl TaskView {
             .collect();
         let reviewed = settled.into_iter().chain(added.iter().cloned()).collect();
         Ok(Judged {
-            findings,
-            reviewed,
-            added,
+            all: findings,
+            spoken_to: reviewed,
+            reported: added,
             blocking,
         })
     }
@@ -388,8 +375,6 @@ impl TaskView {
         }
     }
 
-    /// A blocking finding that survived its fix attempts pauses the task as stuck. Otherwise the
-    /// cap pauses it, or another round starts.
     fn after_blocking(
         mut self: Box<Self>,
         seq: FactSeq,

@@ -26,14 +26,13 @@ use crate::security_triggers::{Trigger, TriggerHit};
 use crate::task_plan::{Amendment, PlanChangeRequest, Scope, ScopePattern, ScopeSource, TaskPlan};
 
 /// Fix attempts a blocking finding gets before the task pauses as stuck.
-pub const FIX_ATTEMPTS: u32 = 2;
+pub(crate) const FIX_ATTEMPTS: u32 = 2;
 /// Questions one step may ask before the next goes to the user and not to the planner. This keeps a
 /// planner and an agent from talking in circles and spending tokens.
-pub const MAX_QUESTIONS_PER_STEP: u32 = 3;
+pub(crate) const MAX_QUESTIONS_PER_STEP: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct TaskView {
-    // Frozen when the task started.
     pub request: String,
     pub constraints: Vec<String>,
     pub explicit_scope: Vec<ScopePattern>,
@@ -55,7 +54,6 @@ pub struct TaskView {
     /// step-back requests and replanning, separately from messages addressed to one member.
     pub requirements: Vec<String>,
 
-    // The record.
     pub rounds: Vec<Round>,
     pub findings: Vec<Finding>,
     pub rulings: Vec<RulingRecord>,
@@ -101,8 +99,6 @@ pub enum PlanState {
         conditions: Option<String>,
     },
 }
-
-// Phases.
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -241,8 +237,6 @@ pub enum ApprovedBy {
     Reviewer,
     User,
 }
-
-// Turns. Each is one piece of agent work.
 
 /// What a member is asked to do. Each variant carries only its own inputs.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -510,7 +504,6 @@ pub struct Turn {
     pub retries: Vec<Retry>,
     pub note: Option<Note>,
     pub resolutions: Vec<Resolution>,
-    /// Questions this step has asked so far.
     pub questions_asked: u32,
 }
 
@@ -581,8 +574,6 @@ pub enum Pending {
     PlanChange { request: PlanChangeRequest },
 }
 
-// The record.
-
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Round {
     pub n: u32,
@@ -614,7 +605,6 @@ pub struct Finding {
     pub status: FindingStatus,
 }
 
-/// A finding is in exactly one status.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum FindingStatus {
@@ -731,16 +721,13 @@ pub enum DirectionStatus {
     Dropped,
 }
 
-// Questions the other modules ask of the view.
-
 impl TaskView {
     /// A Team with a planner always plans first. Otherwise the stored setting decides (D28).
-    pub fn plans_first(&self) -> bool {
+    pub(crate) fn plans_first(&self) -> bool {
         self.bindings.has_planner() || self.policy.plan_first
     }
 
-    /// Who writes the plan. The planner does, or the implementer in a two-member Team.
-    pub fn plan_author(&self) -> Role {
+    pub(crate) fn plan_author(&self) -> Role {
         if self.bindings.has_planner() {
             Role::Planner
         } else {
@@ -778,7 +765,7 @@ impl TaskView {
             .outside(self.changed_files.iter().map(String::as_str))
     }
 
-    pub fn open_findings(&self) -> impl Iterator<Item = &Finding> {
+    pub(crate) fn open_findings(&self) -> impl Iterator<Item = &Finding> {
         self.findings.iter().filter(|finding| finding.is_open())
     }
 
@@ -827,7 +814,7 @@ impl TaskView {
     /// How many more review rounds the task may run before it pauses at the cap. A round counts
     /// once its commit has been reviewed, so a commit that waits on a ruling, or that the user
     /// accepted as it was, uses none.
-    pub fn rounds_left(&self) -> usize {
+    pub(crate) fn rounds_left(&self) -> usize {
         let cap = usize::try_from(self.policy.round_cap.get()).unwrap_or(usize::MAX);
         let reviewed = self
             .rounds
@@ -871,7 +858,7 @@ impl TaskView {
     /// What the next standard review diffs against. It is the last commit a standard review judged,
     /// or the base. The engine measures the change from here, so review depth matches what the
     /// reviewer reads.
-    pub fn standard_review_base(&self) -> &Sha {
+    pub(crate) fn standard_review_base(&self) -> &Sha {
         self.last_reviewed.as_ref().unwrap_or(&self.base)
     }
 }

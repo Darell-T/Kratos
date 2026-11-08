@@ -41,7 +41,6 @@ impl RepoPath {
     }
 }
 
-/// Why text cannot name a path inside the repository.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RepoPathError {
     #[error("{0:?} is not relative to the repository root.")]
@@ -67,7 +66,7 @@ impl From<RepoPath> for String {
 }
 
 /// Reviewers write `src\a.rs` or `./src/a.rs`. Git names the same file `src/a.rs`.
-pub fn repo_path(raw: &str) -> String {
+pub(crate) fn repo_path(raw: &str) -> String {
     let mut path = raw.replace('\\', "/");
     while let Some(rest) = path.strip_prefix("./") {
         path = rest.to_owned();

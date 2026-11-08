@@ -5,9 +5,9 @@ use kratos_protocol::{
     AgentItem, MessageInput, MessageOrigin, PauseReason, ThreadEventBody, TurnOutcome,
 };
 
-pub const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
 
-pub fn line(event: &ThreadEventBody) -> Option<String> {
+pub(super) fn line(event: &ThreadEventBody) -> Option<String> {
     match event {
         ThreadEventBody::UserMessage { text } => Some(format!("user: {text}")),
         ThreadEventBody::MessageQueued { input, origin, .. } => {
@@ -42,7 +42,7 @@ pub fn line(event: &ThreadEventBody) -> Option<String> {
     }
 }
 
-pub fn newest(lines: &[String]) -> String {
+pub(super) fn newest(lines: &[String]) -> String {
     let mut used = 0;
     let kept = lines
         .iter()

@@ -44,7 +44,6 @@ impl ManualClock {
         self.now.send_replace(now);
     }
 
-    /// Waits until the scheduler asked to wake at `wake`.
     async fn wait_for_wake_up_at(&self, wake: SystemTime) {
         let deadline = tokio::time::Instant::now() + WAIT;
         while !self

@@ -15,7 +15,6 @@ pub(super) struct Follows {
     live: StreamMap<ThreadId, BroadcastStream<LiveUpdate>>,
 }
 
-/// What a followed thread sent.
 pub(super) enum FollowUpdate {
     Page(ThreadId, Result<Vec<ThreadEvent>, StoreError>),
     Live(ThreadId, Result<LiveUpdate, BroadcastStreamRecvError>),

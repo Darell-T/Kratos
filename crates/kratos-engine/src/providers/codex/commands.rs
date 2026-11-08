@@ -202,7 +202,6 @@ async fn list_skills(codex: &Codex, folder: String) -> Result<Vec<Skill>, Provid
         .collect())
 }
 
-/// Runs `command` through Codex's command runner, in `folder`, inside `profile`'s sandbox.
 async fn exec(
     codex: &Codex,
     command: Vec<String>,

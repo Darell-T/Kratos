@@ -29,7 +29,7 @@ use tokio::sync::{broadcast, watch};
 use crate::store_thread::StoreThread;
 
 /// The most stored bytes one page holds, except that a page always holds at least one event.
-pub const PAGE_BYTES: usize = 64 * 1024;
+pub(crate) const PAGE_BYTES: usize = 64 * 1024;
 /// Live updates a client may fall behind by before it gets a snapshot in their place.
 const LIVE_BACKLOG: usize = 256;
 
@@ -117,7 +117,7 @@ impl Hub {
 
     /// Sends `update` to the clients following the thread, without storing it. A reply delta also
     /// extends the turn's reply so far, which a client that subscribes later gets as a snapshot.
-    pub fn publish(&self, thread_id: &ThreadId, update: LiveUpdate) {
+    pub(crate) fn publish(&self, thread_id: &ThreadId, update: LiveUpdate) {
         self.live.publish(thread_id, update);
     }
 

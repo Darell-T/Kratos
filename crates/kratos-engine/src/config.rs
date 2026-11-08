@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use kratos_protocol::{DEFAULT_PORT, HOME_VAR, ThreadId, engine_home};
 
 /// The variable naming the port the engine listens on. Empty counts as unset.
-pub const PORT_VAR: &str = "KRATOS_PORT";
-pub const THREAD_ID_VAR: &str = "KRATOS_THREAD_ID";
+pub(crate) const PORT_VAR: &str = "KRATOS_PORT";
+pub(crate) const THREAD_ID_VAR: &str = "KRATOS_THREAD_ID";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Config {

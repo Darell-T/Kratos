@@ -15,7 +15,6 @@ use kratos_teams::view::{
 use crate::observe::tag_of;
 use crate::support::{ScriptedTask, sha};
 
-/// The phase of an approved task.
 pub fn approved(commit: u64, by: ApprovedBy) -> Phase {
     Phase::Waiting {
         waiting: Waiting::Approved {
@@ -32,7 +31,6 @@ pub fn waiting(view: &TaskView) -> Option<&Waiting> {
     }
 }
 
-/// The pause a task is in because of trouble, if any.
 pub fn trouble(view: &TaskView) -> Option<(Trouble, Role, &str)> {
     match waiting(view)? {
         Waiting::Trouble { why, detail, left } => Some((*why, left.role(), detail)),
@@ -67,7 +65,6 @@ pub fn notes(runs: &[&Run]) -> Vec<Option<String>> {
         .collect()
 }
 
-/// The evidence checks the loop ran.
 pub fn checks(task: &ScriptedTask) -> Vec<&CheckStep> {
     task.steps
         .iter()
@@ -255,7 +252,6 @@ pub fn view_when_sent(task: &ScriptedTask, run: &Run) -> TaskView {
         .unwrap_or_else(|| panic!("no prefix of the log waits for {:?}", run.message))
 }
 
-/// The text the engine would send for `run`.
 pub fn text_of(task: &ScriptedTask, run: &Run, session: Session) -> String {
     let view = view_when_sent(task, run);
     let context = PromptContext {

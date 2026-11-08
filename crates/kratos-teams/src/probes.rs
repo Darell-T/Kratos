@@ -98,7 +98,6 @@ impl TaskView {
         }
     }
 
-    /// A kept probe must fail before the fix and pass after it.
     fn probe_by_run(probe: &AddedProbe, run: &ProbeRun) -> ProbeStatus {
         let reason = if !run.failed_before_fix {
             ProbeRejection::PassedBeforeTheFix

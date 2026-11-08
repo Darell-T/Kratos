@@ -2,16 +2,15 @@
 
 use kratos_protocol::{AgentItem, FileChangeKind, ItemStatus, TurnChanges};
 
-/// What a turn changed, recorded from its finished items as they arrive.
 #[derive(Debug, Default)]
-pub struct ChangesRecorder {
+pub(crate) struct ChangesRecorder {
     files: Vec<String>,
     edited_since_command: bool,
     ran_command: bool,
 }
 
 impl ChangesRecorder {
-    pub fn record(&mut self, item: &AgentItem) {
+    pub(super) fn record(&mut self, item: &AgentItem) {
         match item {
             AgentItem::FileChanges {
                 status: ItemStatus::Completed,
@@ -46,7 +45,7 @@ impl ChangesRecorder {
         self.edited_since_command = true;
     }
 
-    pub fn finish(self) -> TurnChanges {
+    pub(super) fn finish(self) -> TurnChanges {
         TurnChanges {
             files: self.files,
             edited_since_command: self.edited_since_command,

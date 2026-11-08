@@ -35,7 +35,7 @@ pub(super) enum ApprovalAnswer {
 }
 
 impl ApprovalAnswer {
-    pub fn response(&self, decision: ApprovalDecision) -> ServerResponse {
+    pub(super) fn response(&self, decision: ApprovalDecision) -> ServerResponse {
         match self {
             ApprovalAnswer::Command => {
                 ServerResponse::CommandApproval(wire::command_decision(decision))
@@ -64,7 +64,11 @@ pub(super) struct Closed {
 }
 
 impl Requests {
-    pub fn close(&mut self, thread_id: &ThreadId, in_turn: impl Fn(&TurnId) -> bool) -> Closed {
+    pub(super) fn close(
+        &mut self,
+        thread_id: &ThreadId,
+        in_turn: impl Fn(&TurnId) -> bool,
+    ) -> Closed {
         let selected = |waiting_thread: &ThreadId, waiting_turn: &TurnId| {
             waiting_thread == thread_id && in_turn(waiting_turn)
         };
@@ -75,7 +79,7 @@ impl Requests {
     }
 
     /// The thread whose request Codex withdrew, and that request's ids.
-    pub fn withdraw(&mut self, codex_id: &RequestId) -> Option<(ThreadId, Closed)> {
+    pub(super) fn withdraw(&mut self, codex_id: &RequestId) -> Option<(ThreadId, Closed)> {
         let approval = find_id(&self.approvals, codex_id);
         let question = find_id(&self.questions, codex_id);
         let thread_id = approval
@@ -100,7 +104,7 @@ impl Requests {
     }
 
     /// Whether the thread's turn waits on the user, so its deadline does not run.
-    pub fn blocks(&self, thread_id: &ThreadId) -> bool {
+    pub(super) fn blocks(&self, thread_id: &ThreadId) -> bool {
         self.approvals
             .values()
             .any(|waiting| &waiting.thread_id == thread_id)

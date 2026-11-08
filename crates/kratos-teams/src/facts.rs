@@ -24,8 +24,6 @@ use crate::reports::{FindingId, Reported};
 use crate::security_triggers::{Trigger, TriggerHit};
 use crate::task_plan::{ProbeConstraints, ScopePattern};
 
-// Ids. Each is its own type, so a message id cannot go where a step id is wanted.
-
 /// A fact's position in its task's log. The engine's database assigns it, counting up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -60,7 +58,7 @@ pub struct StepId(pub FactSeq);
 pub struct MessageId(String);
 
 impl MessageId {
-    pub fn due_at(seq: FactSeq) -> MessageId {
+    pub(crate) fn due_at(seq: FactSeq) -> MessageId {
         MessageId(format!("m{}", seq.0))
     }
 
@@ -148,8 +146,6 @@ impl fmt::Display for Sha {
 #[serde(transparent)]
 pub struct UnixMillis(pub u64);
 
-// The task's frozen starting point.
-
 /// `AGENTS.md`, `CLAUDE.md`, and `REVIEW.md` as they were in the Team's folder when the task
 /// started. The review package, the quote check, and the security triggers all read this copy, so
 /// the implementer cannot weaken the standard it is judged by.
@@ -161,7 +157,7 @@ pub struct RulesSnapshot {
 }
 
 impl RulesSnapshot {
-    pub fn instruction_files(&self) -> [(&'static str, Option<&str>); 2] {
+    pub(crate) fn instruction_files(&self) -> [(&'static str, Option<&str>); 2] {
         [
             ("AGENTS.md", self.agents_md.as_deref()),
             ("CLAUDE.md", self.claude_md.as_deref()),
@@ -245,7 +241,7 @@ pub enum Depth {
 }
 
 impl LargeChange {
-    pub fn depth_of(self, size: ChangeSize) -> Depth {
+    pub(crate) fn depth_of(self, size: ChangeSize) -> Depth {
         if size.files >= self.files || size.lines >= self.lines {
             Depth::Thorough
         } else {
@@ -307,8 +303,6 @@ pub struct TaskStarted {
     pub bindings: Bindings,
 }
 
-// Facts.
-
 /// A fact with the position the engine's database gave it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct StoredFact {
@@ -329,7 +323,6 @@ pub enum Fact {
     },
     /// The worktree, the branch, and the sessions exist.
     Prepared,
-    /// A member's turn ended. `ended` says how.
     TurnEnded {
         message: MessageId,
         ended: Box<Ended>,

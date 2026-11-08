@@ -65,7 +65,6 @@ impl TaskView {
         Ok(self)
     }
 
-    /// A step cannot complete while any message to its member has no recorded fate.
     pub(crate) fn refuse_undisposed(&self, member: &MemberId) -> Result<(), Rejection> {
         let deliveries: Vec<DeliveryId> = self
             .directions
@@ -123,7 +122,6 @@ impl TaskView {
             .collect()
     }
 
-    /// What the engine needs to deliver the turn's message.
     pub(crate) fn run_of(&self, turn: &Turn) -> Run {
         Run {
             step: turn.step,

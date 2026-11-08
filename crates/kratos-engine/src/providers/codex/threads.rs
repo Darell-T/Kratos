@@ -31,7 +31,7 @@ pub(super) struct ThreadState {
 }
 
 impl ThreadState {
-    pub fn new(folder: String, settings: ThreadSettings) -> ThreadState {
+    pub(super) fn new(folder: String, settings: ThreadSettings) -> ThreadState {
         ThreadState {
             folder,
             turn_settings: None,
@@ -44,12 +44,11 @@ impl ThreadState {
         }
     }
 
-    pub fn turn_settings(&self) -> &ThreadSettings {
+    pub(super) fn turn_settings(&self) -> &ThreadSettings {
         self.turn_settings.as_ref().unwrap_or(&self.settings)
     }
 
-    /// The thread's Codex id, when it is loaded in the running app-server.
-    pub fn native_id(&self) -> Option<&str> {
+    pub(super) fn native_id(&self) -> Option<&str> {
         match &self.link {
             Link::Attached { native_id, .. } => Some(native_id),
             Link::Detached | Link::Attaching => None,
@@ -57,7 +56,7 @@ impl ThreadState {
     }
 
     /// The model Codex runs the thread's turns with: the setting, else the one Codex chose.
-    pub fn model(&self) -> Option<&str> {
+    pub(super) fn model(&self) -> Option<&str> {
         match (&self.settings.model, &self.link) {
             (Some(model), _) => Some(model.as_str()),
             (None, Link::Attached { model, .. }) => Some(model),
@@ -66,12 +65,10 @@ impl ThreadState {
     }
 }
 
-/// Whether the thread is loaded in the running app-server.
 pub(super) enum Link {
     /// Not loaded. A load that failed leaves the thread here, and the pause says why. Kratos does
     /// not start a new Codex thread in its place (L7), and the next use tries again.
     Detached,
-    /// `thread/start` or `thread/resume` is out.
     Attaching,
     Attached {
         native_id: String,
@@ -116,7 +113,7 @@ pub(super) enum Turn {
 impl Turn {
     /// What the starting or running turn has gathered. `None` when idle, where Codex's reports
     /// belong to no turn and are not kept.
-    pub fn work_mut(&mut self) -> Option<&mut TurnWork> {
+    pub(super) fn work_mut(&mut self) -> Option<&mut TurnWork> {
         match self {
             Turn::Starting { work, .. } | Turn::Running { work, .. } => Some(work),
             Turn::Idle => None,
@@ -124,7 +121,7 @@ impl Turn {
     }
 
     /// Ends a running turn, returning its id and what it gathered. Any other turn stays as it is.
-    pub fn end_running(&mut self) -> Option<(TurnId, TurnWork)> {
+    pub(super) fn end_running(&mut self) -> Option<(TurnId, TurnWork)> {
         if !matches!(self, Turn::Running { .. }) {
             return None;
         }
@@ -134,7 +131,7 @@ impl Turn {
         Some((turn_id, work))
     }
 
-    pub fn running_id(&self) -> Option<&TurnId> {
+    pub(super) fn running_id(&self) -> Option<&TurnId> {
         match self {
             Turn::Running { turn_id, .. } => Some(turn_id),
             Turn::Idle | Turn::Starting { .. } => None,

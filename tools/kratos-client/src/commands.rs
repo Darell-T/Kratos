@@ -18,7 +18,7 @@ use kratos_protocol::{
 };
 use serde_json::{Value, json};
 
-pub const USAGE: &str = "\
+pub(crate) const USAGE: &str = "\
 usage: kratos-client [--url <url>] [--normalize] <command>
 
   health
@@ -63,7 +63,7 @@ const SUBSCRIBE_WAIT: Duration = Duration::from_secs(60);
 const SOCKET_SEND_WAIT: Duration = Duration::from_secs(2);
 const BENCH_MESSAGES: NonZeroUsize = NonZeroUsize::new(500).unwrap();
 
-pub enum Failure {
+pub(crate) enum Failure {
     /// The command line is wrong. Nothing was sent.
     Usage(String),
     Client(ClientError),
@@ -130,7 +130,7 @@ const COMMANDS: [Command; 25] = [
     Command { name: "bench-turns", positional: 1, options: &[], run: turns_bench },
 ];
 
-pub fn run(arguments: &[String]) -> Result<(), Failure> {
+pub(crate) fn run(arguments: &[String]) -> Result<(), Failure> {
     let (name, args) = Args::parse(arguments)?;
     let Some(name) = name else {
         return usage("no command given");

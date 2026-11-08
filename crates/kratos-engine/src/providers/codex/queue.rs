@@ -375,7 +375,6 @@ fn blocks_continuation(write: &mut ThreadWrite<'_>) -> Result<Option<String>, St
     })
 }
 
-/// Lifts a pause that a refused or uncertain message caused, once no such message is left.
 fn resume_when_settled(write: &mut ThreadWrite<'_>) -> Result<(), StoreError> {
     let held = held_message(write)?.is_some();
     let paused_by_message = matches!(

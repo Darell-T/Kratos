@@ -149,7 +149,7 @@ fn spent_window(bucket: &UsageBucket) -> Option<UsageWindow> {
 
 /// Whether a fresh read lets the continuation go: the account may use its included quota, it is
 /// the account the continuation waited on, and none of the buckets it waited on is still spent.
-pub fn may_continue(waits_on: &UsageWait, account: Option<&AccountUsage>) -> Readiness {
+pub(crate) fn may_continue(waits_on: &UsageWait, account: Option<&AccountUsage>) -> Readiness {
     let Some(account) = account else {
         return Readiness::Unanswered;
     };
@@ -172,7 +172,7 @@ pub fn may_continue(waits_on: &UsageWait, account: Option<&AccountUsage>) -> Rea
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Readiness {
+pub(crate) enum Readiness {
     Ready,
     StillSpent,
     /// No answer, or an answer that says nothing about permission.
@@ -180,7 +180,6 @@ pub enum Readiness {
     AccountChanged,
 }
 
-/// Commands the API sends the scheduler.
 enum Request {
     /// The user's go for a continuation that waits on them (D41).
     Schedule {
@@ -290,7 +289,6 @@ pub async fn start(
 }
 
 impl Scheduler {
-    /// Wakes at the provider's reset time, or after the recheck wait when no reset time was given.
     fn arm(&self, id: &ContinuationId, at: Option<&Timestamp>) {
         let at = at
             .map(Timestamp::instant)

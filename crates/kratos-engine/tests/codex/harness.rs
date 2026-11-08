@@ -35,7 +35,6 @@ pub struct Options {
     pub turn_timeout: Duration,
     pub stop_timeout: Duration,
     pub settings: ThreadSettings,
-    /// More arguments for the fake, such as `--state-file`.
     pub fake_args: Vec<OsString>,
     pub mcp: Option<McpServer>,
 }
@@ -367,7 +366,6 @@ impl Harness {
             .await;
     }
 
-    /// Ends `turn_id` of Codex thread `native_id` with `status`.
     pub async fn complete(&mut self, native_id: &str, turn_id: &str, status: &str) {
         let request = codex_control::complete(native_id, turn_id, status);
         self.control_request(request).await;

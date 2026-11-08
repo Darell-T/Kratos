@@ -189,7 +189,6 @@ pub(super) enum Done {
     },
 }
 
-/// Finished work tagged with the server generation that started it.
 pub(super) struct Completion {
     generation: u64,
     done: Done,
@@ -233,7 +232,6 @@ impl Done {
     }
 }
 
-/// A thread Codex loaded, and whether it is new.
 pub(super) struct Opened {
     pub native_id: String,
     pub model: String,
@@ -241,7 +239,6 @@ pub(super) struct Opened {
     pub is_new: bool,
 }
 
-/// The app-server, as far as the actor knows.
 pub(super) enum Server {
     Down,
     Starting,

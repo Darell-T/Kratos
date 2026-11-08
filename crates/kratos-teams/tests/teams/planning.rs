@@ -112,8 +112,6 @@ fn a_three_member_team_always_plans_first_and_the_planner_writes_the_plan() {
 
 #[test]
 fn the_plan_first_setting_does_not_apply_to_a_team_with_a_planner() {
-    // The setting is false here and the planner still plans, because a planner means planning
-    // first.
     let task = Task::three().script(Script {
         planner: vec![plan_ready()].into(),
         ..Script::default()

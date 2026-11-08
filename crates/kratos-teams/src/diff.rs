@@ -32,7 +32,6 @@ pub struct LineRange {
     pub last: u32,
 }
 
-/// One file's side of a parsed diff.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffFile {
     /// The path as git names it, with forward slashes and relative to the repository root.
@@ -79,8 +78,7 @@ impl Diff {
 #[derive(Default)]
 struct Walker {
     files: Vec<DiffFile>,
-    /// Whether the last `+++` header named a file, which is the file new hunks belong to.
-    in_file: bool,
+    header_named_file: bool,
     hunk: Option<Hunk>,
 }
 
@@ -104,10 +102,10 @@ impl Walker {
         if self.hunk.is_some() {
             self.feed_hunk_line(line);
         } else if line.starts_with("diff ") {
-            self.in_file = false;
+            self.header_named_file = false;
         } else if let Some(header) = line.strip_prefix("+++ ") {
-            self.in_file = self.start_file(header);
-        } else if self.in_file {
+            self.header_named_file = self.start_file(header);
+        } else if self.header_named_file {
             self.hunk = Hunk::open(line);
         }
     }

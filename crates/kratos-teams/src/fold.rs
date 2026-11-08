@@ -274,7 +274,6 @@ impl TaskView {
         std::mem::replace(&mut self.phase, placeholder)
     }
 
-    /// Plan first when the Team plans first, and otherwise start work.
     fn on_prepared(self: Box<Self>, seq: FactSeq) -> Result<Box<TaskView>, Rejection> {
         let Phase::Active {
             activity: Activity::Preparing { .. },
@@ -386,7 +385,6 @@ impl TaskView {
         self
     }
 
-    /// The step a task starts with once it is prepared.
     fn first_work(&self) -> Work {
         if self.plans_first() {
             Work::Plan {

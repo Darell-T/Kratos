@@ -19,7 +19,7 @@ use crate::reports::{FindingId, RulingVerdict};
 use crate::task_plan::Amendment;
 use crate::view::{
     Activity, AfterCommit, Answerer, ApprovedBy, Brief, Finding, FindingStatus, Hold, Phase,
-    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, Stop, TaskView, Turn,
+    PlanState, Probe, ProbeRejection, ProbeStatus, Resolution, RulingRecord, Stop, TaskView,
     UsageLimitAsk, Waiting, Work,
 };
 
@@ -168,8 +168,6 @@ impl Decision {
     }
 }
 
-// What is allowed.
-
 /// The decisions the task accepts now, in a stable order. Empty once the task is closing or closed.
 ///
 /// | The task is                          | It accepts                                      |
@@ -246,7 +244,6 @@ fn trouble_decisions(left: &Activity) -> Vec<DecisionKind> {
     [&[Resume], fits, &[Cancel]].concat()
 }
 
-/// `KeepProbes` is offered only while the user decides and a probe still waits for a choice.
 fn probes_offered(view: &TaskView) -> bool {
     matches!(view.policy.probes, ProbePolicy::UserDecides)
         && view
@@ -254,8 +251,6 @@ fn probes_offered(view: &TaskView) -> bool {
             .iter()
             .any(|probe| probe.status == ProbeStatus::Offered)
 }
-
-// What each decision does.
 
 /// | Decision       | Effect |
 /// | -------------- | ------ |
@@ -308,8 +303,12 @@ pub(crate) fn apply_decision(
         Decision::KeepProbes { keep } => keep_probes(view, &keep, seq, &invalid),
         Decision::ReassignRoles { to } => reassign(view, to, &invalid),
         Decision::KeepWaiting => keep_waiting(view),
-        Decision::ApproveHandoff => handoff(view, true),
-        Decision::DeclineHandoff => handoff(view, false),
+        Decision::ApproveHandoff => hold_limited_turn(view, DecisionKind::ApproveHandoff, |stop| {
+            Hold::HandOff { stop }
+        }),
+        Decision::DeclineHandoff => hold_limited_turn(view, DecisionKind::DeclineHandoff, |stop| {
+            Hold::ToScheduler { stop }
+        }),
     }
 }
 
@@ -397,8 +396,6 @@ fn answer(
     view.resume_step(resolution, seq)
 }
 
-/// The user rules on the disputed findings. The same path serves a Team with no planner and a
-/// planner that failed to rule.
 fn rule(
     mut view: Box<TaskView>,
     not_bug: &[FindingId],
@@ -577,40 +574,28 @@ fn reassign(
     Ok(view)
 }
 
-fn usage_limit_turn(view: &TaskView, decision: DecisionKind) -> Result<(Turn, Stop), Rejection> {
-    match &view.phase {
-        Phase::Waiting {
-            waiting: Waiting::UsageLimit { turn, stop, .. },
-        } => Ok((turn.clone(), stop.clone())),
-        _ => Err(not_allowed(view, decision)),
-    }
-}
-
-fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
-    let (turn, mut stop) = usage_limit_turn(&view, DecisionKind::KeepWaiting)?;
-    stop.user_accepted_wait = true;
-    Ok(view.active(Activity::Turn {
-        turn,
-        hold: Some(Hold::ToScheduler { stop }),
-    }))
-}
-
-fn handoff(view: Box<TaskView>, approved: bool) -> Result<Box<TaskView>, Rejection> {
-    let decision = if approved {
-        DecisionKind::ApproveHandoff
-    } else {
-        DecisionKind::DeclineHandoff
+fn hold_limited_turn(
+    view: Box<TaskView>,
+    decision: DecisionKind,
+    hold: impl FnOnce(Stop) -> Hold,
+) -> Result<Box<TaskView>, Rejection> {
+    let Phase::Waiting {
+        waiting: Waiting::UsageLimit { turn, stop, .. },
+    } = &view.phase
+    else {
+        return Err(not_allowed(&view, decision));
     };
-    let (turn, stop) = usage_limit_turn(&view, decision)?;
-    let hold = Some(if approved {
-        Hold::HandOff { stop }
-    } else {
-        Hold::ToScheduler { stop }
-    });
+    let turn = turn.clone();
+    let hold = Some(hold(stop.clone()));
     Ok(view.active(Activity::Turn { turn, hold }))
 }
 
-// The approval report.
+fn keep_waiting(view: Box<TaskView>) -> Result<Box<TaskView>, Rejection> {
+    hold_limited_turn(view, DecisionKind::KeepWaiting, |mut stop| {
+        stop.user_accepted_wait = true;
+        Hold::ToScheduler { stop }
+    })
+}
 
 /// What the user reads before the final call. It is built from the view, so it cannot leave
 /// anything out.
