@@ -25,6 +25,8 @@ struct Harness {
 
 impl Harness {
     async fn start() -> Self {
+        #[cfg(windows)]
+        kratos_process::contain_current_process().unwrap();
         let root = tempfile::tempdir().unwrap();
         let store = Store::open(&root.path().join("kratos")).unwrap();
         let request: CreateWorkspace = serde_json::from_value(json!({

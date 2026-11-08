@@ -1,6 +1,6 @@
-//! The job object that holds a child's process tree.
+//! Job objects that contain this process for its lifetime and each child's process tree.
 //!
-//! Every function here is a thin call into kernel32. Each unsafe block states the invariant that
+//! Each unsafe block states the invariant that
 //! makes its call sound; none of them reads or writes memory that Rust does not own for the whole
 //! call.
 #![allow(unsafe_code, reason = "the job object API has no safe wrapper in std")]
@@ -8,6 +8,7 @@
 use std::io;
 use std::mem::size_of;
 use std::process::ExitStatus;
+use std::sync::Mutex;
 
 use tokio::process::{Child, Command};
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
@@ -20,11 +21,35 @@ use windows_sys::Win32::System::JobObjects::{
     SetInformationJobObject, TerminateJobObject,
 };
 use windows_sys::Win32::System::Threading::{
-    CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, GetCurrentProcess, OpenThread, ResumeThread,
+    THREAD_SUSPEND_RESUME,
 };
 
 /// The exit code every process in the tree gets when the owner ends it.
 const ENDED_BY_OWNER: u32 = 1;
+
+static CONTAINED: Mutex<bool> = Mutex::new(false);
+
+/// Keeps future children in a kill-on-close job owned until this process exits.
+///
+/// Call before starting children. An incompatible enclosing job makes this fail.
+pub fn contain_current_process() -> io::Result<()> {
+    let mut contained = CONTAINED
+        .lock()
+        .map_err(|_| io::Error::other("the process containment lock is poisoned"))?;
+    if *contained {
+        return Ok(());
+    }
+    let job = new_job()?;
+    // SAFETY: the job is open and GetCurrentProcess returns this process's valid pseudo-handle.
+    if unsafe { AssignProcessToJobObject(job.0, GetCurrentProcess()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // Closing this job would kill us too. Windows closes the non-inherited handle at process exit.
+    std::mem::forget(job);
+    *contained = true;
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct Tree {
@@ -35,6 +60,15 @@ impl Tree {
     /// Starts the child suspended, puts it in a new kill-on-close job, then lets it run. A failure
     /// at any step ends the child before returning, so no process runs outside a job.
     pub fn spawn(command: &mut Command) -> io::Result<(Tree, Child)> {
+        if !*CONTAINED
+            .lock()
+            .map_err(|_| io::Error::other("the process containment lock is poisoned"))?
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "call contain_current_process before spawning an owned child",
+            ));
+        }
         let job = new_job()?;
         command.creation_flags(CREATE_SUSPENDED | CREATE_NO_WINDOW);
         let mut child = command.spawn()?;

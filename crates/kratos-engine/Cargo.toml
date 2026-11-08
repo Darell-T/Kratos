@@ -14,6 +14,7 @@ getrandom.workspace = true
 kratos-api-client.workspace = true
 kratos-codex-client.workspace = true
 kratos-command-safety.workspace = true
+kratos-process.workspace = true
 kratos-protocol.workspace = true
 kratos-store.workspace = true
 serde.workspace = true
