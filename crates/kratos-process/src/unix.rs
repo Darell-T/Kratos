@@ -35,10 +35,12 @@ impl Tree {
             return Ok(());
         }
         let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(error)
+        match error.raw_os_error() {
+            Some(libc::ESRCH) => Ok(()),
+            // Darwin's killpg skips zombies and answers EPERM when no other member could take the
+            // signal, where Linux counts the exited, unreaped leader and succeeds.
+            Some(libc::EPERM) if matches!(leader_exited(group), Ok(true)) => Ok(()),
+            _ => Err(error),
         }
     }
 
@@ -47,12 +49,10 @@ impl Tree {
         let Some(group) = self.group else {
             return child.wait().await;
         };
-        let leader = libc::id_t::try_from(group)
-            .map_err(|_| io::Error::other(format!("process group {group} does not fit an id_t")))?;
         // Subscribe before checking exit so an intervening SIGCHLD cannot be missed.
         let mut exited = signal(SignalKind::child())?;
         loop {
-            let done = leader_exited(leader).inspect_err(|error| {
+            let done = leader_exited(group).inspect_err(|error| {
                 if error.raw_os_error() == Some(libc::ECHILD) {
                     self.group = None;
                 }
@@ -73,7 +73,9 @@ impl Tree {
 /// Reports whether the leader has exited, without reaping it. This is a plain function so the
 /// `siginfo_t` it holds, which contains raw pointers, never lives in an async state machine and
 /// makes the wait future non-`Send`.
-fn leader_exited(leader: libc::id_t) -> io::Result<bool> {
+fn leader_exited(group: libc::pid_t) -> io::Result<bool> {
+    let leader = libc::id_t::try_from(group)
+        .map_err(|_| io::Error::other(format!("process group {group} does not fit an id_t")))?;
     #[allow(unsafe_code, reason = "waitid requires a siginfo_t output buffer")]
     // SAFETY: zero is valid for siginfo_t and keeps si_pid zero when WNOHANG finds no status.
     let mut info = unsafe { std::mem::zeroed::<libc::siginfo_t>() };
@@ -170,5 +172,23 @@ mod tests {
             .unwrap();
         assert!(status.success());
         drop(owner);
+    }
+
+    #[tokio::test]
+    async fn ending_a_tree_whose_leader_already_exited_is_not_an_error() {
+        // Catches a group holding only its exited, unreaped leader failing to end on macOS.
+        let mut owner = OwnedChild::spawn(Command::new("true")).unwrap();
+        let leader = libc::pid_t::try_from(owner.child.id().unwrap()).unwrap();
+
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !super::leader_exited(leader).unwrap() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the leader exits");
+
+        owner.end_tree().unwrap();
+        assert!(owner.wait().await.unwrap().success());
     }
 }
