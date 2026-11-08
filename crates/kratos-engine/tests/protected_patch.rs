@@ -4,6 +4,60 @@ use kratos_protocol::{
     AskReason, CappedText, FileChange, FileChangeKind, Permission, ThreadSettings,
 };
 
+fn credential_alias_verdict(home: &std::path::Path, path: &str) -> Verdict {
+    let settings = ThreadSettings {
+        permission: Permission::FullAccess,
+        ..ThreadSettings::default()
+    };
+    let folders = ProtectedFolders::new(home.join(".kratos"), None, Some(home.into()));
+    let change = FileChange {
+        path: path.into(),
+        kind: FileChangeKind::Add,
+        diff: CappedText::new("test", 100),
+    };
+    decide_patch(&settings, Some(&[change]), false, home, &folders)
+}
+
+#[test]
+fn a_missing_credential_folder_with_a_trailing_dot_asks() {
+    // Catches a missing .aws. folder being created as the protected .aws directory on Windows.
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        credential_alias_verdict(home.path(), ".aws./config"),
+        Verdict::Ask(AskReason::Unchecked)
+    );
+}
+
+#[test]
+fn a_missing_credential_folder_with_a_stream_suffix_asks() {
+    // Catches .ssh::$INDEX_ALLOCATION creating files in the protected .ssh directory on NTFS.
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        credential_alias_verdict(home.path(), ".ssh::$INDEX_ALLOCATION/config"),
+        Verdict::Ask(AskReason::Unchecked)
+    );
+}
+
+#[test]
+fn a_missing_credential_folder_with_a_unicode_case_alias_asks() {
+    // Catches a new .aw\u{17f} folder being read as protected .aws on a case-insensitive disk.
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        credential_alias_verdict(home.path(), ".aw\u{17f}/config"),
+        Verdict::Ask(AskReason::Unchecked)
+    );
+}
+
+#[test]
+fn a_new_unicode_file_in_an_existing_folder_is_accepted() {
+    // Catches the missing-folder rule refusing a non-ASCII file name in an existing directory.
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        credential_alias_verdict(home.path(), "r\u{e9}sum\u{e9}.txt"),
+        Verdict::Accept
+    );
+}
+
 #[test]
 fn a_patch_through_a_directory_link_still_asks_before_changing_protected_files() {
     let root = tempfile::tempdir().unwrap();
@@ -28,6 +82,29 @@ fn a_patch_through_a_directory_link_still_asks_before_changing_protected_files()
         ..ThreadSettings::default()
     };
     let folders = ProtectedFolders::new(protected.clone(), None, None);
+    #[cfg(unix)]
+    {
+        // Catches missing/.. bypassing resolution of the real alias into protected files.
+        let change = FileChange {
+            path: "missing/../alias/new.txt".into(),
+            kind: FileChangeKind::Add,
+            diff: CappedText::new("test", 100),
+        };
+        assert_eq!(
+            decide_patch(&settings, Some(&[change]), false, &project, &folders),
+            Verdict::Ask(AskReason::Unchecked)
+        );
+    }
+    // Catches the missing-parent guard refusing an ordinary new file without traversal.
+    let change = FileChange {
+        path: "missing/plain/new.txt".into(),
+        kind: FileChangeKind::Add,
+        diff: CappedText::new("test", 100),
+    };
+    assert_eq!(
+        decide_patch(&settings, Some(&[change]), false, &project, &folders),
+        Verdict::Accept
+    );
     for (path, kind) in [
         ("alias/new.txt", FileChangeKind::Add),
         (
