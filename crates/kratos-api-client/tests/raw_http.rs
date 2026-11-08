@@ -192,9 +192,9 @@ fn file_tokens_reload_while_pinned_tokens_keep_their_original_presence_and_value
         requests
     });
     let request = ApiRequest::new("GET", "/token").header("Host", "manual.host");
-    let pinned_missing = client.clone().with_current_token();
+    let pinned_missing = client.clone().with_current_token().unwrap();
     fs::write(&token_file, "first-token").unwrap();
-    let pinned = client.clone().with_current_token();
+    let pinned = client.clone().with_current_token().unwrap();
 
     client.send(&request).unwrap();
     fs::write(&token_file, " second-token \n").unwrap();
@@ -233,4 +233,36 @@ fn host_header(request: &str) -> &str {
         .lines()
         .find_map(|line| line.strip_prefix("Host: "))
         .unwrap()
+}
+
+#[test]
+fn unreadable_token_errors_name_the_file_for_http_and_sockets() {
+    // Catches unreadable credentials silently becoming an unauthenticated request.
+    let home = TokenHome::new();
+    let token_file = home.0.join(CLIENT_TOKEN_FILE);
+    let client = Client::new("http://127.0.0.1:9")
+        .unwrap()
+        .with_token_from(&home.0);
+    fs::create_dir(&token_file).unwrap();
+    for error in [
+        client.get("/api/workspaces").unwrap_err(),
+        client.connect_events(&[]).err().unwrap(),
+        client.clone().with_current_token().unwrap_err(),
+    ] {
+        assert!(
+            error
+                .to_string()
+                .contains(&token_file.display().to_string()),
+            "the token read error must name its file: {error}"
+        );
+        assert!(std::error::Error::source(&error).is_some());
+    }
+    fs::remove_dir(&token_file).unwrap();
+    fs::write(&token_file, [0xff]).unwrap();
+    let error = client.get("/api/workspaces").unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains(&token_file.display().to_string())
+    );
 }

@@ -44,7 +44,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   subscribe <thread-id> [--after <seq>] [--count <n>] [--read-delay-ms <ms>]
   request <METHOD> <path> [--header <name:value>]... [--json <body> | --body-bytes <n>]
   socket-send <bytes> [--header <name:value>]...
-  bench-post <url>
+  bench-post
   bench-turns <fake-control-file>
 
 The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
@@ -126,7 +126,7 @@ const COMMANDS: [Command; 25] = [
         options: &["--header", "--json", "--body-bytes"], run: request,
     },
     Command { name: "socket-send", positional: 1, options: &["--header"], run: socket_send },
-    Command { name: "bench-post", positional: 1, options: &[], run: bench },
+    Command { name: "bench-post", positional: 0, options: &[], run: bench },
     Command { name: "bench-turns", positional: 1, options: &[], run: turns_bench },
 ];
 
@@ -474,9 +474,8 @@ fn socket_send(session: &mut Session, args: &Args) -> Result<(), Failure> {
     Ok(())
 }
 
-fn bench(_: &mut Session, args: &Args) -> Result<(), Failure> {
-    let client = with_token(Client::new(&args.positional[0])?);
-    let report = bench_post(&client, BENCH_MESSAGES)?;
+fn bench(session: &mut Session, _: &Args) -> Result<(), Failure> {
+    let report = bench_post(&session.client, BENCH_MESSAGES)?;
     println!(
         "{}",
         serde_json::to_string(&report).expect("a bench report serializes")

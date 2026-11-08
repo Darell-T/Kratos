@@ -102,7 +102,7 @@ preserves those files. Confirm that no SQLite program uses the folder before mov
 cargo run -p kratos-client -- health
 cargo run -p kratos-client -- create-workspace repo C:\work\repo
 cargo run -p kratos-client -- subscribe <thread-id> --after 0 --count 1
-cargo run -p kratos-client -- bench-post http://127.0.0.1:4200
+cargo run -p kratos-client -- --url http://127.0.0.1:4200 bench-post
 ```
 
 Run `kratos-client` with no arguments to see the other commands.
