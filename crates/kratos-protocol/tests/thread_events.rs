@@ -110,7 +110,7 @@ fn a_queued_message_reports_its_origin_and_status_beside_its_input() {
                 continuation_id: ContinuationId::new("c-1".into()),
             },
             status: MessageStatus::Accepted { turn_id: turn() },
-            queued_at: Timestamp::from_stored("2030-01-01T00:00:00.000Z".into()),
+            queued_at: Timestamp::try_from("2030-01-01T00:00:00.000Z".to_owned()).unwrap(),
         },
         r#"{"id":"m-1","input":[{"type":"text","text":"go"}],"by":"continuation","continuationId":"c-1","status":"accepted","turnId":"turn-1","queuedAt":"2030-01-01T00:00:00.000Z"}"#,
     );
@@ -369,7 +369,9 @@ fn thread_and_provider_events_keep_their_stored_shape() {
         (
             PauseReason::UsageLimit {
                 turn_id: turn(),
-                resets_at: Some(Timestamp::from_stored("2030-01-01T05:00:00.000Z".into())),
+                resets_at: Some(
+                    Timestamp::try_from("2030-01-01T05:00:00.000Z".to_owned()).unwrap(),
+                ),
             },
             r#""reason":"usageLimit","turnId":"turn-1","resetsAt":"2030-01-01T05:00:00.000Z""#,
         ),

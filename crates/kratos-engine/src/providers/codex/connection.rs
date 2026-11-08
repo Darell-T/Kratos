@@ -12,16 +12,14 @@ use std::time::{Duration, Instant};
 use kratos_codex_client::{
     Codex, ConnectError, Exit, Incoming, Launch, RequestError, connect, methods, types,
 };
-use kratos_protocol::{
-    ContextLimit, MessageStatus, PauseReason, Provider, RequiredText, ThreadId, TurnId, TurnOutcome,
-};
+use kratos_protocol::{ContextLimit, MessageStatus, Provider, RequiredText, ThreadId, TurnId};
 use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::actor::{Actor, Done, Opened, Server};
-use super::approvals::settle_closed;
 use super::profiles::Profile;
-use super::threads::{Link, ThreadState};
+use super::recovery::{self, EndReason, EndingTurn, Unfinished};
+use super::threads::{Link, ThreadState, Turn};
 use super::{CodexSettings, ProviderError, policy, queue, wire};
 use crate::mcp::{self, McpServer};
 
@@ -49,6 +47,11 @@ pub(super) struct Restarts {
 }
 
 impl Restarts {
+    #[cfg(test)]
+    pub(super) fn settled_start(&mut self) {
+        self.started_at = Some(Instant::now() - SETTLED_AFTER);
+    }
+
     /// `Err` with the wait left while the last failure's backoff runs.
     fn may_start(&self) -> Result<(), Duration> {
         match self.not_before {
@@ -147,13 +150,11 @@ impl Actor {
         }
         self.generation += 1;
         self.server = Server::Starting;
-        let generation = self.generation;
         let launch = launch(&self.settings);
         self.spawn(async move {
             let capabilities = serde_json::from_value(json!({ "experimentalApi": true }))
                 .expect("the capabilities match the generated type");
             Done::Connected {
-                generation,
                 result: connect_ready(launch, capabilities).await,
             }
         });
@@ -162,15 +163,8 @@ impl Actor {
 
     pub(super) async fn on_connected(
         &mut self,
-        generation: u64,
         result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     ) {
-        if generation != self.generation {
-            if let Ok((codex, _)) = result {
-                codex.close().await;
-            }
-            return;
-        }
         match result {
             Ok((codex, incoming)) => {
                 self.restarts.started();
@@ -178,7 +172,7 @@ impl Actor {
                     codex: codex.clone(),
                     incoming,
                 };
-                self.read_account(generation, codex);
+                self.read_account(codex);
                 for deferred in std::mem::take(&mut self.deferred) {
                     self.on_command(deferred).await;
                 }
@@ -197,13 +191,8 @@ impl Actor {
                 }
                 let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
                 for thread_id in threads {
-                    self.pause_if_waiting(
-                        &thread_id,
-                        PauseReason::Unavailable {
-                            error: message.clone(),
-                        },
-                    )
-                    .await;
+                    self.pause_unavailable_if_waiting(&thread_id, message.clone())
+                        .await;
                 }
             }
         }
@@ -255,7 +244,7 @@ impl Actor {
             .model
             .as_ref()
             .map(|model| model.as_str().to_owned());
-        let (thread_id, generation) = (thread_id.clone(), self.generation);
+        let thread_id = thread_id.clone();
         self.spawn(async move {
             if let Some(native_id) = reload {
                 let params = types::ThreadUnsubscribeParams {
@@ -267,7 +256,6 @@ impl Actor {
             let result = open_thread(&codex, native_id, folder, model, profile, config).await;
             Done::Attached {
                 thread_id,
-                generation,
                 context_limit,
                 access,
                 result,
@@ -279,7 +267,6 @@ impl Actor {
     pub(super) async fn on_attached(
         &mut self,
         thread_id: ThreadId,
-        generation: u64,
         context_limit: Option<ContextLimit>,
         access: kratos_protocol::AccessLimit,
         result: Result<Opened, RequestError>,
@@ -287,10 +274,6 @@ impl Actor {
         let Some(thread) = self.threads.get_mut(&thread_id) else {
             return;
         };
-        if generation != self.generation {
-            thread.link = Link::Detached;
-            return;
-        }
         match result {
             Ok(opened) => {
                 thread.link = Link::Attached {
@@ -325,8 +308,7 @@ impl Actor {
                 let message = format!("Codex could not load the thread: {error}");
                 thread.link = Link::Detached;
                 fail_discards(thread, &message);
-                self.pause_if_waiting(&thread_id, PauseReason::Unavailable { error: message })
-                    .await;
+                self.pause_unavailable_if_waiting(&thread_id, message).await;
             }
         }
     }
@@ -371,7 +353,7 @@ impl Actor {
             unreachable!("the attached server has connected");
         };
         let codex = codex.clone();
-        let (thread_id, generation) = (thread_id.clone(), self.generation);
+        let thread_id = thread_id.clone();
         self.spawn(async move {
             let result = codex
                 .request::<methods::ThreadFork>(&params)
@@ -393,7 +375,6 @@ impl Actor {
             }
             Done::Attached {
                 thread_id,
-                generation,
                 context_limit,
                 access,
                 result,
@@ -446,9 +427,12 @@ impl Actor {
         .await
     }
 
-    /// Codex ended. A turn it was running ended with it; a start it was answering stays uncertain
-    /// until its own completion arrives. Waiting requests close, and every thread must load again.
+    /// Ends the generation first, so replies still in flight from this process are dropped. Then
+    /// every thread detaches and its running turn ends. A start or steer Codex never answered is
+    /// uncertain, since the process may have taken it. Waiting stops and requests are answered, and
+    /// untouched queued work requests a replacement process, respecting the restart backoff.
     pub(super) async fn on_exit(&mut self, exit: Exit) {
+        self.generation += 1;
         self.server = Server::Down;
         self.restarts.exited();
         let error = exit.to_string();
@@ -457,35 +441,35 @@ impl Actor {
             let thread = self.threads.get_mut(thread_id).expect("listed above");
             thread.link = Link::Detached;
             fail_discards(thread, &format!("Codex could not load the thread: {error}"));
-            let Some((turn_id, work)) = thread.turn.end_running() else {
-                continue;
+            let mut sending = std::mem::take(&mut thread.steering);
+            if let Turn::Starting { message_id, .. } = &thread.turn {
+                sending.insert(message_id.clone());
+            }
+            let mut unfinished = Unfinished {
+                sending: sending.into_iter().collect(),
+                requests: self.requests.close(thread_id, |_| true),
+                ..Unfinished::default()
             };
-            let outcome = TurnOutcome::Failed {
-                error: error.clone(),
-            };
-            let pause = PauseReason::TurnFailed {
-                turn_id: turn_id.clone(),
-                error: error.clone(),
-            };
+            if let Some((turn_id, work)) = thread.turn.end_running() {
+                unfinished.running_turn = Some(EndingTurn {
+                    id: turn_id,
+                    changes: work.changes.finish(),
+                    context: work.context,
+                });
+            }
+            thread.file_items.clear();
+            self.end_start(thread_id, Ok(()));
+            let reason = EndReason::Exited(error.clone());
             let _ = self
-                .record_turn_end(
-                    thread_id,
-                    turn_id,
-                    outcome,
-                    work,
-                    super::turns::After::PauseIfWaiting(pause),
-                )
-                .await;
-        }
-        for thread_id in self.requests.threads() {
-            let closed = self.requests.close(&thread_id, |_| true);
-            let _ = self
-                .write(&thread_id, move |write| {
-                    settle_closed(write, &closed, "Codex exited")
+                .write(thread_id, move |write| {
+                    recovery::settle(write, unfinished, reason)
                 })
                 .await;
         }
         self.ready.clear();
+        for thread_id in &thread_ids {
+            self.dispatch(thread_id).await;
+        }
     }
 
     /// Closes the app-server and waits for it to end; its exit arrives as usual.

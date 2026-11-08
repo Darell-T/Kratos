@@ -23,6 +23,69 @@ fn limited_implementer(then: Vec<Ended>) -> Script {
     }
 }
 
+#[test]
+fn a_correction_after_a_continuation_runs_instead_of_waiting_on_the_old_scheduler_hold() {
+    // Catches a completed continuation retaining its scheduled hold on a new correction message.
+    for ending in [
+        lost(),
+        implementer_invalid("Bad JSON."),
+        implements_unchecked(),
+    ] {
+        let mut task = Task::two().script(limited_implementer(vec![ending, implements()]));
+        task.step_until(|task| matches!(task.next(), Step::Wait { .. }));
+        let before = task.view();
+        let message = before.phase.waiting_message().cloned().unwrap();
+        let original_step = runs(&task, Role::Implementer)[0].step;
+        task.step();
+
+        let Step::Run { run } = task.next() else {
+            panic!(
+                "the continuation ended, so its correction must run: {:?}",
+                task.next()
+            );
+        };
+        assert_eq!(
+            run.step, original_step,
+            "a correction keeps the logical step"
+        );
+        assert_ne!(run.message, message, "the correction needs a new message");
+        assert!(run.note.is_some(), "the correction carries its reason");
+        task.run();
+        assert_eq!(task.view().phase, approved(1, ApprovedBy::Reviewer));
+        assert_replayable(&task);
+    }
+}
+
+#[test]
+fn a_verdict_correction_after_a_continuation_runs_after_the_evidence_check() {
+    // Catches scheduler holds leaking through a completed reviewer into evidence-check retries.
+    let mut script = script(
+        vec![implements(), fix_f1()],
+        vec![
+            hits_usage_limit(),
+            approves_listing(vec![bug("null-deref", "cmd1")]),
+            requests_changes(vec![bug("null-deref", "cmd1")]),
+            approves(),
+        ],
+    );
+    script_commands(&mut script, "cmd1", vec![fails(), fails(), passes()]);
+    let mut task = Task::two().script(script);
+    task.step_until(|task| matches!(task.next(), Step::Check { .. }));
+    task.step();
+
+    let Step::Run { run } = task.next() else {
+        panic!("a corrected reviewer verdict must run: {:?}", task.next());
+    };
+    assert_eq!(run.role, Role::Reviewer);
+    assert!(matches!(
+        run.note,
+        Some(kratos_teams::view::Note::VerdictMismatch { .. })
+    ));
+    task.run();
+    assert_eq!(task.view().phase, approved(2, ApprovedBy::Reviewer));
+    assert_replayable(&task);
+}
+
 fn run_message(step: &Step) -> Option<&MessageId> {
     match step {
         Step::Run { run } => Some(&run.message),
@@ -345,8 +408,11 @@ fn the_stopped_turn_is_held_with_the_scheduler_until_it_answers() {
     assert!(matches!(
         &view.phase,
         kratos_teams::view::Phase::Active {
-            activity: kratos_teams::view::Activity::Turn { turn }
-        } if matches!(turn.hold, Some(Hold::ToScheduler { .. }))
+            activity: kratos_teams::view::Activity::Turn {
+                hold: Some(Hold::ToScheduler { .. }),
+                ..
+            }
+        }
     ));
 }
 

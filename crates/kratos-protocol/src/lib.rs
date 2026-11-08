@@ -64,12 +64,12 @@ pub use messages::{
 };
 pub use skills::{Skill, ThreadSkills};
 pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};
-pub use text::RequiredText;
+pub use text::{RequiredText, is_javascript_whitespace};
 pub use threads::{
     AccessLimit, CreateThread, ListEvents, ListThreads, OutsideWrites, Permission, Provider,
     Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
 };
-pub use time::Timestamp;
+pub use time::{Timestamp, TimestampError};
 pub use turns::{
     AgentItem, CappedText, CommandResult, ContextUsage, FileChange, FileChangeKind, ItemStatus,
     TurnChanges, TurnId, TurnOutcome,

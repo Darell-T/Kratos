@@ -6,7 +6,7 @@
 use crate::evidence::EvidenceCheck;
 use crate::facts::{EvidenceChecked, ProbePolicy, ProbeRun};
 use crate::fold::Rejection;
-use crate::paths::parse_repo_path;
+use crate::paths::RepoPath;
 use crate::reports::{AddedProbe, ImplementerDone};
 use crate::task_plan::{ProbeConstraints, Scope};
 use crate::view::{Brief, Finding, Probe, ProbeRejection, ProbeStatus, TaskView, Work};
@@ -106,7 +106,7 @@ impl TaskView {
             ProbeRejection::FailedAfterTheFix
         } else {
             return ProbeStatus::Retained {
-                as_path: probe.to.clone(),
+                as_path: probe.to.as_str().to_owned(),
                 evidence: run.evidence.clone(),
             };
         };
@@ -158,17 +158,14 @@ impl TaskView {
 fn probe_copy_problem(
     constraints: &ProbeConstraints,
     scope: &Scope,
-    to: &str,
+    to: &RepoPath,
 ) -> Option<ProbeRejection> {
-    // A glob matches text, so `tests/../../x` would match `tests/**` without this check.
-    let allowed = parse_repo_path(to).is_ok_and(|path| {
-        constraints
-            .test_paths
-            .iter()
-            .any(|pattern| pattern.covers(&path))
-    });
+    let allowed = constraints
+        .test_paths
+        .iter()
+        .any(|pattern| pattern.covers(to.as_str()));
     if !allowed {
         return Some(ProbeRejection::OutsideAllowedPaths);
     }
-    (!scope.covers(to)).then_some(ProbeRejection::OutsideScope)
+    (!scope.covers(to.as_str())).then_some(ProbeRejection::OutsideScope)
 }

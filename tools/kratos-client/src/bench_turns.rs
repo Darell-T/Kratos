@@ -130,8 +130,15 @@ fn await_completion(
     let deadline = Instant::now() + WAIT;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let Some(Incoming::Text(text)) = socket.next_incoming(remaining)? else {
-            return Err(ClientError::TimedOut(WAIT).into());
+        let text = match socket.next_incoming(remaining)? {
+            Some(Incoming::Text(text)) => text,
+            Some(Incoming::Closed(code)) => {
+                let code = code.map_or("no close code".to_owned(), |code| format!("code {code}"));
+                return Err(BenchError::Failed(format!(
+                    "the engine closed the event socket ({code}) before turn {turn_id} completed"
+                )));
+            }
+            None => return Err(ClientError::TimedOut(WAIT).into()),
         };
         let message: ServerMessage =
             serde_json::from_str(&text).map_err(|source| ClientError::Json {
@@ -146,8 +153,7 @@ fn await_completion(
                     ..
                 } = event.event
                 {
-                    if &event.thread_id != thread_id
-                        || completed_id.as_str() != turn_id
+                    if (&event.thread_id, completed_id.as_str()) != (thread_id, turn_id)
                         || outcome != TurnOutcome::Completed
                     {
                         return Err(BenchError::Failed(format!(
@@ -172,7 +178,8 @@ struct Control(BufReader<TcpStream>);
 
 impl Control {
     fn connect(control_file: &Path) -> Result<Self, BenchError> {
-        let port = codex_control::read_port(control_file)?;
+        let port = codex_control::wait_for_port(control_file, WAIT)
+            .map_err(|error| BenchError::Failed(error.to_string()))?;
         let stream = TcpStream::connect(("127.0.0.1", port))?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(WAIT))?;
@@ -245,5 +252,84 @@ impl Observer {
 impl Drop for Observer {
     fn drop(&mut self) {
         let _ = self.stream.shutdown(Shutdown::Both);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kratos_protocol::ThreadId;
+
+    use super::*;
+
+    #[test]
+    fn control_waits_for_a_fake_codex_that_starts_late() {
+        // Catches a benchmark that fails when Codex has not yet written its control port, because
+        // it read the port file once.
+        let dir = tempfile::tempdir().unwrap();
+        let control_file = dir.path().join("fake-codex-control");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let late_file = control_file.clone();
+        let starter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(300));
+            codex_control::write_port(&late_file, port).unwrap();
+        });
+
+        let connected = Control::connect(&control_file);
+
+        starter.join().unwrap();
+        assert!(connected.is_ok(), "{:?}", connected.err());
+    }
+
+    #[test]
+    fn a_missing_control_port_reports_its_file_when_the_deadline_expires() {
+        // Catches a shared wait returning a raw missing-file error or losing the control path.
+        let dir = tempfile::tempdir().unwrap();
+        let control_file = dir.path().join("missing-control");
+
+        let error = codex_control::wait_for_port(&control_file, Duration::ZERO).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("missing-control"), "{error}");
+    }
+
+    #[test]
+    fn a_closed_event_socket_is_reported_as_closed_not_as_a_timeout() {
+        // Catches a received close frame being reported as a timeout or with debug Option codes.
+        use tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+
+        for (frame, diagnostic) in [
+            (None, "(no close code)"),
+            (
+                Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "".into(),
+                }),
+                "(code 1000)",
+            ),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = thread::spawn(move || {
+                let (stream, _) = listener.accept().unwrap();
+                let mut socket = tungstenite::accept(stream).unwrap();
+                socket.close(frame).unwrap();
+                while socket.read().is_ok() {}
+            });
+            let mut socket = Client::new(&format!("http://{address}"))
+                .unwrap()
+                .connect_events(&[])
+                .unwrap();
+
+            let error = await_completion(&mut socket, &ThreadId::new("thread".to_owned()), "turn")
+                .unwrap_err()
+                .to_string();
+
+            drop(socket);
+            server.join().unwrap();
+            assert!(error.contains("closed"), "{error}");
+            assert!(!error.contains("nothing arrived"), "{error}");
+            assert!(error.contains(diagnostic), "{error}");
+        }
     }
 }

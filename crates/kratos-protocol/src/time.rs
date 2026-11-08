@@ -1,40 +1,92 @@
+use std::fmt;
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-/// A UTC instant as the engines write it: `2026-10-22T18:45:12.345Z`, the exact text of
-/// JavaScript's `Date.toISOString()`.
+/// A UTC instant and the text accepted by `humantime::parse_rfc3339`.
 ///
-/// Stored and sent as text. Text of this one shape sorts in time order, which the `ORDER BY
-/// created_at` listings rely on, so [`Timestamp::at`] is the only place Rust formats a time.
+/// Parsing keeps text verbatim, without assuming it sorts in time order. [`Timestamp::at`]
+/// formats the sortable JavaScript `Date.toISOString()` millisecond shape. Ordered storage
+/// columns are written from that formatter through [`Timestamp::now`].
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct Timestamp(String);
+#[serde(try_from = "String", into = "String")]
+pub struct Timestamp {
+    text: String,
+    instant: SystemTime,
+}
+
+/// Invalid timestamp text or a system time outside the supported years 1970 to 9999.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TimestampError {
+    InvalidText { text: String },
+    OutOfRange { time: SystemTime },
+}
+
+impl fmt::Display for TimestampError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidText { text } => write!(formatter, "{text:?} is not a timestamp"),
+            Self::OutOfRange { time } => {
+                write!(formatter, "the time {time:?} is outside 1970 to 9999")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TimestampError {}
 
 impl Timestamp {
     /// The current wall-clock time, truncated to milliseconds.
     ///
     /// Wall-clock time can step backwards, so a timestamp orders listings for display only. Event
     /// order comes from [`crate::Seq`].
-    pub fn now() -> Timestamp {
+    ///
+    /// # Errors
+    /// Returns TimestampError when the system clock is outside the supported RFC 3339 range.
+    pub fn now() -> Result<Timestamp, TimestampError> {
         Timestamp::at(SystemTime::now())
     }
 
     /// `time`, truncated to milliseconds.
-    pub fn at(time: SystemTime) -> Timestamp {
-        Timestamp(humantime::format_rfc3339_millis(time).to_string())
+    ///
+    /// # Errors
+    /// Returns TimestampError when `time` cannot be represented in the supported RFC 3339 range.
+    pub fn at(time: SystemTime) -> Result<Timestamp, TimestampError> {
+        if time < SystemTime::UNIX_EPOCH {
+            return Err(TimestampError::OutOfRange { time });
+        }
+        let mut text = String::new();
+        fmt::write(
+            &mut text,
+            format_args!("{}", humantime::format_rfc3339_millis(time)),
+        )
+        .map_err(|_| TimestampError::OutOfRange { time })?;
+        Self::try_from(text)
     }
 
-    /// The instant the text names. `None` for text that is not a timestamp, such as a damaged row.
-    pub fn instant(&self) -> Option<SystemTime> {
-        humantime::parse_rfc3339(&self.0).ok()
-    }
-
-    pub fn from_stored(text: String) -> Timestamp {
-        Timestamp(text)
+    /// The instant the text names.
+    pub fn instant(&self) -> SystemTime {
+        self.instant
     }
 
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.text
+    }
+}
+
+impl TryFrom<String> for Timestamp {
+    type Error = TimestampError;
+
+    fn try_from(text: String) -> Result<Timestamp, TimestampError> {
+        match humantime::parse_rfc3339(&text) {
+            Ok(instant) => Ok(Timestamp { text, instant }),
+            Err(_) => Err(TimestampError::InvalidText { text }),
+        }
+    }
+}
+
+impl From<Timestamp> for String {
+    fn from(timestamp: Timestamp) -> String {
+        timestamp.text
     }
 }

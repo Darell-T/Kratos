@@ -9,7 +9,7 @@ use super::{ProviderError, wire};
 
 impl Actor {
     /// Reads the plan that pays for the account (D24) and the account's usage (D38).
-    pub(super) fn read_account(&self, generation: u64, codex: Codex) {
+    pub(super) fn read_account(&self, codex: Codex) {
         let reader = codex.clone();
         self.spawn(async move {
             let plan = match reader
@@ -19,15 +19,9 @@ impl Actor {
                 Ok(read) => wire::plan(&read),
                 Err(_) => None,
             };
-            Done::Account { generation, plan }
+            Done::Account { plan }
         });
         self.read_usage(codex, None);
-    }
-
-    pub(super) fn on_account(&mut self, generation: u64, plan: Option<String>) {
-        if generation == self.generation {
-            self.plan = plan;
-        }
     }
 
     pub(super) fn refresh_usage(&mut self, reply: Reply<()>) {
@@ -60,14 +54,18 @@ impl Actor {
         result: Result<Box<types::GetAccountRateLimitsResponse>, RequestError>,
         reply: Option<Reply<()>>,
     ) {
+        let result = result
+            .map_err(|error| format!("Codex did not report the account's usage: {error}"))
+            .and_then(|read| {
+                wire::account_usage(&read, self.plan.clone())
+                    .map_err(|error| format!("Kratos could not timestamp the usage read: {error}"))
+            });
         let answer = match result {
-            Ok(read) => {
-                let usage = wire::account_usage(&read, self.plan.clone());
+            Ok(usage) => {
                 self.usage.record_read(tracker_generation, usage);
                 Ok(())
             }
-            Err(error) => {
-                let reason = format!("Codex did not report the account's usage: {error}");
+            Err(reason) => {
                 self.usage
                     .record_unavailable(Provider::Codex, reason.clone());
                 Err(ProviderError::Unavailable(reason))

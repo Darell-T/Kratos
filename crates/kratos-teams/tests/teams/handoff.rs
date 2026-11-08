@@ -146,6 +146,71 @@ fn exactly_one_response_per_open_finding_and_a_reason_for_each_dispute() {
 }
 
 #[test]
+fn a_response_to_a_nonexistent_finding_returns_the_implementer_report() {
+    // Catches unknown response ids being ignored even before any finding exists.
+    let mut task = Task::two().script(script(
+        vec![implements_answering(vec![fixed(99)]), implements()],
+        vec![approves()],
+    ));
+
+    task.run();
+
+    let implementer = runs(&task, Role::Implementer);
+    assert_eq!(
+        implementer.len(),
+        2,
+        "the invalid handoff needs a correction"
+    );
+    assert_eq!(
+        implementer[1].note,
+        Some(Note::InvalidReport {
+            error: "Answer only open findings. Not open: F99.".to_owned(),
+        })
+    );
+    assert_eq!(task.view().phase, approved(1, ApprovedBy::Reviewer));
+    assert_replayable(&task);
+}
+
+#[test]
+fn a_response_to_a_closed_finding_returns_the_implementer_report() {
+    // Catches closed finding ids being accepted when the user asks for more work.
+    let mut script = script(
+        vec![
+            implements(),
+            fix_f1(),
+            implements_answering(vec![fixed(1)]),
+            implements(),
+        ],
+        vec![
+            requests_changes(vec![bug("null-deref", "cmd1")]),
+            approves(),
+            approves(),
+        ],
+    );
+    script_commands(&mut script, "cmd1", vec![fails(), passes()]);
+    let mut task = Task::two().script(script);
+    task.run();
+    task.decide(Decision::Direct {
+        text: "Continue the work.".to_owned(),
+    });
+
+    let implementer = runs(&task, Role::Implementer);
+    assert_eq!(
+        implementer.len(),
+        4,
+        "the closed response needs a correction"
+    );
+    assert_eq!(
+        implementer[3].note,
+        Some(Note::InvalidReport {
+            error: "Answer only open findings. Not open: F1.".to_owned(),
+        })
+    );
+    assert_eq!(task.view().phase, approved(3, ApprovedBy::Reviewer));
+    assert_replayable(&task);
+}
+
+#[test]
 fn the_handoff_is_checked_in_order_the_responses_before_the_unchecked_edits() {
     let mut script = script(
         vec![

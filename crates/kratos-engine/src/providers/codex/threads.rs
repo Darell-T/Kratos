@@ -97,7 +97,6 @@ pub(super) enum Turn {
     /// `turn/start` is out for `message_id`. A completion that arrives before Codex answers is
     /// kept, so the turn ends as soon as its id is known.
     Starting {
-        attempt: u64,
         message_id: MessageId,
         early_completion: Option<Box<types::Turn>>,
         /// Stops asked for before the turn's id was known; answered once it is.

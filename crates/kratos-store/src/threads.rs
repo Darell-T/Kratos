@@ -1,13 +1,14 @@
 use kratos_protocol::{
     ContextLimit, ContextUsage, CreateThread, PauseReason, Permission, Provider, RequiredText,
-    Thread, ThreadDetails, ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, Timestamp,
-    TurnChanges, TurnId, TurnOutcome, WorkspaceId,
+    Thread, ThreadDetails, ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, TurnChanges,
+    TurnId, TurnOutcome, WorkspaceId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
 
 use crate::columns::{
-    from_column, from_stored_name, permission_name, provider_name, to_column, unreadable,
+    from_column, from_stored_name, permission_name, provider_name, timestamp_column, to_column,
+    unreadable,
 };
 use crate::{Store, StoreError, ThreadWrite};
 
@@ -31,7 +32,7 @@ impl Store {
     /// settings or the defaults. `Err(UnknownWorkspace)` when the workspace does not exist; nothing
     /// is written then.
     pub fn create_thread(&self, request: &CreateThread) -> Result<Thread, StoreError> {
-        let now = Timestamp::now();
+        let now = crate::columns::timestamp_now()?;
         let thread = Thread {
             id: ThreadId::new(Uuid::new_v4().to_string()),
             workspace_id: request.workspace_id.clone(),
@@ -305,7 +306,7 @@ fn thread_from_row(row: &Row<'_>) -> rusqlite::Result<Thread> {
         workspace_id: WorkspaceId::new(row.get(1)?),
         title: row.get(2)?,
         provider: from_stored_name(Provider::ALL, provider_name, &provider, 3, "provider")?,
-        created_at: Timestamp::from_stored(row.get(4)?),
-        updated_at: Timestamp::from_stored(row.get(5)?),
+        created_at: timestamp_column(row, 4, "created_at")?,
+        updated_at: timestamp_column(row, 5, "updated_at")?,
     })
 }

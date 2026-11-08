@@ -10,8 +10,8 @@ use kratos_protocol::{
     AccessLimit, AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult,
     ContextUsage, ExtraAccess, FileChange, FileChangeKind, ItemStatus, Message, MessageInput,
     MessageOrigin, NetworkAccess, PathAccess, PathAccessMode, Permission, Provider, Question,
-    QuestionId, QuestionItem, QuestionOption, ThreadId, Timestamp, TurnId, TurnOutcome,
-    UsageBucket, UsageWindow,
+    QuestionId, QuestionItem, QuestionOption, ThreadId, Timestamp, TimestampError, TurnId,
+    TurnOutcome, UsageBucket, UsageWindow,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -412,7 +412,7 @@ pub fn plan(read: &types::GetAccountResponse) -> Option<String> {
 pub fn account_usage(
     read: &types::GetAccountRateLimitsResponse,
     plan: Option<String>,
-) -> AccountUsage {
+) -> Result<AccountUsage, TimestampError> {
     let buckets = match &read.rate_limits_by_limit_id {
         Some(by_id) if !by_id.is_empty() => {
             let mut buckets: Vec<UsageBucket> = by_id
@@ -434,14 +434,14 @@ pub fn account_usage(
             reason: "Codex did not say whether the account may use its included quota".to_owned(),
         },
     };
-    AccountUsage {
+    Ok(AccountUsage {
         provider: Provider::Codex,
         account: read.account_id.clone(),
         plan: plan.or_else(|| read.rate_limits.plan_type.as_ref().map(ToString::to_string)),
         allowance,
         buckets,
-        read_at: Timestamp::now(),
-    }
+        read_at: Timestamp::now()?,
+    })
 }
 
 /// One bucket of a read or a rolling update. A bucket without an id is Codex's default, `codex`.
@@ -468,7 +468,8 @@ fn usage_window(window: &types::RateLimitWindow) -> UsageWindow {
         resets_at: window
             .resets_at
             .and_then(|seconds| u64::try_from(seconds).ok())
-            .map(|seconds| Timestamp::at(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds))),
+            .and_then(|seconds| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
+            .and_then(|time| Timestamp::at(time).ok()),
     }
 }
 
@@ -501,6 +502,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn out_of_range_usage_reset_times_are_unknown() {
+        // Catches provider reset seconds overflowing SystemTime or exceeding the timestamp range.
+        for seconds in [253_402_300_800_i64, i64::MAX] {
+            let window: types::RateLimitWindow = required(serde_json::json!({
+                "usedPercent": 100, "windowDurationMins": 300, "resetsAt": seconds,
+            }));
+            assert!(
+                usage_window(&window).resets_at.is_none(),
+                "reset {seconds} was accepted"
+            );
+        }
+        let window: types::RateLimitWindow = required(serde_json::json!({
+            "usedPercent": 100, "windowDurationMins": 300, "resetsAt": 0,
+        }));
+        assert_eq!(
+            usage_window(&window).resets_at.map(|time| time.instant()),
+            Some(SystemTime::UNIX_EPOCH)
+        );
+    }
 
     fn item(value: Value) -> types::ThreadItem {
         serde_json::from_value(value).unwrap()

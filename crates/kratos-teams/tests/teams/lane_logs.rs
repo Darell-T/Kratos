@@ -322,7 +322,7 @@ fn probes() -> ScriptedTask {
                     responses: vec![fixed(1)],
                     added_probes: vec![AddedProbe {
                         from: probe.to_owned(),
-                        to: "tests/null_session.rs".to_owned(),
+                        to: kratos_teams::paths::RepoPath::new("tests/null_session.rs").unwrap(),
                     }],
                     ..done()
                 },
@@ -469,7 +469,7 @@ fn question_routes(log: &[StoredFact]) -> Vec<(Role, &'static str, bool)> {
         }
         let before = view_of(&log[..index]);
         let Phase::Active {
-            activity: Activity::Turn { turn },
+            activity: Activity::Turn { turn, .. },
         } = &before.phase
         else {
             panic!("a question ends a turn");
@@ -480,13 +480,13 @@ fn question_routes(log: &[StoredFact]) -> Vec<(Role, &'static str, bool)> {
                 waiting: Waiting::Answer,
             } => "user",
             Phase::Active {
-                activity: Activity::Turn { turn },
+                activity: Activity::Turn { turn, .. },
             } if matches!(turn.work, Work::Answer { .. }) => "planner",
             other => panic!("a question went to {other:?}"),
         };
         let resumed = log[index + 1..].iter().enumerate().any(|(offset, _)| {
             let later = view_of(&log[..index + 2 + offset]);
-            matches!(&later.phase, Phase::Active { activity: Activity::Turn { turn: again } }
+            matches!(&later.phase, Phase::Active { activity: Activity::Turn { turn: again, .. } }
                 if again.step == turn.step && again.message != turn.message)
         });
         routes.push((turn.work.role(), to, resumed));
@@ -549,7 +549,7 @@ fn lane_6_the_planners_ruling_decides_a_dispute_and_with_no_planner_the_users_do
     );
     assert!(prefix_views(&planner_log).iter().any(|view| matches!(
         &view.phase,
-        Phase::Active { activity: Activity::Turn { turn } } if matches!(turn.work, Work::Rule { .. })
+        Phase::Active { activity: Activity::Turn { turn, .. } } if matches!(turn.work, Work::Rule { .. })
     )));
     assert!(
         prefix_views(&user_log)

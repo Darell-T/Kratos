@@ -6,7 +6,7 @@ use kratos_api_client::{ApiRequest, Client, ClientError};
 use kratos_protocol::{LiveUpdate, Provider, ServerMessage, Thread, ThreadEventBody};
 use serde_json::{Value, json};
 
-use crate::running_engine::{RunningEngine, next_text, subscribed};
+use crate::running_engine::{RunningEngine, expect_silence, next_text, subscribed};
 use crate::server::post_whole_body_then_read;
 
 fn messages_path(thread: &Thread) -> String {
@@ -142,6 +142,38 @@ fn a_codex_message_streams_its_reply_live_and_its_end_reaches_the_log() {
     );
     let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
     assert_eq!(details.body["queue"], json!([]));
+}
+
+#[test]
+fn a_follow_that_ends_on_an_unreadable_page_stops_its_live_updates_too() {
+    // Catches a client still receiving live updates for a follow the engine reported as ended.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let thread = engine.create_thread_of(Provider::Codex);
+    engine
+        .client()
+        .post(
+            &messages_path(&thread),
+            &json!({ "text": "hello", "messageId": "m1" }),
+        )
+        .unwrap();
+    engine.start_turn();
+    rusqlite::Connection::open(home.path().join("kratos.db"))
+        .unwrap()
+        .execute("UPDATE thread_events SET event = 'not json'", [])
+        .unwrap();
+    let mut socket = subscribed(&engine, &thread.id, 0);
+
+    next_message(&mut socket, |message| {
+        matches!(message, ServerMessage::Error { .. })
+    });
+    emit(
+        &engine,
+        "item/agentMessage/delta",
+        json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "r1", "delta": "late" }),
+    );
+
+    expect_silence(&mut socket);
 }
 
 #[test]

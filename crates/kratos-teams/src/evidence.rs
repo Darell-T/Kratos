@@ -16,7 +16,7 @@ use kratos_protocol::CommandResult;
 use serde::{Deserialize, Serialize};
 
 use crate::diff::Diff;
-use crate::paths::{PathProblem, parse_repo_path, repo_path};
+use crate::paths::{RepoPath, RepoPathError, repo_path};
 use crate::reports::{FindingReport, Kind, Location};
 
 /// How long the engine lets an evidence command run. A timeout proves nothing.
@@ -33,10 +33,8 @@ const OUTPUT_TAIL_CHARS: usize = 4000;
 /// Why a finding's location is refused. The text is written for the reviewer.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum LocationProblem {
-    #[error("{0} is not a path relative to the repository root.")]
-    NotRelative(String),
-    #[error("{0} leaves the repository.")]
-    LeavesRepository(String),
+    #[error(transparent)]
+    InvalidPath(#[from] RepoPathError),
     #[error("{0} does not exist in the reviewed commit.")]
     NoSuchFile(String),
     #[error("{path} has no line {line}. It has {lines}.")]
@@ -46,15 +44,11 @@ pub enum LocationProblem {
 /// `None` when the location names a real line of a file in the reviewed commit. `file_text` is the
 /// file at that commit, or `None` if it does not exist there.
 pub fn location_problem(location: &Location, file_text: Option<&str>) -> Option<LocationProblem> {
-    let path = match parse_repo_path(&location.path) {
+    let path = match RepoPath::new(&location.path) {
         Ok(path) => path,
-        Err(PathProblem::Rooted) => {
-            return Some(LocationProblem::NotRelative(location.path.clone()));
-        }
-        Err(PathProblem::Climbs) => {
-            return Some(LocationProblem::LeavesRepository(location.path.clone()));
-        }
+        Err(error) => return Some(error.into()),
     };
+    let path = String::from(path);
     let Some(text) = file_text else {
         return Some(LocationProblem::NoSuchFile(path));
     };

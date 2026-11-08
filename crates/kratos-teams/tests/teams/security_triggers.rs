@@ -17,15 +17,57 @@ fn file(path: &str, added: &[&str]) -> DiffFile {
 }
 
 fn path_trigger(glob: &str) -> Trigger {
-    Trigger::Path {
-        glob: glob.to_owned(),
-    }
+    Trigger::path(glob).expect("a valid glob")
 }
 
 fn code_trigger(pattern: &str) -> Trigger {
-    Trigger::Code {
-        pattern: pattern.to_owned(),
+    Trigger::code(pattern).expect("a valid regex")
+}
+
+#[test]
+fn invalid_security_triggers_are_refused_when_the_task_started_fact_is_read() {
+    // Catches unchecked stored patterns surviving until the later security scan.
+    let task = crate::support::Task::two().script(Default::default());
+    for (kind, field, pattern) in [("path", "glob", "src/[a"), ("code", "pattern", "spawn(")] {
+        let mut fact = serde_json::to_value(&task.log()[0].fact).unwrap();
+        fact["started"]["triggers"] = serde_json::json!([{ "kind": kind, field: pattern }]);
+        let parsed = serde_json::from_value::<kratos_teams::facts::Fact>(fact);
+        let error = parsed
+            .expect_err("an invalid trigger must be rejected")
+            .to_string();
+        assert!(error.contains(pattern), "{kind}: {error}");
     }
+}
+
+#[test]
+fn stored_security_triggers_keep_their_wire_shape_and_match_after_reading() {
+    // Catches compiled trigger state leaking into facts or changing stored regex whitespace.
+    let task = crate::support::Task::two().script(Default::default());
+    let mut fact = serde_json::to_value(&task.log()[0].fact).unwrap();
+    let triggers = serde_json::json!([
+        { "kind": "path", "glob": "src/**" },
+        { "kind": "code", "pattern": " spawn " }
+    ]);
+    fact["started"]["triggers"] = triggers.clone();
+    let kratos_teams::facts::Fact::TaskStarted { started } = serde_json::from_value(fact).unwrap()
+    else {
+        panic!("the initial fact starts the task");
+    };
+    assert_eq!(serde_json::to_value(&started.triggers).unwrap(), triggers);
+    assert_eq!(
+        match_triggers(&started.triggers, &[file("src/a.rs", &[" spawn "])]),
+        vec![
+            TriggerHit::Path {
+                glob: "src/**".to_owned(),
+                path: "src/a.rs".to_owned()
+            },
+            TriggerHit::Code {
+                pattern: " spawn ".to_owned(),
+                path: "src/a.rs".to_owned(),
+                line: "spawn".to_owned()
+            },
+        ]
+    );
 }
 
 #[test]
@@ -146,7 +188,7 @@ fn globs_match_changed_paths_and_patterns_match_added_lines() {
 
     assert_eq!(
         hits,
-        Ok(vec![
+        vec![
             TriggerHit::Path {
                 glob: "src/providers/**".to_owned(),
                 path: "src/providers/codex.ts".to_owned()
@@ -156,17 +198,14 @@ fn globs_match_changed_paths_and_patterns_match_added_lines() {
                 path: "src/ui/view.ts".to_owned(),
                 line: "import { spawn } from 'node:child_process';".to_owned()
             },
-        ])
+        ]
     );
 }
 
 #[test]
 fn a_star_stays_inside_one_folder_and_two_stars_cross_folders() {
-    let hits = |glob: &str, path: &str| {
-        match_triggers(&[path_trigger(glob)], &[file(path, &[])])
-            .unwrap()
-            .len()
-    };
+    let hits =
+        |glob: &str, path: &str| match_triggers(&[path_trigger(glob)], &[file(path, &[])]).len();
 
     assert_eq!(hits("*.rs", "main.rs"), 1);
     assert_eq!(hits("*.rs", "src/main.rs"), 0);
@@ -256,7 +295,7 @@ fn each_default_pattern_catches_its_case_and_leaves_the_benign_neighbour_alone()
     let triggers = default_triggers();
     for (index, risky, benign) in FIXTURES {
         let pattern = DEFAULT_PATTERNS[index];
-        let hits = match_triggers(&triggers, &[file("src/x.rs", &[risky])]).unwrap();
+        let hits = match_triggers(&triggers, &[file("src/x.rs", &[risky])]);
         let patterns: Vec<&str> = hits
             .iter()
             .filter_map(|hit| match hit {
@@ -270,7 +309,7 @@ fn each_default_pattern_catches_its_case_and_leaves_the_benign_neighbour_alone()
             "`{risky}` should hit only pattern {index}"
         );
 
-        let quiet = match_triggers(&triggers, &[file("src/x.rs", &[benign])]).unwrap();
+        let quiet = match_triggers(&triggers, &[file("src/x.rs", &[benign])]);
         assert_eq!(quiet, vec![], "`{benign}` is benign");
     }
 }
@@ -280,12 +319,10 @@ fn removing_a_default_pattern_leaves_its_fixture_unmatched() {
     for (index, risky, _) in FIXTURES {
         let without: Vec<Trigger> = default_triggers()
             .into_iter()
-            .filter(|trigger| {
-                !matches!(trigger, Trigger::Code { pattern } if pattern == DEFAULT_PATTERNS[index])
-            })
+            .filter(|trigger| trigger != &code_trigger(DEFAULT_PATTERNS[index]))
             .collect();
 
-        let hits = match_triggers(&without, &[file("src/x.rs", &[risky])]).unwrap();
+        let hits = match_triggers(&without, &[file("src/x.rs", &[risky])]);
 
         assert_eq!(
             hits,
@@ -310,7 +347,7 @@ fn rust_process_and_network_calls_in_ordinary_source_paths_select_review() {
     ];
 
     for (path, line) in ordinary {
-        let hits = match_triggers(&triggers, &[file(path, &[line])]).unwrap();
+        let hits = match_triggers(&triggers, &[file(path, &[line])]);
         assert!(!hits.is_empty(), "{line} in {path} selects review");
     }
 }
@@ -328,11 +365,11 @@ fn build_scripts_cargo_config_env_files_and_permission_named_files_select_review
         "src/permissions.rs",
         "src/approvalPolicy.ts",
     ] {
-        let hits = match_triggers(&triggers, &[file(path, &[])]).unwrap();
+        let hits = match_triggers(&triggers, &[file(path, &[])]);
         assert!(!hits.is_empty(), "{path} selects review");
     }
     assert_eq!(
-        match_triggers(&triggers, &[file("src/math.rs", &["a + b"])]).unwrap(),
+        match_triggers(&triggers, &[file("src/math.rs", &["a + b"])]),
         vec![]
     );
 }
@@ -344,12 +381,11 @@ fn no_more_than_fifty_hits_and_no_more_than_two_hundred_characters_of_a_line_are
         .collect();
     let long_line = format!("child_process {}", "x".repeat(500));
 
-    let hits = match_triggers(&[code_trigger("child_process")], &many).unwrap();
+    let hits = match_triggers(&[code_trigger("child_process")], &many);
     let cut = match_triggers(
         &[code_trigger("child_process")],
         &[file("a.ts", &[&long_line])],
-    )
-    .unwrap();
+    );
 
     assert_eq!(hits.len(), MAX_HITS);
     let TriggerHit::Code { line, .. } = &cut[0] else {
@@ -365,7 +401,7 @@ fn a_process_call_after_a_long_ascii_literal_selects_review_with_a_bounded_snipp
         "x".repeat(2_100)
     );
 
-    let hits = match_triggers(&default_triggers(), &[file("src/run.rs", &[&added])]).unwrap();
+    let hits = match_triggers(&default_triggers(), &[file("src/run.rs", &[&added])]);
 
     assert_eq!(hits.len(), 1);
     let TriggerHit::Code {
@@ -390,7 +426,7 @@ fn a_network_call_after_a_long_unicode_literal_selects_review_with_a_bounded_sni
         "界🙂".repeat(1_100)
     );
 
-    let hits = match_triggers(&default_triggers(), &[file("src/net.rs", &[&added])]).unwrap();
+    let hits = match_triggers(&default_triggers(), &[file("src/net.rs", &[&added])]);
 
     assert_eq!(hits.len(), 1);
     let TriggerHit::Code {
@@ -417,11 +453,11 @@ fn long_benign_lines_and_disabled_triggers_still_select_no_review() {
         let risky = format!("let payload = \"{padding}\"; reqwest::get(url).await?;");
 
         assert_eq!(
-            match_triggers(&default_triggers(), &[file("src/run.rs", &[&benign])]).unwrap(),
+            match_triggers(&default_triggers(), &[file("src/run.rs", &[&benign])]),
             vec![]
         );
         assert_eq!(
-            match_triggers(&[], &[file("src/net.rs", &[&risky])]).unwrap(),
+            match_triggers(&[], &[file("src/net.rs", &[&risky])]),
             vec![]
         );
     }
@@ -434,16 +470,20 @@ fn a_pattern_that_runs_out_of_budget_on_a_line_counts_as_a_hit_instead_of_hangin
     let evil = code_trigger(r"^(?:(a|aa)(?!b))+$");
     let line = format!("{}b", "a".repeat(200));
 
-    let hits = match_triggers(&[evil], &[file("a.ts", &[&line])]).unwrap();
+    let hits = match_triggers(&[evil], &[file("a.ts", &[&line])]);
 
     assert_eq!(hits.len(), 1);
 }
 
 #[test]
-fn a_stored_trigger_that_no_longer_compiles_is_an_error_naming_it() {
-    let broken = match_triggers(&[code_trigger("spawn(")], &[file("a.ts", &["spawn()"])]);
-
-    assert!(matches!(broken, Err(TriggerError::Stale { trigger, .. }) if trigger == "spawn("));
+fn a_trigger_that_cannot_compile_is_refused_at_construction_and_names_the_pattern() {
+    // Catches invalid programmatically created triggers bypassing fact deserialization.
+    assert!(
+        matches!(Trigger::code("spawn("), Err(TriggerError::Invalid { trigger, .. }) if trigger == "spawn(")
+    );
+    assert!(
+        matches!(Trigger::path("src/[a"), Err(TriggerError::Invalid { trigger, .. }) if trigger == "src/[a")
+    );
 }
 
 #[test]
@@ -452,7 +492,7 @@ fn only_a_diffs_added_lines_are_scanned_so_a_removed_dangerous_line_selects_noth
         "+++ b/src/a.rs\n@@ -1 +1 @@\n-std::process::Command::new(\"rm\");\n+let safe = 1;\n",
     );
 
-    let hits = match_triggers(&default_triggers(), &diff.files).unwrap();
+    let hits = match_triggers(&default_triggers(), &diff.files);
 
     assert_eq!(hits, vec![]);
 }

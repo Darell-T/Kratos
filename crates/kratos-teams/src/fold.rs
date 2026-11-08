@@ -360,10 +360,10 @@ impl TaskView {
     /// keeps the note that paused it and its resolutions.
     pub(crate) fn retake(self: Box<Self>, activity: Activity, seq: FactSeq) -> Box<TaskView> {
         let activity = match activity {
-            Activity::Turn { mut turn } => {
+            Activity::Turn { mut turn, .. } => {
                 turn.retries.clear();
                 turn.resend(seq, None);
-                Activity::Turn { turn }
+                Activity::Turn { turn, hold: None }
             }
             other => other,
         };
@@ -444,9 +444,8 @@ impl TaskView {
             note: None,
             resolutions: Vec::new(),
             questions_asked: 0,
-            hold: None,
         };
-        Ok(self.active(Activity::Turn { turn }))
+        Ok(self.active(Activity::Turn { turn, hold: None }))
     }
 
     /// `bindings = to`, and the deferred step starts under the new roles. The new holder gets fresh

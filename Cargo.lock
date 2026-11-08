@@ -624,7 +624,9 @@ dependencies = [
  "kratos-protocol",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
+ "tungstenite",
 ]
 
 [[package]]
@@ -674,6 +676,7 @@ dependencies = [
  "kratos-command-safety",
  "kratos-protocol",
  "kratos-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_path_to_error",
