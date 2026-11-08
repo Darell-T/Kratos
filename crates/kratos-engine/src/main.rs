@@ -17,7 +17,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use kratos_api_client::Client;
+use kratos_api_client::{Client, ClientError};
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
@@ -67,7 +67,7 @@ fn mcp(config: &Config) -> Result<(), StartError> {
     let client = Client::new(&format!("http://127.0.0.1:{}", config.port))
         .expect("a loopback address is valid")
         .with_token_from(&config.home);
-    let caller = mcp::Caller::new(client, thread_id);
+    let caller = mcp::Caller::new(client, thread_id)?;
     mcp::serve(&caller, io::stdin().lock(), io::stdout())?;
     Ok(())
 }
@@ -196,10 +196,31 @@ enum CodexMissing {
     Engine(#[source] io::Error),
 }
 
+#[cfg(not(windows))]
 async fn shutdown_signal() {
     if let Err(error) = tokio::signal::ctrl_c().await {
         eprintln!("cannot listen for Ctrl+C: {error}");
         std::future::pending::<()>().await;
+    }
+}
+
+// A launcher that starts the engine in a new process group can stop it only with Ctrl+Break.
+#[cfg(windows)]
+async fn shutdown_signal() {
+    let signals = (
+        tokio::signal::windows::ctrl_c(),
+        tokio::signal::windows::ctrl_break(),
+    );
+    let (mut ctrl_c, mut ctrl_break) = match signals {
+        (Ok(ctrl_c), Ok(ctrl_break)) => (ctrl_c, ctrl_break),
+        (Err(error), _) | (_, Err(error)) => {
+            eprintln!("cannot listen for console shutdown signals: {error}");
+            return std::future::pending().await;
+        }
+    };
+    tokio::select! {
+        _ = ctrl_c.recv() => {},
+        _ = ctrl_break.recv() => {},
     }
 }
 
@@ -227,6 +248,8 @@ enum StartError {
         "cannot put the engine in a Windows job object; refusing to start because agent processes could outlive it: {0}"
     )]
     Contain(#[source] io::Error),
+    #[error(transparent)]
+    Client(#[from] ClientError),
     #[error(transparent)]
     Config(#[from] ConfigError),
     #[error(transparent)]

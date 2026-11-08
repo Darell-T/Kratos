@@ -268,18 +268,14 @@ impl Harness {
 
     async fn connect(&mut self) -> &mut Control {
         if self.control.is_none() {
-            let deadline = tokio::time::Instant::now() + WAIT;
-            // Codex starts on demand inside this runtime, so the wait sleeps instead of blocking.
-            let port = loop {
-                if let Ok(port) = codex_control::read_port(&self.control_file) {
-                    break port;
-                }
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "fake-codex never started"
-                );
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            };
+            let control_file = self.control_file.clone();
+            // Codex starts inside this runtime, so wait on a blocking worker.
+            let port = tokio::task::spawn_blocking(move || {
+                codex_control::wait_for_port(&control_file, WAIT)
+            })
+            .await
+            .expect("the port wait task finishes")
+            .expect("fake-codex never started");
             let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
             let (reader, writer) = stream.into_split();
             self.control = Some(Control {
@@ -478,4 +474,21 @@ fn uuid_like() -> String {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     )
+}
+
+#[tokio::test]
+async fn an_exited_fake_leaves_no_control_port_to_read() {
+    // Catches `connect` reading the port a dead fake wrote and meeting a refused connection, or
+    // another process's listener, before the restarted fake writes its own.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+
+    harness.exit_fake(1).await;
+
+    let left = codex_control::read_port(&harness.control_file);
+    assert!(
+        left.is_err(),
+        "the dead fake's port is still readable: {left:?}"
+    );
 }

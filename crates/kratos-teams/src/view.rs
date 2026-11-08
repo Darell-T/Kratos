@@ -10,7 +10,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use kratos_protocol::Provider;
 use serde::Serialize;
 
 use crate::evidence::{DropReason, EvidenceCheck, Rerun};
@@ -134,6 +133,7 @@ pub enum Activity {
     },
     Turn {
         turn: Turn,
+        hold: Option<Hold>,
     },
     Committing {
         step: StepId,
@@ -471,6 +471,11 @@ pub enum Hold {
     },
 }
 
+/// A scheduled continuation awaits its result; scheduler and handoff holds await the engine.
+pub(crate) fn awaits_result(hold: Option<&Hold>) -> bool {
+    matches!(hold, None | Some(Hold::Scheduled { .. }))
+}
+
 /// What the user or the planner settled for a step that had suspended, in the order it happened. It
 /// goes in the step's next message.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -507,29 +512,16 @@ pub struct Turn {
     pub resolutions: Vec<Resolution>,
     /// Questions this step has asked so far.
     pub questions_asked: u32,
-    pub hold: Option<Hold>,
 }
 
 impl Turn {
-    /// Whether a result for `message` is the one this turn waits for.
-    pub fn awaits(&self, message: &MessageId) -> bool {
-        self.is_awaiting_result() && self.message == *message
-    }
-
-    /// A turn held for the scheduler or for a handoff waits for the engine, not for a result.
-    pub fn is_awaiting_result(&self) -> bool {
-        matches!(self.hold, None | Some(Hold::Scheduled { .. }))
-    }
-
     /// Makes the step's next message due at `seq`, under a new message id. `follows` names the
     /// message it continues in the same session, or `None` for a fresh session. `due` decides which
-    /// queued user messages ride along, so it always moves with the message. A hold describes the
-    /// old message, so the new one starts without it.
+    /// queued user messages ride along, so it always moves with the message.
     pub(crate) fn resend(&mut self, seq: FactSeq, follows: Option<MessageId>) {
         self.message = MessageId::due_at(seq);
         self.due = seq;
         self.follows = follows;
-        self.hold = None;
     }
 }
 
@@ -866,11 +858,6 @@ impl TaskView {
         }
     }
 
-    /// The provider of the member who holds `role`, for the branch name and for prompts.
-    pub fn provider_of(&self, role: Role) -> Option<Provider> {
-        self.bindings.member(role).map(|member| member.provider)
-    }
-
     /// The commit the next round diffs from. It is the last round's, or the base.
     pub fn head(&self) -> &Sha {
         self.rounds.last().map_or(&self.base, |round| &round.commit)
@@ -904,8 +891,8 @@ impl Phase {
     pub fn waiting_message(&self) -> Option<&MessageId> {
         match self {
             Phase::Active {
-                activity: Activity::Turn { turn },
-            } if turn.is_awaiting_result() => Some(&turn.message),
+                activity: Activity::Turn { turn, hold },
+            } if awaits_result(hold.as_ref()) => Some(&turn.message),
             _ => None,
         }
     }
@@ -925,7 +912,7 @@ impl Activity {
     /// The role whose job this activity is, for a failure to name.
     pub fn role(&self) -> Role {
         match self {
-            Activity::Turn { turn } => turn.work.role(),
+            Activity::Turn { turn, .. } => turn.work.role(),
             Activity::Checking { .. } => Role::Reviewer,
             Activity::Rebinding { then, .. } => then.role(),
             Activity::Preparing { .. } | Activity::Committing { .. } => Role::Implementer,

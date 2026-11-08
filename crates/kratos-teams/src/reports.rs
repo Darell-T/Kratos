@@ -173,7 +173,7 @@ pub struct Check {
 #[serde(deny_unknown_fields)]
 pub struct AddedProbe {
     pub from: String,
-    pub to: String,
+    pub to: crate::paths::RepoPath,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

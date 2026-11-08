@@ -1,10 +1,10 @@
 use kratos_protocol::{
     Message, MessageId, MessageInput, MessageOrigin, MessageStatus, ThreadEventBody, ThreadId,
-    Timestamp, TurnId,
+    TurnId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::columns::{required_column, to_column, unreadable};
+use crate::columns::{required_column, timestamp_column, to_column, unreadable};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// Where a new message joins a thread's queue.
@@ -217,7 +217,7 @@ fn message_from_row(row: &Row<'_>) -> rusqlite::Result<Message> {
         origin: required_column(row, 2)?,
         status: status_from_columns(&status, turn_id, error)
             .ok_or_else(|| unreadable(3, format!("message status {status} without its details")))?,
-        queued_at: Timestamp::from_stored(row.get(6)?),
+        queued_at: timestamp_column(row, 6, "queued_at")?,
     })
 }
 

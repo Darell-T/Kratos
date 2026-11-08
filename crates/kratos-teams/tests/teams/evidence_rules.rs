@@ -7,6 +7,7 @@ use kratos_teams::evidence::{
     CommandJudgment, DropWhy, EvidenceCheck, LocationProblem, RerunVerdict, Seen, Start,
     finish_check, judge_command, location_problem, quote_appears, rerun, start_check,
 };
+use kratos_teams::paths::RepoPathError;
 use kratos_teams::reports::Location;
 
 use crate::support::*;
@@ -87,6 +88,7 @@ fn a_rerun_that_could_not_run_is_inconclusive_and_the_exit_code_decides_otherwis
 
 #[test]
 fn a_location_counts_only_when_a_relative_path_names_an_existing_line() {
+    // Catches invalid locations losing their path error or being accepted as existing lines.
     let text = Some("one\ntwo\nthree\n");
 
     assert_eq!(location_problem(&location("src/a.ts", 3), text), None);
@@ -109,19 +111,21 @@ fn a_location_counts_only_when_a_relative_path_names_an_existing_line() {
     );
     assert_eq!(
         location_problem(&location("src/../../etc/passwd", 1), text),
-        Some(LocationProblem::LeavesRepository(
+        Some(LocationProblem::InvalidPath(RepoPathError::Climbs(
             "src/../../etc/passwd".to_owned()
-        ))
+        )))
     );
     assert_eq!(
         location_problem(&location("C:/Windows/win.ini", 1), text),
-        Some(LocationProblem::NotRelative(
+        Some(LocationProblem::InvalidPath(RepoPathError::Rooted(
             "C:/Windows/win.ini".to_owned()
-        ))
+        )))
     );
     assert_eq!(
         location_problem(&location("/etc/passwd", 1), text),
-        Some(LocationProblem::NotRelative("/etc/passwd".to_owned()))
+        Some(LocationProblem::InvalidPath(RepoPathError::Rooted(
+            "/etc/passwd".to_owned()
+        )))
     );
 }
 

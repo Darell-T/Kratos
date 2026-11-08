@@ -6,12 +6,12 @@
 
 use kratos_protocol::{
     AccessLimit, AgentItem, Approval, ApprovalDecision, ApprovalId, ApprovalRequest, AskReason,
-    CappedText, ContextUsage, Continuation, ContinuationId, ContinuationState, ExtraAccess,
-    FileChange, FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId, MessageInput,
-    MessageOrigin, MessageStatus, NetworkAccess, PathAccess, PathAccessMode, PauseReason,
-    Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption, ReplySoFar,
-    RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId, ThreadSettings, Timestamp,
-    TurnChanges, TurnId, TurnOutcome, UsageWait,
+    CappedText, ContextLimit, ContextUsage, Continuation, ContinuationId, ContinuationState,
+    ExtraAccess, FileChange, FileChangeKind, ItemStatus, LiveUpdate, Message, MessageId,
+    MessageInput, MessageOrigin, MessageStatus, NetworkAccess, PathAccess, PathAccessMode,
+    PauseReason, Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption,
+    ReplySoFar, RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId,
+    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
 use std::fmt::Debug;
 
@@ -110,7 +110,7 @@ fn a_queued_message_reports_its_origin_and_status_beside_its_input() {
                 continuation_id: ContinuationId::new("c-1".into()),
             },
             status: MessageStatus::Accepted { turn_id: turn() },
-            queued_at: Timestamp::from_stored("2030-01-01T00:00:00.000Z".into()),
+            queued_at: Timestamp::try_from("2030-01-01T00:00:00.000Z".to_owned()).unwrap(),
         },
         r#"{"id":"m-1","input":[{"type":"text","text":"go"}],"by":"continuation","continuationId":"c-1","status":"accepted","turnId":"turn-1","queuedAt":"2030-01-01T00:00:00.000Z"}"#,
     );
@@ -369,7 +369,9 @@ fn thread_and_provider_events_keep_their_stored_shape() {
         (
             PauseReason::UsageLimit {
                 turn_id: turn(),
-                resets_at: Some(Timestamp::from_stored("2030-01-01T05:00:00.000Z".into())),
+                resets_at: Some(
+                    Timestamp::try_from("2030-01-01T05:00:00.000Z".to_owned()).unwrap(),
+                ),
             },
             r#""reason":"usageLimit","turnId":"turn-1","resetsAt":"2030-01-01T05:00:00.000Z""#,
         ),
@@ -387,10 +389,10 @@ fn thread_and_provider_events_keep_their_stored_shape() {
     assert_wire(
         ThreadEventBody::SettingsChanged {
             settings: ThreadSettings {
-                model: Some("gpt-5.4-mini".into()),
+                model: RequiredText::new("gpt-5.4-mini"),
                 permission: Permission::ApproveForMe,
                 plan_mode: false,
-                context_limit_tokens: Some(200000),
+                context_limit_tokens: ContextLimit::new(200_000),
             },
         },
         r#"{"kind":"settings.changed","settings":{"model":"gpt-5.4-mini","permission":"approveForMe","planMode":false,"contextLimitTokens":200000}}"#,

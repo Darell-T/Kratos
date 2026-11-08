@@ -25,7 +25,7 @@ impl RequiredText {
 
 /// What JavaScript's `String.prototype.trim` removes, so both engines accept and store the same
 /// text. `char::is_whitespace` differs in two characters: it keeps U+FEFF and strips U+0085.
-fn is_javascript_whitespace(character: char) -> bool {
+pub fn is_javascript_whitespace(character: char) -> bool {
     character == '\u{feff}' || (character.is_whitespace() && character != '\u{85}')
 }
 

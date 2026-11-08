@@ -25,6 +25,13 @@ pub const WAIT: Duration = Duration::from_secs(10);
 /// How long a test listens to a socket to show that nothing more arrives.
 pub const QUIET: Duration = Duration::from_millis(300);
 
+#[cfg(windows)]
+pub enum ShutdownSignal {
+    CtrlC,
+    /// Models a launcher that passes down the ignore-Ctrl+C flag.
+    CtrlBreak,
+}
+
 pub struct RunningEngine {
     child: Child,
     port: u16,
@@ -52,15 +59,15 @@ impl RunningEngine {
 
     /// Gives this engine its own hidden console so Ctrl+C cannot reach the test runner.
     #[cfg(windows)]
-    pub fn start_for_shutdown(home: &Path) -> RunningEngine {
+    pub fn start_for_shutdown(home: &Path, signal: ShutdownSignal) -> RunningEngine {
         Self::from_child(
             home,
-            Self::spawn_for_shutdown(home, include_str!("windows_shutdown.ps1")),
+            Self::spawn_for_shutdown(home, include_str!("windows_shutdown.ps1"), signal),
         )
     }
 
     #[cfg(windows)]
-    fn spawn_for_shutdown(home: &Path, script: &str) -> Child {
+    fn spawn_for_shutdown(home: &Path, script: &str, signal: ShutdownSignal) -> Child {
         Command::new("powershell.exe")
             .args([
                 "-NoLogo",
@@ -70,6 +77,13 @@ impl RunningEngine {
                 script,
             ])
             .env("KRATOS_SHUTDOWN_ENGINE", ENGINE)
+            .env(
+                "KRATOS_SHUTDOWN_SIGNAL",
+                match signal {
+                    ShutdownSignal::CtrlC => "0",
+                    ShutdownSignal::CtrlBreak => "1",
+                },
+            )
             .env("KRATOS_HOME", home)
             .env("KRATOS_PORT", "0")
             .env("CODEX_EXE", fake_agents::executable("fake-codex"))
@@ -148,17 +162,8 @@ impl RunningEngine {
     /// on an error answer.
     pub fn fake_codex(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
         let control = self.fake_codex_control_file();
-        let deadline = Instant::now() + WAIT;
-        let port = loop {
-            if let Ok(port) = codex_control::read_port(&control) {
-                break port;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "the engine never started fake-codex"
-            );
-            thread::sleep(Duration::from_millis(20));
-        };
+        let port = codex_control::wait_for_port(&control, WAIT)
+            .expect("the engine never started fake-codex");
         let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
         stream.set_read_timeout(Some(WAIT)).unwrap();
         let request = json!({ "id": 1, "method": method, "params": params });
@@ -417,7 +422,7 @@ fn console_helper_preparation_does_not_use_the_engine_startup_deadline() {
         WAIT.as_secs() + 1,
         include_str!("windows_shutdown.ps1")
     );
-    let child = RunningEngine::spawn_for_shutdown(home.path(), &script);
+    let child = RunningEngine::spawn_for_shutdown(home.path(), &script, ShutdownSignal::CtrlC);
     let mut engine = RunningEngine::from_child(home.path(), child);
     assert_eq!(engine.client().get("/api/health").unwrap().status, 200);
     engine.shutdown();

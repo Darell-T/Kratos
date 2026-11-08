@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 
-use kratos_api_client::Client;
+use kratos_api_client::{Client, ClientError};
 use kratos_codex_client::RequestId;
 use kratos_protocol::{HOME_VAR, ThreadId};
 use serde::Deserialize;
@@ -65,11 +65,11 @@ pub struct Caller {
 }
 
 impl Caller {
-    pub fn new(client: Client, thread_id: ThreadId) -> Caller {
-        Caller {
-            client: client.with_current_token().acting_for(thread_id.clone()),
+    pub fn new(client: Client, thread_id: ThreadId) -> Result<Caller, ClientError> {
+        Ok(Caller {
+            client: client.with_current_token()?.acting_for(thread_id.clone()),
             thread_id,
-        }
+        })
     }
 }
 
@@ -209,7 +209,7 @@ mod tests {
         // Catches a tools/call without a tool name run as a call to the tool named "", and a
         // message with no method answered as a call to an unknown method.
         let client = Client::new("http://127.0.0.1:9").unwrap();
-        let caller = Caller::new(client, ThreadId::new("t".to_owned()));
+        let caller = Caller::new(client, ThreadId::new("t".to_owned())).unwrap();
         let input = [
             r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{}}}"#,
             r#"{"jsonrpc":"2.0","id":2}"#,

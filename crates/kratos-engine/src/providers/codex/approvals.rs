@@ -109,23 +109,6 @@ impl Requests {
                 .values()
                 .any(|waiting| &waiting.thread_id == thread_id && waiting.is_blocking())
     }
-
-    /// Every thread with a request waiting, for closing them all when Codex exits.
-    pub fn threads(&self) -> Vec<ThreadId> {
-        let mut threads: Vec<ThreadId> = self
-            .approvals
-            .values()
-            .map(|waiting| waiting.thread_id.clone())
-            .chain(
-                self.questions
-                    .values()
-                    .map(|waiting| waiting.thread_id.clone()),
-            )
-            .collect();
-        threads.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-        threads.dedup();
-        threads
-    }
 }
 
 impl Waiting {

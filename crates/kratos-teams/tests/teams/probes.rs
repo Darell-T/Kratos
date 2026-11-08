@@ -32,7 +32,7 @@ fn implements_adding(from: &str, to: &str) -> Ended {
             responses: vec![fixed(1)],
             added_probes: vec![AddedProbe {
                 from: from.to_owned(),
-                to: to.to_owned(),
+                to: kratos_teams::paths::RepoPath::new(to).expect("a repository path"),
             }],
             ..done()
         },
@@ -103,7 +103,7 @@ fn the_user_decides_which_probes_stay_and_the_implementer_adds_the_picks_in_one_
                 done: ImplementerDone {
                     added_probes: vec![AddedProbe {
                         from: PROBE.to_owned(),
-                        to: "tests/null_session.rs".to_owned(),
+                        to: kratos_teams::paths::RepoPath::new("tests/null_session.rs").unwrap(),
                     }],
                     ..done()
                 },
@@ -457,24 +457,4 @@ fn a_commit_without_a_run_for_an_added_probe_is_a_damaged_record() {
     });
 
     assert!(matches!(refused, Err(Rejection::InvalidFact(_))));
-}
-
-#[test]
-fn a_delegated_copy_that_climbs_out_of_the_users_folder_is_rejected_though_a_glob_matches_its_text()
-{
-    for to in [
-        "tests/../../outside.rs",
-        "/etc/null_session.rs",
-        "C:/work/null_session.rs",
-    ] {
-        let status = delegated_outcome(&["**"], &["**"], to, true, true);
-
-        assert_eq!(
-            status,
-            ProbeStatus::Rejected {
-                reason: ProbeRejection::OutsideAllowedPaths
-            },
-            "{to}"
-        );
-    }
 }

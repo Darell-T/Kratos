@@ -1,7 +1,7 @@
 use kratos_protocol::{Seq, ThreadEvent, ThreadEventBody, ThreadId, Timestamp};
 use rusqlite::{Transaction, TransactionBehavior, params};
 
-use crate::columns::to_column;
+use crate::columns::{timestamp_now, to_column};
 use crate::events::last_seq_of;
 use crate::{Store, StoreError};
 
@@ -29,7 +29,7 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let at = Timestamp::now();
+        let at = timestamp_now()?;
         let Some(last_seq) = last_seq_of(&transaction, thread_id)? else {
             return Err(StoreError::UnknownThread(thread_id.clone()));
         };
