@@ -90,6 +90,13 @@ impl UsageTracker {
     /// Merges a rolling update for one bucket into the latest snapshot. A field the update leaves
     /// out keeps its last known value.
     pub fn merge_bucket(&self, provider: Provider, update: UsageBucket) {
+        let read_at = match Timestamp::now() {
+            Ok(read_at) => read_at,
+            Err(error) => {
+                self.record_unavailable(provider, error.to_string());
+                return;
+            }
+        };
         {
             let mut accounts = self.accounts();
             let Some(usage) = accounts
@@ -107,7 +114,7 @@ impl UsageTracker {
                 Some(bucket) => merge(bucket, update),
                 None => usage.buckets.push(update),
             }
-            usage.read_at = Timestamp::now();
+            usage.read_at = read_at;
         }
         self.changed();
     }
@@ -200,7 +207,7 @@ mod tests {
             plan: Some("plus".into()),
             allowance,
             buckets,
-            read_at: Timestamp::now(),
+            read_at: Timestamp::now().unwrap(),
         }
     }
 

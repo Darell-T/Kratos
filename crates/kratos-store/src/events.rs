@@ -1,6 +1,7 @@
 use kratos_protocol::{Seq, ThreadEvent, ThreadId, Timestamp};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
+use crate::columns::timestamp_column;
 use crate::{Store, StoreError};
 
 impl Store {
@@ -64,7 +65,7 @@ pub(crate) fn last_seq_of(
 
 struct StoredEvent {
     seq: u64,
-    at: String,
+    at: Timestamp,
     json: String,
 }
 
@@ -72,7 +73,7 @@ impl StoredEvent {
     fn from_row(row: &Row<'_>) -> rusqlite::Result<StoredEvent> {
         Ok(StoredEvent {
             seq: row.get(0)?,
-            at: row.get(1)?,
+            at: timestamp_column(row, 1, "at")?,
             json: row.get(2)?,
         })
     }
@@ -88,7 +89,7 @@ impl StoredEvent {
         Ok(ThreadEvent {
             thread_id: thread_id.clone(),
             seq,
-            at: Timestamp::from_stored(self.at),
+            at: self.at,
             event,
         })
     }

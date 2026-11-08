@@ -6,13 +6,12 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_
 use axum::response::{IntoResponse, Response};
 use kratos_protocol::{ClientMessage, LiveUpdate, Seq, ServerMessage, ThreadEvent, ThreadId};
 use kratos_store::StoreError;
-use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
-use tokio_stream::{StreamExt, StreamMap};
 
+use super::follows::{FollowUpdate, Follows};
 use super::json::{JsonError, parse_json};
 use super::{ApiError, MAX_SOCKET_MESSAGE_BYTES, ServerState};
-use crate::hub::{EventPages, FollowError, Hub};
+use crate::hub::{FollowError, Hub};
 
 /// What the WebSocket library buffers for one message. Clients are held to
 /// [`MAX_SOCKET_MESSAGE_BYTES`], but a message between the two limits is read in full and then
@@ -37,9 +36,7 @@ pub(super) async fn events(
 struct Connection {
     socket: WebSocket,
     hub: Hub,
-    follows: StreamMap<ThreadId, EventPages>,
-    /// Each followed thread's live updates, which the log does not keep (D88).
-    live: StreamMap<ThreadId, BroadcastStream<LiveUpdate>>,
+    follows: Follows,
 }
 
 impl Connection {
@@ -47,8 +44,7 @@ impl Connection {
         Connection {
             socket,
             hub,
-            follows: StreamMap::new(),
-            live: StreamMap::new(),
+            follows: Follows::default(),
         }
     }
 
@@ -58,12 +54,10 @@ impl Connection {
         loop {
             let flow = tokio::select! {
                 frame = self.socket.recv() => self.on_frame(frame).await,
-                Some((thread_id, page)) = self.follows.next(), if !self.follows.is_empty() => {
-                    self.on_page(thread_id, page).await
-                }
-                Some((thread_id, update)) = self.live.next(), if !self.live.is_empty() => {
-                    self.on_live(thread_id, update).await
-                }
+                update = self.follows.next() => match update {
+                    FollowUpdate::Page(thread_id, page) => self.on_page(thread_id, page).await,
+                    FollowUpdate::Live(thread_id, update) => self.on_live(thread_id, update).await,
+                },
             };
             if flow.is_break() {
                 return;
@@ -97,7 +91,6 @@ impl Connection {
             }
             Ok(ClientMessage::Unsubscribe { thread_id }) => {
                 self.follows.remove(&thread_id);
-                self.live.remove(&thread_id);
                 ControlFlow::Continue(())
             }
         }
@@ -106,19 +99,21 @@ impl Connection {
     async fn subscribe(&mut self, thread_id: ThreadId, after: Seq) -> ControlFlow<()> {
         match self.hub.follow(thread_id.clone(), after).await {
             Ok(pages) => {
-                self.follows.insert(thread_id.clone(), pages);
-                self.watch_live(thread_id).await
+                // The snapshot and the receiver come together, so no live update falls between
+                // them or arrives twice.
+                let (snapshot, updates) = self.hub.watch_live(&thread_id);
+                self.follows.insert(thread_id.clone(), pages, updates);
+                self.send_snapshot(thread_id, snapshot).await
             }
             Err(error) => self.send_error(follow_error_message(error)).await,
         }
     }
 
-    /// Starts the thread's live updates with the running turn's replies so far. The snapshot and
-    /// the receiver come together, so no update falls between them or arrives twice.
-    async fn watch_live(&mut self, thread_id: ThreadId) -> ControlFlow<()> {
-        let (snapshot, updates) = self.hub.watch_live(&thread_id);
-        self.live
-            .insert(thread_id.clone(), BroadcastStream::new(updates));
+    async fn send_snapshot(
+        &mut self,
+        thread_id: ThreadId,
+        snapshot: Option<LiveUpdate>,
+    ) -> ControlFlow<()> {
         match snapshot {
             Some(update) => self.send(&ServerMessage::Live { thread_id, update }).await,
             None => ControlFlow::Continue(()),
@@ -133,7 +128,11 @@ impl Connection {
     ) -> ControlFlow<()> {
         match update {
             Ok(update) => self.send(&ServerMessage::Live { thread_id, update }).await,
-            Err(BroadcastStreamRecvError::Lagged(_)) => self.watch_live(thread_id).await,
+            Err(BroadcastStreamRecvError::Lagged(_)) => {
+                let (snapshot, updates) = self.hub.watch_live(&thread_id);
+                self.follows.replace_live(thread_id.clone(), updates);
+                self.send_snapshot(thread_id, snapshot).await
+            }
         }
     }
 

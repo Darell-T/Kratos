@@ -10,7 +10,9 @@ use kratos_protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 
-use crate::columns::{from_column, provider_name, required_column, to_column, unreadable};
+use crate::columns::{
+    from_column, optional_timestamp_column, provider_name, required_column, to_column, unreadable,
+};
 use crate::{Enqueued, QueuePlace, Store, StoreError, ThreadWrite};
 
 impl ThreadWrite<'_> {
@@ -229,7 +231,7 @@ fn continuation_from_row(row: &Row<'_>) -> rusqlite::Result<(ThreadId, Continuat
             id: ContinuationId::new(row.get(1)?),
             turn_id: TurnId::new(row.get(2)?),
             waits_on: required_column(row, 3)?,
-            resets_at: row.get::<_, Option<String>>(4)?.map(Timestamp::from_stored),
+            resets_at: optional_timestamp_column(row, 4, "resets_at")?,
             state,
         },
     ))
