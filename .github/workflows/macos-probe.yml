@@ -1,0 +1,32 @@
+name: macOS killpg probe
+
+on:
+  push:
+    branches: [macos-killpg-probe]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: Probe (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run the C killpg probe
+        run: |
+          uname -a
+          cc -Wall -o killpg-probe probe/killpg.c
+          ./killpg-probe
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Run the failing tests with the killpg error printed
+        run: |
+          cargo test --locked -p kratos-process --lib unix -- --nocapture || true
+          cargo test --locked -p kratos-codex-client --test client fails_pending_and_later_requests_once_the_process_exits -- --nocapture || true

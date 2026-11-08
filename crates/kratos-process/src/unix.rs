@@ -35,6 +35,7 @@ impl Tree {
             return Ok(());
         }
         let error = io::Error::last_os_error();
+        eprintln!("PROBE killpg({group}, SIGKILL) failed: {error:?}");
         if error.raw_os_error() == Some(libc::ESRCH) {
             Ok(())
         } else {
