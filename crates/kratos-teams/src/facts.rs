@@ -60,7 +60,7 @@ pub struct StepId(pub FactSeq);
 pub struct MessageId(String);
 
 impl MessageId {
-    pub fn due_at(seq: FactSeq) -> MessageId {
+    pub(crate) fn due_at(seq: FactSeq) -> MessageId {
         MessageId(format!("m{}", seq.0))
     }
 
@@ -161,7 +161,7 @@ pub struct RulesSnapshot {
 }
 
 impl RulesSnapshot {
-    pub fn instruction_files(&self) -> [(&'static str, Option<&str>); 2] {
+    pub(crate) fn instruction_files(&self) -> [(&'static str, Option<&str>); 2] {
         [
             ("AGENTS.md", self.agents_md.as_deref()),
             ("CLAUDE.md", self.claude_md.as_deref()),
@@ -245,7 +245,7 @@ pub enum Depth {
 }
 
 impl LargeChange {
-    pub fn depth_of(self, size: ChangeSize) -> Depth {
+    pub(crate) fn depth_of(self, size: ChangeSize) -> Depth {
         if size.files >= self.files || size.lines >= self.lines {
             Depth::Thorough
         } else {

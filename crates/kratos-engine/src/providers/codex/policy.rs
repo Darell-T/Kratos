@@ -26,7 +26,7 @@ pub enum Verdict {
 
 /// The parts of a command approval request the decision reads.
 #[derive(Clone, Copy, Debug)]
-pub struct CommandRequest<'a> {
+pub(super) struct CommandRequest<'a> {
     /// The command as Codex shows it: its words joined with shell quoting.
     pub command: Option<&'a str>,
     /// The agent's reason for asking, which Codex sends with a request to leave the sandbox.
@@ -39,7 +39,7 @@ pub struct CommandRequest<'a> {
 /// unless it asks to leave the sandbox, the dangerous-command check flags it (D18), or it starts a
 /// shell or interpreter whose later input Kratos would never see. Plan mode changes the sandbox,
 /// not what asks: its profile writes nothing.
-pub fn decide_command(
+pub(super) fn decide_command(
     settings: &ThreadSettings,
     request: &CommandRequest<'_>,
     platform: DangerousCommandPlatform,

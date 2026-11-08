@@ -8,7 +8,7 @@ use super::{ApiError, MAX_BODY_BYTES};
 /// Reads a request body of at most [`MAX_BODY_BYTES`] and parses it into `T`. Answers 413 "Request
 /// body is too large", 400 "Request body must be valid JSON" for a syntax error or an empty body,
 /// and 400 naming the field for valid JSON of the wrong shape. `Content-Type` is ignored.
-pub async fn read_json<T: DeserializeOwned>(body: Body) -> Result<T, ApiError> {
+pub(crate) async fn read_json<T: DeserializeOwned>(body: Body) -> Result<T, ApiError> {
     let bytes = read_capped(body).await?;
     parse_json(&bytes).map_err(|error| match error {
         JsonError::Invalid => ApiError::bad_request("Request body must be valid JSON"),
@@ -18,7 +18,7 @@ pub async fn read_json<T: DeserializeOwned>(body: Body) -> Result<T, ApiError> {
 
 /// Reads `body` to its end and throws it away, for a request refused before its body matters. See
 /// [`read_capped`] for why the body is read at all.
-pub async fn discard(body: Body) {
+pub(super) async fn discard(body: Body) {
     let mut chunks = body.into_data_stream();
     while let Some(Ok(_)) = chunks.next().await {}
 }
@@ -45,14 +45,14 @@ async fn read_capped(body: Body) -> Result<Vec<u8>, ApiError> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum JsonError {
+pub(crate) enum JsonError {
     /// Not JSON at all, or JSON with something after the value.
     Invalid,
     /// JSON of the wrong shape. The text names the field, for example `text: must not be blank`.
     Shape(String),
 }
 
-pub fn parse_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, JsonError> {
+pub(crate) fn parse_json<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, JsonError> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let value = serde_path_to_error::deserialize(&mut deserializer).map_err(json_error)?;
     deserializer.end().map_err(|_| JsonError::Invalid)?;

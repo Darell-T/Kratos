@@ -47,7 +47,7 @@ impl Default for UsageTracker {
 
 impl UsageTracker {
     /// The account generation a read of `provider` starts under.
-    pub fn generation(&self, provider: Provider) -> u64 {
+    pub(crate) fn generation(&self, provider: Provider) -> u64 {
         self.accounts()
             .get(&provider)
             .map_or(0, |tracked| tracked.generation)
@@ -55,7 +55,7 @@ impl UsageTracker {
 
     /// Replaces the provider's snapshot with a full read made under `generation`. Returns false,
     /// changing nothing, when the account changed while the read was out.
-    pub fn record_read(&self, generation: u64, usage: AccountUsage) -> bool {
+    pub(crate) fn record_read(&self, generation: u64, usage: AccountUsage) -> bool {
         let recorded = {
             let mut accounts = self.accounts();
             let tracked = accounts.entry(usage.provider).or_insert(Tracked {
@@ -76,7 +76,7 @@ impl UsageTracker {
 
     /// A read of the provider failed. What was known stays for display, but nothing may be read as
     /// permission until the next full read.
-    pub fn record_unavailable(&self, provider: Provider, reason: String) {
+    pub(crate) fn record_unavailable(&self, provider: Provider, reason: String) {
         if let Some(usage) = self
             .accounts()
             .get_mut(&provider)
@@ -89,7 +89,7 @@ impl UsageTracker {
 
     /// Merges a rolling update for one bucket into the latest snapshot. A field the update leaves
     /// out keeps its last known value.
-    pub fn merge_bucket(&self, provider: Provider, update: UsageBucket) {
+    pub(crate) fn merge_bucket(&self, provider: Provider, update: UsageBucket) {
         let read_at = match Timestamp::now() {
             Ok(read_at) => read_at,
             Err(error) => {
@@ -121,7 +121,7 @@ impl UsageTracker {
 
     /// The signed-in account or its plan changed: every snapshot and read in flight describes an
     /// account that is gone.
-    pub fn account_changed(&self, provider: Provider) {
+    pub(crate) fn account_changed(&self, provider: Provider) {
         {
             let mut accounts = self.accounts();
             let tracked = accounts.entry(provider).or_insert(Tracked {

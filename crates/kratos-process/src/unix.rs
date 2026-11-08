@@ -6,12 +6,12 @@ use tokio::signal::unix::{SignalKind, signal};
 
 /// The child's process group. Its id is the child's process id, because the child leads it.
 #[derive(Debug)]
-pub struct Tree {
+pub(crate) struct Tree {
     group: Option<libc::pid_t>,
 }
 
 impl Tree {
-    pub fn spawn(command: &mut Command) -> io::Result<(Tree, Child)> {
+    pub(crate) fn spawn(command: &mut Command) -> io::Result<(Tree, Child)> {
         command.process_group(0);
         let child = command.spawn()?;
         let id = child
@@ -23,7 +23,7 @@ impl Tree {
     }
 
     /// Attempts to kill the group once, only while its leader has not been reaped.
-    pub fn end(&mut self) -> io::Result<()> {
+    pub(crate) fn end(&mut self) -> io::Result<()> {
         let Some(group) = self.group.take() else {
             return Ok(());
         };
@@ -44,7 +44,7 @@ impl Tree {
         }
     }
 
-    pub async fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+    pub(crate) async fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
         drop(child.stdin.take());
         let Some(group) = self.group else {
             return child.wait().await;

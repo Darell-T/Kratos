@@ -22,7 +22,7 @@ const CANCEL_CHECK: Duration = Duration::from_secs(1);
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-pub enum WaitOutcome {
+pub(crate) enum WaitOutcome {
     Idle,
     WaitingForInput {
         approvals: Vec<Approval>,
@@ -41,7 +41,7 @@ pub enum WaitOutcome {
 }
 
 /// Waits from `details` until the thread settles, Codex cancels the call, or `timeout` passes.
-pub fn wait(
+pub(super) fn wait(
     call: &Call,
     thread_id: ThreadId,
     details: ThreadDetails,

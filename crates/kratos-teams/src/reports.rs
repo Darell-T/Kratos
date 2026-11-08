@@ -53,7 +53,7 @@ impl FindingId {
     }
 
     /// The id of the finding at zero-based `position` in the record.
-    pub fn nth(position: usize) -> FindingId {
+    pub(crate) fn nth(position: usize) -> FindingId {
         let number = u32::try_from(position.saturating_add(1)).unwrap_or(u32::MAX);
         FindingId(NonZeroU32::new(number).unwrap_or(NonZeroU32::MAX))
     }
@@ -154,7 +154,7 @@ pub struct FindingReport {
 
 impl FindingReport {
     /// Only an important finding that is not a design opinion can block the work.
-    pub fn can_block(&self) -> bool {
+    pub(crate) fn can_block(&self) -> bool {
         self.severity == Severity::Important && self.kind != Kind::Design
     }
 }

@@ -19,7 +19,7 @@ use kratos_protocol::{Permission, ThreadSettings};
 
 /// The profile a turn selects, from the thread's settings at the turn's start (D87).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Profile {
+pub(super) enum Profile {
     /// Reads everything but Kratos's data and writes nothing.
     Plan,
     /// Writes the thread's workspaces and the temp folder.
@@ -31,7 +31,7 @@ pub enum Profile {
 }
 
 impl Profile {
-    pub fn for_settings(settings: &ThreadSettings) -> Profile {
+    pub(super) fn for_settings(settings: &ThreadSettings) -> Profile {
         match (settings.plan_mode, settings.permission) {
             (true, _) => Profile::Plan,
             (false, Permission::AskMe) => Profile::AskMe,
@@ -41,7 +41,7 @@ impl Profile {
     }
 
     /// The id the app-server knows the profile by.
-    pub fn id(self) -> &'static str {
+    pub(super) fn id(self) -> &'static str {
         match self {
             Profile::Plan => "kratos-plan",
             Profile::AskMe => "kratos-ask",
@@ -83,7 +83,7 @@ impl ProtectedFolders {
     /// Resolves existing links before checking a patch's destination, including new files below
     /// a linked directory. An unreadable or dangling link cannot establish a safe destination.
     /// Neither can a missing-parent climb or a new name the disk may interpret differently.
-    pub fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
+    pub(super) fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
         let path = resolve_destination(path)?;
         for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
             if is_within(&path, &resolve_destination(folder)?) {
@@ -95,7 +95,7 @@ impl ProtectedFolders {
 
     /// The `-c` arguments that define Kratos's three profiles, for the app-server's command line.
     /// `temp` is the folder Ask me and Approve for me let commands write besides the workspaces.
-    pub fn launch_arguments(&self, temp: &Path) -> Vec<OsString> {
+    pub(super) fn launch_arguments(&self, temp: &Path) -> Vec<OsString> {
         let deny = format!("{}=\"deny\"", toml_key(&self.kratos_home));
         let workspaces = vec![
             r#"":root"="read""#.to_owned(),

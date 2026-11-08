@@ -97,11 +97,11 @@ pub enum TriggerHit {
 pub const MAX_HITS: usize = 50;
 pub const MAX_HIT_LINE: usize = 200;
 /// The regex engine's backtracking budget for one line.
-pub const BACKTRACK_LIMIT: usize = 100_000;
+pub(crate) const BACKTRACK_LIMIT: usize = 100_000;
 
 /// The path triggers used when `REVIEW.md` has no `kratos-security` block. Build scripts and cargo
 /// configuration run code at build time, so they count.
-pub const DEFAULT_PATHS: [&str; 6] = [
+pub(crate) const DEFAULT_PATHS: [&str; 6] = [
     "**/*{sandbox,Sandbox,permission,Permission,approval,Approval,credential,Credential}*",
     "**/.env",
     "**/.env.*",

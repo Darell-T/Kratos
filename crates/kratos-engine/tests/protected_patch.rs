@@ -1,5 +1,5 @@
+use kratos_engine::providers::codex::ProtectedFolders;
 use kratos_engine::providers::codex::policy::{Verdict, decide_patch};
-use kratos_engine::providers::codex::profiles::ProtectedFolders;
 use kratos_protocol::{
     AskReason, CappedText, FileChange, FileChangeKind, Permission, ThreadSettings,
 };

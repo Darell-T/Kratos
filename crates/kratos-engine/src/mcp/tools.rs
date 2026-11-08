@@ -55,7 +55,7 @@ const TOOLS: [Tool; 11] = [
         description: "Decide an approval another thread waits on. Only a Full access thread may." },
 ];
 
-pub fn list() -> Vec<Value> {
+pub(super) fn list() -> Vec<Value> {
     TOOLS
         .iter()
         .map(|tool| {
@@ -66,12 +66,12 @@ pub fn list() -> Vec<Value> {
 }
 
 #[derive(Deserialize)]
-pub struct ToolCall {
+pub(crate) struct ToolCall {
     name: String,
     arguments: Option<Value>,
 }
 
-pub fn call(call: &Call, ToolCall { name, arguments }: ToolCall) -> Value {
+pub(super) fn call(call: &Call, ToolCall { name, arguments }: ToolCall) -> Value {
     let arguments = arguments.unwrap_or_else(|| json!({}));
     let answer = match TOOLS.iter().find(|tool| tool.name == name) {
         Some(tool) => (tool.run)(call, arguments),

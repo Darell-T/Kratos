@@ -17,7 +17,7 @@ mod commands;
 mod connection;
 mod incoming;
 pub mod policy;
-pub mod profiles;
+mod profiles;
 mod queue;
 mod recovery;
 #[cfg(windows)]
@@ -25,7 +25,7 @@ mod sandbox;
 mod settings;
 mod threads;
 mod turns;
-pub mod wire;
+mod wire;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -48,7 +48,7 @@ use crate::usage::{LimitStop, UsageTracker};
 pub use profiles::ProtectedFolders;
 
 /// The most undelivered messages one thread holds (D85).
-pub const MAX_PENDING_MESSAGES: usize = 10;
+pub(crate) const MAX_PENDING_MESSAGES: usize = 10;
 
 /// How the provider starts Codex and how long it waits on it.
 #[derive(Clone, Debug)]
@@ -75,7 +75,7 @@ pub struct CodexSettings {
 
 /// What became of a continuation the scheduler sent (D39).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Continued {
+pub(crate) enum Continued {
     Queued,
     /// The continuation was cancelled or sent before; there is nothing to send.
     NotOpen,
@@ -273,7 +273,10 @@ impl CodexProvider {
 
     /// Refuses settings a new thread could not run with, by the checks [`Self::set_settings`]
     /// applies.
-    pub async fn check_settings(&self, settings: ThreadSettings) -> Result<(), ProviderError> {
+    pub(crate) async fn check_settings(
+        &self,
+        settings: ThreadSettings,
+    ) -> Result<(), ProviderError> {
         self.ask(|reply| actor::Command::CheckSettings { settings, reply })
             .await
     }
@@ -345,7 +348,7 @@ impl CodexProvider {
 
     /// Queues a continuation's message ahead of the thread's waiting messages and lets the queue
     /// run (D39). Called by the usage scheduler only.
-    pub async fn continue_thread(
+    pub(crate) async fn continue_thread(
         &self,
         thread_id: ThreadId,
         continuation_id: ContinuationId,

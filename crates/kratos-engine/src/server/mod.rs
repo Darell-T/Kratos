@@ -1,6 +1,6 @@
 mod acting;
 mod agents;
-pub mod auth;
+mod auth;
 mod follows;
 mod json;
 mod local_only;
@@ -40,9 +40,9 @@ use crate::usage::UsageTracker;
 pub use auth::ClientToken;
 
 /// The largest request body a route reads. One byte more answers 413.
-pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_BODY_BYTES: usize = 1024 * 1024;
 /// The largest message a client may send on the socket. One byte more closes that socket.
-pub const MAX_SOCKET_MESSAGE_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_SOCKET_MESSAGE_BYTES: usize = 64 * 1024;
 /// Time for in-flight HTTP requests to finish after shutdown. A stalled upload cannot hold the
 /// process open beyond this drain period.
 const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -203,7 +203,7 @@ async fn not_found() -> ApiError {
 }
 
 #[derive(Debug)]
-pub struct ApiError {
+pub(crate) struct ApiError {
     status: StatusCode,
     message: String,
 }
@@ -216,21 +216,21 @@ impl ApiError {
         }
     }
 
-    pub fn bad_request(message: impl Into<String>) -> ApiError {
+    pub(crate) fn bad_request(message: impl Into<String>) -> ApiError {
         ApiError {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
         }
     }
 
-    pub fn not_found() -> ApiError {
+    pub(crate) fn not_found() -> ApiError {
         ApiError {
             status: StatusCode::NOT_FOUND,
             message: "Not found".into(),
         }
     }
 
-    pub fn unauthorized() -> ApiError {
+    pub(crate) fn unauthorized() -> ApiError {
         ApiError {
             status: StatusCode::UNAUTHORIZED,
             message: "Unauthorized".into(),
@@ -238,21 +238,21 @@ impl ApiError {
     }
 
     /// The agent cannot serve the request now, for example because Codex is not installed.
-    pub fn unavailable(message: String) -> ApiError {
+    pub(crate) fn unavailable(message: String) -> ApiError {
         ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             message,
         }
     }
 
-    pub fn forbidden() -> ApiError {
+    pub(crate) fn forbidden() -> ApiError {
         ApiError {
             status: StatusCode::FORBIDDEN,
             message: "Forbidden".into(),
         }
     }
 
-    pub fn body_too_large() -> ApiError {
+    pub(crate) fn body_too_large() -> ApiError {
         ApiError {
             status: StatusCode::PAYLOAD_TOO_LARGE,
             message: "Request body is too large".into(),
@@ -261,7 +261,7 @@ impl ApiError {
 
     /// Logs `error` to stderr and answers 500 "Internal server error", so internals never reach a
     /// client.
-    pub fn internal(error: &dyn std::error::Error) -> ApiError {
+    pub(crate) fn internal(error: &dyn std::error::Error) -> ApiError {
         eprintln!("internal error: {error}");
         ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -269,7 +269,7 @@ impl ApiError {
         }
     }
 
-    pub fn message(&self) -> &str {
+    pub(crate) fn message(&self) -> &str {
         &self.message
     }
 }
@@ -325,7 +325,7 @@ impl IntoResponse for ApiError {
 }
 
 /// `body` as JSON with `Content-Type: application/json; charset=utf-8`.
-pub fn json_reply<T: Serialize>(status: StatusCode, body: &T) -> Response {
+pub(crate) fn json_reply<T: Serialize>(status: StatusCode, body: &T) -> Response {
     let json = serde_json::to_vec(body).expect("wire types serialize");
     (
         status,

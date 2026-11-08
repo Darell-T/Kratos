@@ -20,10 +20,10 @@ use crate::paths::{RepoPath, RepoPathError, repo_path};
 use crate::reports::{FindingReport, Kind, Location};
 
 /// How long the engine lets an evidence command run. A timeout proves nothing.
-pub const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const EVIDENCE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// A quote shorter than this cannot be told apart from a coincidence.
-pub const MIN_QUOTE_LEN: usize = 12;
+pub(crate) const MIN_QUOTE_LEN: usize = 12;
 
 /// The tail of a command's output that the record keeps.
 const OUTPUT_TAIL_CHARS: usize = 4000;
@@ -151,7 +151,7 @@ pub enum DropWhy {
 
 impl DropWhy {
     /// Plain words for the record and for the reviewer.
-    pub fn explanation(self) -> &'static str {
+    pub(crate) fn explanation(self) -> &'static str {
         match self {
             DropWhy::Location => "the location does not exist",
             DropWhy::Quote => "the quote is not in the task or the project rules",

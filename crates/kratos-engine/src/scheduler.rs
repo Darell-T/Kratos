@@ -149,7 +149,7 @@ fn spent_window(bucket: &UsageBucket) -> Option<UsageWindow> {
 
 /// Whether a fresh read lets the continuation go: the account may use its included quota, it is
 /// the account the continuation waited on, and none of the buckets it waited on is still spent.
-pub fn may_continue(waits_on: &UsageWait, account: Option<&AccountUsage>) -> Readiness {
+pub(crate) fn may_continue(waits_on: &UsageWait, account: Option<&AccountUsage>) -> Readiness {
     let Some(account) = account else {
         return Readiness::Unanswered;
     };
@@ -172,7 +172,7 @@ pub fn may_continue(waits_on: &UsageWait, account: Option<&AccountUsage>) -> Rea
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Readiness {
+pub(crate) enum Readiness {
     Ready,
     StillSpent,
     /// No answer, or an answer that says nothing about permission.

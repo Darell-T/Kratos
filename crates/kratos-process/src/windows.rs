@@ -52,14 +52,14 @@ pub fn contain_current_process() -> io::Result<()> {
 }
 
 #[derive(Debug)]
-pub struct Tree {
+pub(crate) struct Tree {
     job: OwnedHandle,
 }
 
 impl Tree {
     /// Starts the child suspended, puts it in a new kill-on-close job, then lets it run. A failure
     /// at any step ends the child before returning, so no process runs outside a job.
-    pub fn spawn(command: &mut Command) -> io::Result<(Tree, Child)> {
+    pub(crate) fn spawn(command: &mut Command) -> io::Result<(Tree, Child)> {
         if !*CONTAINED
             .lock()
             .map_err(|_| io::Error::other("the process containment lock is poisoned"))?
@@ -79,7 +79,7 @@ impl Tree {
         Ok((Tree { job }, child))
     }
 
-    pub fn end(&mut self) -> io::Result<()> {
+    pub(crate) fn end(&mut self) -> io::Result<()> {
         // SAFETY: `self.job` is a job handle this value owns and keeps open.
         if unsafe { TerminateJobObject(self.job.0, ENDED_BY_OWNER) } == 0 {
             return Err(io::Error::last_os_error());
@@ -87,7 +87,7 @@ impl Tree {
         Ok(())
     }
 
-    pub async fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+    pub(crate) async fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
         child.wait().await
     }
 }

@@ -79,7 +79,7 @@ pub struct SharedMember(pub MemberId);
 
 /// Why a requested role change cannot be applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum RebindProblem {
+pub(crate) enum RebindProblem {
     #[error("a role change moves roles between the Team's own members and adds none")]
     DifferentMembers,
     #[error("a two-member Team has no planner, and a three-member Team always has one")]
@@ -130,13 +130,13 @@ impl Bindings {
         }
     }
 
-    pub fn role_of(&self, id: &MemberId) -> Option<Role> {
+    pub(crate) fn role_of(&self, id: &MemberId) -> Option<Role> {
         [Role::Planner, Role::Implementer, Role::Reviewer]
             .into_iter()
             .find(|role| self.member(*role).is_some_and(|member| member.id == *id))
     }
 
-    pub fn has_planner(&self) -> bool {
+    pub(crate) fn has_planner(&self) -> bool {
         self.planner.is_some()
     }
 
@@ -157,7 +157,7 @@ impl Bindings {
 
     /// Why `to` cannot replace these bindings, or `None` when it moves the same members between
     /// roles.
-    pub fn reassignment_problem(&self, to: &Bindings) -> Option<RebindProblem> {
+    pub(crate) fn reassignment_problem(&self, to: &Bindings) -> Option<RebindProblem> {
         if self.has_planner() != to.has_planner() {
             return Some(RebindProblem::PlannerPresenceChanged);
         }
