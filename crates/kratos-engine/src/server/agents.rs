@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
     AnswerQuestion, ApprovalId, ContinuationId, DecideApproval, MessageId, MessageOrigin,
-    QuestionId, QueueFull, SendMessage, ThreadId, ThreadSettings, ThreadSkills,
+    QuestionId, QueueFull, SendMessage, ThreadId, ThreadSettings,
 };
 use uuid::Uuid;
 
@@ -23,12 +23,6 @@ use crate::providers::{Agent, MAX_PENDING_MESSAGES, Sent};
 
 /// How long `GET /api/usage` waits for Codex's fresh read before it answers with what it knows.
 const USAGE_REFRESH_WAIT: Duration = Duration::from_secs(10);
-
-const NO_CLAUDE_SKILLS: &str =
-    "Kratos does not list a Claude thread's skills and slash commands yet";
-
-const NO_SLASH_COMMANDS: &str =
-    "Codex's app-server protocol does not list its slash commands, so Kratos cannot offer them";
 
 /// `POST /api/threads/{id}/messages`: 201 with the queued message, 200 with the message the
 /// client sent before under the same `messageId` (D85), 409 when that id holds another message, or
@@ -190,22 +184,16 @@ pub(super) async fn put_settings(
     details(&state, thread_id, None).await
 }
 
-/// `GET /api/threads/{id}/skills`: 200 with the skills Codex reports for the thread's folder, and
-/// why slash commands are missing (D97).
+/// `GET /api/threads/{id}/skills`: 200 with what the thread's agent reports for its folder. Codex
+/// lists skills and says why slash commands are missing. Claude lists the slash commands its
+/// session reports, which include its skills (D97).
 pub(super) async fn skills(
     State(state): State<ServerState>,
     id: ThreadPath,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    let Agent::Codex(codex) = state.agent(&thread_id).await? else {
-        return Err(ApiError::bad_request(NO_CLAUDE_SKILLS));
-    };
-    let skills = codex.skills(thread_id).await?;
-    let reply = ThreadSkills {
-        skills,
-        slash_commands_gap: Some(NO_SLASH_COMMANDS.to_owned()),
-    };
-    Ok(json_reply(StatusCode::OK, &reply))
+    let skills = state.agent(&thread_id).await?.skills(thread_id).await?;
+    Ok(json_reply(StatusCode::OK, &skills))
 }
 
 /// `POST /api/approvals/{id}`: 200 with the approval's outcome. The first decision is recorded and

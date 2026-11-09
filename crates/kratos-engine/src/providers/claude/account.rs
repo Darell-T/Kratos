@@ -8,7 +8,7 @@
 //! usage endpoint reports (see `limits`).
 
 use kratos_claude_client::{RateLimitEvent, RateLimitStatus, RequestError, UsageRead};
-use kratos_protocol::{Provider, ThreadId, Timestamp};
+use kratos_protocol::{Provider, SlashCommand, ThreadId, Timestamp};
 
 use super::ProviderError;
 use super::actor::{Actor, Done, Reply};
@@ -37,6 +37,22 @@ impl Actor {
             return;
         }
         self.when_open(&thread_id, Waiter::Usage(reply)).await;
+    }
+
+    /// Lists the slash commands the thread's session reports, starting one when none runs.
+    pub(super) async fn slash_commands(
+        &mut self,
+        thread_id: ThreadId,
+        reply: Reply<Vec<SlashCommand>>,
+    ) {
+        let ready = match self.running() {
+            Ok(()) => self.load(&thread_id).await,
+            Err(error) => Err(error),
+        };
+        match ready {
+            Ok(()) => self.when_open(&thread_id, Waiter::Commands(reply)).await,
+            Err(error) => drop(reply.send(Err(error))),
+        }
     }
 
     /// Asks the thread's open session for the account's usage. A read finished after the account

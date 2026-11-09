@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use kratos_claude_client::{Claude, PermissionMode, SessionId};
-use kratos_protocol::{MessageId, ThreadSettings, Timestamp, TurnId};
+use kratos_protocol::{MessageId, SlashCommand, ThreadSettings, Timestamp, TurnId};
 use tokio::task::AbortHandle;
 
 use super::actor::Reply;
@@ -49,12 +49,17 @@ pub(super) struct SeenLimit {
 pub(super) enum Waiter {
     /// Reads the account's usage through the session.
     Usage(Reply<()>),
+    /// Lists the slash commands the session's `initialize` reported.
+    Commands(Reply<Vec<SlashCommand>>),
 }
 
 impl Waiter {
     pub(super) fn fail(self, reason: &str) {
         match self {
             Waiter::Usage(reply) => {
+                let _ = reply.send(Err(super::ProviderError::Unavailable(reason.to_owned())));
+            }
+            Waiter::Commands(reply) => {
                 let _ = reply.send(Err(super::ProviderError::Unavailable(reason.to_owned())));
             }
         }
@@ -69,6 +74,8 @@ pub(super) struct OpenSession {
     /// Claude finished a turn in this process, so it works.
     pub worked: bool,
     pub plan: Option<String>,
+    /// The slash commands `initialize` listed, which the CLI fixes for the life of the process.
+    pub commands: Vec<kratos_claude_client::SlashCommand>,
 }
 
 pub(super) enum Session {

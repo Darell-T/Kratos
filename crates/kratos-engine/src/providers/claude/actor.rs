@@ -14,7 +14,8 @@ use kratos_claude_client::{
 };
 use kratos_protocol::{
     AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
-    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
+    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, SlashCommand, ThreadId,
+    ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -83,6 +84,10 @@ pub(super) enum Command {
     RefreshUsage {
         thread_id: ThreadId,
         reply: Reply<()>,
+    },
+    SlashCommands {
+        thread_id: ThreadId,
+        reply: Reply<Vec<SlashCommand>>,
     },
     Resume {
         thread_id: ThreadId,

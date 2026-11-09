@@ -134,6 +134,13 @@ impl Actor {
     fn serve(&self, thread_id: &ThreadId, waiter: Waiter) {
         match waiter {
             Waiter::Usage(reply) => self.read_usage(thread_id, Some(reply)),
+            Waiter::Commands(reply) => {
+                let open = self.threads.get(thread_id).and_then(|thread| thread.open());
+                let _ = reply.send(match open {
+                    Some(open) => Ok(wire::slash_commands(&open.commands)),
+                    None => Err(ProviderError::Unavailable("Claude is not running".into())),
+                });
+            }
         }
     }
 
@@ -196,6 +203,7 @@ impl Actor {
                     initialized,
                 } = *connected;
                 let plan = wire::plan(&initialized);
+                let commands = initialized.commands;
                 self.note_plan(&plan);
                 let thread = self.threads.get_mut(&thread_id).expect("checked above");
                 thread.session = Session::Open(OpenSession {
@@ -204,6 +212,7 @@ impl Actor {
                     started: false,
                     worked: false,
                     plan,
+                    commands,
                 });
                 tokio::spawn(forward(
                     thread_id.clone(),

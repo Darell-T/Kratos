@@ -77,6 +77,9 @@ impl Actor {
             Command::RefreshUsage { thread_id, reply } => {
                 self.refresh_usage(thread_id, reply).await;
             }
+            Command::SlashCommands { thread_id, reply } => {
+                self.slash_commands(thread_id, reply).await;
+            }
             Command::Resume { thread_id, reply } => {
                 let resumed = self.resume(&thread_id).await;
                 let _ = reply.send(resumed);

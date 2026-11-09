@@ -2,7 +2,7 @@
 //! sent, the items its replies become, and the plan that pays for the session.
 
 use kratos_claude_client::{Assistant, Initialized, StreamEvent};
-use kratos_protocol::{AgentItem, MessageId, MessageInput, TurnId};
+use kratos_protocol::{AgentItem, MessageId, MessageInput, SlashCommand, TurnId};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -91,6 +91,20 @@ pub(super) fn reply_delta(stream: &StreamEvent) -> Option<(String, String)> {
         reply_id(message_id, 0),
         event["delta"]["text"].as_str()?.to_owned(),
     ))
+}
+
+/// The slash commands the session's `initialize` listed.
+pub(super) fn slash_commands(commands: &[kratos_claude_client::SlashCommand]) -> Vec<SlashCommand> {
+    commands
+        .iter()
+        .map(|command| SlashCommand {
+            name: command.name.clone(),
+            description: command.description.clone(),
+            argument_hint: command.argument_hint.clone(),
+            aliases: command.aliases.clone(),
+            builtin: command.builtin,
+        })
+        .collect()
 }
 
 /// The subscription that pays for the session, never the account behind it (D24).

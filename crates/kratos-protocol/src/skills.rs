@@ -12,12 +12,29 @@ pub struct Skill {
     pub enabled: bool,
 }
 
+/// A slash command the agent CLI reports for the thread.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlashCommand {
+    pub name: String,
+    pub description: String,
+    /// What the command takes, such as `<file>`; empty when it takes nothing.
+    pub argument_hint: String,
+    /// Other names that run the command.
+    pub aliases: Vec<String>,
+    /// True for the CLI's own commands, false for one a user, plugin, or MCP server defines.
+    pub builtin: bool,
+}
+
 /// The body of `GET /api/threads/{id}/skills`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThreadSkills {
     pub skills: Vec<Skill>,
-    /// Why no slash commands are listed, when the CLI's protocol does not report them. Kratos does
-    /// not read the CLI's private files to fill the gap.
+    /// The slash commands the CLI's protocol reports. Claude lists its skills among them.
+    #[serde(default)]
+    pub slash_commands: Vec<SlashCommand>,
+    /// Why the listing is incomplete or empty, when it is. Kratos does not read the CLI's private
+    /// files to fill the gap.
     pub slash_commands_gap: Option<String>,
 }

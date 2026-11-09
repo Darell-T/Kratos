@@ -62,7 +62,7 @@ pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
     PostMessage, QueueFull, SendMessage,
 };
-pub use skills::{Skill, ThreadSkills};
+pub use skills::{Skill, SlashCommand, ThreadSkills};
 pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};
 pub use text::{RequiredText, is_javascript_whitespace};
 pub use threads::{

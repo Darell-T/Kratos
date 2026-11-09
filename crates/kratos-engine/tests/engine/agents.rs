@@ -6,7 +6,7 @@ use kratos_api_client::{ApiRequest, Client, ClientError};
 use kratos_protocol::{LiveUpdate, Provider, ServerMessage, Thread, ThreadEventBody};
 use serde_json::{Value, json};
 
-use crate::running_engine::{RunningEngine, expect_silence, next_text, subscribed};
+use crate::running_engine::{RunningEngine, expect_silence, next_text, post, subscribed};
 use crate::server::post_whole_body_then_read;
 
 fn messages_path(thread: &Thread) -> String {
@@ -480,4 +480,113 @@ fn a_full_queue_answers_429_and_stores_nothing() {
     );
     let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
     assert_eq!(details.body["queue"].as_array().unwrap().len(), 10);
+}
+
+#[test]
+fn a_claude_threads_skills_are_the_slash_commands_its_session_reports() {
+    // Catches the route still refusing a Claude thread, a command listed without its aliases or
+    // its built-in mark, and a silent gap where the project's own commands are not listed (D97).
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start_with_answering_claude(home.path());
+    let thread = engine.create_thread_of(Provider::Claude);
+
+    let skills = engine
+        .client()
+        .get(&format!("/api/threads/{}/skills", thread.id))
+        .unwrap();
+
+    assert_eq!(skills.status, 200, "{}", skills.body);
+    assert_eq!(skills.body["skills"], json!([]));
+    assert_eq!(
+        skills.body["slashCommands"],
+        json!([
+            { "name": "synthetic-command", "description": "Synthetic command",
+              "argumentHint": "", "aliases": ["synthetic-alias"], "builtin": true },
+            { "name": "synthetic-plugin-command", "description": "Defined outside the CLI",
+              "argumentHint": "<file>", "aliases": [], "builtin": false },
+        ])
+    );
+    assert!(
+        skills.body["slashCommandsGap"]
+            .as_str()
+            .unwrap()
+            .contains("Claude settings")
+    );
+}
+
+#[test]
+fn a_codex_threads_skills_still_list_no_slash_commands_and_keep_their_gap() {
+    // Catches the new slash command list leaking Claude's commands into a Codex thread, or the
+    // gap text Codex clients read changing (D97).
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let thread = engine.create_thread_of(Provider::Codex);
+
+    let skills = engine
+        .client()
+        .get(&format!("/api/threads/{}/skills", thread.id))
+        .unwrap();
+
+    assert_eq!(skills.body["slashCommands"], json!([]));
+    assert_eq!(
+        skills.body["slashCommandsGap"],
+        "Codex's app-server protocol does not list its slash commands, so Kratos cannot offer them"
+    );
+}
+
+#[test]
+fn usage_lists_the_claude_account_s_two_windows_beside_codex_s() {
+    // Catches Claude's windows missing from the report, or listed in the CLI's own units: a whole
+    // percent and the five-hour and weekly lengths, with the reset in the engine's time form.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start_with_answering_claude(home.path());
+    let client = engine.client();
+    client.get("/api/usage").unwrap();
+    engine.fake_codex(
+        "test/rateLimits",
+        json!({ "accountId": "account-1", "ordinaryUsageAllowed": true,
+                "rateLimits": { "limitId": "codex", "planType": "plus",
+                    "primary": { "usedPercent": 20, "windowDurationMins": 300, "resetsAt": 4_102_444_800_i64 } } }),
+    );
+    let thread = engine.create_thread_of(Provider::Claude);
+    post(&client, &thread, "hello");
+
+    let deadline = std::time::Instant::now() + crate::running_engine::WAIT;
+    let usage = loop {
+        let usage = client.get("/api/usage").unwrap();
+        let providers: Vec<&str> = usage.body["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|account| account["provider"].as_str().unwrap())
+            .collect();
+        if providers == ["claude", "codex"] {
+            break usage;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the report lists {providers:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    let claude = &usage.body["accounts"][0];
+    assert_eq!(claude["allowance"], json!({ "state": "allowed" }));
+    assert_eq!(
+        claude["account"],
+        Value::Null,
+        "no account id and no email (D24)"
+    );
+    assert_eq!(claude["plan"], "Claude Pro");
+    let unified = &claude["buckets"][0];
+    assert_eq!(unified["limitId"], "unified");
+    assert_eq!(unified["primary"]["usedPercent"], 19);
+    assert_eq!(unified["primary"]["windowMinutes"], 300);
+    assert_eq!(unified["secondary"]["usedPercent"], 7);
+    assert_eq!(unified["secondary"]["windowMinutes"], 10080);
+    assert_eq!(unified["primary"]["resetsAt"], "2030-01-01T05:00:00.112Z");
+    assert_eq!(
+        usage.body["accounts"][1]["buckets"][0]["primary"]["usedPercent"],
+        20
+    );
 }

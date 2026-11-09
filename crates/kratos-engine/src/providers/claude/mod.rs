@@ -42,7 +42,8 @@ use std::time::Duration;
 
 use kratos_protocol::{
     AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
-    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
+    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, SlashCommand, ThreadId,
+    ThreadSettings,
 };
 use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
@@ -300,6 +301,15 @@ impl ClaudeProvider {
     /// because the continuation that follows needs it (D38, D39).
     pub async fn refresh_usage(&self, thread_id: ThreadId) -> Result<(), ProviderError> {
         self.ask(|reply| actor::Command::RefreshUsage { thread_id, reply })
+            .await
+    }
+
+    /// The slash commands the thread's session reports, opening one when none runs (D97).
+    pub async fn slash_commands(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<SlashCommand>, ProviderError> {
+        self.ask(|reply| actor::Command::SlashCommands { thread_id, reply })
             .await
     }
 
