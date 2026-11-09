@@ -13,6 +13,7 @@ rust-version = "1.99.1"
 fake-agents = { path = "tools/fake-agents" }
 kratos-api-client = { path = "crates/kratos-api-client" }
 kratos-client = { path = "tools/kratos-client" }
+kratos-claude-client = { path = "crates/kratos-claude-client" }
 kratos-codex-client = { path = "crates/kratos-codex-client" }
 kratos-command-safety = { path = "crates/kratos-command-safety" }
 kratos-process = { path = "crates/kratos-process" }
