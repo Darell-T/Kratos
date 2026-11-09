@@ -120,11 +120,6 @@ impl Actor {
             .clone();
         let native = wire::native_id(&message.id).to_string();
         let first = thread.pending.is_empty();
-        if first {
-            // What an earlier turn or an idle moment left must not decide this turn's end.
-            thread.rejection = None;
-            thread.answering_model = None;
-        }
         thread.pending.push(InFlight {
             message_id: message.id.clone(),
             native: native.clone(),
@@ -240,6 +235,15 @@ impl Actor {
             return;
         };
         let message_id = flight.message_id.clone();
+        let thread = self.threads.get_mut(thread_id).expect("found above");
+        if thread.run.is_none() {
+            // The CLI's stdout is ordered, and it echoes a turn's first message before that turn
+            // makes any request. So whatever the CLI wrote before the echo, between turns or
+            // while the message was on its way, is already handled, and no later event is from an
+            // earlier turn. What was left must not decide this turn's end.
+            thread.rejection = None;
+            thread.answering_model = None;
+        }
         let _ = self.record_run(thread_id, vec![message_id], None).await;
     }
 

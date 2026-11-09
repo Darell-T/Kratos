@@ -14,7 +14,7 @@ use kratos_protocol::{
 use serde_json::{Value, json};
 
 use crate::clock::{HOUR, MINUTE, ManualClock, RESET, at};
-use crate::harness::{A, B, Harness, Launch, Options, message_id, text_input};
+use crate::harness::{A, B, C, Harness, Launch, Options, message_id, text_input};
 
 /// `RESET + seconds` in the form `get_usage` measured: ISO 8601 with microseconds and an offset.
 fn measured(seconds: u64) -> String {
@@ -926,9 +926,11 @@ async fn second_turn(harness: &Harness, launch: &Launch) {
 }
 
 #[tokio::test]
-async fn a_rejection_seen_between_turns_does_not_decide_the_next_turn() {
-    // Catches an event that arrived while the thread was idle deciding how the next turn ended:
-    // the turn that follows fails for its own reason, and would be continued at a reset.
+async fn a_rejection_seen_before_a_turn_is_accepted_does_not_decide_that_turn() {
+    // Catches an event the CLI wrote before it accepted the turn's first message deciding how that
+    // turn ended, whether it came while the thread was idle or after Kratos wrote the message and
+    // before the CLI echoed it. The next turn fails for its own reason and would be continued at
+    // a reset nobody asked for.
     let mut harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     harness.finish(&launch, &[A], json!({})).await;
@@ -938,13 +940,25 @@ async fn a_rejection_seen_between_turns_does_not_decide_the_next_turn() {
     harness
         .emit(&launch, rate_limit_event("rejected", "five_hour", RESET))
         .await;
-
     second_turn(&harness, &launch).await;
     harness.finish(&launch, &[B], limit_failure()).await;
-
     harness
         .wait_for(|event| {
             matches!(event, ThreadEventBody::TurnCompleted { turn_id, .. } if turn_id.as_str() == B)
+        })
+        .await;
+
+    harness.send(C, C).await;
+    harness.wait_written(&launch, &[A, B, C]).await;
+    harness
+        .emit(&launch, rate_limit_event("rejected", "five_hour", RESET))
+        .await;
+    harness.accept(&launch, C).await;
+    harness.finish(&launch, &[C], limit_failure()).await;
+
+    harness
+        .wait_for(|event| {
+            matches!(event, ThreadEventBody::TurnCompleted { turn_id, .. } if turn_id.as_str() == C)
         })
         .await;
     assert!(
