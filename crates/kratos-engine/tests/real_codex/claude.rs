@@ -112,7 +112,8 @@ async fn run(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
 async fn a_claude_mcp_command_runs_in_the_real_sandbox_and_cannot_write_outside_its_root() {
-    // Catches a fake-only permission check, an unsandboxed Claude command, and a refusal caused only by setup failure.
+    // Catches a fake-only permission check, an unsandboxed Claude command, a refusal caused only by setup failure,
+    // and a forbidden target inside a folder the profile grants.
     let harness = Harness::start(kratos_protocol::ThreadSettings::default(), vec![]).await;
     std::fs::write(
         harness.folder().join("powershell.exe"),
@@ -168,8 +169,37 @@ async fn a_claude_mcp_command_runs_in_the_real_sandbox_and_cannot_write_outside_
         matches!(control, CommandResult::Exited { exit_code: 0, ref stdout, .. } if stdout.contains("KRATOS_CLAUDE_SANDBOX_CONTROL")),
         "harmless process must run successfully: {control:?}"
     );
-    let target = harness.root.path().join("outside-claude-root.txt");
-    assert!(!target.exists());
+    let inside = harness.folder().join("inside-claude-root.txt");
+    let written = run(
+        &harness,
+        port,
+        thread_id,
+        "inside",
+        &format!(
+            "Set-Content -LiteralPath '{}' -Value allowed -ErrorAction Stop",
+            inside.display().to_string().replace('\'', "''")
+        ),
+    )
+    .await;
+    assert!(
+        matches!(written, CommandResult::Exited { exit_code: 0, .. }) && inside.exists(),
+        "the sandbox must let a command write the thread's folder: {written:?}"
+    );
+    // The Ask me profile writes the thread's folder and the temp folder, and the test's own
+    // folders live in the temp folder, so the refused target sits beside the build output.
+    let outside = tempfile::Builder::new()
+        .prefix("claude-outside-")
+        .tempdir_in(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"))
+        .unwrap();
+    let temp = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+    let target = std::fs::canonicalize(outside.path())
+        .unwrap()
+        .join("outside-claude-root.txt");
+    assert!(
+        !target.starts_with(&temp)
+            && !target.starts_with(std::fs::canonicalize(harness.folder()).unwrap()),
+        "the refused target must sit outside every folder the profile writes: {target:?}"
+    );
     let command = format!(
         "Set-Content -LiteralPath '{}' -Value blocked -ErrorAction Stop",
         target.display().to_string().replace('\'', "''")
