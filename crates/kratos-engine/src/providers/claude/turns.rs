@@ -119,6 +119,11 @@ impl Actor {
             .clone();
         let native = wire::native_id(&message.id).to_string();
         let first = thread.pending.is_empty();
+        if first {
+            // What an earlier turn or an idle moment left must not decide this turn's end.
+            thread.rejection = None;
+            thread.answering_model = None;
+        }
         thread.pending.push(InFlight {
             message_id: message.id.clone(),
             native: native.clone(),

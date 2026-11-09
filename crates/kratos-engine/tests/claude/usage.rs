@@ -919,3 +919,86 @@ async fn a_session_of_an_account_that_was_signed_out_no_longer_writes_usage() {
     assert_eq!(usage.allowance, Allowance::Allowed);
     assert_eq!(unified_percents(&usage), (Some(19), Some(7)));
 }
+
+/// Plays a second turn on the first process: message B is written, accepted, and in progress.
+async fn second_turn(harness: &Harness, launch: &Launch) {
+    harness.send(B, B).await;
+    harness.wait_written(launch, &[A, B]).await;
+    harness.accept(launch, B).await;
+}
+
+#[tokio::test]
+async fn a_rejection_seen_between_turns_does_not_decide_the_next_turn() {
+    // Catches an event that arrived while the thread was idle deciding how the next turn ended:
+    // the turn that follows fails for its own reason, and would be continued at a reset.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    harness.finish(&launch, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    harness
+        .emit(&launch, rate_limit_event("rejected", "five_hour", RESET))
+        .await;
+
+    second_turn(&harness, &launch).await;
+    harness.finish(&launch, &[B], limit_failure()).await;
+
+    harness
+        .wait_for(|event| {
+            matches!(event, ThreadEventBody::TurnCompleted { turn_id, .. } if turn_id.as_str() == B)
+        })
+        .await;
+    assert!(
+        !matches!(
+            harness.details().await.paused,
+            Some(PauseReason::UsageLimit { .. })
+        ),
+        "{:?}",
+        harness.details().await.paused
+    );
+    assert!(harness.stops.as_mut().unwrap().try_recv().is_err());
+}
+
+#[tokio::test]
+async fn a_turn_with_no_reply_does_not_take_the_previous_turns_model_for_its_window() {
+    // Catches a window read from the model of an earlier turn: a turn that wrote no reply, with
+    // several models in its result, has no answering model and so no window.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "assistant", "uuid": "u1", "session_id": "s",
+                    "message": { "id": "msg_1", "model": "model-a",
+                                 "content": [{ "type": "text", "text": "hi" }] } }),
+        )
+        .await;
+    harness.finish(&launch, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+
+    second_turn(&harness, &launch).await;
+    harness
+        .finish(
+            &launch,
+            &[B],
+            json!({
+                "modelUsage": { "model-a": { "contextWindow": 200_000 },
+                                "model-b": { "contextWindow": 1_000_000 } },
+                "usage": { "iterations": [{ "input_tokens": 1, "output_tokens": 1 }] },
+            }),
+        )
+        .await;
+
+    let ended = harness
+        .wait_for(|event| {
+            matches!(event, ThreadEventBody::TurnCompleted { turn_id, .. } if turn_id.as_str() == B)
+        })
+        .await;
+    let ThreadEventBody::TurnCompleted { context, .. } = ended else {
+        unreachable!("wait_for picked a turn end");
+    };
+    assert_eq!(context.unwrap().context_window, None);
+}
