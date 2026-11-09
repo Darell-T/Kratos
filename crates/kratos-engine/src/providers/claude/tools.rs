@@ -2,11 +2,13 @@
 
 use std::time::Duration;
 
-use kratos_claude_client::IncomingControl;
+use kratos_claude_client::{CanUseTool, IncomingControl};
 use kratos_command_safety::{
     DangerousCommandPlatform, dangerous_command, reads_commands_from_input, split_command_text,
 };
-use kratos_protocol::ThreadId;
+use kratos_protocol::{
+    ApprovalRequest, ExtraAccess, NetworkAccess, PathAccess, PathAccessMode, ThreadId,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -56,6 +58,28 @@ impl CommandArgs {
         }
     }
 
+    /// What the user is asked to approve, the same whichever entry point asked.
+    pub(super) fn approval(&self, folder: &str) -> ApprovalRequest {
+        ApprovalRequest::Command {
+            command: self.command_line.clone(),
+            cwd: Some(folder.to_owned()),
+            reason: self
+                .outside_sandbox
+                .then(|| "Run outside the sandbox, including protected folders".into()),
+            access: if self.outside_sandbox {
+                ExtraAccess {
+                    paths: vec![PathAccess {
+                        path: ":root".into(),
+                        access: PathAccessMode::Write,
+                    }],
+                    network: Some(NetworkAccess::Any),
+                }
+            } else {
+                ExtraAccess::default()
+            },
+        }
+    }
+
     pub(super) fn action(&self) -> Action {
         let words = self.words();
         Action::Command {
@@ -65,6 +89,31 @@ impl CommandArgs {
             outside: self.outside_sandbox,
         }
     }
+}
+
+/// Kratos's own `run_command` is the tool of the SDK server Kratos registered. A server of another
+/// source or name that borrows the name is an ordinary external tool.
+fn is_kratos_command(tool: &CanUseTool) -> bool {
+    tool.tool_name == "mcp__kratos__run_command"
+        && tool
+            .mcp_server
+            .as_ref()
+            .is_some_and(|server| server.source == "sdk" && server.name == "kratos")
+}
+
+/// What the policy decides for a permission callback about an MCP tool.
+pub(super) fn callback_action(tool: &CanUseTool) -> Action {
+    if !is_kratos_command(tool) {
+        return Action::ExternalTool;
+    }
+    CommandArgs::parse(tool.input.clone()).map_or(Action::Invalid, |args| args.action())
+}
+
+/// The command a permission callback asks about, when it is Kratos's own `run_command`.
+pub(super) fn callback_command(tool: &CanUseTool) -> Option<CommandArgs> {
+    is_kratos_command(tool)
+        .then(|| CommandArgs::parse(tool.input.clone()))
+        .flatten()
 }
 
 pub(super) fn result(id: Value, body: Value) -> Value {

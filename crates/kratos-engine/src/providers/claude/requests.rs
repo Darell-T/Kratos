@@ -118,13 +118,7 @@ impl Actor {
         else {
             return;
         };
-        if tool.tool_name == "mcp__kratos__run_command"
-            && tool
-                .mcp_server
-                .as_ref()
-                .is_some_and(|server| server.source == "sdk" && server.name == "kratos")
-            && let Some(args) = CommandArgs::parse(tool.input.clone())
-        {
+        if let Some(args) = tools::callback_command(tool) {
             self.threads
                 .get_mut(&pending.thread_id)
                 .expect("pending thread is loaded")

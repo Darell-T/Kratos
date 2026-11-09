@@ -1,6 +1,9 @@
 //! MCP execution and fail-closed tool classification.
 
-use kratos_protocol::{ApprovalDecision, AskReason, Permission, ThreadSettings};
+use kratos_protocol::{
+    ApprovalDecision, ApprovalRequest, AskReason, ExtraAccess, NetworkAccess, Permission,
+    ThreadSettings,
+};
 use serde_json::{Value, json};
 
 use crate::harness::{A, Harness, Launch, Options, WAIT};
@@ -602,5 +605,117 @@ async fn native_file_writes_match_the_workspace_and_temp_scope_of_sandboxed_comm
                 assert_eq!(response(&harness, &launch, id).await["behavior"], "allow");
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn a_command_approval_shows_the_command_folder_and_escape_access_on_both_entry_points() {
+    // Catches the real CLI's permission callback reaching the client as a generic Permissions request
+    // that hides the command and the extra access an escape asks for.
+    for (permission, escape) in [(Permission::ApproveForMe, true), (Permission::AskMe, false)] {
+        for callback in [true, false] {
+            let mut harness = Harness::start(Options {
+                tools: true,
+                settings: ThreadSettings {
+                    permission,
+                    ..ThreadSettings::default()
+                },
+                ..Options::default()
+            })
+            .await;
+            let launch = harness.begin(A, 1).await;
+            let input = json!({ "commandLine": "echo shown", "outsideSandbox": escape });
+            if callback {
+                harness.call(&launch, "test/ask", json!({ "requestId": "shown", "request": {
+                    "subtype": "can_use_tool", "tool_name": "mcp__kratos__run_command", "tool_use_id": "shown",
+                    "mcp_server": { "source": "sdk", "name": "kratos" }, "input": input
+                }})).await;
+            } else {
+                mcp(&harness, &launch, "shown", json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "run_command", "arguments": input } })).await;
+            }
+            let asked = approval(&mut harness).await;
+            let label = format!("{permission:?}, escape {escape}, callback {callback}");
+            let ApprovalRequest::Command {
+                command,
+                cwd,
+                reason,
+                access,
+            } = &asked.request
+            else {
+                panic!(
+                    "{label}: a command approval must show the command, not {:?}",
+                    asked.request
+                );
+            };
+            assert_eq!(command, "echo shown", "{label}");
+            assert_eq!(cwd.as_deref(), harness.folder().to_str(), "{label}");
+            assert_eq!(reason.is_some(), escape, "{label}");
+            if escape {
+                assert_eq!(access.network, Some(NetworkAccess::Any), "{label}");
+                assert_eq!(access.paths.len(), 1, "{label}");
+                assert_eq!(access.paths[0].path, ":root", "{label}");
+            } else {
+                assert_eq!(access, &ExtraAccess::default(), "{label}");
+            }
+            harness
+                .provider
+                .decide(asked.id, ApprovalDecision::Decline)
+                .await
+                .unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_server_borrowing_the_kratos_name_is_an_unchecked_tool_and_earns_no_command_grant() {
+    // Catches a spoofed server being shown as Kratos's command or leaving a grant that skips the dangerous-command ask.
+    let mut harness = Harness::start(Options {
+        tools: true,
+        settings: ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    let command = if cfg!(windows) {
+        "Remove-Item -Recurse -Force keep"
+    } else {
+        "rm -rf keep"
+    };
+    for (id, server) in [
+        ("stdio", json!({ "source": "stdio", "name": "kratos" })),
+        ("renamed", json!({ "source": "sdk", "name": "imposter" })),
+    ] {
+        harness.call(&launch, "test/ask", json!({ "requestId": id, "request": {
+            "subtype": "can_use_tool", "tool_name": "mcp__kratos__run_command", "tool_use_id": id,
+            "mcp_server": server, "input": { "commandLine": command }
+        }})).await;
+        let asked = approval(&mut harness).await;
+        assert_eq!(asked.why, AskReason::Unchecked, "{id}");
+        assert!(
+            matches!(asked.request, ApprovalRequest::Permissions { .. }),
+            "{id}: {:?}",
+            asked.request
+        );
+        harness
+            .provider
+            .decide(asked.id, ApprovalDecision::Accept)
+            .await
+            .unwrap();
+        assert_eq!(response(&harness, &launch, id).await["behavior"], "allow");
+        mcp(&harness, &launch, &format!("{id}-call"), json!({ "jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": command } } })).await;
+        let again = approval(&mut harness).await;
+        assert_eq!(
+            again.why,
+            AskReason::Dangerous,
+            "{id}: an approved impostor must not grant the command"
+        );
+        harness
+            .provider
+            .decide(again.id, ApprovalDecision::Decline)
+            .await
+            .unwrap();
     }
 }

@@ -15,7 +15,7 @@ use super::super::codex::temp_folder;
 use super::actor::Actor;
 use super::policy::{self, Action, Decision, Destination};
 use super::requests::{Answer, Pending};
-use super::tools::{self, CommandArgs};
+use super::tools;
 
 const DENIED: &str = "Kratos's command service is unavailable, so it declines every tool request";
 
@@ -95,7 +95,7 @@ fn action(
         "ExitPlanMode" => Action::ExitPlan,
         "Read" | "Glob" | "Grep" => local_read_action(tool, folder, protected),
         "WebFetch" | "WebSearch" | "TodoWrite" | "EnterPlanMode" => read_action(tool),
-        name if name.starts_with("mcp__") => mcp_action(tool),
+        name if name.starts_with("mcp__") => tools::callback_action(tool),
         _ => Action::Invalid,
     }
 }
@@ -176,17 +176,6 @@ fn local_read_action(
         }
     }
     Action::Read
-}
-
-fn mcp_action(tool: &CanUseTool) -> Action {
-    let sdk = tool
-        .mcp_server
-        .as_ref()
-        .is_some_and(|server| server.source == "sdk" && server.name == "kratos");
-    if tool.tool_name != "mcp__kratos__run_command" || !sdk {
-        return Action::ExternalTool;
-    }
-    CommandArgs::parse(tool.input.clone()).map_or(Action::Invalid, |args| args.action())
 }
 
 #[derive(Deserialize)]
@@ -337,25 +326,13 @@ impl Actor {
 }
 
 pub(super) fn shown(pending: &Pending, folder: &str) -> ApprovalRequest {
-    if let Answer::Command { args, .. } = &pending.answer {
-        return ApprovalRequest::Command {
-            command: args.command_line.clone(),
-            cwd: Some(folder.to_owned()),
-            reason: args
-                .outside_sandbox
-                .then(|| "Run outside the sandbox, including protected folders".into()),
-            access: if args.outside_sandbox {
-                ExtraAccess {
-                    paths: vec![kratos_protocol::PathAccess {
-                        path: ":root".into(),
-                        access: kratos_protocol::PathAccessMode::Write,
-                    }],
-                    network: Some(kratos_protocol::NetworkAccess::Any),
-                }
-            } else {
-                ExtraAccess::default()
-            },
-        };
+    let command = match (&pending.answer, &pending.control.request) {
+        (Answer::Command { args, .. }, _) => Some(args.clone()),
+        (Answer::Tool(_), ControlRequest::CanUseTool(tool)) => tools::callback_command(tool),
+        _ => None,
+    };
+    if let Some(command) = command {
+        return command.approval(folder);
     }
     let reason = match &pending.control.request {
         ControlRequest::CanUseTool(tool) => format!("{} {}", tool.tool_name, tool.input),
