@@ -436,11 +436,6 @@ impl Scheduler {
             Ok(()) => may_continue(&continuation.waits_on, account.as_ref()),
             Err(_) => Readiness::Unanswered,
         };
-        if let (Readiness::Unanswered, Err(missing)) =
-            (readiness, self.providers.agent(provider).map(|_| ()))
-        {
-            return self.unanswered(thread_id, continuation, &missing).await;
-        }
         match readiness {
             Readiness::Ready => self.send(thread_id, continuation).await,
             Readiness::StillSpent => {
@@ -448,10 +443,14 @@ impl Scheduler {
                     .await
             }
             Readiness::Unanswered => {
-                let why = format!(
-                    "{} did not say whether the account may run",
-                    display(provider)
-                );
+                // A provider that is not running says why itself; one that is says nothing.
+                let why = match self.providers.agent(provider) {
+                    Err(missing) => missing,
+                    Ok(_) => format!(
+                        "{} did not say whether the account may run",
+                        display(provider)
+                    ),
+                };
                 self.unanswered(thread_id, continuation, &why).await
             }
             Readiness::AccountChanged => {

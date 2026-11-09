@@ -26,15 +26,12 @@ impl Actor {
         if known.is_some_and(|known| known.plan.as_deref() != plan) {
             self.usage.account_changed(Provider::Claude);
         }
-        self.signed_in = Some(plan.map(str::to_owned));
+        self.signed_in = plan.map(str::to_owned);
     }
 
-    /// Whether a session of `plan` is of the account that signed in last. Before any session
-    /// reports, every session is.
+    /// Whether a session of `plan` is of the account that signed in last.
     fn is_signed_in(&self, plan: Option<&str>) -> bool {
-        self.signed_in
-            .as_ref()
-            .is_none_or(|signed_in| signed_in.as_deref() == plan)
+        self.signed_in.as_deref() == plan
     }
 
     /// Asks the thread's open session for the account's usage. A read finished after the account

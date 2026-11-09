@@ -18,7 +18,7 @@ impl ServerState {
             .await?
         {
             Some(stored) => self.agent(&stored.thread_id).await,
-            None => Ok(Agent::Codex(self.codex()?)),
+            None => self.agent_of(Provider::Codex),
         }
     }
 
@@ -30,7 +30,7 @@ impl ServerState {
             .await?
         {
             Some(stored) => self.agent(&stored.thread_id).await,
-            None => Ok(Agent::Codex(self.codex()?)),
+            None => self.agent_of(Provider::Codex),
         }
     }
 

@@ -192,8 +192,9 @@ pub(crate) struct Actor {
     pub(super) store: StoreThread,
     pub(super) usage: UsageTracker,
     /// The plan of the session that initialized last, which is the account that is signed in.
-    /// `None` before any session has.
-    pub(super) signed_in: Option<Option<String>>,
+    /// `None` for an account with no plan. Every read and event comes from a session that
+    /// initialized, so it is never read before a session has set it.
+    pub(super) signed_in: Option<String>,
     pub(super) limit_stops: mpsc::UnboundedSender<LimitStop>,
     pub(super) threads: HashMap<ThreadId, ThreadState>,
     /// Set when a write failed: no CLI runs after that, because its work would go unrecorded (L2).
