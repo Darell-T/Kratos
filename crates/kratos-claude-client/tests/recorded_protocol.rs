@@ -4,8 +4,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use kratos_claude_client::{
-    Initialized, SessionId, SessionStart, StreamMessage, TurnOutcome, TurnResult,
-    delivered_message_ids, locate_claude, transcript_path,
+    Initialized, RateLimitStatus, RateLimitType, SessionId, SessionStart, StreamMessage,
+    TurnOutcome, TurnResult, delivered_message_ids, locate_claude, transcript_path,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -149,8 +149,8 @@ fn real_rate_limit_event_keeps_two_windows_and_unix_second_resets() {
         panic!("rate limit event");
     };
     let info = event.rate_limit_info;
-    assert_eq!(info.status, "allowed");
-    assert_eq!(info.rate_limit_type.as_deref(), Some("five_hour"));
+    assert_eq!(info.status, RateLimitStatus::Allowed);
+    assert_eq!(info.rate_limit_type, Some(RateLimitType::FiveHour));
     assert_eq!(info.resets_at, Some(1_792_531_800));
     let windows = info.unified_windows.unwrap();
     let five = windows.five_hour.unwrap();

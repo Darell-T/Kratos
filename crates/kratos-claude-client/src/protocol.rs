@@ -5,6 +5,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::usage::{ApiRetry, RateLimitStatus, RateLimitType, TurnContext};
+
 /// Startup configuration for SDK-owned MCP servers, hooks, and structured output.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Initialize {
@@ -48,6 +50,13 @@ pub struct SlashCommand {
     pub name: String,
     pub description: String,
     pub argument_hint: String,
+    /// Other names that run the command.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// True for the CLI's own commands. The CLI leaves it out for a command a user, project, plugin
+    /// or MCP server defines.
+    #[serde(default)]
+    pub builtin: bool,
 }
 
 /// Login capabilities without an account email or organization identifier.
@@ -146,6 +155,8 @@ pub struct TurnResult {
     pub message_ids: Vec<String>,
     pub outcome: TurnOutcome,
     pub structured_output: Option<Value>,
+    /// The context the turn used, from the result's token counts.
+    pub context: TurnContext,
     pub raw: Value,
 }
 
@@ -196,6 +207,7 @@ impl TurnResult {
             message_ids,
             outcome,
             structured_output: wire.structured_output,
+            context: TurnContext::of(&raw),
             raw,
         })
     }
@@ -220,9 +232,11 @@ pub struct UnifiedWindows {
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RateLimitInfo {
-    pub status: String,
-    pub rate_limit_type: Option<String>,
+    pub status: RateLimitStatus,
+    pub rate_limit_type: Option<RateLimitType>,
     pub resets_at: Option<u64>,
+    /// The reported limit's utilization as a fraction, when the event gives one.
+    pub utilization: Option<f64>,
     pub unified_windows: Option<UnifiedWindows>,
     pub is_using_overage: Option<bool>,
     pub overage_status: Option<String>,
@@ -241,12 +255,19 @@ pub struct RateLimitEvent {
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamMessage {
     Init(SessionInit),
-    Replay { uuid: String },
+    Replay {
+        uuid: String,
+    },
     Assistant(Assistant),
     StreamEvent(StreamEvent),
     Result(TurnResult),
     RateLimit(RateLimitEvent),
-    Unrecognized { kind: String, raw: Value },
+    /// The CLI's request failed and the CLI retries by itself.
+    ApiRetry(ApiRetry),
+    Unrecognized {
+        kind: String,
+        raw: Value,
+    },
 }
 
 impl StreamMessage {
@@ -278,6 +299,9 @@ impl StreamMessage {
     }
 
     fn system(raw: Value) -> Result<Self, ParseError> {
+        if raw["subtype"] == "api_retry" {
+            return Ok(Self::ApiRetry(serde_json::from_value(raw)?));
+        }
         if raw["subtype"] != "init" {
             return Ok(Self::Unrecognized {
                 kind: "system".to_owned(),

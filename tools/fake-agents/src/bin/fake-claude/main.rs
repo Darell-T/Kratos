@@ -161,6 +161,7 @@ impl Fake {
             ),
             Some("test/echo") => reply(message, request["value"].clone()),
             Some("interrupt") => reply(message, json!({"still_queued":[]})),
+            Some("get_usage") => reply(message, usage_answer(&json!({}))),
             _ => self.fault(message),
         }
     }
@@ -221,14 +222,54 @@ impl Fake {
     }
 }
 
-/// The initialize answer the default recording holds: a Claude Pro login, no email.
+/// The initialize answer the default recording holds: a Claude Pro login, no email. The command
+/// list is the fake's own, so a test can tell a built-in from a defined command and see aliases.
 fn initialize_response() -> Value {
     let row = DEFAULT_RECORDING
         .lines()
         .map(|line| serde_json::from_str::<Row>(line).expect("default recording row"))
         .find(|row| row.dir == "in" && row.msg["type"] == "control_response")
         .expect("default initialize reply");
-    row.msg["response"]["response"].clone()
+    let mut response = row.msg["response"]["response"].clone();
+    response["commands"] = json!([
+        { "name": "synthetic-command", "description": "Synthetic command", "argumentHint": "",
+          "aliases": ["synthetic-alias"], "builtin": true },
+        { "name": "synthetic-plugin-command", "description": "Defined outside the CLI",
+          "argumentHint": "<file>" },
+    ]);
+    response
+}
+
+/// A `get_usage` answer in the shape the CLI measured: a whole percent and an ISO 8601 reset with
+/// microseconds and an offset, beside null keys the crate ignores. `window` fields `fiveHour` and
+/// `sevenDay` hold `{ utilization, resetsAt }` or null; `subscriptionType` and `available` override
+/// the plan and whether plan limits apply.
+fn usage_answer(window: &Value) -> Value {
+    let pick = |key: &str, default: Value| {
+        window.get(key).map_or(default.clone(), |given| {
+            if given.is_null() {
+                Value::Null
+            } else {
+                json!({ "utilization": given["utilization"], "resets_at": given["resetsAt"],
+                            "extra": null })
+            }
+        })
+    };
+    let available = window["available"].as_bool().unwrap_or(true);
+    let limits = json!({
+        "five_hour": pick("fiveHour", json!({ "utilization": 19, "resets_at": "2030-01-01T05:00:00.123456+00:00" })),
+        "seven_day": pick("sevenDay", json!({ "utilization": 7, "resets_at": "2030-01-06T12:00:00.000000+00:00" })),
+        "seven_day_opus": null,
+        "synthetic_codename_a": null,
+        "synthetic_codename_b": null,
+    });
+    json!({
+        "subscription_type": window.get("subscriptionType").cloned().unwrap_or(json!("pro")),
+        "rate_limits_available": available,
+        "session": { "total_cost_usd": 0 },
+        "behaviors": null,
+        "rate_limits": if available { limits } else { Value::Null },
+    })
 }
 
 /// Models a CLI that finishes its own shutdown after stdout closes: it flushes a marker, then exits.

@@ -51,7 +51,9 @@ impl Actor {
             StreamMessage::Assistant(assistant) => self.on_assistant(thread_id, &assistant).await,
             StreamMessage::StreamEvent(stream) => self.on_stream(thread_id, &stream),
             StreamMessage::Result(result) => self.on_result(thread_id, result).await,
-            StreamMessage::RateLimit(_) | StreamMessage::Unrecognized { .. } => {}
+            StreamMessage::RateLimit(_)
+            | StreamMessage::ApiRetry(_)
+            | StreamMessage::Unrecognized { .. } => {}
         }
     }
 

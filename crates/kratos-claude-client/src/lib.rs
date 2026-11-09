@@ -5,6 +5,7 @@ mod launch;
 mod locate;
 mod protocol;
 mod transcript;
+mod usage;
 
 pub use connection::{
     Claude, ConnectError, Control, Exit, ExitCause, Incoming, IncomingControl, MAX_LINE_BYTES,
@@ -21,4 +22,8 @@ pub use protocol::{
 pub use transcript::{
     DeliveredMessages, SessionId, SessionStart, TranscriptError, delivered_message_ids,
     transcript_path,
+};
+pub use usage::{
+    ApiRetry, IterationTokens, LimitWindow, RateLimitStatus, RateLimitType, RateLimits,
+    TurnContext, UsageRead,
 };

@@ -8,6 +8,8 @@
 //! `FAKE_CLAUDE_SILENT` makes the fake read its input and answer nothing, not even `initialize`,
 //! so a thread stays starting and its log holds only what the engine appends before a process is
 //! up.
+//! `get_usage` answers a plan read that a test changes with `test/usage` (see `usage_answer`), or
+//! refuses it as a CLI without the control does with `test/usageUnsupported`.
 //! `FAKE_CLAUDE_FAIL_START` names a file: while it exists, a start exits with the exit code it
 //! holds and a "Not logged in" message, so a test chooses which starts fail by writing the file.
 
@@ -18,7 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde_json::{Value, json};
 
-use crate::{fail, initialize_response, reply, send};
+use crate::{fail, initialize_response, reply, send, usage_answer};
 
 /// How the fake answers an `interrupt` control.
 #[derive(Clone, Copy, PartialEq)]
@@ -29,10 +31,18 @@ enum Interrupts {
     Reject,
 }
 
+/// How the fake answers a `get_usage` control.
+enum Usage {
+    /// The window the test last set with `test/usage`, `{}` until it sets one.
+    Answer(Value),
+    Unsupported,
+}
+
 struct Script {
     initializing: Option<Value>,
     received: Vec<Value>,
     interrupts: Interrupts,
+    usage: Usage,
 }
 
 type Shared = Arc<Mutex<Script>>;
@@ -50,6 +60,7 @@ pub fn run(log: &Path) {
         initializing: None,
         received: Vec::new(),
         interrupts: Interrupts::Acknowledge,
+        usage: Usage::Answer(json!({})),
     }));
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a localhost port is free");
     let port = listener.local_addr().expect("a bound port").port();
@@ -108,9 +119,12 @@ fn handle(script: &Shared, message: Value) {
         }
         return;
     }
-    if message["type"] != "control_request" || std::env::var_os("FAKE_CLAUDE_SILENT").is_some() {
-        return;
+    if message["type"] == "control_request" && std::env::var_os("FAKE_CLAUDE_SILENT").is_none() {
+        answer(script, message);
     }
+}
+
+fn answer(script: &Shared, message: Value) {
     match message["request"]["subtype"].as_str() {
         Some("initialize") if message["request"]["sdkMcpServers"] == json!(["kratos"]) => {
             lock(script).initializing = Some(message);
@@ -122,6 +136,10 @@ fn handle(script: &Shared, message: Value) {
         }
         Some("initialize") => reply(&message, initialize_response()),
         Some("interrupt") => interrupt(script, &message),
+        Some("get_usage") => match &lock(script).usage {
+            Usage::Answer(window) => reply(&message, usage_answer(window)),
+            Usage::Unsupported => fail(&message, "Unsupported control request subtype: get_usage"),
+        },
         _ => fail(&message, "unsupported fake control"),
     }
 }
@@ -174,6 +192,14 @@ fn control(script: &Shared, method: &Value, params: &Value) -> Value {
                 Some("reject") => Interrupts::Reject,
                 _ => Interrupts::Acknowledge,
             };
+            json!({})
+        }
+        Some("test/usage") => {
+            lock(script).usage = Usage::Answer(params.clone());
+            json!({})
+        }
+        Some("test/usageUnsupported") => {
+            lock(script).usage = Usage::Unsupported;
             json!({})
         }
         Some("test/exit") => std::process::exit(params["code"].as_i64().unwrap_or(1) as i32),

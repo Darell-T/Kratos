@@ -15,7 +15,9 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::launch::spawn;
-use crate::{ControlRequest, Initialize, Initialized, Launch, ParseError, StreamMessage};
+use crate::{
+    ControlRequest, Initialize, Initialized, Launch, ParseError, StreamMessage, UsageRead,
+};
 
 /// Largest of 1,089 messages in 34 spike recordings was 50,630 UTF-8 bytes without newline,
 /// s8-settings-isolation/b-user-project-local/wire.jsonl:6. 128 KiB gives 2.59 times headroom.
@@ -30,6 +32,9 @@ const STDERR_LINES_KEPT: usize = 20;
 pub enum Control {
     Initialize(Initialize),
     Interrupt,
+    /// The account's plan limits, without the scan of local transcripts behind the answer's
+    /// `behaviors`, which a usage meter does not need.
+    GetUsage,
     /// An arbitrary control body, for fakes and recorded replays. Only built with `test-util`.
     #[cfg(feature = "test-util")]
     Raw(Value),
@@ -40,6 +45,7 @@ impl Control {
         match self {
             Self::Initialize(_) => "initialize",
             Self::Interrupt => "interrupt",
+            Self::GetUsage => "get_usage",
             #[cfg(feature = "test-util")]
             Self::Raw(body) => body["subtype"].as_str().unwrap_or("unknown"),
         }
@@ -52,6 +58,7 @@ impl Control {
                 serde_json::to_value(initialize).expect("initialize fields serialize")
             }
             Self::Interrupt => json!({}),
+            Self::GetUsage => json!({ "skip_behaviors": true }),
             #[cfg(feature = "test-util")]
             Self::Raw(body) => body,
         };
@@ -496,6 +503,18 @@ impl Claude {
             json!({"type":"control_request", "request_id":id, "request":request}).to_string(),
         );
         reply.await.unwrap_or_else(|_| Err(self.ended()))
+    }
+
+    /// Reads the account's plan limits. A CLI that lacks `get_usage` refuses it, which is
+    /// [`RequestError::Rejected`], not a timeout.
+    ///
+    /// # Errors
+    /// Returns a CLI refusal, a timeout with unknown outcome, a connection exit, or an answer whose
+    /// shape is not a usage read.
+    pub async fn usage(&self) -> Result<UsageRead, RequestError> {
+        let answer = self.control(Control::GetUsage).await?;
+        serde_json::from_value(answer)
+            .map_err(|error| RequestError::Unreadable(ParseError::Json(error)))
     }
 
     /// Acknowledges the interrupt request. The terminal turn result still arrives on the stream.
