@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use kratos_claude_client::IncomingControl;
 use kratos_command_safety::{
-    DangerousCommandPlatform, dangerous_command, reads_commands_from_input,
+    DangerousCommandPlatform, dangerous_command, reads_commands_from_input, split_command_text,
 };
 use kratos_protocol::ThreadId;
 use serde::Deserialize;
@@ -46,15 +46,9 @@ impl CommandArgs {
 
     pub(super) fn words(&self) -> Vec<String> {
         if cfg!(windows) {
-            [
-                &self.shell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &self.command_line,
-            ]
-            .map(str::to_owned)
-            .to_vec()
+            [&self.shell, "-NoProfile", "-Command", &self.command_line]
+                .map(str::to_owned)
+                .to_vec()
         } else {
             [self.shell.as_str(), "-c", &self.command_line]
                 .map(str::to_owned)
@@ -66,7 +60,8 @@ impl CommandArgs {
         let words = self.words();
         Action::Command {
             flagged: dangerous_command(&words, DangerousCommandPlatform::host()).is_some()
-                || reads_commands_from_input(&words),
+                || reads_commands_from_input(&words)
+                || split_command_text(&self.command_line).is_none(),
             outside: self.outside_sandbox,
         }
     }

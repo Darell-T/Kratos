@@ -10,6 +10,98 @@ async fn mcp(harness: &Harness, launch: &Launch, id: &str, message: Value) {
     harness.call(launch, "test/ask", json!({ "requestId": id, "request": { "subtype": "mcp_message", "server_name": "kratos", "message": message } })).await;
 }
 
+#[cfg(windows)]
+async fn approval_before_answer(
+    harness: &Harness,
+    launch: &Launch,
+    id: &str,
+) -> kratos_protocol::Approval {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        if let Some(approval) = harness.details().await.approvals.into_iter().next() {
+            return approval;
+        }
+        let frames = harness.received(launch).await;
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame["response"]["request_id"] == id),
+            "{id}: a destructive command was answered before approval: {frames:?}"
+        );
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{id}: no command approval arrived"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn powershell_quoting_cannot_hide_a_forced_delete_from_either_command_entry_point() {
+    // Catches a PowerShell wrapper forcing the destructive-command check into its weaker POSIX fallback.
+    for permission in [
+        Permission::ApproveForMe,
+        Permission::FullAccess,
+        Permission::AskMe,
+    ] {
+        let harness = Harness::start(Options {
+            tools: true,
+            settings: ThreadSettings {
+                permission,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+        let target = harness.folder().join("src");
+        std::fs::create_dir(&target).unwrap();
+        for (index, command) in [
+            r"Write-Output `'; Remove-Item -Recurse -Force .\src",
+            r"<#'#> Remove-Item -Recurse -Force .\src",
+            r"Remove-Item -Recurse -Force .\src",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let callback = format!("callback-{index}");
+            harness.call(&launch, "test/ask", json!({ "requestId": callback, "request": {
+                "subtype": "can_use_tool", "tool_name": "mcp__kratos__run_command", "tool_use_id": callback,
+                "mcp_server": { "source": "sdk", "name": "kratos" }, "input": { "commandLine": command }
+            }})).await;
+            let asked = approval_before_answer(&harness, &launch, &callback).await;
+            assert_eq!(asked.why, AskReason::Dangerous, "{permission:?}: {command}");
+            harness
+                .provider
+                .decide(asked.id, ApprovalDecision::Decline)
+                .await
+                .unwrap();
+            assert_eq!(
+                response(&harness, &launch, &callback).await["behavior"],
+                "deny"
+            );
+            let direct = format!("direct-{index}");
+            mcp(&harness, &launch, &direct, json!({ "jsonrpc": "2.0", "id": index, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": command } } })).await;
+            let asked = approval_before_answer(&harness, &launch, &direct).await;
+            assert_eq!(asked.why, AskReason::Dangerous, "{permission:?}: {command}");
+            harness
+                .provider
+                .decide(asked.id, ApprovalDecision::Decline)
+                .await
+                .unwrap();
+            assert!(
+                response(&harness, &launch, &direct).await["mcp_response"]["error"].is_object()
+            );
+            assert!(target.is_dir());
+        }
+        assert!(
+            !harness.root.path().join("codex-control").exists(),
+            "a declined script reached execution"
+        );
+    }
+}
+
 #[tokio::test]
 async fn sdk_server_metadata_and_command_output_reach_claude_through_the_shared_runner() {
     // Catches wrong MCP envelopes, a command outside the thread's sandbox, or output lost before Claude receives it.
