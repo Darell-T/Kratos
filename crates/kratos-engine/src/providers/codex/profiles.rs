@@ -10,8 +10,8 @@
 //! denies Kratos's data folder, so no sandboxed command can read the client token (D19). A Full
 //! access command runs as the user and can. An approved patch writes wherever it points, so
 //! [`super::policy`] checks patch paths against [`ProtectedFolders`] before accepting one.
-//! Claude's separate command profiles enforce protected folders even under automatic permissions.
-//! Its wide profile allows ordinary outside writes (D93); an explicit escape always asks first.
+//! A Claude command runs in exactly the profile a Codex thread at the same level uses. Claude's own
+//! file tools run outside every sandbox, so [`sandbox_may_write`] gives them the same scope.
 
 use std::ffi::OsString;
 use std::io;
@@ -82,37 +82,6 @@ impl ProtectedFolders {
         &self.kratos_home
     }
 
-    pub(super) fn claude_launch_arguments(&self, temp: &Path) -> Vec<OsString> {
-        let protected = self
-            .read_only
-            .iter()
-            .map(|path| format!("{}=\"read\"", toml_key(path)))
-            .chain(std::iter::once(format!(
-                "{}=\"deny\"",
-                toml_key(&self.kratos_home)
-            )))
-            .collect::<Vec<_>>()
-            .join(",");
-        let ask = format!(
-            r#"":root"="read",":workspace_roots"="write",{}="write",{protected}"#,
-            toml_key(temp)
-        );
-        let wide = format!(r#"":root"="write",{protected}"#);
-        [("kratos-claude-ask", ask), ("kratos-claude-wide", wide)]
-            .into_iter()
-            .flat_map(|(id, entries)| {
-                [
-                    OsString::from("-c"),
-                    format!("permissions.{id}.filesystem={{{entries}}}").into(),
-                ]
-            })
-            .chain([
-                OsString::from("-c"),
-                "permissions.kratos-claude-wide.network.enabled=true".into(),
-            ])
-            .collect()
-    }
-
     /// Resolves existing links before checking a patch's destination, including new files below
     /// a linked directory. An unreadable or dangling link cannot establish a safe destination.
     /// Neither can a missing-parent climb or a new name the disk may interpret differently.
@@ -178,6 +147,11 @@ impl ProtectedFolders {
         );
         arguments
     }
+}
+
+/// The temp folder Ask me and Approve for me let commands write besides the thread's workspace.
+pub(crate) fn temp_folder() -> PathBuf {
+    std::env::temp_dir()
 }
 
 /// A TOML basic string, quoted and escaped, for a path used as a table key.

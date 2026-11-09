@@ -31,10 +31,9 @@ pub(super) enum Decision {
 
 pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
     match (action, settings.plan_mode, settings.permission) {
-        (Action::Invalid, _, _) => Decision::Deny,
         (Action::Question, _, _) => Decision::Question,
         (Action::ProtectedRead, false, Permission::FullAccess) => Decision::Allow,
-        (Action::ProtectedRead, _, _) => Decision::Deny,
+        (Action::Invalid | Action::ProtectedRead, _, _) => Decision::Deny,
         (Action::ExitPlan | Action::Command { outside: true, .. }, true, _) => Decision::Deny,
         (Action::File(Destination::Protected(path)), _, _) => {
             Decision::Ask(AskReason::ProtectedFolder { path })
@@ -43,6 +42,9 @@ pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
         (Action::Command { outside: true, .. }, _, _) => Decision::Ask(AskReason::Escalation),
         (Action::ExternalTool, _, _) => Decision::Ask(AskReason::Unchecked),
         (_, true, _) | (_, _, Permission::AskMe) => Decision::Ask(AskReason::AskEveryAction),
+        (Action::File(Destination::Outside), false, Permission::ApproveForMe) => {
+            Decision::Ask(AskReason::Escalation)
+        }
         _ => Decision::Allow,
     }
 }
@@ -50,6 +52,50 @@ pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outside_file_writes_need_approval_unless_the_turn_has_unsandboxed_full_access() {
+        // Catches the older D93 wording widening sandboxed file writes beyond workspace and temp.
+        for (permission, plan_mode, expected) in [
+            (
+                Permission::ApproveForMe,
+                false,
+                Decision::Ask(AskReason::Escalation),
+            ),
+            (
+                Permission::AskMe,
+                false,
+                Decision::Ask(AskReason::AskEveryAction),
+            ),
+            (Permission::FullAccess, false, Decision::Allow),
+            (
+                Permission::ApproveForMe,
+                true,
+                Decision::Ask(AskReason::AskEveryAction),
+            ),
+            (
+                Permission::AskMe,
+                true,
+                Decision::Ask(AskReason::AskEveryAction),
+            ),
+            (
+                Permission::FullAccess,
+                true,
+                Decision::Ask(AskReason::AskEveryAction),
+            ),
+        ] {
+            let settings = ThreadSettings {
+                permission,
+                plan_mode,
+                ..ThreadSettings::default()
+            };
+            assert_eq!(
+                decide(&settings, Action::File(Destination::Outside)),
+                expected,
+                "{permission:?}, plan {plan_mode}"
+            );
+        }
+    }
 
     #[test]
     fn every_permission_and_plan_mode_obeys_the_complete_tool_table() {
@@ -69,7 +115,6 @@ mod tests {
                 for action in [
                     Action::Read,
                     Action::File(Destination::Inside),
-                    Action::File(Destination::Outside),
                     Action::Command {
                         flagged: false,
                         outside: false,

@@ -10,7 +10,6 @@ async fn mcp(harness: &Harness, launch: &Launch, id: &str, message: Value) {
     harness.call(launch, "test/ask", json!({ "requestId": id, "request": { "subtype": "mcp_message", "server_name": "kratos", "message": message } })).await;
 }
 
-#[cfg(windows)]
 async fn approval_before_answer(
     harness: &Harness,
     launch: &Launch,
@@ -176,7 +175,7 @@ async fn sdk_server_metadata_and_command_output_reach_claude_through_the_shared_
         std::path::Path::new(request["params"]["command"][0].as_str().unwrap()).is_absolute(),
         "the workspace must never choose the command shell: {request}"
     );
-    assert_eq!(request["params"]["permissionProfile"], "kratos-claude-wide");
+    assert_eq!(request["params"]["permissionProfile"], "kratos-approve");
     assert_eq!(request["params"]["timeoutMs"], 12345);
     harness.command_control("test/settleTurn", json!({ "method": "command/exec", "result": { "exitCode": 0, "stdout": "KRATOS_COMMAND", "stderr": "" } })).await;
     let result = response(&harness, &launch, "run").await;
@@ -487,6 +486,121 @@ async fn commands_are_terminated_when_the_cli_withdraws_them_stops_or_exits() {
                 "{ending} left the command running"
             );
             tokio::task::yield_now().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn claude_commands_select_the_same_profiles_as_codex_for_every_permission_and_plan_mode() {
+    // Catches a Claude permission selecting a different sandbox or making the whole filesystem writable.
+    for (permission, plan_mode, profile) in [
+        (Permission::ApproveForMe, false, "kratos-approve"),
+        (Permission::AskMe, false, "kratos-ask"),
+        (Permission::FullAccess, false, ":danger-full-access"),
+        (Permission::ApproveForMe, true, "kratos-plan"),
+        (Permission::AskMe, true, "kratos-plan"),
+        (Permission::FullAccess, true, "kratos-plan"),
+    ] {
+        let harness = Harness::start(Options {
+            tools: true,
+            settings: ThreadSettings {
+                permission,
+                plan_mode,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+        mcp(&harness, &launch, "profile", json!({ "jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": "echo shared-profile" } } })).await;
+        if permission == Permission::AskMe || plan_mode {
+            let asked = approval_before_answer(&harness, &launch, "profile").await;
+            harness
+                .provider
+                .decide(asked.id, ApprovalDecision::Accept)
+                .await
+                .unwrap();
+        }
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            let requests = harness
+                .command_control("test/turnRequests", json!({}))
+                .await;
+            if let Some(request) = requests
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|request| request["method"] == "command/exec")
+            {
+                assert_eq!(
+                    request["params"]["permissionProfile"], profile,
+                    "{permission:?}, plan {plan_mode}"
+                );
+                assert_eq!(request["params"]["cwd"], json!(harness.folder()));
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "command never reached its sandbox"
+            );
+            tokio::task::yield_now().await;
+        }
+        harness.command_control("test/settleTurn", json!({ "method": "command/exec", "result": { "exitCode": 0, "stdout": "shared-profile", "stderr": "" } })).await;
+        assert_eq!(
+            response(&harness, &launch, "profile").await["mcp_response"]["result"]["isError"],
+            false
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_file_writes_match_the_workspace_and_temp_scope_of_sandboxed_commands() {
+    // Catches automatic native writes beyond workspace and temp while preserving Full access and temp writes.
+    let parent = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let outside = tempfile::Builder::new()
+        .prefix("claude-outside-")
+        .tempdir_in(parent)
+        .unwrap();
+    assert!(
+        !std::fs::canonicalize(outside.path())
+            .unwrap()
+            .starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()),
+        "this fixture must be outside the system temp grant"
+    );
+    for permission in [
+        Permission::ApproveForMe,
+        Permission::AskMe,
+        Permission::FullAccess,
+    ] {
+        let harness = Harness::start(Options {
+            tools: true,
+            settings: ThreadSettings {
+                permission,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+        for (id, path) in [
+            ("outside", outside.path().join("write.txt")),
+            ("workspace", harness.folder().join("write.txt")),
+            ("temp", harness.root.path().join("write.txt")),
+        ] {
+            send(&harness, &launch, id, "Write", json!({ "file_path": path })).await;
+            if permission == Permission::AskMe
+                || (permission == Permission::ApproveForMe && id == "outside")
+            {
+                let asked = approval_before_answer(&harness, &launch, id).await;
+                harness
+                    .provider
+                    .decide(asked.id, ApprovalDecision::Decline)
+                    .await
+                    .unwrap();
+                assert_eq!(response(&harness, &launch, id).await["behavior"], "deny");
+            } else {
+                assert_eq!(response(&harness, &launch, id).await["behavior"], "allow");
+            }
         }
     }
 }

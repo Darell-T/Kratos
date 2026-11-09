@@ -17,7 +17,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::actor::{Actor, Done, Opened, Server};
-use super::profiles::Profile;
+use super::profiles::{Profile, temp_folder};
 use super::recovery::{self, EndReason, EndingTurn, Unfinished};
 use super::threads::{Link, ThreadState, Turn};
 use super::{CodexSettings, ProviderError, policy, wire};
@@ -113,12 +113,7 @@ fn launch(settings: &CodexSettings) -> Launch {
     args.extend(settings.extra_args.iter().cloned());
     #[cfg(windows)]
     args.extend(super::sandbox::launch_arguments());
-    args.extend(settings.protected.launch_arguments(&std::env::temp_dir()));
-    args.extend(
-        settings
-            .protected
-            .claude_launch_arguments(&std::env::temp_dir()),
-    );
+    args.extend(settings.protected.launch_arguments(&temp_folder()));
     Launch {
         program: settings.program.clone(),
         args,

@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use super::super::codex::temp_folder;
 use super::actor::Actor;
 use super::policy::{self, Action, Decision, Destination};
 use super::requests::{Answer, Pending};
@@ -376,11 +377,16 @@ fn file_action(
     };
     match protected.containing(&Path::new(folder).join(path)) {
         Ok(Some(path)) => Action::File(Destination::Protected(path.display().to_string())),
-        Ok(None) => Action::File(if Path::new(folder).join(path).starts_with(folder) {
-            Destination::Inside
-        } else {
-            Destination::Outside
-        }),
+        Ok(None) => {
+            let target = Path::new(folder).join(path);
+            Action::File(
+                if target.starts_with(folder) || target.starts_with(temp_folder()) {
+                    Destination::Inside
+                } else {
+                    Destination::Outside
+                },
+            )
+        }
         Err(_) => Action::Invalid,
     }
 }

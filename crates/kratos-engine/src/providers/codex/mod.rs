@@ -46,7 +46,9 @@ use crate::providers::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent};
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 
+use profiles::Profile;
 pub use profiles::ProtectedFolders;
+pub(crate) use profiles::temp_folder;
 
 /// The isolated profile for a Claude command, or an explicitly approved escape.
 #[derive(Clone, Debug)]
@@ -58,12 +60,8 @@ pub(crate) enum CommandProfile {
 impl CommandProfile {
     fn id(&self) -> &'static str {
         match self {
-            Self::Claude(settings) if settings.plan_mode => "kratos-plan",
-            Self::Claude(settings) if settings.permission == kratos_protocol::Permission::AskMe => {
-                "kratos-claude-ask"
-            }
-            Self::Claude(_) => "kratos-claude-wide",
-            Self::ApprovedOutside => ":danger-full-access",
+            Self::Claude(settings) => Profile::for_settings(settings).id(),
+            Self::ApprovedOutside => Profile::FullAccess.id(),
         }
     }
 }
