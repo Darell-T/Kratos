@@ -75,7 +75,7 @@ impl TurnEnd {
 
 /// The context the turn's last request filled, the same meaning as Codex's `last` counts (D76):
 /// input includes what the cache holds, and the total is input plus output. Claude counts thinking
-/// inside its output and reports no split, so the reasoning share is zero. A result that lists no
+/// inside its output and reports no split per request, so the reasoning share is zero. A result that lists no
 /// request has no context, never a context of zeros.
 pub(super) fn context_usage(
     context: &TurnContext,

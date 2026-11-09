@@ -15,7 +15,6 @@ use std::ffi::OsString;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -32,7 +31,7 @@ use kratos_engine::mcp::{self, McpServer};
 use kratos_engine::providers::Providers;
 use kratos_engine::providers::claude::{self, ClaudeProvider, ClaudeSettings};
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
-use kratos_engine::scheduler::{self, SystemClock};
+use kratos_engine::scheduler;
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::{LimitStop, UsageTracker};
@@ -138,9 +137,8 @@ fn run_server(
             None
         } else {
             let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
-            let clock = Arc::new(SystemClock);
             let providers = providers.clone();
-            Some(scheduler::start(hub, store, usage, providers, clock, stops).await?)
+            Some(scheduler::start(hub, store, usage, providers, stops).await?)
         };
         let state = ServerState {
             hub,

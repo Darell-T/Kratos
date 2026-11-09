@@ -9,7 +9,10 @@
 
 use std::time::{Duration, SystemTime};
 
-use kratos_claude_client::{LimitWindow, RateLimitInfo, RateLimitStatus, RateLimitType, UsageRead};
+use kratos_claude_client::{
+    LimitWindow, RateLimitInfo, RateLimitStatus, RateLimitType, UsageRead,
+    UsageWindow as EventWindow,
+};
 use kratos_protocol::{AccountUsage, Allowance, Provider, Timestamp, UsageBucket, UsageWindow};
 
 use crate::usage::timestamp_of_unix;
@@ -271,7 +274,7 @@ fn overlay(unified: Option<UsageWindow>, reported: Option<UsageWindow>) -> Optio
 
 fn event_buckets(info: &RateLimitInfo) -> Vec<UsageBucket> {
     let windows = info.unified_windows.as_ref();
-    let unified_window = |window: Option<&LimitWindowOfEvent>, minutes| {
+    let unified_window = |window: Option<&EventWindow>, minutes| {
         let window = window?;
         Some(UsageWindow {
             used_percent: percent_of_fraction(window.utilization?)?,
@@ -314,8 +317,6 @@ fn event_buckets(info: &RateLimitInfo) -> Vec<UsageBucket> {
     buckets.extend(own_bucket(info, kind));
     buckets
 }
-
-type LimitWindowOfEvent = kratos_claude_client::UsageWindow;
 
 /// The bucket of a limit that is not the unified pair. Opus and Sonnet are weekly; an overage or
 /// a limit the crate does not know has no window length, so its plan always waits for the user.

@@ -300,7 +300,14 @@ impl StreamMessage {
 
     fn system(raw: Value) -> Result<Self, ParseError> {
         if raw["subtype"] == "api_retry" {
-            return Ok(Self::ApiRetry(serde_json::from_value(raw)?));
+            // Kratos only watches this frame, so one the typed parse refuses is kept as it came.
+            return Ok(match serde_json::from_value(raw.clone()) {
+                Ok(retry) => Self::ApiRetry(retry),
+                Err(_) => Self::Unrecognized {
+                    kind: "system".to_owned(),
+                    raw,
+                },
+            });
         }
         if raw["subtype"] != "init" {
             return Ok(Self::Unrecognized {

@@ -12,6 +12,9 @@
 //! only Claude's transcript or the user settles it. Claude accepts a message only when it echoes
 //! it back, and a turn ends only on its result.
 //!
+//! A CLI starts when a message needs one, or when the usage scheduler or the skills route (D97)
+//! asks a thread's session something.
+//!
 //! The account's usage reaches the shared tracker (D38) from the CLI's rate limit events and from
 //! a `get_usage` read after each session starts and whenever the scheduler asks. Only a turn's
 //! result decides a stop at the usage limit (D39): a failed result after a rejected event pauses
@@ -58,6 +61,7 @@ use crate::hub::Hub;
 use crate::providers::{Continued, ProviderError, Sent};
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
+use threads::Waiter;
 
 use crate::providers::MAX_PENDING_MESSAGES;
 
@@ -306,17 +310,23 @@ impl ClaudeProvider {
     /// Reads the account's usage through a session of the thread, starting one when none runs,
     /// because the continuation that follows needs it (D38, D39).
     pub async fn refresh_usage(&self, thread_id: ThreadId) -> Result<(), ProviderError> {
-        self.ask(|reply| actor::Command::RefreshUsage { thread_id, reply })
-            .await
+        self.ask(|reply| actor::Command::WhenOpen {
+            thread_id,
+            waiter: Waiter::Usage(reply),
+        })
+        .await
     }
 
     /// The slash commands the thread's session reports, opening one when none runs (D97).
-    pub async fn slash_commands(
+    pub(crate) async fn slash_commands(
         &self,
         thread_id: ThreadId,
     ) -> Result<Vec<SlashCommand>, ProviderError> {
-        self.ask(|reply| actor::Command::SlashCommands { thread_id, reply })
-            .await
+        self.ask(|reply| actor::Command::WhenOpen {
+            thread_id,
+            waiter: Waiter::Commands(reply),
+        })
+        .await
     }
 
     /// The access the thread's settings give its agent.

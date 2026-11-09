@@ -14,14 +14,13 @@ use kratos_claude_client::{
 };
 use kratos_protocol::{
     AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
-    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, SlashCommand, ThreadId,
-    ThreadSettings,
+    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
 
 use super::recovery::Settling;
-use super::threads::{Session, SessionConfig, ThreadState};
+use super::threads::{Session, SessionConfig, ThreadState, Waiter};
 use super::{ClaudeSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
@@ -81,13 +80,10 @@ pub(super) enum Command {
         continuation_id: ContinuationId,
         reply: Reply<Continued>,
     },
-    RefreshUsage {
+    /// Runs `waiter` once the thread's CLI is up, starting one when none runs.
+    WhenOpen {
         thread_id: ThreadId,
-        reply: Reply<()>,
-    },
-    SlashCommands {
-        thread_id: ThreadId,
-        reply: Reply<Vec<SlashCommand>>,
+        waiter: Waiter,
     },
     Resume {
         thread_id: ThreadId,

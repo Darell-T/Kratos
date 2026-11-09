@@ -122,8 +122,8 @@ fn serve_once(body: serde_json::Value) -> (String, std::thread::JoinHandle<()>) 
 
 #[test]
 fn usage_prints_the_claude_accounts_two_windows_next_to_codexs() {
-    // Catches the lane that reads usage seeing one provider only: the report must carry the Claude
-    // account's five-hour and weekly windows in the same line as Codex's.
+    // Checks that the client prints every account the engine reports, with both windows of each,
+    // in one line. That the engine reports the Claude account is the engine's test.
     let window = |minutes: i64, used: i32| {
         serde_json::json!({ "usedPercent": used, "windowMinutes": minutes,
                             "resetsAt": "2100-01-01T05:00:00.000Z" })

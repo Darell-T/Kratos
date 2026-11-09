@@ -3,19 +3,22 @@
 //! questions, and reads back what the provider sent.
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use fake_agents::codex_control::{self, ControlRequest};
 use futures_util::StreamExt;
 use kratos_command_safety::DangerousCommandPlatform;
+use kratos_engine::clock::{Clock, SystemClock};
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::mcp::McpServer;
 use kratos_engine::providers::Providers;
 use kratos_engine::providers::Sent;
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
-use kratos_engine::scheduler::{self, Clock, SchedulerHandle};
+use kratos_engine::scheduler::{self, SchedulerHandle};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::LimitStop;
 use kratos_engine::usage::UsageTracker;
@@ -59,6 +62,8 @@ pub struct Harness {
     pub hub: Hub,
     pub store: StoreThread,
     pub usage: UsageTracker,
+    /// The clock `usage` holds, and so the scheduler: a test points it at its own.
+    clock: Arc<SwitchClock>,
     pub provider: CodexProvider,
     /// Usage-limit stops, until a test starts the scheduler, which takes them.
     pub stops: Option<mpsc::UnboundedReceiver<LimitStop>>,
@@ -71,6 +76,42 @@ pub struct Harness {
     control: Option<Control>,
     control_file: PathBuf,
     next_control_id: u64,
+}
+
+/// The clock the harness's tracker holds. The tracker and the scheduler read one clock, so a test
+/// that wants its own clock points this one at it before the scheduler starts.
+pub struct SwitchClock(Mutex<Arc<dyn Clock>>);
+
+impl Default for SwitchClock {
+    fn default() -> SwitchClock {
+        SwitchClock(Mutex::new(Arc::new(SystemClock)))
+    }
+}
+
+impl SwitchClock {
+    fn current(&self) -> Arc<dyn Clock> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Clock for SwitchClock {
+    fn now(&self) -> SystemTime {
+        self.current().now()
+    }
+
+    fn sleep_until(&self, at: SystemTime) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.current().sleep_until(at)
+    }
+}
+
+impl Harness {
+    /// Makes `clock` the time the tracker and a scheduler started after this read.
+    pub fn use_clock(&self, clock: Arc<dyn Clock>) {
+        *self.clock.0.lock().unwrap_or_else(PoisonError::into_inner) = clock;
+    }
 }
 
 /// The providers of a test that drives Codex alone: Claude is not running.
@@ -107,7 +148,8 @@ impl Harness {
         let (store_thread, jobs) = store_thread::channel();
         let store_runner = std::thread::spawn(move || jobs.run(store));
         let hub = Hub::new(store_thread.clone());
-        let usage = UsageTracker::default();
+        let clock = Arc::new(SwitchClock::default());
+        let usage = UsageTracker::with_clock(clock.clone());
         let control_file = root.path().join(format!("control-{}", uuid_like()));
         let server_folder = root.path().join("server");
         std::fs::create_dir_all(&server_folder).unwrap();
@@ -144,6 +186,7 @@ impl Harness {
             hub,
             store: store_thread,
             usage,
+            clock,
             provider,
             stops: Some(stops),
             scheduler: None,
@@ -207,13 +250,13 @@ impl Harness {
 
     /// Starts the usage scheduler on `clock`, as the engine does after the provider.
     pub async fn start_scheduler(&mut self, clock: Arc<dyn Clock>) -> SchedulerHandle {
+        self.use_clock(clock);
         let stops = self.stops.take().expect("the scheduler starts once");
         let handle = scheduler::start(
             self.hub.clone(),
             self.store.clone(),
             self.usage.clone(),
             codex_only(self.provider.clone()),
-            clock,
             stops,
         )
         .await

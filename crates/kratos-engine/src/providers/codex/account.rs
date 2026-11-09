@@ -2,7 +2,7 @@
 //! that stop at its usage limit (D39).
 
 use kratos_codex_client::{Codex, RequestError, methods, types};
-use kratos_protocol::{Provider, ThreadId};
+use kratos_protocol::Provider;
 
 use super::actor::{Actor, Command, Done, Reply};
 use super::{ProviderError, wire};
@@ -74,14 +74,5 @@ impl Actor {
         if let Some(reply) = reply {
             let _ = reply.send(answer);
         }
-    }
-
-    /// Reports a usage-limit stop to the scheduler, which plans the continuation (D39).
-    pub(super) fn report_limit_stop(&self, thread_id: &ThreadId, turn_id: kratos_protocol::TurnId) {
-        let _ = self.limit_stops.send(crate::usage::LimitStop {
-            thread_id: thread_id.clone(),
-            turn_id,
-            provider: Provider::Codex,
-        });
     }
 }

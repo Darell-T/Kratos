@@ -543,7 +543,12 @@ impl Actor {
             return;
         }
         if at_limit {
-            self.report_limit_stop(thread_id, turn_id);
+            crate::usage::LimitStop {
+                thread_id: thread_id.clone(),
+                turn_id,
+                provider: kratos_protocol::Provider::Codex,
+            }
+            .report(&self.limit_stops);
         }
         self.dispatch(thread_id).await;
     }

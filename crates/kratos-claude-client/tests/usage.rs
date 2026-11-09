@@ -243,3 +243,18 @@ fn the_context_is_the_last_request_not_the_first_the_sum_or_the_top_level() {
         (1, 2, 3, 4)
     );
 }
+
+#[test]
+fn an_api_retry_frame_that_fails_the_typed_parse_is_kept_as_an_unrecognized_frame() {
+    // Catches a self-updating CLI that renames a field of a frame Kratos only watches: the frame
+    // would become an error on the running turn instead of being kept as it came.
+    let message = StreamMessage::parse(json!({
+        "type": "system", "subtype": "api_retry", "attempt": 2, "max_retries": 10,
+        "delay_ms": 4000, "error_status": 429, "error": "rate_limit",
+    }));
+
+    assert!(
+        matches!(&message, Ok(StreamMessage::Unrecognized { kind, .. }) if kind == "system"),
+        "{message:?}"
+    );
+}

@@ -16,6 +16,7 @@ use super::ends::{Stop, TurnEnd, end_turn};
 use super::threads::{InFlight, SessionConfig};
 use super::{ProviderError, wire};
 use crate::providers::queue::mark_refused;
+use crate::usage::LimitStop;
 
 /// Why Kratos ends a CLI that was asked to stop and did not.
 const STOP_FAILED: &str = "Claude did not stop the turn; its process was closed";
@@ -280,7 +281,12 @@ impl Actor {
                 .publish(thread_id, LiveUpdate::Context { turn_id, usage });
         }
         if matches!(stop, Stop::UsageLimit { .. }) {
-            self.report_limit_stop(thread_id, turn_id);
+            LimitStop {
+                thread_id: thread_id.clone(),
+                turn_id,
+                provider: Provider::Claude,
+            }
+            .report(&self.limit_stops);
         }
         let thread = self.threads.get_mut(thread_id).expect("found above");
         thread

@@ -1,5 +1,6 @@
 //! Starting a thread's CLI process and ending it. Each thread has a process of its own, started
-//! when its next message needs one and never on a timer (L4, L5).
+//! when its next message needs one (L4, L5), or when the usage scheduler or the skills route needs
+//! a session to ask. A CLI that failed to start is tried again only by a message or the user.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -114,6 +115,14 @@ impl Actor {
     /// Runs `waiter` once the thread's CLI is up, starting one when none runs. A CLI that cannot
     /// start answers the waiter with why.
     pub(super) async fn when_open(&mut self, thread_id: &ThreadId, waiter: Waiter) {
+        let ready = match self.running() {
+            Ok(()) => self.load(thread_id).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = ready {
+            waiter.reject(error);
+            return;
+        }
         let thread = self
             .threads
             .get_mut(thread_id)

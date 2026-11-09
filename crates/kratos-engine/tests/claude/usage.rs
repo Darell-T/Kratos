@@ -235,7 +235,7 @@ async fn a_rejected_turn_pauses_at_the_limit_and_continues_once_after_a_read_tha
     // on a lagging read that contradicts the server's refusal, or sent twice (D39).
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut harness = Harness::start(options(&clock)).await;
-    harness.start_scheduler(clock.clone()).await;
+    harness.start_scheduler().await;
 
     let launch = stop_at_the_limit(&mut harness, "five_hour").await;
 
@@ -305,7 +305,7 @@ async fn a_turn_the_cli_waits_out_and_finishes_sends_nothing_at_the_reset_or_aft
     // the CLI resumed and finished by itself (D39).
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut harness = Harness::start(options(&clock)).await;
-    harness.start_scheduler(clock.clone()).await;
+    harness.start_scheduler().await;
     let launch = harness.begin(A, 1).await;
 
     wait_out_the_rejection(&harness, &launch).await;
@@ -336,14 +336,14 @@ async fn an_engine_that_restarts_after_a_stop_continues_once_and_after_a_wait_se
     // and one that sends into a turn the CLI was still waiting out when the engine died.
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut stopped = Harness::start(options(&clock)).await;
-    stopped.start_scheduler(clock.clone()).await;
+    stopped.start_scheduler().await;
     stop_at_the_limit(&mut stopped, "five_hour").await;
     let scheduled = next_continuation(&mut stopped).await;
     assert_eq!(scheduled.state, ContinuationState::Scheduled);
     let (root, thread_id) = stopped.stop().await;
 
     let mut restarted = Harness::start_in(root, options(&clock), Some(thread_id)).await;
-    restarted.start_scheduler(clock.clone()).await;
+    restarted.start_scheduler().await;
     clock.advance_to(at(RESET));
 
     let launch = restarted.launch(2).await;
@@ -359,7 +359,7 @@ async fn an_engine_that_restarts_after_a_stop_continues_once_and_after_a_wait_se
     let (root, thread_id) = restarted.stop().await;
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut waiting = Harness::start_in(root, options(&clock), Some(thread_id)).await;
-    waiting.start_scheduler(clock.clone()).await;
+    waiting.start_scheduler().await;
     let launches = waiting.launches().len();
     clock.advance_to(at(RESET + HOUR));
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -376,13 +376,13 @@ async fn a_restart_while_the_cli_waits_out_a_rejection_leaves_no_continuation_to
     // into a turn the CLI may have finished.
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut running = Harness::start(options(&clock)).await;
-    running.start_scheduler(clock.clone()).await;
+    running.start_scheduler().await;
     let launch = running.begin(A, 1).await;
     wait_out_the_rejection(&running, &launch).await;
     let (root, thread_id) = running.stop().await;
 
     let mut restarted = Harness::start_in(root, options(&clock), Some(thread_id)).await;
-    restarted.start_scheduler(clock.clone()).await;
+    restarted.start_scheduler().await;
     clock.advance_to(at(RESET + HOUR));
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -404,7 +404,7 @@ async fn a_weekly_rejection_waits_for_the_user_and_the_users_go_sends_at_the_res
     // a go from the user that is ignored at the reset.
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut harness = Harness::start(options(&clock)).await;
-    let scheduler: SchedulerHandle = harness.start_scheduler(clock.clone()).await;
+    let scheduler: SchedulerHandle = harness.start_scheduler().await;
 
     let launch = stop_at_the_limit(&mut harness, "seven_day").await;
 
@@ -490,7 +490,7 @@ async fn a_cli_without_get_usage_leaves_the_allowance_unavailable_and_the_decisi
     // times, then hand the continuation to the user and never send.
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut harness = Harness::start(options(&clock)).await;
-    harness.start_scheduler(clock.clone()).await;
+    harness.start_scheduler().await;
     let launch = harness.begin(A, 1).await;
     wait_for_usage(&harness, |usage| usage.allowance == Allowance::Allowed).await;
     harness
@@ -534,7 +534,7 @@ async fn a_session_that_ends_after_a_limit_stop_keeps_the_pause_and_the_continua
     // waits for the reset must leave the pause and the plan, and the continuation still sends.
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut harness = Harness::start(options(&clock)).await;
-    harness.start_scheduler(clock.clone()).await;
+    harness.start_scheduler().await;
     let first = stop_at_the_limit(&mut harness, "five_hour").await;
     let scheduled = next_continuation(&mut harness).await;
     harness.paused_for(usage_limit_pause).await;
@@ -841,7 +841,7 @@ async fn a_provider_that_is_not_running_tells_the_scheduler_and_the_user_why() {
     // user would read "not running" where the engine knows "not installed".
     let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
     let mut stopped = Harness::start(options(&clock)).await;
-    stopped.start_scheduler(clock.clone()).await;
+    stopped.start_scheduler().await;
     stop_at_the_limit(&mut stopped, "five_hour").await;
     let scheduled = next_continuation(&mut stopped).await;
     let (root, thread_id) = stopped.stop().await;
@@ -851,9 +851,7 @@ async fn a_provider_that_is_not_running_tells_the_scheduler_and_the_user_why() {
         codex: Err("Codex is not installed".to_owned()),
         claude: Err("Claude Code is not installed".to_owned()),
     };
-    restarted
-        .start_scheduler_with(clock.clone(), providers)
-        .await;
+    restarted.start_scheduler_with(providers).await;
     clock.advance_to(at(RESET));
     for check in 1..=2 {
         let next = RESET + 300 * check;
@@ -1015,7 +1013,7 @@ async fn a_stop_lost_in_a_restart_waits_for_the_user_with_the_pauses_reset() {
     let (root, thread_id) = stopped.stop().await;
 
     let mut restarted = Harness::start_in(root, options(&clock), Some(thread_id)).await;
-    let scheduler = restarted.start_scheduler(clock.clone()).await;
+    let scheduler = restarted.start_scheduler().await;
     let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
     let waiting = loop {
         if let Some(found) = open_continuations(&restarted).await.pop() {
@@ -1041,4 +1039,31 @@ async fn a_stop_lost_in_a_restart_waits_for_the_user_with_the_pauses_reset() {
     clock.advance_to(at(RESET));
     let texts = wait_for_written(&restarted, &launch, 1).await;
     assert!(is_continuation(&texts[0]), "{texts:?}");
+}
+
+#[tokio::test]
+async fn a_retry_frame_the_crate_cannot_read_leaves_no_error_on_the_running_turn() {
+    // Catches a renamed field in a frame Kratos only watches reaching the log as a provider error
+    // on the turn that is running.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "system", "subtype": "api_retry", "attempt": 1, "error": "rate_limit" }),
+        )
+        .await;
+    harness.finish(&launch, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+
+    let errors = harness
+        .log()
+        .await
+        .into_iter()
+        .filter(|event| matches!(event, ThreadEventBody::ProviderError { .. }))
+        .count();
+    assert_eq!(errors, 0);
 }

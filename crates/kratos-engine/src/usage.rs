@@ -2,10 +2,12 @@
 //!
 //! The tracker holds what each provider account may still use. Providers write what their CLI
 //! reports; the usage API and the resume scheduler read it. A full read replaces an account's
-//! snapshot, and only a full read says whether the account may use its included quota. Missing
-//! information never becomes permission: no read, a failed read, or a read without that answer
-//! leaves the allowance unavailable. A rolling update only fills in the buckets it names and never
-//! clears what it leaves out, as Codex's schema directs.
+//! snapshot. Codex's rolling update only fills in the buckets it names, never clears what it
+//! leaves out, and never says whether the account may run, as its schema directs. Claude's
+//! `rate_limit_event` is an update that does state the allowance, so it sets it, replaces the
+//! windows it carries, and clears the reached limit of the buckets it names. Missing information
+//! never becomes permission: no read, a failed read, or a read without that answer leaves the
+//! allowance unavailable.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -14,7 +16,7 @@ use std::time::{Duration, SystemTime};
 use kratos_protocol::{
     AccountUsage, Allowance, Provider, ThreadId, Timestamp, TurnId, UsageBucket, UsageReport,
 };
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 
 use crate::clock::{Clock, SystemClock};
 
@@ -31,6 +33,14 @@ pub struct LimitStop {
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
     pub provider: Provider,
+}
+
+impl LimitStop {
+    /// Reports the stop to the scheduler, which plans the continuation (D39). A scheduler that has
+    /// stopped has no plan to make, so a closed channel is not an error.
+    pub(crate) fn report(self, stops: &mpsc::UnboundedSender<LimitStop>) {
+        let _ = stops.send(self);
+    }
 }
 
 #[derive(Clone)]
@@ -67,6 +77,11 @@ impl UsageTracker {
     /// The time providers judge a snapshot at.
     pub(crate) fn now(&self) -> SystemTime {
         self.clock.now()
+    }
+
+    /// The one clock of the engine: the scheduler waits on it, and providers judge snapshots by it.
+    pub(crate) fn clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
     }
 
     /// The account generation a read of `provider` starts under.
@@ -222,17 +237,11 @@ impl UsageTracker {
     }
 }
 
+/// Like [`merge`], except that the update also says whether the bucket's limit is still reached.
 fn replace(bucket: &mut UsageBucket, update: UsageBucket) {
-    if update.name.is_some() {
-        bucket.name = update.name;
-    }
-    if update.primary.is_some() {
-        bucket.primary = update.primary;
-    }
-    if update.secondary.is_some() {
-        bucket.secondary = update.secondary;
-    }
-    bucket.reached = update.reached;
+    let reached = update.reached.clone();
+    merge(bucket, update);
+    bucket.reached = reached;
 }
 
 fn merge(bucket: &mut UsageBucket, update: UsageBucket) {

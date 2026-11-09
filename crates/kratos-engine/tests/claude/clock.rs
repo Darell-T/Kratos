@@ -7,7 +7,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use kratos_engine::scheduler::Clock;
+use kratos_engine::clock::Clock;
 use tokio::sync::watch;
 
 use crate::harness::WAIT;

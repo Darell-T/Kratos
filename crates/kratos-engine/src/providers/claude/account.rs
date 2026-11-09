@@ -8,13 +8,13 @@
 //! usage endpoint reports (see `limits`).
 
 use kratos_claude_client::{RateLimitEvent, RateLimitStatus, RequestError, UsageRead};
-use kratos_protocol::{Provider, SlashCommand, ThreadId, Timestamp};
+use kratos_protocol::{Provider, ThreadId, Timestamp};
 
 use super::ProviderError;
 use super::actor::{Actor, Done, Reply};
 use super::limits;
-use super::threads::{Rejection, Waiter};
-use crate::usage::{LimitStop, timestamp_of_unix};
+use super::threads::Rejection;
+use crate::usage::timestamp_of_unix;
 
 impl Actor {
     /// A session reported `plan`, and is now the account that is signed in. A plan other than the
@@ -35,35 +35,6 @@ impl Actor {
         self.signed_in
             .as_ref()
             .is_none_or(|signed_in| signed_in.as_deref() == plan)
-    }
-
-    /// Reads the account's usage through a session of the thread, starting one when none runs.
-    pub(super) async fn refresh_usage(&mut self, thread_id: ThreadId, reply: Reply<()>) {
-        let ready = match self.running() {
-            Ok(()) => self.load(&thread_id).await,
-            Err(error) => Err(error),
-        };
-        if let Err(error) = ready {
-            let _ = reply.send(Err(error));
-            return;
-        }
-        self.when_open(&thread_id, Waiter::Usage(reply)).await;
-    }
-
-    /// Lists the slash commands the thread's session reports, starting one when none runs.
-    pub(super) async fn slash_commands(
-        &mut self,
-        thread_id: ThreadId,
-        reply: Reply<Vec<SlashCommand>>,
-    ) {
-        let ready = match self.running() {
-            Ok(()) => self.load(&thread_id).await,
-            Err(error) => Err(error),
-        };
-        match ready {
-            Ok(()) => self.when_open(&thread_id, Waiter::Commands(reply)).await,
-            Err(error) => drop(reply.send(Err(error))),
-        }
     }
 
     /// Asks the thread's open session for the account's usage. A read finished after the account
@@ -160,14 +131,5 @@ impl Actor {
                 .usage
                 .record_unavailable(Provider::Claude, error.to_string()),
         }
-    }
-
-    /// Reports a usage-limit stop to the scheduler, which plans the continuation (D39).
-    pub(super) fn report_limit_stop(&self, thread_id: &ThreadId, turn_id: kratos_protocol::TurnId) {
-        let _ = self.limit_stops.send(LimitStop {
-            thread_id: thread_id.clone(),
-            turn_id,
-            provider: Provider::Claude,
-        });
     }
 }

@@ -55,14 +55,15 @@ pub(super) enum Waiter {
 }
 
 impl Waiter {
+    /// Answers the waiter that the CLI cannot be had, with `reason`.
     pub(super) fn fail(self, reason: &str) {
+        self.reject(super::ProviderError::Unavailable(reason.to_owned()));
+    }
+
+    pub(super) fn reject(self, error: super::ProviderError) {
         match self {
-            Waiter::Usage(reply) => {
-                let _ = reply.send(Err(super::ProviderError::Unavailable(reason.to_owned())));
-            }
-            Waiter::Commands(reply) => {
-                let _ = reply.send(Err(super::ProviderError::Unavailable(reason.to_owned())));
-            }
+            Waiter::Usage(reply) => drop(reply.send(Err(error))),
+            Waiter::Commands(reply) => drop(reply.send(Err(error))),
         }
     }
 }

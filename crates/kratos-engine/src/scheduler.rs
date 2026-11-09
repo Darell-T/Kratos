@@ -19,7 +19,7 @@ use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-pub use crate::clock::{Clock, SystemClock};
+use crate::clock::Clock;
 use crate::hub::Hub;
 use crate::providers::{Agent, Continued, ProviderError, Providers};
 use crate::store_thread::StoreThread;
@@ -229,16 +229,15 @@ pub async fn start(
     store: StoreThread,
     usage: UsageTracker,
     providers: Providers,
-    clock: Arc<dyn Clock>,
     mut stops: mpsc::UnboundedReceiver<LimitStop>,
 ) -> Result<SchedulerHandle, StoreError> {
     let (due, mut due_ids) = mpsc::unbounded_channel();
     let mut scheduler = Scheduler {
         hub,
         store: store.clone(),
+        clock: usage.clock(),
         usage,
         providers,
-        clock,
         unanswered: HashMap::new(),
         store_failures: HashMap::new(),
         due,
