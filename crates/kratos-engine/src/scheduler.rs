@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime};
 
 use kratos_protocol::{
     AccountUsage, Allowance, Continuation, ContinuationId, ContinuationState, PauseReason,
-    Provider, ThreadId, Timestamp, UsageBucket, UsageWait, UsageWindow,
+    Provider, ThreadId, Timestamp, TurnId, UsageBucket, UsageWait, UsageWindow,
 };
 use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
@@ -100,6 +100,17 @@ pub fn plan(provider: Provider, account: Option<&AccountUsage>) -> Plan {
         waits_on,
         resets_at,
         state,
+    }
+}
+
+/// The reset the thread's pause recorded, when the pause is the usage-limit stop of `turn_id`.
+fn source_pause_reset(paused: Option<PauseReason>, turn_id: &TurnId) -> Option<Option<Timestamp>> {
+    match paused {
+        Some(PauseReason::UsageLimit {
+            turn_id: paused_turn,
+            resets_at,
+        }) if paused_turn == *turn_id => Some(resets_at),
+        _ => None,
     }
 }
 
@@ -312,14 +323,20 @@ impl Scheduler {
             .hub
             .write(stop.thread_id, move |write| {
                 let thread = write.provider_thread()?;
-                let is_source_pause = matches!(thread.paused, Some(PauseReason::UsageLimit { turn_id, .. }) if turn_id == stop.turn_id);
+                let source_reset = source_pause_reset(thread.paused, &stop.turn_id);
                 if thread.thread.provider != stop.provider
                     || thread.running_turn.is_some()
-                    || !is_source_pause
+                    || source_reset.is_none()
                     || write.open_continuation()?.is_some()
                 {
                     // The refresh may finish after the user changed the pause or turn.
                     return Ok(false);
+                }
+                let mut continuation = continuation;
+                if continuation.resets_at.is_none() {
+                    // A stop recovered without evidence of its window waits for the user, who
+                    // may let Kratos resume at the reset the pause itself recorded (D41).
+                    continuation.resets_at = source_reset.flatten();
                 }
                 write.add_continuation(continuation)
             })

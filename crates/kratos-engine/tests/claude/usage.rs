@@ -1002,3 +1002,43 @@ async fn a_turn_with_no_reply_does_not_take_the_previous_turns_model_for_its_win
     };
     assert_eq!(context.unwrap().context_window, None);
 }
+
+#[tokio::test]
+async fn a_stop_lost_in_a_restart_waits_for_the_user_with_the_pauses_reset() {
+    // Catches the user's go refused after a restart: the recovered continuation waits for the user,
+    // as D41 says missing evidence must, but without the reset the pause recorded, so "resume at
+    // the reset" had no time to resume at.
+    let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
+    let mut stopped = Harness::start(options(&clock)).await;
+    stop_at_the_limit(&mut stopped, "five_hour").await;
+    stopped.paused_for(usage_limit_pause).await;
+    let (root, thread_id) = stopped.stop().await;
+
+    let mut restarted = Harness::start_in(root, options(&clock), Some(thread_id)).await;
+    let scheduler = restarted.start_scheduler(clock.clone()).await;
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    let waiting = loop {
+        if let Some(found) = open_continuations(&restarted).await.pop() {
+            break found;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no continuation");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    assert!(
+        matches!(waiting.state, ContinuationState::AwaitingUser { .. }),
+        "{waiting:?}"
+    );
+    assert_eq!(
+        waiting.resets_at.as_ref().map(Timestamp::instant),
+        Some(at(RESET))
+    );
+    let launch = restarted.launch(2).await;
+    let scheduled = scheduler.schedule(waiting.id.clone()).await.unwrap();
+    assert_eq!(scheduled.state, ContinuationState::Scheduled);
+    clock.wait_for_wake_up_at(at(RESET)).await;
+    restarted.assert_written(&launch, &[]).await;
+    clock.advance_to(at(RESET));
+    let texts = wait_for_written(&restarted, &launch, 1).await;
+    assert!(is_continuation(&texts[0]), "{texts:?}");
+}
