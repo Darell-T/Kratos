@@ -37,12 +37,13 @@ impl SessionConfig {
     }
 }
 
-/// The latest `rate_limit_event` of a turn. Only the turn's result decides whether the turn
-/// stopped at the usage limit (D39), so the event is kept until then.
+/// The server refused a request, as the latest `rate_limit_event` says. Only the turn's result
+/// decides whether the turn stopped at the usage limit (D39), so the refusal is kept until then.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct SeenLimit {
-    pub rejected: bool,
+pub(super) struct Rejection {
     pub resets_at: Option<Timestamp>,
+    /// Extra usage pays for the requests, so the refusal of the included quota stops nothing.
+    pub is_using_overage: bool,
 }
 
 /// A caller waiting for the thread's CLI to be up.
@@ -189,8 +190,9 @@ pub(super) struct ThreadState {
     /// Why Kratos is closing the CLI, when it chose to, in place of the exit's own text.
     pub close_reason: Option<String>,
     pub restarts: Restarts,
-    /// The latest rate limit event of the running turn, read by the turn's result.
-    pub rate_limit: Option<SeenLimit>,
+    /// The refusal the latest rate limit event reports, or nothing when that event allowed. Read by
+    /// the turn's result.
+    pub rejection: Option<Rejection>,
     /// The model that wrote the last reply, which names the window of the turn's context (D76).
     pub answering_model: Option<String>,
     /// Callers that wait for the CLI to be up, answered when it is or when it cannot start.
@@ -222,7 +224,7 @@ impl ThreadState {
             deadline_epoch: 0,
             close_reason: None,
             restarts: Restarts::default(),
-            rate_limit: None,
+            rejection: None,
             answering_model: None,
             waiters: Vec::new(),
         }

@@ -258,8 +258,12 @@ impl Actor {
         self.close_requests(thread_id, None, "Claude's turn ended")
             .await;
         let thread = self.threads.get_mut(thread_id).expect("found above");
-        let limit = thread.rate_limit.take();
-        let end = TurnEnd::of(&result, limit.as_ref(), thread.answering_model.as_deref());
+        let rejection = thread.rejection.take();
+        let end = TurnEnd::of(
+            &result,
+            rejection.as_ref(),
+            thread.answering_model.as_deref(),
+        );
         let (context, stop) = (end.context.clone(), end.stop.clone());
         let Ok(turn_id) = self.record_run(thread_id, ended.clone(), Some(end)).await else {
             return;

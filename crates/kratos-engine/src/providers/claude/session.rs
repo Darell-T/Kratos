@@ -223,7 +223,7 @@ impl Actor {
                 let waiters = std::mem::take(&mut thread.waiters);
                 // A new process has seen no rate limit event, so one left by an earlier process
                 // must not decide how this process's first turn ended.
-                thread.rate_limit = None;
+                thread.rejection = None;
                 self.read_usage(&thread_id, None);
                 for waiter in waiters {
                     self.serve(&thread_id, waiter);

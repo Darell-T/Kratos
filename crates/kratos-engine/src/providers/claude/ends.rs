@@ -6,16 +6,17 @@ use kratos_claude_client::{TurnContext, TurnOutcome as ClaudeOutcome, TurnResult
 use kratos_protocol::{ContextUsage, PauseReason, Timestamp, TurnId, TurnOutcome};
 use kratos_store::{StoreError, ThreadWrite};
 
-use super::threads::SeenLimit;
+use super::threads::Rejection;
 use crate::providers::queue::pause_if_waiting;
 
 /// Whether the turn stopped because the account ran out of usage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Stop {
     Ordinary,
-    /// The turn failed and the latest `rate_limit_event` of the turn said rejected. Only the end of
-    /// the turn decides this: an event alone changes nothing, and a turn that goes on to succeed
-    /// was one the CLI waited out and resumed by itself.
+    /// The turn failed and the latest `rate_limit_event` said the server refused the included
+    /// quota while no extra usage paid. Only the end of the turn decides this: an event alone
+    /// changes nothing, and a turn that goes on to succeed was one the CLI waited out and resumed
+    /// by itself.
     UsageLimit {
         resets_at: Option<Timestamp>,
     },
@@ -37,11 +38,11 @@ impl TurnEnd {
         }
     }
 
-    /// The end a result reports. `limit` is the latest rate limit event of the turn, and
-    /// `answering` the model that wrote its last reply, which names the context window.
+    /// The end a result reports. `rejection` is what the latest rate limit event refused, and
+    /// `answering` the model that wrote the turn's last reply, which names the context window.
     pub(super) fn of(
         result: &TurnResult,
-        limit: Option<&SeenLimit>,
+        rejection: Option<&Rejection>,
         answering: Option<&str>,
     ) -> TurnEnd {
         let outcome = match &result.outcome {
@@ -51,10 +52,12 @@ impl TurnEnd {
                 error: error.clone(),
             },
         };
-        let stop = match (&outcome, limit) {
-            (TurnOutcome::Failed { .. }, Some(seen)) if seen.rejected => Stop::UsageLimit {
-                resets_at: seen.resets_at.clone(),
-            },
+        let stop = match (&outcome, rejection) {
+            (TurnOutcome::Failed { .. }, Some(refused)) if !refused.is_using_overage => {
+                Stop::UsageLimit {
+                    resets_at: refused.resets_at.clone(),
+                }
+            }
             _ => Stop::Ordinary,
         };
         TurnEnd {

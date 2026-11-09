@@ -13,7 +13,7 @@ use kratos_protocol::{Provider, SlashCommand, ThreadId, Timestamp};
 use super::ProviderError;
 use super::actor::{Actor, Done, Reply};
 use super::limits;
-use super::threads::{SeenLimit, Waiter};
+use super::threads::{Rejection, Waiter};
 use crate::usage::LimitStop;
 
 impl Actor {
@@ -124,9 +124,9 @@ impl Actor {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
-        thread.rate_limit = Some(SeenLimit {
-            rejected: info.status == RateLimitStatus::Rejected,
+        thread.rejection = (info.status == RateLimitStatus::Rejected).then(|| Rejection {
             resets_at: info.resets_at.and_then(limits::timestamp_of_unix),
+            is_using_overage: info.is_using_overage == Some(true),
         });
         let plan = thread.open().and_then(|open| open.plan.clone());
         match Timestamp::at(self.usage.now()) {

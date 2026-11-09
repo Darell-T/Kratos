@@ -701,3 +701,29 @@ async fn a_rejection_an_earlier_process_saw_does_not_decide_a_later_turn() {
     ));
     assert!(harness.stops.as_mut().unwrap().try_recv().is_err());
 }
+
+#[tokio::test]
+async fn a_rejection_while_extra_usage_pays_is_not_a_limit_stop() {
+    // Catches a turn that fails for another reason while overage pays, with every event saying
+    // rejected, being paused as a usage limit and continued at the reset nobody asked for.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    wait_for_usage(&harness, |usage| usage.allowance == Allowance::Allowed).await;
+    let mut event = rate_limit_event("rejected", "five_hour", RESET);
+    event["rate_limit_info"]["isUsingOverage"] = json!(true);
+
+    harness.emit(&launch, event).await;
+    harness.finish(&launch, &[A], limit_failure()).await;
+
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert_eq!(harness.details().await.paused, None);
+    assert!(harness.stops.as_mut().unwrap().try_recv().is_err());
+    assert!(open_continuations(&harness).await.is_empty());
+    assert_eq!(
+        harness.usage.account(Provider::Claude).unwrap().allowance,
+        Allowance::Blocked,
+        "the included quota is what the server refused"
+    );
+}
