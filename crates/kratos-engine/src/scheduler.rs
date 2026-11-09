@@ -21,9 +21,7 @@ use uuid::Uuid;
 
 pub use crate::clock::{Clock, SystemClock};
 use crate::hub::Hub;
-use crate::providers::claude::ClaudeProvider;
-use crate::providers::codex::CodexProvider;
-use crate::providers::{Agent, Continued, ProviderError};
+use crate::providers::{Agent, Continued, ProviderError, Providers};
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 
@@ -48,39 +46,6 @@ pub enum SchedulerError {
     Stopped,
     #[error(transparent)]
     Store(#[from] StoreError),
-}
-
-/// The providers the scheduler reaches, each only while it runs. A provider that is not running
-/// answers a usage read as failed, so its continuations go to the user.
-#[derive(Clone, Default)]
-pub struct Providers {
-    pub codex: Option<CodexProvider>,
-    pub claude: Option<ClaudeProvider>,
-}
-
-impl From<CodexProvider> for Providers {
-    fn from(codex: CodexProvider) -> Providers {
-        Providers {
-            codex: Some(codex),
-            claude: None,
-        }
-    }
-}
-
-impl Providers {
-    pub fn is_empty(&self) -> bool {
-        self.codex.is_none() && self.claude.is_none()
-    }
-
-    fn agent(&self, provider: Provider) -> Result<Agent<'_>, ProviderError> {
-        let agent = match provider {
-            Provider::Codex => self.codex.as_ref().map(Agent::Codex),
-            Provider::Claude => self.claude.as_ref().map(Agent::Claude),
-        };
-        agent.ok_or_else(|| {
-            ProviderError::Unavailable(format!("{} is not running", display(provider)))
-        })
-    }
 }
 
 /// The provider's name as the plan texts spell it.
@@ -252,7 +217,7 @@ pub async fn start(
     hub: Hub,
     store: StoreThread,
     usage: UsageTracker,
-    providers: impl Into<Providers>,
+    providers: Providers,
     clock: Arc<dyn Clock>,
     mut stops: mpsc::UnboundedReceiver<LimitStop>,
 ) -> Result<SchedulerHandle, StoreError> {
@@ -261,7 +226,7 @@ pub async fn start(
         hub,
         store: store.clone(),
         usage,
-        providers: providers.into(),
+        providers,
         clock,
         unanswered: HashMap::new(),
         store_failures: HashMap::new(),
@@ -416,10 +381,15 @@ impl Scheduler {
     /// Asks the provider for the account's usage, through a session of `thread_id` where the
     /// provider needs one.
     async fn refresh(&self, provider: Provider, thread_id: &ThreadId) -> Result<(), ProviderError> {
+        self.agent(provider)?.refresh_usage(thread_id).await
+    }
+
+    /// The agent of `provider`. A provider that is not running says why, and that text reaches the
+    /// user when the continuation goes to them.
+    fn agent(&self, provider: Provider) -> Result<Agent<'_>, ProviderError> {
         self.providers
-            .agent(provider)?
-            .refresh_usage(thread_id)
-            .await
+            .agent(provider)
+            .map_err(ProviderError::Unavailable)
     }
 
     async fn resume_or_wait(
@@ -434,6 +404,11 @@ impl Scheduler {
             Ok(()) => may_continue(&continuation.waits_on, account.as_ref()),
             Err(_) => Readiness::Unanswered,
         };
+        if let (Readiness::Unanswered, Err(missing)) =
+            (readiness, self.providers.agent(provider).map(|_| ()))
+        {
+            return self.unanswered(thread_id, continuation, &missing).await;
+        }
         match readiness {
             Readiness::Ready => self.send(thread_id, continuation).await,
             Readiness::StillSpent => {
@@ -460,7 +435,7 @@ impl Scheduler {
         continuation: &Continuation,
     ) -> Result<(), StoreError> {
         self.forget(&continuation.id);
-        let sent = match self.providers.agent(continuation.waits_on.provider) {
+        let sent = match self.agent(continuation.waits_on.provider) {
             Ok(agent) => {
                 agent
                     .continue_thread(thread_id.clone(), continuation.id.clone())

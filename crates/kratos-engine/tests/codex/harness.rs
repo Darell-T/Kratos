@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::mcp::McpServer;
+use kratos_engine::providers::Providers;
 use kratos_engine::providers::Sent;
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
 use kratos_engine::scheduler::{self, Clock, SchedulerHandle};
@@ -70,6 +71,14 @@ pub struct Harness {
     control: Option<Control>,
     control_file: PathBuf,
     next_control_id: u64,
+}
+
+/// The providers of a test that drives Codex alone: Claude is not running.
+pub fn codex_only(codex: CodexProvider) -> Providers {
+    Providers {
+        codex: Ok(codex),
+        claude: Err("Claude is not running in this test".to_owned()),
+    }
 }
 
 struct Control {
@@ -203,7 +212,7 @@ impl Harness {
             self.hub.clone(),
             self.store.clone(),
             self.usage.clone(),
-            self.provider.clone(),
+            codex_only(self.provider.clone()),
             clock,
             stops,
         )

@@ -47,10 +47,9 @@ impl ServerState {
 
     /// The agent of `provider`. 503 saying why when it cannot run.
     pub(super) fn agent_of(&self, provider: Provider) -> Result<Agent<'_>, ApiError> {
-        match provider {
-            Provider::Codex => Ok(Agent::Codex(self.codex()?)),
-            Provider::Claude => Ok(Agent::Claude(self.claude()?)),
-        }
+        self.providers
+            .agent(provider)
+            .map_err(ApiError::unavailable)
     }
 
     /// The agent of `thread_id`'s provider. 404 for a thread that does not exist, 503 saying why

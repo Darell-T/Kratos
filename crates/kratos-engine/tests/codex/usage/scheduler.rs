@@ -588,7 +588,7 @@ async fn start_with_reports(
         harness.hub.clone(),
         harness.store.clone(),
         harness.usage.clone(),
-        harness.provider.clone(),
+        crate::harness::codex_only(harness.provider.clone()),
         clock,
         stops,
     )

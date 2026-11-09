@@ -155,8 +155,10 @@ impl Harness {
         let state = ServerState {
             store,
             hub: hub.clone(),
-            codex: Ok(provider.clone()),
-            claude: Ok(claude.clone()),
+            providers: kratos_engine::providers::Providers {
+                codex: Ok(provider.clone()),
+                claude: Ok(claude.clone()),
+            },
             scheduler: None,
             usage,
             token,

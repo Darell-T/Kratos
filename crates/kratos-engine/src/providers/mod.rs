@@ -9,6 +9,7 @@ pub mod codex;
 pub(crate) mod queue;
 
 pub(crate) use agent::Agent;
+pub use agent::Providers;
 
 use kratos_protocol::{ApprovalId, Message, MessageId, QuestionId, ThreadId};
 use kratos_store::StoreError;

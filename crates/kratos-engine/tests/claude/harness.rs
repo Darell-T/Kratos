@@ -10,9 +10,10 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use kratos_claude_client::{SessionId, transcript_path};
 use kratos_engine::hub::{EventPages, Hub};
+use kratos_engine::providers::Providers;
 use kratos_engine::providers::Sent;
 use kratos_engine::providers::claude::{self, ClaudeProvider, ClaudeSettings};
-use kratos_engine::scheduler::{self, Clock, Providers, SchedulerHandle};
+use kratos_engine::scheduler::{self, Clock, SchedulerHandle};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::{LimitStop, UsageTracker};
 use kratos_protocol::{
@@ -245,11 +246,23 @@ impl Harness {
 
     /// Starts the usage scheduler on `clock`, as the engine does after the providers.
     pub async fn start_scheduler(&mut self, clock: Arc<dyn Clock>) -> SchedulerHandle {
-        let stops = self.stops.take().expect("the scheduler starts once");
         let providers = Providers {
-            codex: self.runner.clone(),
-            claude: Some(self.provider.clone()),
+            codex: self
+                .runner
+                .clone()
+                .ok_or_else(|| "Codex is not running in this test".to_owned()),
+            claude: Ok(self.provider.clone()),
         };
+        self.start_scheduler_with(clock, providers).await
+    }
+
+    /// Starts the usage scheduler on `clock` with the providers a test chooses.
+    pub async fn start_scheduler_with(
+        &mut self,
+        clock: Arc<dyn Clock>,
+        providers: Providers,
+    ) -> SchedulerHandle {
+        let stops = self.stops.take().expect("the scheduler starts once");
         let handle = scheduler::start(
             self.hub.clone(),
             self.store.clone(),

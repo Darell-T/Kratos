@@ -2,7 +2,7 @@
 //! an agent: the HTTP routes and the usage scheduler (D39). Code that serves both providers calls
 //! these methods instead of matching on the provider itself.
 
-use kratos_protocol::{ContinuationId, ThreadId, ThreadSkills};
+use kratos_protocol::{ContinuationId, Provider, ThreadId, ThreadSkills};
 
 use super::claude::ClaudeProvider;
 use super::codex::CodexProvider;
@@ -14,6 +14,31 @@ const NO_CODEX_SLASH_COMMANDS: &str =
 /// Kratos loads only the user's Claude settings (D21), so what a project defines is not in the
 /// CLI's list.
 const CLAUDE_COMMANDS_FROM_USER_SETTINGS: &str = "Kratos loads only your Claude settings, so a project's own slash commands and skills are not listed";
+
+/// The providers the engine drives, each running or with the reason it cannot, such as no CLI
+/// installed. The one place that maps a [`Provider`] to its [`Agent`], for the routes and the
+/// scheduler alike.
+#[derive(Clone)]
+pub struct Providers {
+    pub codex: Result<CodexProvider, String>,
+    pub claude: Result<ClaudeProvider, String>,
+}
+
+impl Providers {
+    /// The agent of `provider`, or why it cannot run.
+    pub(crate) fn agent(&self, provider: Provider) -> Result<Agent<'_>, String> {
+        match provider {
+            Provider::Codex => self.codex.as_ref().map(Agent::Codex),
+            Provider::Claude => self.claude.as_ref().map(Agent::Claude),
+        }
+        .map_err(Clone::clone)
+    }
+
+    /// Whether neither provider runs.
+    pub fn none_running(&self) -> bool {
+        self.codex.is_err() && self.claude.is_err()
+    }
+}
 
 pub(crate) enum Agent<'a> {
     Codex(&'a CodexProvider),

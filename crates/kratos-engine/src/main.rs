@@ -29,9 +29,10 @@ use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, St
 use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
 use kratos_engine::mcp::{self, McpServer};
+use kratos_engine::providers::Providers;
 use kratos_engine::providers::claude::{self, ClaudeProvider, ClaudeSettings};
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
-use kratos_engine::scheduler::{self, Providers, SystemClock};
+use kratos_engine::scheduler::{self, SystemClock};
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::{LimitStop, UsageTracker};
@@ -132,32 +133,29 @@ fn run_server(
         let (limit_stops, stops) = mpsc::unbounded_channel();
         let codex = start_codex(config, port, &hub, &store, &usage, limit_stops.clone()).await?;
         let claude = start_claude(config, &hub, &store, &codex, &usage, limit_stops).await?;
-        let providers = Providers {
-            codex: codex.as_ref().ok().cloned(),
-            claude: claude.as_ref().ok().cloned(),
-        };
-        let scheduler = if providers.is_empty() {
+        let providers = Providers { codex, claude };
+        let scheduler = if providers.none_running() {
             None
         } else {
             let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
             let clock = Arc::new(SystemClock);
+            let providers = providers.clone();
             Some(scheduler::start(hub, store, usage, providers, clock, stops).await?)
         };
         let state = ServerState {
             hub,
             store,
-            codex,
-            claude,
+            providers,
             scheduler,
             usage,
             token,
         };
         server::serve(listener, state.clone(), shutdown_signal()).await?;
         // The agents end before the store closes, so nothing they report goes unrecorded (L2).
-        if let Ok(claude) = &state.claude {
+        if let Ok(claude) = &state.providers.claude {
             claude.shutdown().await;
         }
-        if let Ok(codex) = &state.codex {
+        if let Ok(codex) = &state.providers.codex {
             codex.shutdown().await;
         }
         Ok(())

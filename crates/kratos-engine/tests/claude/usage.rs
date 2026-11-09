@@ -831,3 +831,41 @@ async fn the_context_is_the_last_request_not_the_first_the_sum_or_the_top_level(
         })
     );
 }
+
+#[tokio::test]
+async fn a_provider_that_is_not_running_tells_the_scheduler_and_the_user_why() {
+    // Catches the scheduler's own list of providers losing the reason a provider is missing: the
+    // user would read "not running" where the engine knows "not installed".
+    let clock = ManualClock::starting_at(at(RESET - 2 * MINUTE));
+    let mut stopped = Harness::start(options(&clock)).await;
+    stopped.start_scheduler(clock.clone()).await;
+    stop_at_the_limit(&mut stopped, "five_hour").await;
+    let scheduled = next_continuation(&mut stopped).await;
+    let (root, thread_id) = stopped.stop().await;
+
+    let mut restarted = Harness::start_in(root, options(&clock), Some(thread_id)).await;
+    let providers = kratos_engine::providers::Providers {
+        codex: Err("Codex is not installed".to_owned()),
+        claude: Err("Claude Code is not installed".to_owned()),
+    };
+    restarted
+        .start_scheduler_with(clock.clone(), providers)
+        .await;
+    clock.advance_to(at(RESET));
+    for check in 1..=2 {
+        let next = RESET + 300 * check;
+        clock.wait_for_wake_up_at(at(next)).await;
+        clock.advance_to(at(next));
+    }
+
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    loop {
+        let state = continuation(&restarted, &scheduled.id).await.state;
+        if let ContinuationState::AwaitingUser { why } = state {
+            assert_eq!(why, "Claude Code is not installed");
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "still {state:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}

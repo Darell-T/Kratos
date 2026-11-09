@@ -33,9 +33,8 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::hub::Hub;
-use crate::providers::ProviderError;
-use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
+use crate::providers::{ProviderError, Providers};
 use crate::scheduler::{SchedulerError, SchedulerHandle};
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
@@ -54,10 +53,8 @@ const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ServerState {
     pub store: StoreThread,
     pub hub: Hub,
-    /// Codex, or why Codex cannot run, such as no Codex installed.
-    pub codex: Result<CodexProvider, String>,
-    /// Claude, or why Claude cannot run, such as no Claude Code installed.
-    pub claude: Result<ClaudeProvider, String>,
+    /// Each provider, or why it cannot run, such as no Codex installed.
+    pub providers: Providers,
     /// The usage scheduler, which serves every provider that runs. `None` where no provider runs,
     /// and where a test drives a provider without one.
     pub scheduler: Option<SchedulerHandle>,
@@ -67,13 +64,8 @@ pub struct ServerState {
 
 impl ServerState {
     fn codex(&self) -> Result<&CodexProvider, ApiError> {
-        self.codex
-            .as_ref()
-            .map_err(|missing| ApiError::unavailable(missing.clone()))
-    }
-
-    fn claude(&self) -> Result<&ClaudeProvider, ApiError> {
-        self.claude
+        self.providers
+            .codex
             .as_ref()
             .map_err(|missing| ApiError::unavailable(missing.clone()))
     }
