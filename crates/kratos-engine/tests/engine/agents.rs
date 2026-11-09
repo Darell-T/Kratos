@@ -584,7 +584,7 @@ fn usage_lists_the_claude_account_s_two_windows_beside_codex_s() {
     assert_eq!(unified["primary"]["windowMinutes"], 300);
     assert_eq!(unified["secondary"]["usedPercent"], 7);
     assert_eq!(unified["secondary"]["windowMinutes"], 10080);
-    assert_eq!(unified["primary"]["resetsAt"], "2030-01-01T05:00:00.112Z");
+    assert_eq!(unified["primary"]["resetsAt"], "2030-01-01T05:00:00.123Z");
     assert_eq!(
         usage.body["accounts"][1]["buckets"][0]["primary"]["usedPercent"],
         20
