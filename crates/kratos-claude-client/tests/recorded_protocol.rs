@@ -1,5 +1,6 @@
 //! Compatibility facts pinned to the recorded native CLI rather than inferred from SDK types.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use kratos_claude_client::{
@@ -309,13 +310,70 @@ fn a_cancelled_queued_message_is_not_in_the_completed_turn() {
 #[tokio::test]
 async fn native_transcript_reconciliation_includes_user_rows_and_folded_attachments() {
     // Catches losing a folded message after restart because it was stored as an attachment.
-    let ids = delivered_message_ids(&recordings().join("native-fold.jsonl"))
+    let delivered = delivered_message_ids(&recordings().join("native-fold.jsonl"))
         .await
         .unwrap();
+    assert!(!delivered.torn_tail);
+    let ids = delivered.ids;
     assert_eq!(ids.len(), 3);
     assert!(ids.contains("00000000-0000-4000-8000-00000000005f"));
     assert!(ids.contains("00000000-0000-4000-8000-000000000075"));
     assert!(ids.contains("00000000-0000-4000-8000-000000000071"));
+}
+
+#[tokio::test]
+async fn a_torn_last_line_keeps_the_earlier_ids_and_says_delivery_may_be_unknown() {
+    // Catches failing the whole read after a crash mid-write, when the earlier rows still prove delivery.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"uuid\":\"first\"}
+{\"type\":\"user\",\"uuid\":\"second\",\"mess",
+    )
+    .unwrap();
+    let delivered = delivered_message_ids(&path).await.unwrap();
+    assert!(delivered.torn_tail);
+    assert_eq!(delivered.ids, HashSet::from(["first".to_owned()]));
+
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"uuid\":\"first\"}
+",
+    )
+    .unwrap();
+    assert!(!delivered_message_ids(&path).await.unwrap().torn_tail);
+
+    std::fs::write(&path, "{\"type\":\"user\",\"uuid\":\"first\"}").unwrap();
+    let unterminated = delivered_message_ids(&path).await.unwrap();
+    assert!(!unterminated.torn_tail, "a complete row needs no newline");
+    assert_eq!(unterminated.ids.len(), 1);
+}
+
+#[tokio::test]
+async fn a_malformed_line_before_the_tail_still_fails() {
+    // Catches treating corruption in the middle of a transcript as a harmless torn tail.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("session.jsonl");
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"uuid\":\"first\"}
+{\"type\":\"user\",\"uu
+{\"type\":\"user\",\"uuid\":\"third\"}
+",
+    )
+    .unwrap();
+    assert!(delivered_message_ids(&path).await.is_err());
+    std::fs::write(
+        &path,
+        "{\"type\":\"user\",\"uu
+",
+    )
+    .unwrap();
+    assert!(
+        delivered_message_ids(&path).await.is_err(),
+        "a newline-terminated bad line is not a torn tail"
+    );
 }
 
 #[test]

@@ -17,5 +17,6 @@ pub use protocol::{
     UsageWindow,
 };
 pub use transcript::{
-    SessionId, SessionStart, TranscriptError, delivered_message_ids, transcript_path,
+    DeliveredMessages, SessionId, SessionStart, TranscriptError, delivered_message_ids,
+    transcript_path,
 };

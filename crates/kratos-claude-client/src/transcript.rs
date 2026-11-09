@@ -93,43 +93,67 @@ pub fn transcript_path(claude_home: &Path, cwd: &Path, id: SessionId) -> PathBuf
         .join(format!("{id}.jsonl"))
 }
 
+/// What the native transcript proves about delivery.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DeliveredMessages {
+    /// UUIDs of messages the CLI durably accepted.
+    pub ids: HashSet<String>,
+    /// The last line was cut mid-write, so a message accepted just before a crash may be missing
+    /// from `ids`. Treat any message not in `ids` as unknown, never as undelivered.
+    pub torn_tail: bool,
+}
+
 /// Reads accepted user UUIDs, including folded messages saved as queued-command attachments.
 /// A missing file means no durable evidence of delivery.
 ///
 /// # Errors
-/// Returns an error for unreadable or malformed transcript data.
-pub async fn delivered_message_ids(path: &Path) -> Result<HashSet<String>, TranscriptError> {
+/// Returns an error for unreadable data, a malformed row that is not the unterminated last line,
+/// or a delivery marker without a UUID.
+pub async fn delivered_message_ids(path: &Path) -> Result<DeliveredMessages, TranscriptError> {
+    let read_error = |source| TranscriptError::Read {
+        path: path.to_owned(),
+        source,
+    };
     let file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashSet::new()),
-        Err(source) => {
-            return Err(TranscriptError::Read {
-                path: path.to_owned(),
-                source,
-            });
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(DeliveredMessages::default());
         }
+        Err(source) => return Err(read_error(source)),
     };
-    let mut lines = BufReader::new(file).lines();
-    let mut ids = HashSet::new();
-    while let Some(line) = lines
-        .next_line()
-        .await
-        .map_err(|source| TranscriptError::Read {
-            path: path.to_owned(),
-            source,
-        })?
-    {
-        let row: Value = serde_json::from_str(&line).map_err(|source| TranscriptError::Json {
-            path: path.to_owned(),
-            source,
-        })?;
+    let mut reader = BufReader::new(file);
+    let mut delivered = DeliveredMessages::default();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if reader
+            .read_until(b'\n', &mut line)
+            .await
+            .map_err(read_error)?
+            == 0
+        {
+            return Ok(delivered);
+        }
+        let terminated = line.last() == Some(&b'\n');
+        let row: Value = match serde_json::from_slice(&line) {
+            Ok(row) => row,
+            Err(_) if !terminated => {
+                delivered.torn_tail = true;
+                return Ok(delivered);
+            }
+            Err(source) => {
+                return Err(TranscriptError::Json {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        };
         if let Some(id) = delivery_id(&row).map_err(|()| TranscriptError::InvalidDelivery {
             path: path.to_owned(),
         })? {
-            ids.insert(id.to_owned());
+            delivered.ids.insert(id.to_owned());
         }
     }
-    Ok(ids)
 }
 
 fn delivery_id(row: &Value) -> Result<Option<&str>, ()> {
