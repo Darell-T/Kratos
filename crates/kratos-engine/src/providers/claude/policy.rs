@@ -14,6 +14,7 @@ pub(super) enum Action {
     File(Destination),
     Command { flagged: bool, outside: bool },
     Read,
+    ProtectedRead,
     ExternalTool,
     Question,
     ExitPlan,
@@ -32,6 +33,8 @@ pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
     match (action, settings.plan_mode, settings.permission) {
         (Action::Invalid, _, _) => Decision::Deny,
         (Action::Question, _, _) => Decision::Question,
+        (Action::ProtectedRead, false, Permission::FullAccess) => Decision::Allow,
+        (Action::ProtectedRead, _, _) => Decision::Deny,
         (Action::ExitPlan | Action::Command { outside: true, .. }, true, _) => Decision::Deny,
         (Action::File(Destination::Protected(path)), _, _) => {
             Decision::Ask(AskReason::ProtectedFolder { path })
@@ -80,6 +83,14 @@ mod tests {
                 }
                 assert_eq!(decide(&settings, Action::Question), Decision::Question);
                 assert_eq!(decide(&settings, Action::Invalid), Decision::Deny);
+                assert_eq!(
+                    decide(&settings, Action::ProtectedRead),
+                    if permission == Permission::FullAccess && !plan_mode {
+                        Decision::Allow
+                    } else {
+                        Decision::Deny
+                    }
+                );
                 assert_eq!(
                     decide(&settings, Action::ExternalTool),
                     Decision::Ask(AskReason::Unchecked)

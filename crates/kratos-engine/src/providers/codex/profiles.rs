@@ -126,6 +126,18 @@ impl ProtectedFolders {
         Ok(None)
     }
 
+    /// Recursive searches must not start above a protected folder either.
+    pub(crate) fn overlaps(&self, path: &Path) -> io::Result<bool> {
+        let path = resolve_destination(path)?;
+        for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
+            let folder = resolve_destination(folder)?;
+            if is_within(&path, &folder) || is_within(&folder, &path) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// The `-c` arguments that define Kratos's three profiles, for the app-server's command line.
     /// `temp` is the folder Ask me and Approve for me let commands write besides the workspaces.
     pub(super) fn launch_arguments(&self, temp: &Path) -> Vec<OsString> {

@@ -92,9 +92,8 @@ fn action(
             }
         }
         "ExitPlanMode" => Action::ExitPlan,
-        "Read" | "Glob" | "Grep" | "WebFetch" | "WebSearch" | "TodoWrite" | "EnterPlanMode" => {
-            read_action(tool)
-        }
+        "Read" | "Glob" | "Grep" => local_read_action(tool, folder, protected),
+        "WebFetch" | "WebSearch" | "TodoWrite" | "EnterPlanMode" => read_action(tool),
         name if name.starts_with("mcp__") => mcp_action(tool),
         _ => Action::Invalid,
     }
@@ -102,8 +101,6 @@ fn action(
 
 fn read_action(tool: &CanUseTool) -> Action {
     let key = match tool.tool_name.as_str() {
-        "Read" => "file_path",
-        "Glob" | "Grep" => "pattern",
         "WebFetch" => "url",
         "WebSearch" => "query",
         "TodoWrite" => {
@@ -124,6 +121,60 @@ fn read_action(tool: &CanUseTool) -> Action {
     } else {
         Action::Invalid
     }
+}
+
+fn read_scope(tool: &CanUseTool, folder: &str) -> Option<std::path::PathBuf> {
+    let path = if tool.tool_name == "Read" {
+        tool.input["file_path"].as_str()?
+    } else {
+        let pattern = tool.input["pattern"].as_str()?;
+        if pattern.trim().is_empty() || pattern.contains('\0') {
+            return None;
+        }
+        match tool.input.get("path") {
+            Some(path) => path.as_str()?,
+            None => folder,
+        }
+    };
+    (!path.trim().is_empty() && !path.contains('\0')).then(|| Path::new(folder).join(path))
+}
+
+fn glob_prefix(pattern: &str) -> Option<&str> {
+    let end = pattern
+        .find(['*', '?', '[', '{', '('])
+        .unwrap_or(pattern.len());
+    let dynamic = &pattern[end..];
+    // A dynamic glob must not choose another root or climb out of its checked scope.
+    let escapes = [
+        "..", ":", "~", "{/", "{\\", ",/", ",\\", "(/", "(\\", "|/", "|\\",
+    ];
+    (!escapes.iter().any(|part| dynamic.contains(part))).then_some(&pattern[..end])
+}
+
+fn local_read_action(
+    tool: &CanUseTool,
+    folder: &str,
+    protected: &super::super::codex::ProtectedFolders,
+) -> Action {
+    let Some(scope) = read_scope(tool, folder) else {
+        return Action::Invalid;
+    };
+    let target = if tool.tool_name == "Glob" {
+        let Some(prefix) = tool.input["pattern"].as_str().and_then(glob_prefix) else {
+            return Action::Invalid;
+        };
+        scope.join(prefix)
+    } else {
+        scope.clone()
+    };
+    for path in [&scope, &target] {
+        match protected.overlaps(path) {
+            Ok(true) => return Action::ProtectedRead,
+            Ok(false) => {}
+            Err(_) => return Action::Invalid,
+        }
+    }
+    Action::Read
 }
 
 fn mcp_action(tool: &CanUseTool) -> Action {
@@ -278,7 +329,7 @@ impl Actor {
                 self.request_question(pending, question).await;
             }
             Decision::Deny => {
-                let _ = pending.control.answer(json!({ "behavior": "deny", "message": "Kratos denied an unknown, unreadable, disabled, or plan-exit tool request" }));
+                let _ = pending.control.answer(json!({ "behavior": "deny", "message": "Kratos denied a protected read or an unknown, unreadable, disabled, or plan-exit tool request" }));
             }
         }
     }
