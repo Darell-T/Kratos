@@ -77,14 +77,16 @@ pub(super) fn context_usage(
     answering: Option<&str>,
 ) -> Option<ContextUsage> {
     let last = context.last?;
-    let input_tokens =
-        last.input_tokens + last.cache_creation_input_tokens + last.cache_read_input_tokens;
+    let input_tokens = last
+        .input_tokens
+        .checked_add(last.cache_creation_input_tokens)?
+        .checked_add(last.cache_read_input_tokens)?;
     Some(ContextUsage {
         input_tokens,
         cached_input_tokens: last.cache_read_input_tokens,
         output_tokens: last.output_tokens,
         reasoning_output_tokens: 0,
-        total_tokens: input_tokens + last.output_tokens,
+        total_tokens: input_tokens.checked_add(last.output_tokens)?,
         context_window: context.window_of(answering),
     })
 }
@@ -117,5 +119,31 @@ pub(super) fn end_turn(
             pause_if_waiting(write, PauseReason::TurnFailed { turn_id, error })
         }
         (Stop::Ordinary, None) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use kratos_claude_client::IterationTokens;
+
+    use super::*;
+
+    #[test]
+    fn token_counts_that_overflow_give_no_context_and_never_a_panic() {
+        // Catches a result with absurd counts killing the actor in an addition, which would stop
+        // every Claude thread.
+        let context = TurnContext {
+            last: Some(IterationTokens {
+                input_tokens: i64::MAX,
+                cache_creation_input_tokens: 1,
+                cache_read_input_tokens: 1,
+                output_tokens: 1,
+            }),
+            windows: BTreeMap::new(),
+        };
+
+        assert_eq!(context_usage(&context, None), None);
     }
 }

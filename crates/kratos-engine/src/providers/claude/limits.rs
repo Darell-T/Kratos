@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime};
 use kratos_claude_client::{LimitWindow, RateLimitInfo, RateLimitStatus, RateLimitType, UsageRead};
 use kratos_protocol::{AccountUsage, Allowance, Provider, Timestamp, UsageBucket, UsageWindow};
 
+use crate::usage::timestamp_of_unix;
+
 /// The bucket of the five-hour and weekly windows every Claude plan shares.
 pub(super) const UNIFIED: &str = "unified";
 const FIVE_HOUR_MINUTES: i64 = 300;
@@ -38,11 +40,6 @@ pub(super) fn percent_of_percent(percent: f64) -> Option<i32> {
     whole_percent(percent)
 }
 
-/// A reset an event reports in Unix seconds.
-pub(super) fn timestamp_of_unix(seconds: u64) -> Option<Timestamp> {
-    Timestamp::at(SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)).ok()
-}
-
 /// A reset a read reports as ISO 8601 with an offset, such as `2030-01-01T05:00:00.123456+00:00`,
 /// written back in the engine's own form, in UTC with milliseconds. `Timestamp` reads only a zero
 /// offset, so any other is applied here.
@@ -61,8 +58,12 @@ fn instant_with_offset(text: &str) -> Option<SystemTime> {
     let local = Timestamp::try_from(format!("{clock}Z")).ok()?;
     let (sign, digits) = offset.split_at(1);
     let (hours, minutes) = digits.split_once(':')?;
-    let shift =
-        Duration::from_secs(hours.parse::<u64>().ok()? * 3600 + minutes.parse::<u64>().ok()? * 60);
+    let seconds = hours
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(3600)?
+        .checked_add(minutes.parse::<u64>().ok()?.checked_mul(60)?)?;
+    let shift = Duration::from_secs(seconds);
     if sign == "+" {
         local.instant().checked_sub(shift)
     } else {
@@ -398,6 +399,22 @@ mod tests {
         assert_eq!(zulu.as_str(), "2030-01-01T05:00:00.000Z");
         assert_eq!(timestamp_of_iso("tomorrow"), None);
         assert_eq!(timestamp_of_iso("2030-01-01"), None);
+    }
+
+    #[test]
+    fn a_time_that_cannot_be_represented_is_missing_and_never_a_panic() {
+        // Catches a CLI that sends milliseconds, or any huge number, killing the actor with an
+        // overflow in time arithmetic, which would stop every Claude thread.
+        assert_eq!(timestamp_of_unix(u64::MAX), None);
+        assert_eq!(timestamp_of_unix(1_792_531_800_000), None);
+        assert_eq!(
+            timestamp_of_iso("2030-01-01T05:00:00+18446744073709551615:00"),
+            None
+        );
+        assert_eq!(
+            timestamp_of_iso("2030-01-01T05:00:00-00:18446744073709551615"),
+            None
+        );
     }
 
     #[test]

@@ -727,3 +727,28 @@ async fn a_rejection_while_extra_usage_pays_is_not_a_limit_stop() {
         "the included quota is what the server refused"
     );
 }
+
+#[tokio::test]
+async fn an_event_with_a_reset_that_cannot_be_a_time_leaves_the_provider_serving() {
+    // Catches a CLI that sends milliseconds, or any huge reset, killing the Claude actor: every
+    // thread would then answer "stopped" and the running turn would never end.
+    let harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    wait_for_usage(&harness, |usage| usage.allowance == Allowance::Allowed).await;
+
+    let mut event = rate_limit_event("rejected", "five_hour", 1_792_531_800_000);
+    event["rate_limit_info"]["unifiedWindows"] = json!({
+        "five_hour": { "utilization": 0.5, "resetsAt": u64::MAX },
+        "seven_day": { "utilization": 0.1, "resetsAt": 1_792_531_800_000_u64 },
+    });
+    harness.emit(&launch, event).await;
+    harness.finish(&launch, &[A], json!({})).await;
+
+    harness
+        .message_becomes(A, |status| {
+            matches!(status, kratos_protocol::MessageStatus::Accepted { .. })
+        })
+        .await;
+    harness.send(B, "still served").await;
+    harness.wait_written(&launch, &[A, B]).await;
+}

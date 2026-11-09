@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use kratos_protocol::{
     AccountUsage, Allowance, Provider, ThreadId, Timestamp, TurnId, UsageBucket, UsageReport,
@@ -17,6 +17,13 @@ use kratos_protocol::{
 use tokio::sync::watch;
 
 use crate::clock::{Clock, SystemClock};
+
+/// The time `seconds` after the epoch, for a reset a CLI reports in Unix seconds. A number that is
+/// not a time Kratos can write, such as milliseconds or `u64::MAX`, is missing, never a panic.
+pub(crate) fn timestamp_of_unix(seconds: u64) -> Option<Timestamp> {
+    let time = SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))?;
+    Timestamp::at(time).ok()
+}
 
 /// A turn that stopped at a usage limit, reported by its provider.
 #[derive(Clone, Debug, PartialEq, Eq)]

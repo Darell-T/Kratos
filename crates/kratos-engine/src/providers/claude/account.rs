@@ -14,7 +14,7 @@ use super::ProviderError;
 use super::actor::{Actor, Done, Reply};
 use super::limits;
 use super::threads::{Rejection, Waiter};
-use crate::usage::LimitStop;
+use crate::usage::{LimitStop, timestamp_of_unix};
 
 impl Actor {
     /// A session reported `plan`. A plan other than the one the usage was read under means the
@@ -125,7 +125,7 @@ impl Actor {
             return;
         };
         thread.rejection = (info.status == RateLimitStatus::Rejected).then(|| Rejection {
-            resets_at: info.resets_at.and_then(limits::timestamp_of_unix),
+            resets_at: info.resets_at.and_then(timestamp_of_unix),
             is_using_overage: info.is_using_overage == Some(true),
         });
         let plan = thread.open().and_then(|open| open.plan.clone());
