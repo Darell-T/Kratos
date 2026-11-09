@@ -204,7 +204,7 @@ impl Actor {
                 } = *connected;
                 let plan = wire::plan(&initialized);
                 let commands = initialized.commands;
-                self.note_plan(&plan);
+                self.note_plan(plan.as_deref());
                 let thread = self.threads.get_mut(&thread_id).expect("checked above");
                 thread.session = Session::Open(OpenSession {
                     claude,

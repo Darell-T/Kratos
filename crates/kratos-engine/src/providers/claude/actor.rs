@@ -195,6 +195,9 @@ pub(crate) struct Actor {
     pub(super) hub: Hub,
     pub(super) store: StoreThread,
     pub(super) usage: UsageTracker,
+    /// The plan of the session that initialized last, which is the account that is signed in.
+    /// `None` before any session has.
+    pub(super) signed_in: Option<Option<String>>,
     pub(super) limit_stops: mpsc::UnboundedSender<LimitStop>,
     pub(super) threads: HashMap<ThreadId, ThreadState>,
     /// Set when a write failed: no CLI runs after that, because its work would go unrecorded (L2).
@@ -221,6 +224,7 @@ impl Actor {
             hub,
             store,
             usage,
+            signed_in: None,
             limit_stops,
             threads: HashMap::new(),
             parked: None,

@@ -17,13 +17,24 @@ use super::threads::{Rejection, Waiter};
 use crate::usage::{LimitStop, timestamp_of_unix};
 
 impl Actor {
-    /// A session reported `plan`. A plan other than the one the usage was read under means the
-    /// signed-in account changed, so every snapshot and read in flight describes one that is gone.
-    pub(super) fn note_plan(&self, plan: &Option<String>) {
+    /// A session reported `plan`, and is now the account that is signed in. A plan other than the
+    /// one the usage was read under means the account changed, so every snapshot and read in
+    /// flight describes one that is gone, and sessions still open under the old plan no longer
+    /// write usage (see [`Actor::is_signed_in`]).
+    pub(super) fn note_plan(&mut self, plan: Option<&str>) {
         let known = self.usage.account(Provider::Claude);
-        if known.is_some_and(|known| known.plan != *plan) {
+        if known.is_some_and(|known| known.plan.as_deref() != plan) {
             self.usage.account_changed(Provider::Claude);
         }
+        self.signed_in = Some(plan.map(str::to_owned));
+    }
+
+    /// Whether a session of `plan` is of the account that signed in last. Before any session
+    /// reports, every session is.
+    fn is_signed_in(&self, plan: Option<&str>) -> bool {
+        self.signed_in
+            .as_ref()
+            .is_none_or(|signed_in| signed_in.as_deref() == plan)
     }
 
     /// Reads the account's usage through a session of the thread, starting one when none runs.
@@ -86,6 +97,15 @@ impl Actor {
         result: Result<UsageRead, RequestError>,
         reply: Option<Reply<()>>,
     ) {
+        if !self.is_signed_in(plan.as_deref()) {
+            if let Some(reply) = reply {
+                let _ = reply.send(Err(ProviderError::Unavailable(
+                    "The session belongs to an account that was signed out, so its usage is not the account's now"
+                        .into(),
+                )));
+            }
+            return;
+        }
         let answer = match result {
             Ok(read) => self.record_read(generation, plan, &read),
             Err(error) => Err(format!(
@@ -129,6 +149,9 @@ impl Actor {
             is_using_overage: info.is_using_overage == Some(true),
         });
         let plan = thread.open().and_then(|open| open.plan.clone());
+        if !self.is_signed_in(plan.as_deref()) {
+            return;
+        }
         match Timestamp::at(self.usage.now()) {
             Ok(read_at) => self
                 .usage

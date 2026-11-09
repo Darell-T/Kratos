@@ -598,7 +598,10 @@ async fn a_different_plan_at_initialize_drops_a_usage_read_still_in_flight() {
     .await;
     harness.call(&first, "test/usageRelease", json!({})).await;
 
-    refresh.await.unwrap().unwrap();
+    assert!(
+        refresh.await.unwrap().is_err(),
+        "a read of the old account is not a fresh read"
+    );
     let usage = harness.usage.account(Provider::Claude).unwrap();
     assert_eq!(usage.plan.as_deref(), Some("Claude Max"));
     assert_eq!(
@@ -868,4 +871,51 @@ async fn a_provider_that_is_not_running_tells_the_scheduler_and_the_user_why() {
         assert!(tokio::time::Instant::now() < deadline, "still {state:?}");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test]
+async fn a_session_of_an_account_that_was_signed_out_no_longer_writes_usage() {
+    // Catches an old session, still open when another subscription signs in, writing its events
+    // and reads over the new account's numbers, so the scheduler would decide on the wrong account.
+    let harness = Harness::start(Options::default()).await;
+    let old = harness.begin(A, 1).await;
+    wait_for_usage(&harness, |usage| {
+        usage.plan.as_deref() == Some("Claude Pro") && usage.allowance == Allowance::Allowed
+    })
+    .await;
+    harness.set_plan("Claude Max");
+    let second = harness.another_thread("second").await;
+    harness
+        .provider
+        .send(
+            second,
+            message_id(B),
+            text_input("hello"),
+            MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+    harness.launch(2).await;
+    wait_for_usage(&harness, |usage| {
+        usage.plan.as_deref() == Some("Claude Max") && usage.allowance == Allowance::Allowed
+    })
+    .await;
+
+    harness
+        .emit(&old, rate_limit_event("rejected", "five_hour", RESET))
+        .await;
+    read_says(&harness, &old, 100, RESET).await;
+    let read = harness
+        .provider
+        .refresh_usage(harness.thread_id.clone())
+        .await;
+
+    assert!(
+        read.is_err(),
+        "a read of the old account is not a fresh read: {read:?}"
+    );
+    let usage = harness.usage.account(Provider::Claude).unwrap();
+    assert_eq!(usage.plan.as_deref(), Some("Claude Max"));
+    assert_eq!(usage.allowance, Allowance::Allowed);
+    assert_eq!(unified_percents(&usage), (Some(19), Some(7)));
 }
