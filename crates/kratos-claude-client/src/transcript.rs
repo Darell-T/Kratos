@@ -171,7 +171,7 @@ fn delivery_id(row: &Value) -> Result<Option<&str>, ()> {
         .ok_or(())
 }
 
-/// Failure to inspect the native session's durable delivery evidence.
+/// A failure with a session id or a transcript file, including delivery evidence read from it.
 #[derive(Debug, thiserror::Error)]
 pub enum TranscriptError {
     #[error("Claude transcript {} has a delivery marker without a nonempty uuid", .path.display())]

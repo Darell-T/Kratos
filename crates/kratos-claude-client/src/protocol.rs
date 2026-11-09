@@ -388,7 +388,7 @@ impl ControlRequest {
     }
 }
 
-/// A recognized protocol message whose required fields cannot be read.
+/// Stdout data or a control request that the crate cannot turn into a typed message.
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("Claude control request has no string request_id")]
