@@ -752,3 +752,36 @@ async fn an_event_with_a_reset_that_cannot_be_a_time_leaves_the_provider_serving
     harness.send(B, "still served").await;
     harness.wait_written(&launch, &[A, B]).await;
 }
+
+#[tokio::test]
+async fn a_turn_the_user_stopped_is_never_a_limit_stop_whatever_its_result_says() {
+    // Catches the user's Stop becoming an automatic continuation: the CLI answers the interrupt
+    // with a failed result after a rejection, and Kratos would send the work again at the reset.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    wait_for_usage(&harness, |usage| usage.allowance == Allowance::Allowed).await;
+    harness
+        .emit(&launch, rate_limit_event("rejected", "five_hour", RESET))
+        .await;
+
+    harness
+        .provider
+        .stop(harness.thread_id.clone())
+        .await
+        .unwrap();
+    harness.finish(&launch, &[A], limit_failure()).await;
+
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        !matches!(
+            harness.details().await.paused,
+            Some(PauseReason::UsageLimit { .. })
+        ),
+        "{:?}",
+        harness.details().await.paused
+    );
+    assert!(harness.stops.as_mut().unwrap().try_recv().is_err());
+    assert!(open_continuations(&harness).await.is_empty());
+}

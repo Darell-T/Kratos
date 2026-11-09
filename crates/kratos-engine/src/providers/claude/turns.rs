@@ -263,6 +263,7 @@ impl Actor {
             &result,
             rejection.as_ref(),
             thread.answering_model.as_deref(),
+            thread.stopping,
         );
         let (context, stop) = (end.context.clone(), end.stop.clone());
         let Ok(turn_id) = self.record_run(thread_id, ended.clone(), Some(end)).await else {
