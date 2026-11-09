@@ -57,7 +57,7 @@ async fn launches_claude_lazily_and_delivers_queued_messages_one_turn_at_a_time_
         .position(|a| a == "--disallowedTools");
     assert_eq!(
         at.map(|at| launch.arguments[at + 1].as_str()),
-        Some("Bash,PowerShell")
+        Some("Bash,PowerShell,Monitor")
     );
 
     harness.wait_written(&launch, &[A]).await;

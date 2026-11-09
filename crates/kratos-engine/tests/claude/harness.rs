@@ -42,6 +42,7 @@ pub fn interrupted() -> Value {
 }
 
 pub struct Options {
+    pub tools: bool,
     pub turn_timeout: Duration,
     pub stop_timeout: Duration,
     pub control_timeout: Duration,
@@ -53,6 +54,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Options {
         Options {
+            tools: false,
             turn_timeout: Duration::from_secs(600),
             stop_timeout: Duration::from_secs(5),
             control_timeout: Duration::from_secs(10),
@@ -96,6 +98,7 @@ impl Launch {
 }
 
 pub struct Harness {
+    pub runner: Option<kratos_engine::providers::codex::CodexProvider>,
     /// Holds the store's data directory, the thread's folder, Claude's home, and the fake's log.
     pub root: TempDir,
     pub hub: Hub,
@@ -138,6 +141,7 @@ impl Harness {
             ("FAKE_CLAUDE_FAIL_START".into(), fail_start.clone().into()),
         ];
         let settings = ClaudeSettings {
+            tools: None,
             program: fake_agents::executable("fake-claude"),
             claude_home: root.path().join("home"),
             env_set,
@@ -147,6 +151,47 @@ impl Harness {
             restart_wait: options.restart_wait,
             max_restarts: options.max_restarts,
         };
+        let mut settings = settings;
+        let runner = if options.tools {
+            use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
+            let server_folder = root.path().join("command-server");
+            std::fs::create_dir_all(&server_folder).unwrap();
+            let protected = ProtectedFolders::new(
+                root.path().join("kratos"),
+                Some(root.path().join("home/.codex")),
+                Some(root.path().join("home")),
+            );
+            let config = CodexSettings {
+                program: fake_agents::executable("fake-codex"),
+                extra_args: vec![
+                    "--control-file".into(),
+                    root.path().join("codex-control").into(),
+                ],
+                env_set: Vec::new(),
+                server_folder,
+                protected: protected.clone(),
+                turn_timeout: options.turn_timeout,
+                stop_timeout: options.stop_timeout,
+                request_timeout: options.control_timeout,
+                platform: kratos_command_safety::DangerousCommandPlatform::host(),
+                mcp: None,
+            };
+            let (runner, _) = codex::start(
+                config,
+                hub.clone(),
+                store_thread.clone(),
+                kratos_engine::usage::UsageTracker::default(),
+            )
+            .await
+            .unwrap();
+            settings.tools = Some(claude::ClaudeTools {
+                runner: runner.clone(),
+                protected,
+            });
+            Some(runner)
+        } else {
+            None
+        };
         let provider = claude::start(settings, hub.clone(), store_thread.clone())
             .await
             .unwrap();
@@ -155,6 +200,7 @@ impl Harness {
             .await
             .unwrap();
         Harness {
+            runner,
             root,
             hub,
             store: store_thread,
@@ -172,6 +218,9 @@ impl Harness {
     /// restart. The CLIs go without settling anything, as when the engine is killed.
     pub async fn stop(self) -> (TempDir, ThreadId) {
         self.provider.shutdown().await;
+        if let Some(runner) = &self.runner {
+            runner.shutdown().await;
+        }
         let Harness {
             root,
             hub,
@@ -196,6 +245,35 @@ impl Harness {
 
     pub fn folder(&self) -> PathBuf {
         self.root.path().join("project")
+    }
+
+    pub async fn command_control(&self, method: &str, params: Value) -> Value {
+        let path = self.root.path().join("codex-control");
+        let port = tokio::task::spawn_blocking(move || {
+            fake_agents::codex_control::wait_for_port(&path, WAIT)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let (reader, mut writer) = stream.into_split();
+        writer
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({ "id": 1, "method": method, "params": params })
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut line = String::new();
+        tokio::time::timeout(WAIT, BufReader::new(reader).read_line(&mut line))
+            .await
+            .unwrap()
+            .unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        reply["result"].clone()
     }
 
     /// Claude's home folder, where its transcripts live.

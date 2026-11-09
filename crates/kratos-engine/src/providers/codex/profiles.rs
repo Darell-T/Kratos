@@ -1,7 +1,7 @@
 //! The sandbox every Codex turn runs in. Plan, Ask me, and Approve for me select named permission
 //! profiles Kratos defines when it starts the app-server. Full access selects Codex's built-in
-//! `:danger-full-access`, which runs commands without a sandbox, as Zeron does. No profile writes
-//! outside the thread's workspaces and the temp folder: on Windows, Codex sets permissions on every
+//! `:danger-full-access`, which runs commands without a sandbox, as Zeron does. These profiles write
+//! only the thread's workspaces and the temp folder: on Windows, Codex sets permissions on every
 //! file below a write root before the thread starts, and for a home folder that never finished.
 //!
 //! Measured on Codex 0.159.1: a profile's `deny` entry hides a folder from reads and writes, a
@@ -10,6 +10,8 @@
 //! denies Kratos's data folder, so no sandboxed command can read the client token (D19). A Full
 //! access command runs as the user and can. An approved patch writes wherever it points, so
 //! [`super::policy`] checks patch paths against [`ProtectedFolders`] before accepting one.
+//! Claude's separate command profiles enforce protected folders even under automatic permissions.
+//! Its wide profile allows ordinary outside writes (D93); an explicit escape always asks first.
 
 use std::ffi::OsString;
 use std::io;
@@ -80,10 +82,41 @@ impl ProtectedFolders {
         &self.kratos_home
     }
 
+    pub(super) fn claude_launch_arguments(&self, temp: &Path) -> Vec<OsString> {
+        let protected = self
+            .read_only
+            .iter()
+            .map(|path| format!("{}=\"read\"", toml_key(path)))
+            .chain(std::iter::once(format!(
+                "{}=\"deny\"",
+                toml_key(&self.kratos_home)
+            )))
+            .collect::<Vec<_>>()
+            .join(",");
+        let ask = format!(
+            r#"":root"="read",":workspace_roots"="write",{}="write",{protected}"#,
+            toml_key(temp)
+        );
+        let wide = format!(r#"":root"="write",{protected}"#);
+        [("kratos-claude-ask", ask), ("kratos-claude-wide", wide)]
+            .into_iter()
+            .flat_map(|(id, entries)| {
+                [
+                    OsString::from("-c"),
+                    format!("permissions.{id}.filesystem={{{entries}}}").into(),
+                ]
+            })
+            .chain([
+                OsString::from("-c"),
+                "permissions.kratos-claude-wide.network.enabled=true".into(),
+            ])
+            .collect()
+    }
+
     /// Resolves existing links before checking a patch's destination, including new files below
     /// a linked directory. An unreadable or dangling link cannot establish a safe destination.
     /// Neither can a missing-parent climb or a new name the disk may interpret differently.
-    pub(super) fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
+    pub(crate) fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
         let path = resolve_destination(path)?;
         for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
             if is_within(&path, &resolve_destination(folder)?) {

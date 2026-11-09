@@ -12,27 +12,33 @@
 //! only Claude's transcript or the user settles it. Claude accepts a message only when it echoes
 //! it back, and a turn ends only on its result.
 //!
-//! Kratos's permission rules are not built yet, so every request Claude makes is refused and no
-//! thread launches in a mode that skips the ask.
+//! Kratos decides each tool request and records approvals and questions through the shared Hub.
+//! Every command uses the Codex runner. No thread launches in a mode that skips the ask.
 
 mod actor;
 mod commands;
+mod hooks;
 mod incoming;
 mod permissions;
+mod policy;
 mod queue;
 mod recovery;
+mod requests;
 mod session;
 mod settings;
 mod threads;
+mod tools;
 mod turns;
 mod wire;
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use kratos_protocol::{
-    AccessLimit, Message, MessageId, MessageInput, MessageOrigin, ThreadId, ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, Message, MessageId, MessageInput,
+    MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
 use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
@@ -48,6 +54,8 @@ pub use wire::native_id;
 /// How the provider starts Claude and how long it waits on it.
 #[derive(Clone, Debug)]
 pub struct ClaudeSettings {
+    /// The command and permission boundary. Without it, every tool request is refused.
+    pub tools: Option<ClaudeTools>,
     /// The native `claude` executable, found as the user's shell finds it (L8).
     pub program: PathBuf,
     /// The user's home folder, under which Claude keeps each session's transcript.
@@ -64,6 +72,22 @@ pub struct ClaudeSettings {
     pub restart_wait: Duration,
     /// Failures in a row after which only the user may start the CLI again (L4).
     pub max_restarts: u32,
+}
+
+/// Dependencies that let Claude execute tools under Kratos's policy.
+#[derive(Clone)]
+pub struct ClaudeTools {
+    pub runner: super::codex::CodexProvider,
+    pub protected: super::codex::ProtectedFolders,
+}
+
+impl std::fmt::Debug for ClaudeTools {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ClaudeTools")
+            .field("protected", &self.protected)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Commands that may wait for the actor. A burst of requests waits for room instead of growing
@@ -91,6 +115,35 @@ pub async fn start(
 }
 
 impl ClaudeProvider {
+    /// Records the first decision and returns the recorded outcome on every later attempt (D83).
+    pub async fn decide(
+        &self,
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+    ) -> Result<ApprovalOutcome, ProviderError> {
+        self.ask(|reply| actor::Command::Decide {
+            approval_id,
+            decision,
+            reply,
+        })
+        .await
+    }
+
+    /// Answers a question once, subject to the acting thread's access ceiling.
+    pub async fn answer(
+        &self,
+        question_id: QuestionId,
+        answers: BTreeMap<String, Vec<String>>,
+        limit: Option<AccessLimit>,
+    ) -> Result<QuestionOutcome, ProviderError> {
+        self.ask(|reply| actor::Command::Answer {
+            question_id,
+            answers,
+            limit,
+            reply,
+        })
+        .await
+    }
     async fn ask<T>(
         &self,
         command: impl FnOnce(oneshot::Sender<Result<T, ProviderError>>) -> actor::Command,

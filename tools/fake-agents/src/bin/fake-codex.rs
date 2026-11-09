@@ -249,6 +249,14 @@ impl Fake {
             return;
         }
         match method {
+            "command/exec/terminate" => {
+                self.held_log.push(json!({ "method": method, "params": params }));
+                if let Some(index) = self.held.iter().position(|held| held.method == "command/exec" && held.params["processId"] == params["processId"]) {
+                    let held = self.held.remove(index);
+                    self.reply(&held.id, json!({ "exitCode": 1, "stdout": "", "stderr": "Command terminated" }));
+                }
+                self.reply(&id, json!({}));
+            }
             "thread/start" => self.start_thread(&id, params),
             "thread/resume" => self.resume_thread(&id, params),
             "thread/fork" => self.fork_thread(&id, params),

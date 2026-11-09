@@ -48,6 +48,26 @@ use crate::usage::{LimitStop, UsageTracker};
 
 pub use profiles::ProtectedFolders;
 
+/// The isolated profile for a Claude command, or an explicitly approved escape.
+#[derive(Clone, Debug)]
+pub(crate) enum CommandProfile {
+    Claude(ThreadSettings),
+    ApprovedOutside,
+}
+
+impl CommandProfile {
+    fn id(&self) -> &'static str {
+        match self {
+            Self::Claude(settings) if settings.plan_mode => "kratos-plan",
+            Self::Claude(settings) if settings.permission == kratos_protocol::Permission::AskMe => {
+                "kratos-claude-ask"
+            }
+            Self::Claude(_) => "kratos-claude-wide",
+            Self::ApprovedOutside => ":danger-full-access",
+        }
+    }
+}
+
 /// How the provider starts Codex and how long it waits on it.
 #[derive(Clone, Debug)]
 pub struct CodexSettings {
@@ -281,6 +301,25 @@ impl CodexProvider {
     ) -> Result<CommandResult, ProviderError> {
         self.ask(|reply| actor::Command::Run {
             thread_id,
+            command,
+            timeout,
+            reply,
+        })
+        .await
+    }
+
+    /// Runs another provider's command with its frozen turn settings and root, without creating
+    /// a Codex conversation. The caller owns the permission decision before invoking this runner.
+    pub(crate) async fn run_at(
+        &self,
+        folder: String,
+        profile: CommandProfile,
+        command: Vec<String>,
+        timeout: Duration,
+    ) -> Result<CommandResult, ProviderError> {
+        self.ask(|reply| actor::Command::RunAt {
+            folder,
+            profile: profile.id().to_owned(),
             command,
             timeout,
             reply,

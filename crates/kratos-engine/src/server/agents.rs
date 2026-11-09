@@ -1,6 +1,6 @@
 //! The routes that drive a thread's agent: its messages, its turn, its settings, and what it waits
 //! on the user for. Each reaches the agent of the thread's own provider (see [`Agent`]); approvals
-//! and questions are Codex's alone until Claude's permission rules exist.
+//! and questions reach the provider of their recorded thread.
 
 use std::time::Duration;
 
@@ -229,9 +229,9 @@ pub(super) async fn decide(
             acting.not_on_itself(&stored.thread_id)?;
         }
     }
-    let codex = state.codex()?;
+    let agent = state.approval_agent(&approval_id).await?;
     let DecideApproval { decision } = read_json(body).await?;
-    let outcome = codex.decide(approval_id, decision).await?;
+    let outcome = agent.decide(approval_id, decision).await?;
     Ok(json_reply(StatusCode::OK, &outcome))
 }
 
@@ -255,9 +255,9 @@ pub(super) async fn answer(
             acting.not_on_itself(&stored.thread_id)?;
         }
     }
-    let codex = state.codex()?;
+    let agent = state.question_agent(&question_id).await?;
     let AnswerQuestion { answers } = read_json(body).await?;
-    let outcome = codex
+    let outcome = agent
         .answer(question_id, answers, acting.map(|acting| acting.access))
         .await?;
     Ok(json_reply(StatusCode::OK, &outcome))

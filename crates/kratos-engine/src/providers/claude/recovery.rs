@@ -95,17 +95,13 @@ pub(super) fn end_turn(
     write: &mut ThreadWrite<'_>,
     turn_id: TurnId,
     outcome: TurnOutcome,
+    changes: kratos_protocol::TurnChanges,
 ) -> Result<(), StoreError> {
     let failure = match &outcome {
         TurnOutcome::Failed { error } => Some(error.clone()),
         TurnOutcome::Completed | TurnOutcome::Interrupted => None,
     };
-    write.complete_turn(
-        turn_id.clone(),
-        outcome,
-        ChangesRecorder::default().finish(),
-        None,
-    )?;
+    write.complete_turn(turn_id.clone(), outcome, changes, None)?;
     match failure {
         Some(error) => pause_if_waiting(write, PauseReason::TurnFailed { turn_id, error }),
         None => Ok(()),
@@ -136,6 +132,18 @@ impl Actor {
                 reason: RESTARTED.to_owned(),
             };
             hub.write(thread_id, move |write| {
+                for id in work.approvals {
+                    write.settle_approval(
+                        &id,
+                        kratos_store::Settle::Close("Kratos restarted".into()),
+                    )?;
+                }
+                for id in work.questions {
+                    write.settle_question(
+                        &id,
+                        kratos_store::Settle::Close("Kratos restarted".into()),
+                    )?;
+                }
                 if let Some(turn_id) = settling.run.clone() {
                     write.complete_turn(
                         turn_id,
@@ -155,6 +163,7 @@ impl Actor {
     /// A CLI ended. The turn it ran ends as failed and the queue behind it pauses. A message it was
     /// sent is settled from its transcript, so none is sent again that Claude may have taken.
     pub(super) async fn on_exit(&mut self, thread_id: &ThreadId, exit: Exit) {
+        self.close_requests(thread_id, None, "Claude exited").await;
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
@@ -188,9 +197,22 @@ impl Actor {
             started: open.started,
             reason: reason.clone(),
         };
+        let changes = std::mem::take(
+            &mut self
+                .threads
+                .get_mut(thread_id)
+                .expect("found above")
+                .changes,
+        )
+        .finish();
         let ended = self
             .write(thread_id, move |write| match run {
-                Some(turn_id) => end_turn(write, turn_id, TurnOutcome::Failed { error: reason }),
+                Some(turn_id) => end_turn(
+                    write,
+                    turn_id,
+                    TurnOutcome::Failed { error: reason },
+                    changes,
+                ),
                 // No turn started, but messages were in flight, so the user must hear why the
                 // process ended.
                 None => write
@@ -250,6 +272,8 @@ impl Actor {
 /// What a Claude thread has unfinished: the turn the log shows running and the messages being
 /// sent, with where its transcript lives.
 struct Unfinished {
+    approvals: Vec<kratos_protocol::ApprovalId>,
+    questions: Vec<kratos_protocol::QuestionId>,
     running: Option<TurnId>,
     sending: Vec<MessageId>,
     folder: String,
@@ -268,9 +292,21 @@ fn unfinished_claude_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfini
     for (thread_id, (running, sending)) in found {
         let thread = store.provider_thread(&thread_id)?;
         if thread.thread.provider == Provider::Claude {
+            let approvals = store
+                .waiting_approvals(&thread_id)?
+                .into_iter()
+                .map(|approval| approval.id)
+                .collect();
+            let questions = store
+                .waiting_questions(&thread_id)?
+                .into_iter()
+                .map(|question| question.id)
+                .collect();
             unfinished.insert(
                 thread_id,
                 Unfinished {
+                    approvals,
+                    questions,
                     running,
                     sending,
                     folder: thread.folder,

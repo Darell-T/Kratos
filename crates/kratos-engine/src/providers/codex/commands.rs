@@ -106,6 +106,15 @@ impl Actor {
                 timeout,
                 reply,
             } => self.run_command(thread_id, command, timeout, reply).await,
+            Command::RunAt {
+                folder,
+                profile,
+                command,
+                timeout,
+                reply,
+            } => {
+                self.run_at(folder, profile, command, timeout, reply).await;
+            }
             Command::RefreshUsage { reply } => self.refresh_usage(reply),
             Command::Continue {
                 thread_id,
@@ -153,11 +162,34 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
+        let thread = &self.threads[&thread_id];
+        self.run_at(
+            thread.folder.clone(),
+            Profile::for_settings(&thread.settings).id().to_owned(),
+            command,
+            timeout,
+            reply,
+        )
+        .await;
+    }
+
+    async fn run_at(
+        &mut self,
+        folder: String,
+        profile: String,
+        command: Vec<String>,
+        timeout: Duration,
+        reply: Reply<CommandResult>,
+    ) {
+        if reply.is_closed() {
+            return;
+        }
         let codex = match self.connection() {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::Run {
-                    thread_id,
+                self.deferred.push(Command::RunAt {
+                    folder,
+                    profile,
                     command,
                     timeout,
                     reply,
@@ -169,11 +201,20 @@ impl Actor {
                 return;
             }
         };
-        let thread = &self.threads[&thread_id];
-        let profile = Profile::for_settings(&thread.settings).id().to_owned();
-        let folder = thread.folder.clone();
         tokio::spawn(async move {
-            let _ = reply.send(Ok(exec(&codex, command, folder, profile, timeout).await));
+            let mut reply = reply;
+            let process_id = uuid::Uuid::new_v4().to_string();
+            tokio::select! {
+                result = exec(&codex, command, folder, profile, timeout, &process_id) => {
+                    let _ = reply.send(Ok(result));
+                }
+                () = reply.closed() => {
+                    let params = types::CommandExecTerminateParams { process_id };
+                    if let Err(error) = codex.request_within::<Terminate>(&params, Duration::from_secs(5)).await {
+                        eprintln!("Codex could not stop an abandoned command: {error}");
+                    }
+                }
+            }
         });
     }
 }
@@ -208,10 +249,12 @@ async fn exec(
     folder: String,
     profile: String,
     timeout: Duration,
+    process_id: &str,
 ) -> CommandResult {
     let mut params: types::CommandExecParams = wire::required(json!({ "command": command }));
     params.cwd = Some(folder);
     params.permission_profile = Some(profile);
+    params.process_id = Some(process_id.to_owned());
     params.timeout_ms = Some(i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX));
     // The runner's own deadline answers first; this one only bounds a Codex that never answers.
     let deadline = timeout + Duration::from_secs(10);
@@ -219,4 +262,13 @@ async fn exec(
         .request_within::<methods::CommandExec>(&params, deadline)
         .await;
     wire::command_outcome(result)
+}
+
+// The pinned schema exposes this operation; the shared client does not name it yet.
+struct Terminate;
+
+impl kratos_codex_client::Method for Terminate {
+    const NAME: &'static str = "command/exec/terminate";
+    type Params = types::CommandExecTerminateParams;
+    type Response = types::CommandExecTerminateResponse;
 }

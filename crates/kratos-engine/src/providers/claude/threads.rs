@@ -21,10 +21,7 @@ pub(super) struct SessionConfig {
 }
 
 impl SessionConfig {
-    /// Until Kratos's own permission rules exist, a thread launches in a mode that asks for every
-    /// tool use or only plans, and the actor refuses each ask. `FullAccess` and `ApproveForMe` do
-    /// not launch the modes that skip the ask, because nothing would then stand between Claude and
-    /// a write anywhere.
+    /// Default and plan modes preserve the permission callbacks Kratos decides (D21).
     pub(super) fn of(settings: &ThreadSettings) -> SessionConfig {
         SessionConfig {
             model: settings
@@ -133,6 +130,10 @@ impl Restarts {
 }
 
 pub(super) struct ThreadState {
+    pub commands: std::collections::HashMap<String, AbortHandle>,
+    pub turn_settings: Option<ThreadSettings>,
+    pub changes: crate::providers::changes::ChangesRecorder,
+    pub command_grants: Vec<super::tools::CommandArgs>,
     pub folder: String,
     pub settings: ThreadSettings,
     /// The session Claude keeps the thread's history in: the stored one, or the one chosen for a
@@ -166,6 +167,10 @@ impl ThreadState {
         stored: Option<SessionId>,
     ) -> ThreadState {
         ThreadState {
+            commands: std::collections::HashMap::new(),
+            turn_settings: None,
+            changes: crate::providers::changes::ChangesRecorder::default(),
+            command_grants: Vec::new(),
             folder,
             settings,
             recorded: stored.is_some(),
@@ -185,6 +190,25 @@ impl ThreadState {
 
     pub(super) fn is_busy(&self) -> bool {
         !self.pending.is_empty() || matches!(self.session, Session::Opening)
+    }
+
+    pub(super) fn turn_settings(&self) -> &ThreadSettings {
+        self.turn_settings.as_ref().unwrap_or(&self.settings)
+    }
+
+    pub(super) fn cancel_commands(&mut self, control_id: Option<&str>) {
+        match control_id {
+            Some(id) => {
+                if let Some(command) = self.commands.remove(id) {
+                    command.abort();
+                }
+            }
+            None => {
+                for (_, command) in self.commands.drain() {
+                    command.abort();
+                }
+            }
+        }
     }
 
     pub(super) fn open(&self) -> Option<&OpenSession> {

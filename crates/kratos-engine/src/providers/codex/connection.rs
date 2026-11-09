@@ -114,6 +114,11 @@ fn launch(settings: &CodexSettings) -> Launch {
     #[cfg(windows)]
     args.extend(super::sandbox::launch_arguments());
     args.extend(settings.protected.launch_arguments(&std::env::temp_dir()));
+    args.extend(
+        settings
+            .protected
+            .claude_launch_arguments(&std::env::temp_dir()),
+    );
     Launch {
         program: settings.program.clone(),
         args,

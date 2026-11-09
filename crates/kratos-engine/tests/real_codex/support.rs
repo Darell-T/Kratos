@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 pub const WAIT: Duration = Duration::from_secs(180);
 
 pub struct Harness {
+    claude: kratos_engine::providers::claude::ClaudeProvider,
     pub root: TempDir,
     pub model: Server,
     pub client: Client,
@@ -116,6 +117,33 @@ impl Harness {
             .await
             .unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let claude = kratos_engine::providers::claude::start(
+            kratos_engine::providers::claude::ClaudeSettings {
+                tools: Some(kratos_engine::providers::claude::ClaudeTools {
+                    runner: provider.clone(),
+                    protected: ProtectedFolders::new(
+                        home.clone(),
+                        None,
+                        Some(root.path().join("claude-home")),
+                    ),
+                }),
+                program: fake_agents::executable("fake-claude"),
+                claude_home: root.path().join("claude-home"),
+                env_set: vec![(
+                    "FAKE_CLAUDE_LOG".into(),
+                    root.path().join("fake-claude.log").into(),
+                )],
+                turn_timeout: WAIT,
+                stop_timeout: Duration::from_secs(10),
+                control_timeout: Duration::from_secs(30),
+                restart_wait: Duration::from_secs(1),
+                max_restarts: 3,
+            },
+            hub.clone(),
+            store.clone(),
+        )
+        .await
+        .unwrap();
         let state = ServerState {
             store,
             hub: hub.clone(),
@@ -123,7 +151,7 @@ impl Harness {
                 provider: provider.clone(),
                 scheduler: None,
             }),
-            claude: Err("These tests run Codex only".to_owned()),
+            claude: Ok(claude.clone()),
             usage,
             token,
         };
@@ -147,6 +175,7 @@ impl Harness {
             .await
             .unwrap();
         Self {
+            claude,
             root,
             model,
             client,
@@ -215,6 +244,7 @@ impl Harness {
     }
 
     pub async fn stop(mut self) {
+        self.claude.shutdown().await;
         self.provider.shutdown().await;
         let _ = self.shutdown.take().unwrap().send(());
         self.serving.await.unwrap().unwrap();

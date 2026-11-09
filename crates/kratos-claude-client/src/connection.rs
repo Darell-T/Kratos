@@ -108,6 +108,10 @@ impl std::fmt::Display for Exit {
 pub enum Incoming {
     Message(StreamMessage),
     Control(IncomingControl),
+    /// The CLI no longer waits for this reverse control's answer.
+    Cancelled {
+        id: String,
+    },
     Oversized {
         bytes: usize,
     },
@@ -126,6 +130,13 @@ pub struct IncomingControl {
 }
 
 impl IncomingControl {
+    /// Whether this request still waits, including withdrawals the reader has already received.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.responder
+            .as_ref()
+            .is_some_and(|responder| responder.shared.state().awaiting_answer.contains(&self.id))
+    }
     /// Queues a successful response body unless the CLI withdrew the request or exited.
     #[must_use]
     pub fn answer(mut self, body: Value) -> bool {
@@ -150,10 +161,12 @@ impl IncomingControl {
 impl Drop for IncomingControl {
     fn drop(&mut self) {
         if let Some(responder) = self.responder.take() {
-            responder.send(
-                &self.id,
-                Err("Kratos dropped the control unanswered".to_owned()),
-            );
+            let outcome = if matches!(self.request, ControlRequest::HookCallback(_)) {
+                Ok(json!({ "continue": false, "stopReason": "Kratos dropped the hook unanswered" }))
+            } else {
+                Err("Kratos dropped the control unanswered".to_owned())
+            };
+            responder.send(&self.id, outcome);
         }
     }
 }
@@ -681,10 +694,12 @@ async fn dispatch(shared: &Arc<Shared>, message: Value) -> Option<Incoming> {
             None
         }
         Some("control_cancel_request") => {
-            if let Some(id) = message["request_id"].as_str() {
-                shared.state().awaiting_answer.remove(id);
-            }
-            None
+            let id = message["request_id"].as_str()?;
+            shared
+                .state()
+                .awaiting_answer
+                .remove(id)
+                .then(|| Incoming::Cancelled { id: id.to_owned() })
         }
         Some("control_request") => reverse_control(shared, message),
         _ => Some(match StreamMessage::parse(message) {
@@ -732,18 +747,21 @@ fn reverse_control(shared: &Arc<Shared>, message: Value) -> Option<Incoming> {
     if Shared::running(&state).is_err() || !state.awaiting_answer.insert(id.clone()) {
         return None;
     }
-    let request = match request {
-        Ok(request) => request,
-        Err(error) => {
-            drop(state);
-            Responder {
+    let request =
+        match request {
+            Ok(request) => request,
+            Err(error) => {
+                drop(state);
+                Responder {
                 shared: shared.clone(),
                 permit,
             }
-            .send(&id, Err(error.to_string()));
-            return Some(Incoming::Unreadable(error));
-        }
-    };
+            .send(&id, if message["request"]["subtype"] == "hook_callback" {
+                Ok(json!({ "continue": false, "stopReason": "Kratos could not read the hook" }))
+            } else { Err(error.to_string()) });
+                return Some(Incoming::Unreadable(error));
+            }
+        };
     let control = IncomingControl {
         id,
         request,

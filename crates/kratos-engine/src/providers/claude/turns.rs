@@ -98,6 +98,9 @@ impl Actor {
                 .expect("dispatch loaded the thread")
                 .settings = lowered;
         }
+        let thread = self.threads.get_mut(thread_id).expect("dispatch loaded it");
+        thread.turn_settings = Some(thread.settings.clone());
+        thread.command_grants.clear();
         self.deliver(thread_id, &message);
     }
 
@@ -250,6 +253,8 @@ impl Actor {
             open.worked = true;
         }
         thread.restarts.reset();
+        self.close_requests(thread_id, None, "Claude's turn ended")
+            .await;
         let outcome = match result.outcome {
             kratos_claude_client::TurnOutcome::Completed => TurnOutcome::Completed,
             kratos_claude_client::TurnOutcome::Interrupted => TurnOutcome::Interrupted,
@@ -267,6 +272,7 @@ impl Actor {
             .pending
             .retain(|flight| !ended.contains(&flight.message_id));
         thread.run = None;
+        thread.command_grants.clear();
         thread.stopping = false;
         thread.stop_epoch += 1;
         for waiter in std::mem::take(&mut thread.stop_waiters) {
@@ -300,6 +306,18 @@ impl Actor {
             _ => None,
         };
         let ends = end.is_some();
+        let changes = if ends {
+            std::mem::take(
+                &mut self
+                    .threads
+                    .get_mut(thread_id)
+                    .expect("found above")
+                    .changes,
+            )
+            .finish()
+        } else {
+            crate::providers::changes::ChangesRecorder::default().finish()
+        };
         let recorded_turn = turn_id.clone();
         self.write(thread_id, move |write| {
             if let Some((native_id, plan)) = session {
@@ -309,7 +327,9 @@ impl Actor {
             if !started {
                 write.start_turn(recorded_turn.clone())?;
             }
-            end.map_or(Ok(()), |outcome| end_turn(write, recorded_turn, outcome))
+            end.map_or(Ok(()), |outcome| {
+                end_turn(write, recorded_turn, outcome, changes)
+            })
         })
         .await?;
         let thread = self.threads.get_mut(thread_id).expect("found above");
@@ -369,6 +389,7 @@ impl Actor {
         };
         let claude = open.claude.clone();
         thread.stopping = true;
+        thread.cancel_commands(None);
         thread.stop_epoch += 1;
         let (epoch, stop_epoch) = (thread.epoch, thread.stop_epoch);
         let (timeout, control_timeout) =
@@ -473,6 +494,10 @@ impl Actor {
             return;
         };
         if thread.deadline_epoch != deadline_epoch || thread.stopping {
+            return;
+        }
+        if self.requests.blocks(&thread_id) {
+            self.arm_deadline(&thread_id);
             return;
         }
         let Some(turn_id) = thread.run.clone().or_else(|| {

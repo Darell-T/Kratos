@@ -5,14 +5,15 @@
 //! end before the next input, so no two handlers see a thread half changed. A handler awaits only
 //! the store, never a CLI.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 
 use kratos_claude_client::{
     Claude, ConnectError, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError,
 };
 use kratos_protocol::{
-    AccessLimit, Message, MessageId, MessageInput, MessageOrigin, ThreadId, ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, Message, MessageId, MessageInput,
+    MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -30,6 +31,17 @@ const QUEUED_FRAMES: usize = 256;
 pub(super) type Reply<T> = oneshot::Sender<Result<T, ProviderError>>;
 
 pub(super) enum Command {
+    Decide {
+        approval_id: ApprovalId,
+        decision: ApprovalDecision,
+        reply: Reply<ApprovalOutcome>,
+    },
+    Answer {
+        question_id: QuestionId,
+        answers: BTreeMap<String, Vec<String>>,
+        limit: Option<AccessLimit>,
+        reply: Reply<QuestionOutcome>,
+    },
     Send {
         thread_id: ThreadId,
         message_id: MessageId,
@@ -110,6 +122,11 @@ pub(super) enum TranscriptWork {
 /// Finished work that changes actor state. Work for a session that has ended carries its `epoch`
 /// and is dropped.
 pub(super) enum Done {
+    CommandFinished {
+        thread_id: ThreadId,
+        epoch: u64,
+        control_id: String,
+    },
     Opened {
         thread_id: ThreadId,
         epoch: u64,
@@ -148,6 +165,7 @@ pub(super) enum Done {
 }
 
 pub(crate) struct Actor {
+    pub(super) requests: super::requests::Requests,
     pub(super) settings: ClaudeSettings,
     pub(super) hub: Hub,
     pub(super) store: StoreThread,
@@ -165,6 +183,7 @@ impl Actor {
         let (done, completions) = mpsc::unbounded_channel();
         let (frames, incoming) = mpsc::channel(QUEUED_FRAMES);
         Actor {
+            requests: super::requests::Requests::default(),
             settings,
             hub,
             store,
@@ -213,6 +232,17 @@ impl Actor {
     // #lizard forgives: one arm per kind of completion, each a call.
     async fn on_done(&mut self, done: Done) {
         match done {
+            Done::CommandFinished {
+                thread_id,
+                epoch,
+                control_id,
+            } => {
+                if let Some(thread) = self.threads.get_mut(&thread_id)
+                    && thread.epoch == epoch
+                {
+                    thread.commands.remove(&control_id);
+                }
+            }
             Done::Opened {
                 thread_id,
                 epoch,
@@ -283,6 +313,7 @@ impl Actor {
             return;
         }
         for thread in self.threads.values_mut() {
+            thread.cancel_commands(None);
             thread.epoch += 1;
             thread.restarts.cancel_timer();
             if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
@@ -307,6 +338,10 @@ impl Actor {
     }
 
     async fn shutdown(&mut self) {
+        for id in self.threads.keys().cloned().collect::<Vec<_>>() {
+            self.close_requests(&id, None, "Kratos is shutting down")
+                .await;
+        }
         let mut closing = Vec::new();
         for thread in self.threads.values_mut() {
             thread.epoch += 1;

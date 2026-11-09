@@ -4,20 +4,18 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use kratos_claude_client::{
-    Incoming, Initialize, Launch, SessionId, SessionStart, SettingSource, connect,
-};
+use kratos_claude_client::{Incoming, Launch, SessionId, SessionStart, SettingSource, connect};
 use kratos_protocol::{Provider, ThreadId};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::actor::{Actor, Connected, Done, SessionEvent};
 use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState};
-use super::{ClaudeSettings, ProviderError, permissions, wire};
+use super::{ClaudeSettings, ProviderError, hooks, permissions, wire};
 
 /// The tools Claude Code runs commands with. Kratos runs commands itself, in the sandbox of the
-/// thread's permission (D17), so the CLI is left with neither.
-const DISALLOWED_TOOLS: [&str; 2] = ["Bash", "PowerShell"];
+/// thread's permission (D17), so the CLI cannot use its native command tools.
+const DISALLOWED_TOOLS: [&str; 3] = ["Bash", "PowerShell", "Monitor"];
 
 impl Actor {
     /// The thread's state, read from the store the first time the actor sees the thread.
@@ -83,8 +81,12 @@ impl Actor {
         thread.session = Session::Opening;
         let epoch = thread.epoch;
         let thread_id = thread_id.clone();
+        let enabled = self.settings.tools.is_some();
         self.spawn(async move {
-            let result = connect(launch, Initialize::default(), permissions::answer).await;
+            let result = connect(launch, hooks::initialize(enabled), move |control| {
+                permissions::startup(control, enabled)
+            })
+            .await;
             Done::Opened {
                 thread_id,
                 epoch,

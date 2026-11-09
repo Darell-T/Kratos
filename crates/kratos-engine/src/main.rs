@@ -151,7 +151,7 @@ fn run_server(
                 Err(missing.to_string())
             }
         };
-        let claude = start_claude(config, &hub, &store).await?;
+        let claude = start_claude(config, &hub, &store, &codex).await?;
         let state = ServerState {
             hub,
             store,
@@ -162,11 +162,11 @@ fn run_server(
         };
         server::serve(listener, state.clone(), shutdown_signal()).await?;
         // The agents end before the store closes, so nothing they report goes unrecorded (L2).
-        if let Ok(codex) = &state.codex {
-            codex.provider.shutdown().await;
-        }
         if let Ok(claude) = &state.claude {
             claude.shutdown().await;
+        }
+        if let Ok(codex) = &state.codex {
+            codex.provider.shutdown().await;
         }
         Ok(())
     })
@@ -177,11 +177,22 @@ async fn start_claude(
     config: &Config,
     hub: &Hub,
     store: &StoreThread,
+    codex: &Result<server::Codex, String>,
 ) -> Result<Result<ClaudeProvider, String>, StoreError> {
     match claude_settings(config) {
-        Ok(settings) => Ok(Ok(
-            claude::start(settings, hub.clone(), store.clone()).await?
-        )),
+        Ok(mut settings) => {
+            settings.tools = codex.as_ref().ok().map(|codex| claude::ClaudeTools {
+                runner: codex.provider.clone(),
+                protected: ProtectedFolders::new(
+                    config.home.clone(),
+                    config.codex_home.clone(),
+                    config.user_home.clone(),
+                ),
+            });
+            Ok(Ok(
+                claude::start(settings, hub.clone(), store.clone()).await?
+            ))
+        }
         Err(missing) => {
             eprintln!("Claude threads are unavailable: {missing}");
             Ok(Err(missing.to_string()))
@@ -196,6 +207,7 @@ fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
         .clone()
         .ok_or(ClaudeMissing::NoHomeFolder)?;
     Ok(ClaudeSettings {
+        tools: None,
         program,
         claude_home,
         env_set: Vec::new(),

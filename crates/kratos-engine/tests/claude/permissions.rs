@@ -1,5 +1,5 @@
-//! Until Kratos's permission rules exist (slice 3), every request Claude makes is refused, and a
-//! thread never launches in a mode that would skip asking.
+//! Without a command service every request is refused, and a thread never launches in a mode
+//! that would skip Kratos's permission callbacks.
 
 use kratos_protocol::{Permission, ThreadSettings};
 use serde_json::{Value, json};
@@ -39,8 +39,8 @@ async fn running(options: Options) -> (Harness, Launch) {
 
 #[tokio::test]
 async fn every_tool_request_is_denied_with_the_reason() {
-    // Catches a tool allowed, or a request left unanswered with Claude waiting, before Kratos's
-    // permission rules exist.
+    // Catches a tool allowed, or a request left unanswered with Claude waiting, when the provider
+    // has no command service.
     let (harness, launch) = running(Options::default()).await;
 
     let answer = ask(
@@ -58,7 +58,7 @@ async fn every_tool_request_is_denied_with_the_reason() {
         answer["response"]["message"]
             .as_str()
             .unwrap()
-            .contains("not built yet")
+            .contains("command service")
     );
 }
 

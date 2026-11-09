@@ -7,6 +7,21 @@ impl Actor {
     // #lizard forgives: one arm per command, each a call.
     pub(super) async fn on_command(&mut self, command: Command) {
         match command {
+            Command::Decide {
+                approval_id,
+                decision,
+                reply,
+            } => {
+                let _ = reply.send(self.decide(approval_id, decision).await);
+            }
+            Command::Answer {
+                question_id,
+                answers,
+                limit,
+                reply,
+            } => {
+                let _ = reply.send(self.answer(question_id, answers, limit).await);
+            }
             Command::Send {
                 thread_id,
                 message_id,
@@ -67,10 +82,14 @@ impl Actor {
                 let _ = reply.send(check_settings(&settings));
             }
             Command::Access { thread_id, reply } => {
-                let access = self
-                    .load(&thread_id)
-                    .await
-                    .map(|()| self.threads[&thread_id].settings.access());
+                let access = self.load(&thread_id).await.map(|()| {
+                    let thread = &self.threads[&thread_id];
+                    if thread.is_busy() {
+                        thread.turn_settings().access()
+                    } else {
+                        thread.settings.access()
+                    }
+                });
                 let _ = reply.send(access);
             }
             Command::Shutdown { reply } => drop(reply.send(())),

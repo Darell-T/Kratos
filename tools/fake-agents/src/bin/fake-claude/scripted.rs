@@ -30,6 +30,7 @@ enum Interrupts {
 }
 
 struct Script {
+    initializing: Option<Value>,
     received: Vec<Value>,
     interrupts: Interrupts,
 }
@@ -46,6 +47,7 @@ pub fn run(log: &Path) {
         std::process::exit(code);
     }
     let script: Shared = Arc::new(Mutex::new(Script {
+        initializing: None,
         received: Vec::new(),
         interrupts: Interrupts::Acknowledge,
     }));
@@ -86,10 +88,38 @@ fn log_start(log: &Path, port: u16) {
 
 fn handle(script: &Shared, message: Value) {
     lock(script).received.push(message.clone());
+    if message["type"] == "control_response"
+        && message["response"]["request_id"] == "fake-sdk-initialize"
+    {
+        let initialize = lock(script)
+            .initializing
+            .take()
+            .expect("an SDK initialization is pending");
+        let result = &message["response"]["response"]["mcp_response"]["result"];
+        if result["serverInfo"]["name"] != "kratos" || result["protocolVersion"] != "2025-11-25" {
+            fail(&initialize, "invalid Kratos SDK initialization response");
+        } else {
+            send(
+                &json!({ "type": "control_request", "request_id": "fake-sdk-initialized", "request": {
+                    "subtype": "mcp_message", "server_name": "kratos", "message": { "jsonrpc": "2.0", "method": "notifications/initialized" }
+                }}),
+            );
+            reply(&initialize, initialize_response());
+        }
+        return;
+    }
     if message["type"] != "control_request" || std::env::var_os("FAKE_CLAUDE_SILENT").is_some() {
         return;
     }
     match message["request"]["subtype"].as_str() {
+        Some("initialize") if message["request"]["sdkMcpServers"] == json!(["kratos"]) => {
+            lock(script).initializing = Some(message);
+            send(
+                &json!({ "type": "control_request", "request_id": "fake-sdk-initialize", "request": {
+                    "subtype": "mcp_message", "server_name": "kratos", "message": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-11-25" } }
+                }}),
+            );
+        }
         Some("initialize") => reply(&message, initialize_response()),
         Some("interrupt") => interrupt(script, &message),
         _ => fail(&message, "unsupported fake control"),

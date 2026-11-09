@@ -1,0 +1,400 @@
+//! MCP execution and fail-closed tool classification.
+
+use kratos_protocol::{ApprovalDecision, AskReason, Permission, ThreadSettings};
+use serde_json::{Value, json};
+
+use crate::harness::{A, Harness, Launch, Options, WAIT};
+use crate::requests::{approval, response, send};
+
+async fn mcp(harness: &Harness, launch: &Launch, id: &str, message: Value) {
+    harness.call(launch, "test/ask", json!({ "requestId": id, "request": { "subtype": "mcp_message", "server_name": "kratos", "message": message } })).await;
+}
+
+#[tokio::test]
+async fn sdk_server_metadata_and_command_output_reach_claude_through_the_shared_runner() {
+    // Catches wrong MCP envelopes, a command outside the thread's sandbox, or output lost before Claude receives it.
+    let harness = Harness::start(Options {
+        tools: true,
+        settings: ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    let initialize = &harness.received(&launch).await[0]["request"];
+    assert_eq!(initialize["sdkMcpServers"], json!(["kratos"]));
+    assert!(initialize["hooks"]["PostToolUse"].is_array());
+    assert!(
+        launch
+            .arguments
+            .windows(2)
+            .any(|args| args == ["--disallowedTools", "Bash,PowerShell,Monitor"])
+    );
+    mcp(&harness, &launch, "initialize", json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-11-25" } })).await;
+    assert_eq!(
+        response(&harness, &launch, "initialize").await["mcp_response"]["result"]["serverInfo"]["name"],
+        "kratos"
+    );
+    mcp(
+        &harness,
+        &launch,
+        "initialized",
+        json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
+    )
+    .await;
+    assert_eq!(
+        response(&harness, &launch, "initialized").await,
+        json!({ "mcp_response": { "jsonrpc": "2.0", "id": 0, "result": {} } })
+    );
+    mcp(
+        &harness,
+        &launch,
+        "list",
+        json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+    )
+    .await;
+    assert_eq!(
+        response(&harness, &launch, "list").await["mcp_response"]["result"]["tools"][0]["name"],
+        "run_command"
+    );
+    mcp(&harness, &launch, "run", json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": "echo KRATOS_COMMAND", "timeoutMs": 12345 } } })).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let request = loop {
+        let requests = harness
+            .command_control("test/turnRequests", json!({}))
+            .await;
+        if let Some(request) = requests
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|request| request["method"] == "command/exec")
+        {
+            break request.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "command never reached Codex"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(request["params"]["cwd"], json!(harness.folder()));
+    assert!(
+        std::path::Path::new(request["params"]["command"][0].as_str().unwrap()).is_absolute(),
+        "the workspace must never choose the command shell: {request}"
+    );
+    assert_eq!(request["params"]["permissionProfile"], "kratos-claude-wide");
+    assert_eq!(request["params"]["timeoutMs"], 12345);
+    harness.command_control("test/settleTurn", json!({ "method": "command/exec", "result": { "exitCode": 0, "stdout": "KRATOS_COMMAND", "stderr": "" } })).await;
+    let result = response(&harness, &launch, "run").await;
+    assert_eq!(result["mcp_response"]["id"], 3);
+    assert_eq!(result["mcp_response"]["result"]["isError"], false);
+    assert!(result.to_string().contains("KRATOS_COMMAND"));
+}
+
+#[tokio::test]
+async fn declining_a_flagged_command_preserves_its_target_under_every_permission() {
+    // Catches a direct MCP tool call bypassing the dangerous-command check under any permission.
+    for permission in Permission::ALL {
+        let mut harness = Harness::start(Options {
+            tools: true,
+            settings: ThreadSettings {
+                permission,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let target = harness.folder().join("keep");
+        std::fs::create_dir(&target).unwrap();
+        let launch = harness.begin(A, 1).await;
+        let command = if cfg!(windows) {
+            "Remove-Item -Recurse -Force keep"
+        } else {
+            "rm -rf keep"
+        };
+        mcp(&harness, &launch, "danger", json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": command } } })).await;
+        let asked = approval(&mut harness).await;
+        assert_eq!(asked.why, AskReason::Dangerous);
+        assert!(serde_json::to_string(&asked).unwrap().contains(command));
+        harness
+            .provider
+            .decide(asked.id, ApprovalDecision::Decline)
+            .await
+            .unwrap();
+        assert!(response(&harness, &launch, "danger").await["mcp_response"]["error"].is_object());
+        assert!(target.is_dir());
+        assert!(
+            !harness.root.path().join("codex-control").exists(),
+            "declined command started Codex"
+        );
+    }
+}
+
+#[tokio::test]
+async fn unknown_tools_bad_inputs_and_spoofed_sdk_servers_never_gain_automatic_permission() {
+    // Catches name-only SDK trust, unknown tools allowed by Full access, and unchecked or disabled command inputs.
+    let mut harness = Harness::start(Options {
+        tools: true,
+        settings: ThreadSettings {
+            permission: Permission::FullAccess,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    for (id, tool, input) in [
+        ("unknown", "NewUntrustedTool", json!({})),
+        ("bad-write", "Write", json!({ "file_path": 42 })),
+        (
+            "bad-question",
+            "AskUserQuestion",
+            json!({ "questions": "wrong" }),
+        ),
+        ("shell", "Bash", json!({ "command": "echo unsafe" })),
+    ] {
+        send(&harness, &launch, id, tool, input).await;
+        assert_eq!(
+            response(&harness, &launch, id).await["behavior"],
+            "deny",
+            "{id}"
+        );
+    }
+    for (id, source, name) in [("spoofed", "project", "kratos"), ("other", "sdk", "other")] {
+        harness.call(&launch, "test/ask", json!({ "requestId": id, "request": { "subtype": "can_use_tool", "tool_name": "mcp__kratos__run_command", "input": { "commandLine": "echo safe" }, "tool_use_id": id, "mcp_server": { "name": name, "source": source } } })).await;
+        let asked = approval(&mut harness).await;
+        assert_eq!(asked.why, AskReason::Unchecked);
+        harness
+            .provider
+            .decide(asked.id, ApprovalDecision::Decline)
+            .await
+            .unwrap();
+    }
+    mcp(&harness, &launch, "bad-command", json!({ "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": "echo ok", "timeoutMs": 0 } } })).await;
+    assert_eq!(
+        response(&harness, &launch, "bad-command").await["mcp_response"]["error"]["code"],
+        -32602
+    );
+}
+
+#[tokio::test]
+async fn file_writes_follow_d84_and_d93_and_every_protected_folder_always_asks() {
+    // Catches outside writes incorrectly asking under automatic permissions or protected paths being allowed.
+    for permission in Permission::ALL {
+        for plan_mode in [false, true] {
+            let mut harness = Harness::start(Options {
+                tools: true,
+                settings: ThreadSettings {
+                    permission,
+                    plan_mode,
+                    ..ThreadSettings::default()
+                },
+                ..Options::default()
+            })
+            .await;
+            let launch = harness.begin(A, 1).await;
+            for (index, path) in [
+                harness.folder().join("inside.txt"),
+                harness.root.path().join("outside.txt"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = format!("file-{index}");
+                send(
+                    &harness,
+                    &launch,
+                    &id,
+                    "Write",
+                    json!({ "file_path": path }),
+                )
+                .await;
+                if permission == Permission::AskMe || plan_mode {
+                    let asked = approval(&mut harness).await;
+                    assert_eq!(asked.why, AskReason::AskEveryAction);
+                    harness
+                        .provider
+                        .decide(asked.id, ApprovalDecision::Accept)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(response(&harness, &launch, &id).await["behavior"], "allow");
+            }
+            for folder in [
+                "home/.claude",
+                "home/.codex",
+                "home/.ssh",
+                "home/.gnupg",
+                "home/.aws",
+                "home/.config/gh",
+                "kratos",
+            ] {
+                let id = format!("protected-{folder}");
+                send(
+                    &harness,
+                    &launch,
+                    &id,
+                    "Write",
+                    json!({ "file_path": harness.root.path().join(folder).join("test.txt") }),
+                )
+                .await;
+                let asked = approval(&mut harness).await;
+                assert!(
+                    matches!(asked.why, AskReason::ProtectedFolder { .. }),
+                    "{folder} under {permission:?}, plan {plan_mode}"
+                );
+                harness
+                    .provider
+                    .decide(asked.id, ApprovalDecision::Decline)
+                    .await
+                    .unwrap();
+                assert_eq!(response(&harness, &launch, &id).await["behavior"], "deny");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_approved_command_callback_grants_one_exact_execution_and_never_a_changed_command() {
+    // Catches duplicate prompts for one action, reusable command grants, and substitution after approval.
+    let mut harness = Harness::start(Options {
+        tools: true,
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    harness.call(&launch, "test/ask", json!({ "requestId": "permission", "request": {
+        "subtype": "can_use_tool", "tool_name": "mcp__kratos__run_command", "tool_use_id": "tool-command",
+        "mcp_server": { "source": "sdk", "name": "kratos" }, "input": { "commandLine": "echo approved" }
+    }})).await;
+    let asked = approval(&mut harness).await;
+    harness
+        .provider
+        .decide(asked.id, ApprovalDecision::Accept)
+        .await
+        .unwrap();
+    assert_eq!(
+        response(&harness, &launch, "permission").await["behavior"],
+        "allow"
+    );
+    mcp(&harness, &launch, "substituted", json!({ "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": "echo substituted" } } })).await;
+    let changed = approval(&mut harness).await;
+    harness
+        .provider
+        .decide(changed.id, ApprovalDecision::Decline)
+        .await
+        .unwrap();
+    assert!(response(&harness, &launch, "substituted").await["mcp_response"]["error"].is_object());
+    let call = json!({ "jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": "echo approved" } } });
+    mcp(&harness, &launch, "approved", call.clone()).await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let requests = harness
+            .command_control("test/turnRequests", json!({}))
+            .await;
+        if requests
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|request| request["method"] == "command/exec")
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "approved command never reached the runner"
+        );
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        harness.details().await.approvals.is_empty(),
+        "one command asked twice"
+    );
+    harness.command_control("test/settleTurn", json!({ "method": "command/exec", "result": { "exitCode": 0, "stdout": "approved", "stderr": "" } })).await;
+    assert_eq!(
+        response(&harness, &launch, "approved").await["mcp_response"]["result"]["isError"],
+        false
+    );
+    mcp(&harness, &launch, "again", call).await;
+    let repeated = approval(&mut harness).await;
+    harness
+        .provider
+        .decide(repeated.id, ApprovalDecision::Decline)
+        .await
+        .unwrap();
+    assert!(response(&harness, &launch, "again").await["mcp_response"]["error"].is_object());
+}
+
+#[tokio::test]
+async fn commands_are_terminated_when_the_cli_withdraws_them_stops_or_exits() {
+    // Catches command processes outliving the Claude turn that owned their permission grant.
+    for ending in ["withdraw", "stop", "exit", "result"] {
+        let harness = Harness::start(Options {
+            tools: true,
+            settings: ThreadSettings {
+                permission: Permission::ApproveForMe,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+        mcp(&harness, &launch, "running-command", json!({ "jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": { "name": "run_command", "arguments": { "commandLine": "echo waiting" } } })).await;
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let process_id = loop {
+            let requests = harness
+                .command_control("test/turnRequests", json!({}))
+                .await;
+            if let Some(request) = requests
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|request| request["method"] == "command/exec")
+            {
+                break request["params"]["processId"].clone();
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "command never started"
+            );
+            tokio::task::yield_now().await;
+        };
+        match ending {
+            "withdraw" => harness
+                .emit(
+                    &launch,
+                    json!({ "type": "control_cancel_request", "request_id": "running-command" }),
+                )
+                .await,
+            "stop" => harness
+                .provider
+                .stop(harness.thread_id.clone())
+                .await
+                .unwrap(),
+            "exit" => harness.exit(&launch, 3).await,
+            "result" => harness.finish(&launch, &[A], json!({})).await,
+            _ => unreachable!(),
+        }
+        loop {
+            let requests = harness
+                .command_control("test/turnRequests", json!({}))
+                .await;
+            if let Some(request) = requests
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|request| request["method"] == "command/exec/terminate")
+            {
+                assert_eq!(request["params"]["processId"], process_id);
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{ending} left the command running"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+}

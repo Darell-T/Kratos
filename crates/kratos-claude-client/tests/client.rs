@@ -370,6 +370,7 @@ async fn withdrawn_control_cannot_be_answered_or_answered_on_drop() {
         json!({"type":"control_cancel_request", "request_id":"withdrawn"}),
     )
     .await;
+    assert!(matches!(next(&mut incoming).await, Incoming::Cancelled { id } if id == "withdrawn"));
     assert!(!control.answer(json!({"action":"accept"})));
     let inspected = command(&claude, "test/inspect", json!({})).await;
     assert!(
@@ -379,6 +380,32 @@ async fn withdrawn_control_cannot_be_answered_or_answered_on_drop() {
             .iter()
             .all(|message| message["type"] != "control_response")
     );
+    claude.close().await;
+}
+
+#[tokio::test]
+async fn malformed_and_dropped_hooks_explicitly_stop_instead_of_returning_no_decision() {
+    // Catches hook errors interpreted by Claude as no decision, which could let execution continue.
+    let (claude, mut incoming, _) = fake().await;
+    emit(&claude, json!({ "type": "control_request", "request_id": "malformed-hook", "request": { "subtype": "hook_callback" } })).await;
+    assert!(matches!(next(&mut incoming).await, Incoming::Unreadable(_)));
+    let Incoming::Message(StreamMessage::Unrecognized { raw, .. }) = next(&mut incoming).await
+    else {
+        panic!("fake reports the malformed hook answer");
+    };
+    assert_eq!(raw["answer"]["response"]["subtype"], "success");
+    assert_eq!(raw["answer"]["response"]["response"]["continue"], false);
+    emit(&claude, json!({ "type": "control_request", "request_id": "dropped-hook", "request": { "subtype": "hook_callback", "callback_id": "post", "input": {} } })).await;
+    let Incoming::Control(control) = next(&mut incoming).await else {
+        panic!("incoming hook");
+    };
+    drop(control);
+    let Incoming::Message(StreamMessage::Unrecognized { raw, .. }) = next(&mut incoming).await
+    else {
+        panic!("fake reports the dropped hook answer");
+    };
+    assert_eq!(raw["answer"]["response"]["subtype"], "success");
+    assert_eq!(raw["answer"]["response"]["response"]["continue"], false);
     claude.close().await;
 }
 

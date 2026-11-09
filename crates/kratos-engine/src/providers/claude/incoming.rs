@@ -1,11 +1,11 @@
-//! What a CLI sends: messages become thread events and live updates, and requests are refused
-//! until Kratos's permission rules exist.
+//! What a CLI sends: messages become thread events and live updates, and controls reach Kratos
+//! permission, question, hook, and MCP handlers.
 
 use kratos_claude_client::{Assistant, Incoming, StreamEvent, StreamMessage};
 use kratos_protocol::{LiveUpdate, ThreadEventBody, ThreadId, TurnId};
 
 use super::actor::{Actor, SessionEvent};
-use super::{permissions, wire};
+use super::wire;
 
 impl Actor {
     pub(super) async fn on_event(&mut self, event: SessionEvent) {
@@ -24,7 +24,11 @@ impl Actor {
         }
         match incoming {
             Incoming::Message(message) => self.on_message(&thread_id, message).await,
-            Incoming::Control(control) => permissions::answer(control),
+            Incoming::Control(control) => self.on_control(&thread_id, control).await,
+            Incoming::Cancelled { id } => {
+                self.close_requests(&thread_id, Some(&id), "Claude no longer needs an answer")
+                    .await
+            }
             Incoming::Oversized { bytes } => {
                 let message =
                     format!("Claude sent a line of {bytes} bytes, more than Kratos reads");

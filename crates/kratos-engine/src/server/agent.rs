@@ -2,8 +2,8 @@
 //! reach its agent through [`Agent`], so a route is written once for both.
 
 use kratos_protocol::{
-    AccessLimit, Message, MessageId, MessageInput, MessageOrigin, Provider, ThreadId,
-    ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, Message, MessageId, MessageInput,
+    MessageOrigin, Provider, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
 
 use super::{ApiError, ServerState};
@@ -17,6 +17,30 @@ pub(super) enum Agent<'a> {
 }
 
 impl ServerState {
+    pub(super) async fn approval_agent(&self, id: &ApprovalId) -> Result<Agent<'_>, ApiError> {
+        let lookup = id.clone();
+        match self
+            .store
+            .call(move |store| store.approval(&lookup))
+            .await?
+        {
+            Some(stored) => self.agent(&stored.thread_id).await,
+            None => Ok(Agent::Codex(self.codex()?)),
+        }
+    }
+
+    pub(super) async fn question_agent(&self, id: &QuestionId) -> Result<Agent<'_>, ApiError> {
+        let lookup = id.clone();
+        match self
+            .store
+            .call(move |store| store.question(&lookup))
+            .await?
+        {
+            Some(stored) => self.agent(&stored.thread_id).await,
+            None => Ok(Agent::Codex(self.codex()?)),
+        }
+    }
+
     /// The provider of `thread_id`. 404 for a thread that does not exist.
     pub(super) async fn provider_of(&self, thread_id: &ThreadId) -> Result<Provider, ApiError> {
         let lookup = thread_id.clone();
@@ -44,6 +68,28 @@ impl ServerState {
 }
 
 impl Agent<'_> {
+    pub(super) async fn decide(
+        &self,
+        id: ApprovalId,
+        decision: ApprovalDecision,
+    ) -> Result<ApprovalOutcome, ProviderError> {
+        match self {
+            Agent::Codex(provider) => provider.decide(id, decision).await,
+            Agent::Claude(provider) => provider.decide(id, decision).await,
+        }
+    }
+
+    pub(super) async fn answer(
+        &self,
+        id: QuestionId,
+        answers: std::collections::BTreeMap<String, Vec<String>>,
+        limit: Option<AccessLimit>,
+    ) -> Result<QuestionOutcome, ProviderError> {
+        match self {
+            Agent::Codex(provider) => provider.answer(id, answers, limit).await,
+            Agent::Claude(provider) => provider.answer(id, answers, limit).await,
+        }
+    }
     pub(super) async fn send(
         &self,
         thread_id: ThreadId,

@@ -3,8 +3,11 @@
 //! The files are modules of one test binary so that they share `harness` without an
 //! `allow(dead_code)`: each file uses a different part of it.
 
+mod guards;
 mod harness;
 mod permissions;
 mod reliability;
+mod requests;
 mod rules;
+mod tools;
 mod turns;
