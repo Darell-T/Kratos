@@ -12,6 +12,12 @@
 //! only Claude's transcript or the user settles it. Claude accepts a message only when it echoes
 //! it back, and a turn ends only on its result.
 //!
+//! The account's usage reaches the shared tracker (D38) from the CLI's rate limit events and from
+//! a `get_usage` read after each session starts and whenever the scheduler asks. Only a turn's
+//! result decides a stop at the usage limit (D39): a failed result after a rejected event pauses
+//! the thread and reports the stop, and anything else, including a turn the CLI waited out,
+//! sends nothing.
+//!
 //! Kratos decides each tool request and records approvals and questions through the shared Hub.
 //! Every command uses the Codex runner. No thread launches in a mode that skips the ask.
 

@@ -670,3 +670,34 @@ async fn a_result_without_requests_reports_no_context() {
     };
     assert_eq!(context, None);
 }
+
+#[tokio::test]
+async fn a_rejection_an_earlier_process_saw_does_not_decide_a_later_turn() {
+    // Catches a rejection outliving its process: the CLI died mid-turn, and the next process's
+    // first failure, which has nothing to do with the limit, would be read as the limit's.
+    let mut harness = Harness::start(Options::default()).await;
+    let first = harness.begin(A, 1).await;
+    wait_for_usage(&harness, |usage| usage.allowance == Allowance::Allowed).await;
+    harness
+        .emit(&first, rate_limit_event("rejected", "five_hour", RESET))
+        .await;
+    harness.exit(&first, 1).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+
+    let second = harness.begin(B, 2).await;
+    harness.finish(&second, &[B], limit_failure()).await;
+
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(!usage_limit_pause(
+        &harness
+            .details()
+            .await
+            .paused
+            .unwrap_or(PauseReason::Interrupted)
+    ));
+    assert!(harness.stops.as_mut().unwrap().try_recv().is_err());
+}
