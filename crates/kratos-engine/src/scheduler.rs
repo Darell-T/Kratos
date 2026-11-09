@@ -103,6 +103,22 @@ pub fn plan(provider: Provider, account: Option<&AccountUsage>) -> Plan {
     }
 }
 
+/// The reset to record on a continuation: the plan's own. A stop recovered without evidence of its
+/// window, when the plan found no spent window, waits for the user, who may let Kratos resume at
+/// the reset the pause itself recorded (D41). A spent window that has no reset keeps none, so the
+/// user is not shown "did not say when the limit resets" beside a reset time.
+fn continuation_reset(
+    planned: Option<Timestamp>,
+    found_spent_window: bool,
+    paused: Option<Timestamp>,
+) -> Option<Timestamp> {
+    if found_spent_window {
+        planned
+    } else {
+        planned.or(paused)
+    }
+}
+
 /// The reset the thread's pause recorded, when the pause is the usage-limit stop of `turn_id`.
 fn source_pause_reset(paused: Option<PauseReason>, turn_id: &TurnId) -> Option<Option<Timestamp>> {
     match paused {
@@ -332,11 +348,11 @@ impl Scheduler {
                     return Ok(false);
                 }
                 let mut continuation = continuation;
-                if continuation.resets_at.is_none() {
-                    // A stop recovered without evidence of its window waits for the user, who
-                    // may let Kratos resume at the reset the pause itself recorded (D41).
-                    continuation.resets_at = source_reset.flatten();
-                }
+                continuation.resets_at = continuation_reset(
+                    continuation.resets_at.take(),
+                    !continuation.waits_on.limit_ids.is_empty(),
+                    source_reset.flatten(),
+                );
                 write.add_continuation(continuation)
             })
             .await?;
@@ -646,6 +662,22 @@ mod tests {
 
     const SOON: &str = "2030-01-01T05:00:00.000Z";
     const LATER: &str = "2030-01-07T00:00:00.000Z";
+
+    #[test]
+    fn the_pauses_reset_stands_in_only_when_the_plan_found_no_spent_window() {
+        // Catches the pause's reset copied next to a spent window that has none, where the user
+        // would read "did not say when the limit resets" beside a reset time.
+        let planned = Some(Timestamp::try_from(SOON.to_owned()).unwrap());
+        let pause = Some(Timestamp::try_from(LATER.to_owned()).unwrap());
+
+        assert_eq!(continuation_reset(None, false, pause.clone()), pause);
+        assert_eq!(continuation_reset(None, true, pause.clone()), None);
+        assert_eq!(
+            continuation_reset(planned.clone(), true, pause.clone()),
+            planned
+        );
+        assert_eq!(continuation_reset(None, false, None), None);
+    }
 
     #[test]
     fn only_a_spent_five_hour_window_with_a_reset_resumes_on_its_own() {
