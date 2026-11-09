@@ -178,6 +178,16 @@ impl Fake {
                 eprintln!("final fake diagnostic");
                 std::process::exit(request["code"].as_i64().unwrap_or(17) as i32);
             }
+            Some("test/flood_controls") => {
+                for number in 0..request["count"].as_u64().unwrap_or(300) {
+                    send(
+                        &json!({"type":"control_request", "request_id":format!("fake-{number}"),
+                        "request":{"subtype":"can_use_tool", "tool_name":"Read", "input":{},
+                            "tool_use_id":format!("tool-{number}")}}),
+                    );
+                }
+                reply(message, json!({}));
+            }
             Some("test/close_stdout_then_exit") => close_stdout_then_exit(request),
             Some("test/oversized") => {
                 let bytes = usize::try_from(request["bytes"].as_u64().unwrap_or(150_000))

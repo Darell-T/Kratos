@@ -9,9 +9,9 @@ use std::task::Poll;
 use std::time::Duration;
 
 use kratos_claude_client::{
-    Claude, ConnectError, ControlRequest, Incoming, IncomingControl, Initialize, Initialized,
-    Launch, MAX_LINE_BYTES, PermissionMode, RequestError, SessionId, SessionStart, SettingSource,
-    StreamMessage, TurnOutcome, connect,
+    Claude, ConnectError, ControlRequest, ExitCause, Incoming, IncomingControl, Initialize,
+    Initialized, Launch, MAX_LINE_BYTES, PermissionMode, RequestError, SessionId, SessionStart,
+    SettingSource, StreamMessage, TurnOutcome, connect,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -448,6 +448,32 @@ async fn a_cli_that_closes_stdout_is_given_time_to_finish_exiting() {
     };
     assert_eq!(exit.code, Some(3), "the CLI's own exit code survives");
     assert!(marker.exists(), "the CLI finished its work before exiting");
+}
+
+#[tokio::test]
+async fn unanswered_controls_filling_the_reply_queue_end_the_session_with_a_reason() {
+    // Catches ending the session on a full reply queue with an exit that looks like a crash.
+    let (claude, mut incoming, _) = fake().await;
+    let flood = {
+        let claude = claude.clone();
+        tokio::spawn(async move {
+            claude
+                .control(json!({"subtype":"test/flood_controls", "count":400}))
+                .await
+        })
+    };
+    let mut held = Vec::new();
+    let exit = loop {
+        match next(&mut incoming).await {
+            Incoming::Control(control) => held.push(control),
+            Incoming::Exited(exit) => break exit,
+            other => panic!("unexpected event: {other:?}"),
+        }
+    };
+    assert_eq!(exit.cause, Some(ExitCause::ReplyQueueFull));
+    assert!(exit.to_string().contains("waiting for an answer"), "{exit}");
+    let _ = flood.await.unwrap();
+    assert!(!held.is_empty());
 }
 
 #[tokio::test]

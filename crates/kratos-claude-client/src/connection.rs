@@ -98,11 +98,31 @@ impl Launch {
     }
 }
 
+/// Why Kratos ended a session that the CLI did not end itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ExitCause {
+    /// Unanswered reverse controls filled the outgoing queue, so no reply could be reserved.
+    ReplyQueueFull,
+}
+
+impl std::fmt::Display for ExitCause {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ReplyQueueFull => {
+                formatter.write_str("too many reverse controls were waiting for an answer")
+            }
+        }
+    }
+}
+
 /// The final child status and bounded stderr tail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exit {
     pub code: Option<i32>,
     pub stderr: Vec<String>,
+    /// Set when Kratos ended the session for a reason of its own, rather than the CLI exiting.
+    pub cause: Option<ExitCause>,
 }
 
 impl std::fmt::Display for Exit {
@@ -110,6 +130,9 @@ impl std::fmt::Display for Exit {
         match self.code {
             Some(code) => write!(formatter, "Claude exited (code {code})")?,
             None => formatter.write_str("Claude exited (code unknown)")?,
+        }
+        if let Some(cause) = self.cause {
+            write!(formatter, " after Kratos ended it, because {cause}")?;
         }
         if let Some(last) = self.stderr.last() {
             write!(formatter, ": {last}")?;
@@ -246,7 +269,8 @@ struct State {
     lifecycle: Lifecycle,
     pending: HashMap<String, oneshot::Sender<Result<Value, RequestError>>>,
     awaiting_answer: HashSet<String>,
-    startup: Option<mpsc::Sender<IncomingControl>>,
+    startup: Option<mpsc::UnboundedSender<IncomingControl>>,
+    cause: Option<ExitCause>,
 }
 
 impl Shared {
@@ -277,6 +301,11 @@ impl Shared {
                 false
             }
         });
+    }
+
+    fn end_because(&self, cause: ExitCause) {
+        self.state().cause.get_or_insert(cause);
+        self.shutdown(Duration::ZERO);
     }
 
     fn finish(&self, exit: &Exit) {
@@ -354,7 +383,8 @@ pub async fn connect(
     let stderr = child.take_stderr().expect("stderr was piped");
     let (writer, writes) = mpsc::channel(QUEUE_CAPACITY);
     let (incoming_sender, incoming) = mpsc::channel(QUEUE_CAPACITY);
-    let (startup_sender, mut startup) = mpsc::channel(QUEUE_CAPACITY);
+    // Each startup control holds a reply permit, so the writer queue already bounds this channel.
+    let (startup_sender, mut startup) = mpsc::unbounded_channel();
     let (close, close_requested) = watch::channel(None);
     let (exit_sender, exited) = watch::channel(None);
     let shared = Arc::new(Shared {
@@ -664,7 +694,11 @@ async fn keep(
             None
         }
     };
-    let exit = Exit { code, stderr };
+    let exit = Exit {
+        code,
+        stderr,
+        cause: shared.state().cause,
+    };
     shared.finish(&exit);
     shared.close.send_replace(Some(Duration::ZERO));
     exited.send_replace(Some(exit));
@@ -793,7 +827,7 @@ fn reverse_control(shared: &Arc<Shared>, message: Value) -> Option<Incoming> {
     let permit = match shared.writer.clone().try_reserve_owned() {
         Ok(permit) => permit,
         Err(_) => {
-            shared.shutdown(Duration::ZERO);
+            shared.end_because(ExitCause::ReplyQueueFull);
             return None;
         }
     };
@@ -829,15 +863,8 @@ fn reverse_control(shared: &Arc<Shared>, message: Value) -> Option<Incoming> {
         return None;
     }
     if let Some(startup) = &state.startup {
-        return match startup.try_send(control) {
-            Ok(()) => None,
-            Err(error) => {
-                drop(state);
-                drop(error.into_inner());
-                shared.shutdown(Duration::ZERO);
-                None
-            }
-        };
+        let _ = startup.send(control);
+        return None;
     }
     drop(state);
     Some(Incoming::Control(control))

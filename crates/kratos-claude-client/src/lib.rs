@@ -6,8 +6,8 @@ mod protocol;
 mod transcript;
 
 pub use connection::{
-    Claude, ConnectError, Exit, Incoming, IncomingControl, Launch, MAX_LINE_BYTES, PermissionMode,
-    RequestError, SettingSource, connect,
+    Claude, ConnectError, Exit, ExitCause, Incoming, IncomingControl, Launch, MAX_LINE_BYTES,
+    PermissionMode, RequestError, SettingSource, connect,
 };
 pub use locate::{LocateError, locate_claude};
 pub use protocol::{
