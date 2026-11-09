@@ -1,6 +1,7 @@
 //! Starting a thread's CLI process and ending it. Each thread has a process of its own, started
 //! when its next message needs one (L4, L5), or when the usage scheduler or the skills route needs
-//! a session to ask. A CLI that failed to start is tried again only by a message or the user.
+//! a session to ask. A CLI that failed to start is tried again by a message, by the user, or by
+//! the next usage read or skills request, each of which asks for a session.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -126,7 +127,7 @@ impl Actor {
         let thread = self
             .threads
             .get_mut(thread_id)
-            .expect("the caller loaded it");
+            .expect("when_open loaded the thread above");
         match thread.session {
             Session::Open(_) => self.serve(thread_id, waiter),
             Session::Opening => thread.waiters.push(waiter),

@@ -5,7 +5,8 @@
 //! snapshot. Codex's rolling update only fills in the buckets it names, never clears what it
 //! leaves out, and never says whether the account may run, as its schema directs. Claude's
 //! `rate_limit_event` is an update that does state the allowance, so it sets it, replaces the
-//! windows it carries, and clears the reached limit of the buckets it names. Missing information
+//! windows it carries, and sets the reached limit of the buckets it names when rejected and
+//! clears it when allowed. Missing information
 //! never becomes permission: no read, a failed read, or a read without that answer leaves the
 //! allowance unavailable.
 

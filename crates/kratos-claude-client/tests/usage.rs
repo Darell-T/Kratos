@@ -134,8 +134,8 @@ fn an_api_retry_frame_is_typed_and_not_a_result() {
 
 #[test]
 fn a_result_reports_the_last_request_and_the_answering_models_window() {
-    // Catches context summed over every request of the turn, which would pass the window, or
-    // read from the cumulative usage instead of the request that fills it.
+    // Catches the recorded result's counts or window read from the wrong field. The recording has
+    // one request equal to the top level, so which request is read is the two-request test's job.
     let result = TurnResult::parse(recorded_result()).unwrap();
 
     let last = result.context.last.unwrap();
