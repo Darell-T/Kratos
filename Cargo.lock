@@ -620,6 +620,7 @@ name = "kratos-claude-client"
 version = "0.1.0"
 dependencies = [
  "fake-agents",
+ "kratos-claude-client",
  "kratos-process",
  "serde",
  "serde_json",

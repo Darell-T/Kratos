@@ -9,9 +9,9 @@ use std::task::Poll;
 use std::time::Duration;
 
 use kratos_claude_client::{
-    Claude, ConnectError, ControlRequest, ExitCause, Incoming, IncomingControl, Initialize,
-    Initialized, Launch, MAX_LINE_BYTES, PermissionMode, RequestError, SessionId, SessionStart,
-    SettingSource, StreamMessage, TurnOutcome, connect,
+    Claude, ConnectError, Control, ControlRequest, ExitCause, Incoming, IncomingControl,
+    Initialize, Initialized, Launch, MAX_LINE_BYTES, PermissionMode, RequestError, SessionId,
+    SessionStart, SettingSource, StreamMessage, TurnOutcome, connect,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,7 +46,7 @@ async fn next(incoming: &mut mpsc::Receiver<Incoming>) -> Incoming {
 async fn command(claude: &Claude, subtype: &str, fields: Value) -> Value {
     let mut request = fields;
     request["subtype"] = json!(subtype);
-    claude.control(request).await.unwrap()
+    claude.control(Control::Raw(request)).await.unwrap()
 }
 
 async fn emit(claude: &Claude, message: Value) {
@@ -190,7 +190,8 @@ async fn feed_recorded(
         Some("control_request") => {
             let handle = claude.clone();
             let request = input["request"].clone();
-            let mut reply: PendingReply = Box::pin(async move { handle.control(request).await });
+            let mut reply: PendingReply =
+                Box::pin(async move { handle.control(Control::Raw(request)).await });
             let immediate = std::future::poll_fn(|context| {
                 Poll::Ready(match reply.as_mut().poll(context) {
                     Poll::Ready(reply) => Some(reply),
@@ -386,7 +387,10 @@ async fn expired_control_times_out_and_later_controls_still_work() {
     // Catches a missing control deadline or leaving the connection unusable after timeout.
     let (claude, mut incoming, _) = fake().await;
     let request = claude
-        .control_within(json!({"subtype":"test/hang"}), Duration::from_millis(50))
+        .control_within(
+            Control::Raw(json!({"subtype":"test/hang"})),
+            Duration::from_millis(50),
+        )
         .await
         .unwrap_err();
     assert!(matches!(request, RequestError::Timeout { .. }));
@@ -406,12 +410,16 @@ async fn exit_fails_every_pending_request_once_with_the_complete_stderr_tail() {
     for _ in 0..3 {
         let handle = claude.clone();
         requests.push(tokio::spawn(async move {
-            handle.control(json!({"subtype":"test/hang"})).await
+            handle
+                .control(Control::Raw(json!({"subtype":"test/hang"})))
+                .await
         }));
         let _pending = next(&mut incoming).await;
     }
     let exit = claude
-        .control(json!({"subtype":"test/exit", "code":23,"stderr_lines":25}))
+        .control(Control::Raw(
+            json!({"subtype":"test/exit", "code":23,"stderr_lines":25}),
+        ))
         .await
         .unwrap_err();
     assert!(matches!(exit, RequestError::Exited(_)));
@@ -441,7 +449,7 @@ async fn a_cli_that_closes_stdout_is_given_time_to_finish_exiting() {
     let (claude, mut incoming, _) = fake().await;
     let request = json!({"subtype":"test/close_stdout_then_exit", "pause_ms":300, "code":3,
         "marker":marker});
-    let failure = claude.control(request).await.unwrap_err();
+    let failure = claude.control(Control::Raw(request)).await.unwrap_err();
     assert!(matches!(failure, RequestError::Exited(ref exit) if exit.code == Some(3)));
     let Incoming::Exited(exit) = next(&mut incoming).await else {
         panic!("terminal exit");
@@ -458,7 +466,9 @@ async fn unanswered_controls_filling_the_reply_queue_end_the_session_with_a_reas
         let claude = claude.clone();
         tokio::spawn(async move {
             claude
-                .control(json!({"subtype":"test/flood_controls", "count":400}))
+                .control(Control::Raw(
+                    json!({"subtype":"test/flood_controls", "count":400}),
+                ))
                 .await
         })
     };
@@ -477,10 +487,27 @@ async fn unanswered_controls_filling_the_reply_queue_end_the_session_with_a_reas
 }
 
 #[tokio::test]
+async fn typed_controls_serialize_with_their_subtype() {
+    // Catches a typed control reaching the CLI without the subtype tag that selects its handler.
+    let (claude, _incoming, _) = fake().await;
+    claude.interrupt().await.unwrap();
+    let inspected = command(&claude, "test/inspect", json!({})).await;
+    let requests: Vec<&Value> = inspected["received"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| &message["request"])
+        .collect();
+    assert_eq!(requests[0]["subtype"], "initialize");
+    assert_eq!(requests[1], &json!({"subtype":"interrupt"}));
+    claude.close().await;
+}
+
+#[tokio::test]
 async fn process_exit_settles_requests_even_when_the_event_queue_is_full() {
     // Catches coupling pending-request failure to a consumer draining the incoming queue.
     let (claude, mut incoming, _) = fake().await;
-    let request = claude.control(json!({"subtype":"test/flood_then_exit"}));
+    let request = claude.control(Control::Raw(json!({"subtype":"test/flood_then_exit"})));
     let failure = tokio::time::timeout(Duration::from_secs(5), request)
         .await
         .expect("process exit bypasses event backpressure")

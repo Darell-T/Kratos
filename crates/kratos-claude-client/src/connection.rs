@@ -98,6 +98,42 @@ impl Launch {
     }
 }
 
+/// A control Kratos sends to the CLI, serialized with its `subtype` tag.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum Control {
+    Initialize(Initialize),
+    Interrupt,
+    /// An arbitrary control body, for fakes and recorded replays. Only built with `test-util`.
+    #[cfg(feature = "test-util")]
+    Raw(Value),
+}
+
+impl Control {
+    fn subtype(&self) -> &str {
+        match self {
+            Self::Initialize(_) => "initialize",
+            Self::Interrupt => "interrupt",
+            #[cfg(feature = "test-util")]
+            Self::Raw(body) => body["subtype"].as_str().unwrap_or("unknown"),
+        }
+    }
+
+    fn into_wire(self) -> Value {
+        let subtype = self.subtype().to_owned();
+        let mut body = match self {
+            Self::Initialize(initialize) => {
+                serde_json::to_value(initialize).expect("initialize fields serialize")
+            }
+            Self::Interrupt => json!({}),
+            #[cfg(feature = "test-util")]
+            Self::Raw(body) => body,
+        };
+        body["subtype"] = json!(subtype);
+        body
+    }
+}
+
 /// Why Kratos ended a session that the CLI did not end itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -346,8 +382,6 @@ pub enum RequestError {
     Closing,
     #[error("{0}")]
     Exited(Exit),
-    #[error("control request requires a string subtype")]
-    MissingSubtype,
     #[error("invalid user message uuid: {0}")]
     InvalidUuid(#[source] uuid::Error),
     #[error("cannot read Claude response: {0}")]
@@ -419,10 +453,8 @@ pub async fn connect(
         exit_sender,
     ));
     tokio::spawn(read(shared.clone(), stdout, incoming_sender));
-    let mut request = serde_json::to_value(initialize).expect("initialize fields serialize");
-    request["subtype"] = json!("initialize");
     let initialized = {
-        let reply = claude.control(request);
+        let reply = claude.control(Control::Initialize(initialize));
         tokio::pin!(reply);
         loop {
             tokio::select! {
@@ -526,8 +558,8 @@ impl Claude {
     ///
     /// # Errors
     /// Returns a CLI error, timeout with unknown outcome, or connection exit.
-    pub async fn control(&self, request: Value) -> Result<Value, RequestError> {
-        self.control_within(request, self.shared.control_timeout)
+    pub async fn control(&self, control: Control) -> Result<Value, RequestError> {
+        self.control_within(control, self.shared.control_timeout)
             .await
     }
 
@@ -537,15 +569,13 @@ impl Claude {
     /// Returns a CLI error, timeout with unknown outcome, or connection exit.
     pub async fn control_within(
         &self,
-        request: Value,
+        control: Control,
         timeout: Duration,
     ) -> Result<Value, RequestError> {
-        let subtype = request
-            .get("subtype")
-            .and_then(Value::as_str)
-            .ok_or(RequestError::MissingSubtype)?
-            .to_owned();
-        match tokio::time::timeout_at(Instant::now() + timeout, self.request(request)).await {
+        let subtype = control.subtype().to_owned();
+        match tokio::time::timeout_at(Instant::now() + timeout, self.request(control.into_wire()))
+            .await
+        {
             Ok(reply) => reply,
             Err(_) => Err(RequestError::Timeout {
                 subtype,
@@ -594,7 +624,7 @@ impl Claude {
     /// # Errors
     /// Returns a CLI error, unknown-outcome timeout, or connection exit.
     pub async fn interrupt(&self) -> Result<Value, RequestError> {
-        self.control(json!({"subtype":"interrupt"})).await
+        self.control(Control::Interrupt).await
     }
 
     fn ended(&self) -> RequestError {
