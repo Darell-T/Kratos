@@ -38,15 +38,13 @@ impl TurnEnd {
         }
     }
 
-    /// The end a result reports. `rejection` is what the latest rate limit event refused, and
-    /// `answering` the model that wrote the turn's last reply, which names the context window.
-    /// A turn Kratos was asked to interrupt (`stopped`) is never a limit stop, whatever its result
-    /// says: the user's Stop must not become an automatic continuation.
+    /// The end a result reports. `rejection` is the refusal that can stop this turn, when the
+    /// latest rate limit event made one, and `answering` the model that wrote the turn's last
+    /// reply, which names the context window.
     pub(super) fn of(
         result: &TurnResult,
         rejection: Option<&Rejection>,
         answering: Option<&str>,
-        stopped: bool,
     ) -> TurnEnd {
         let outcome = match &result.outcome {
             ClaudeOutcome::Completed => TurnOutcome::Completed,
@@ -56,13 +54,9 @@ impl TurnEnd {
             },
         };
         let stop = match (&outcome, rejection) {
-            (TurnOutcome::Failed { .. }, Some(refused))
-                if !refused.is_using_overage && !stopped =>
-            {
-                Stop::UsageLimit {
-                    resets_at: refused.resets_at.clone(),
-                }
-            }
+            (TurnOutcome::Failed { .. }, Some(refused)) => Stop::UsageLimit {
+                resets_at: refused.resets_at.clone(),
+            },
             _ => Stop::Ordinary,
         };
         TurnEnd {

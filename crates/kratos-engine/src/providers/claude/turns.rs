@@ -268,12 +268,18 @@ impl Actor {
         self.close_requests(thread_id, None, "Claude's turn ended")
             .await;
         let thread = self.threads.get_mut(thread_id).expect("found above");
-        let rejection = thread.rejection.take();
+        // Only a refusal of the included quota can stop the turn: not one extra usage pays past,
+        // and never one of a turn Kratos was asked to interrupt, whatever its result says. The
+        // user's Stop must not become an automatic continuation.
+        let stopping = thread.stopping;
+        let rejection = thread
+            .rejection
+            .take()
+            .filter(|refused| !refused.is_using_overage && !stopping);
         let end = TurnEnd::of(
             &result,
             rejection.as_ref(),
             thread.answering_model.as_deref(),
-            thread.stopping,
         );
         let (context, stop) = (end.context.clone(), end.stop.clone());
         let Ok(turn_id) = self.record_run(thread_id, ended.clone(), Some(end)).await else {
