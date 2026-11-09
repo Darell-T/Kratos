@@ -22,8 +22,9 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::hub::Hub;
-use crate::providers::Continued;
+use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
+use crate::providers::{Agent, Continued, ProviderError};
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 
@@ -70,6 +71,47 @@ impl Clock for SystemClock {
     }
 }
 
+/// The providers the scheduler reaches, each only while it runs. A provider that is not running
+/// answers a usage read as failed, so its continuations go to the user.
+#[derive(Clone, Default)]
+pub struct Providers {
+    pub codex: Option<CodexProvider>,
+    pub claude: Option<ClaudeProvider>,
+}
+
+impl From<CodexProvider> for Providers {
+    fn from(codex: CodexProvider) -> Providers {
+        Providers {
+            codex: Some(codex),
+            claude: None,
+        }
+    }
+}
+
+impl Providers {
+    pub fn is_empty(&self) -> bool {
+        self.codex.is_none() && self.claude.is_none()
+    }
+
+    fn agent(&self, provider: Provider) -> Result<Agent<'_>, ProviderError> {
+        let agent = match provider {
+            Provider::Codex => self.codex.as_ref().map(Agent::Codex),
+            Provider::Claude => self.claude.as_ref().map(Agent::Claude),
+        };
+        agent.ok_or_else(|| {
+            ProviderError::Unavailable(format!("{} is not running", display(provider)))
+        })
+    }
+}
+
+/// The provider's name as the plan texts spell it.
+fn display(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Codex => "Codex",
+        Provider::Claude => "Claude",
+    }
+}
+
 /// What the scheduler plans for a stop, from the account's latest usage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
@@ -93,22 +135,21 @@ pub fn plan(provider: Provider, account: Option<&AccountUsage>) -> Plan {
         .map(|(_, window)| window.resets_at.clone())
         .collect::<Option<Vec<Timestamp>>>()
         .and_then(|resets| resets.into_iter().max_by_key(Timestamp::instant));
+    let name = display(provider);
     let why = if spent.is_empty() {
-        Some("Codex did not say which limit stopped the turn")
+        Some(format!("{name} did not say which limit stopped the turn"))
     } else if resets_at.is_none() {
-        Some("Codex did not say when the limit resets")
+        Some(format!("{name} did not say when the limit resets"))
     } else if spent
         .iter()
         .any(|(_, window)| window.window_minutes != Some(AUTOMATIC_WINDOW_MINUTES))
     {
-        Some("The wait is longer than the five-hour window")
+        Some("The wait is longer than the five-hour window".to_owned())
     } else {
         None
     };
     let state = match why {
-        Some(why) => ContinuationState::AwaitingUser {
-            why: why.to_owned(),
-        },
+        Some(why) => ContinuationState::AwaitingUser { why },
         None => ContinuationState::Scheduled,
     };
     Plan {
@@ -217,7 +258,7 @@ struct Scheduler {
     hub: Hub,
     store: StoreThread,
     usage: UsageTracker,
-    provider: CodexProvider,
+    providers: Providers,
     clock: Arc<dyn Clock>,
     /// Checks in a row without a usable answer, by continuation.
     unanswered: HashMap<ContinuationId, u32>,
@@ -232,7 +273,7 @@ pub async fn start(
     hub: Hub,
     store: StoreThread,
     usage: UsageTracker,
-    provider: CodexProvider,
+    providers: impl Into<Providers>,
     clock: Arc<dyn Clock>,
     mut stops: mpsc::UnboundedReceiver<LimitStop>,
 ) -> Result<SchedulerHandle, StoreError> {
@@ -241,7 +282,7 @@ pub async fn start(
         hub,
         store: store.clone(),
         usage,
-        provider,
+        providers: providers.into(),
         clock,
         unanswered: HashMap::new(),
         store_failures: HashMap::new(),
@@ -252,21 +293,22 @@ pub async fn start(
             scheduler.arm(&continuation.id, continuation.resets_at.as_ref());
         }
     }
-    let unplanned_stops = store
-        .call(|store| store.unplanned_usage_stops(Provider::Codex))
-        .await?;
+    let mut unplanned_stops = Vec::new();
+    for provider in [Provider::Codex, Provider::Claude] {
+        let stops = store
+            .call(move |store| store.unplanned_usage_stops(provider))
+            .await?;
+        unplanned_stops.extend(stops.into_iter().map(|(thread_id, turn_id)| LimitStop {
+            thread_id,
+            turn_id,
+            provider,
+        }));
+    }
     let (requests, mut incoming) = mpsc::channel(16);
     tokio::spawn(async move {
         // Provider refreshes must not delay the HTTP listener becoming usable.
-        for (thread_id, turn_id) in unplanned_stops {
-            if let Err(error) = scheduler
-                .on_stop(LimitStop {
-                    thread_id,
-                    turn_id,
-                    provider: Provider::Codex,
-                })
-                .await
-            {
+        for stop in unplanned_stops {
+            if let Err(error) = scheduler.on_stop(stop).await {
                 eprintln!("cannot recover a usage continuation: {error}");
             }
         }
@@ -308,7 +350,7 @@ impl Scheduler {
     async fn on_stop(&self, stop: LimitStop) -> Result<(), StoreError> {
         // A fresh read, so the plan rests on what the provider says now. A failed read leaves the
         // last known usage, which the plan treats as no evidence where it lacks any.
-        let _ = self.provider.refresh_usage().await;
+        let _ = self.refresh(stop.provider, &stop.thread_id).await;
         let planned = plan(stop.provider, self.usage.account(stop.provider).as_ref());
         let continuation = Continuation {
             id: ContinuationId::new(Uuid::new_v4().to_string()),
@@ -392,13 +434,23 @@ impl Scheduler {
         self.arm_at(id, self.clock.now() + wait);
     }
 
+    /// Asks the provider for the account's usage, through a session of `thread_id` where the
+    /// provider needs one.
+    async fn refresh(&self, provider: Provider, thread_id: &ThreadId) -> Result<(), ProviderError> {
+        self.providers
+            .agent(provider)?
+            .refresh_usage(thread_id)
+            .await
+    }
+
     async fn resume_or_wait(
         &mut self,
         thread_id: &ThreadId,
         continuation: &Continuation,
     ) -> Result<(), StoreError> {
-        let refreshed = self.provider.refresh_usage().await;
-        let account = self.usage.account(continuation.waits_on.provider);
+        let provider = continuation.waits_on.provider;
+        let refreshed = self.refresh(provider, thread_id).await;
+        let account = self.usage.account(provider);
         let readiness = match refreshed {
             Ok(()) => may_continue(&continuation.waits_on, account.as_ref()),
             Err(_) => Readiness::Unanswered,
@@ -410,12 +462,11 @@ impl Scheduler {
                     .await
             }
             Readiness::Unanswered => {
-                self.unanswered(
-                    thread_id,
-                    continuation,
-                    "Codex did not say whether the account may run",
-                )
-                .await
+                let why = format!(
+                    "{} did not say whether the account may run",
+                    display(provider)
+                );
+                self.unanswered(thread_id, continuation, &why).await
             }
             Readiness::AccountChanged => {
                 self.hand_to_user(thread_id, continuation, "The signed-in account changed")
@@ -430,10 +481,14 @@ impl Scheduler {
         continuation: &Continuation,
     ) -> Result<(), StoreError> {
         self.forget(&continuation.id);
-        let sent = self
-            .provider
-            .continue_thread(thread_id.clone(), continuation.id.clone())
-            .await;
+        let sent = match self.providers.agent(continuation.waits_on.provider) {
+            Ok(agent) => {
+                agent
+                    .continue_thread(thread_id.clone(), continuation.id.clone())
+                    .await
+            }
+            Err(error) => Err(error),
+        };
         match sent {
             Ok(Continued::Queued | Continued::NotOpen) => Ok(()),
             Ok(Continued::NeedsUser(why)) => self.hand_to_user(thread_id, continuation, &why).await,
@@ -460,13 +515,11 @@ impl Scheduler {
         if has_reset_passed {
             // A timer armed at this reset would fire at once, so the read says nothing about when
             // to ask again.
-            return self
-                .unanswered(
-                    thread_id,
-                    continuation,
-                    "Codex still reports the limit spent after its reset time",
-                )
-                .await;
+            let why = format!(
+                "{} still reports the limit spent after its reset time",
+                display(continuation.waits_on.provider)
+            );
+            return self.unanswered(thread_id, continuation, &why).await;
         }
         self.forget(&continuation.id);
         let is_scheduled = planned.state == ContinuationState::Scheduled;
@@ -565,9 +618,10 @@ impl Scheduler {
             }
         }
         let Some(resets_at) = continuation.resets_at.clone() else {
-            return Err(SchedulerError::Conflict(
-                "Codex did not say when the limit resets, so there is no time to resume at".into(),
-            ));
+            return Err(SchedulerError::Conflict(format!(
+                "{} did not say when the limit resets, so there is no time to resume at",
+                display(continuation.waits_on.provider)
+            )));
         };
         let write_id = id.clone();
         let updated = self

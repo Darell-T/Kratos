@@ -38,14 +38,14 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use kratos_protocol::{
-    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, Message, MessageId, MessageInput,
-    MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
+    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
 use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::hub::Hub;
-use crate::providers::{ProviderError, Sent};
+use crate::providers::{Continued, ProviderError, Sent};
 use crate::store_thread::StoreThread;
 
 use crate::providers::MAX_PENDING_MESSAGES;
@@ -269,6 +269,29 @@ impl ClaudeProvider {
     ) -> Result<(), ProviderError> {
         self.ask(|reply| actor::Command::CheckSettings { settings, reply })
             .await
+    }
+
+    /// Queues a continuation's message ahead of the thread's waiting messages and lets the queue
+    /// run (D39). Called by the usage scheduler only.
+    pub(crate) async fn continue_thread(
+        &self,
+        thread_id: ThreadId,
+        continuation_id: ContinuationId,
+    ) -> Result<Continued, ProviderError> {
+        self.ask(|reply| actor::Command::Continue {
+            thread_id,
+            continuation_id,
+            reply,
+        })
+        .await
+    }
+
+    /// Reads the account's usage through a session of the thread.
+    pub(crate) async fn refresh_usage(&self, thread_id: ThreadId) -> Result<(), ProviderError> {
+        let _ = thread_id;
+        Err(ProviderError::Unavailable(
+            "Kratos does not read Claude's usage yet".into(),
+        ))
     }
 
     /// The access the thread's settings give its agent.

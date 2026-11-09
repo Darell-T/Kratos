@@ -12,15 +12,15 @@ use kratos_claude_client::{
     Claude, ConnectError, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError,
 };
 use kratos_protocol::{
-    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, Message, MessageId, MessageInput,
-    MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
+    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
 
 use super::recovery::Settling;
 use super::threads::{Session, SessionConfig, ThreadState};
-use super::{ClaudeSettings, ProviderError, Sent};
+use super::{ClaudeSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
 
@@ -72,6 +72,11 @@ pub(super) enum Command {
     Stop {
         thread_id: ThreadId,
         reply: Reply<()>,
+    },
+    Continue {
+        thread_id: ThreadId,
+        continuation_id: ContinuationId,
+        reply: Reply<Continued>,
     },
     Resume {
         thread_id: ThreadId,

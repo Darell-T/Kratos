@@ -6,21 +6,17 @@
 use kratos_codex_client::{RequestError, types};
 use kratos_protocol::{
     ContinuationId, Message, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason,
-    RequiredText, ThreadId,
+    ThreadId,
 };
-use kratos_store::{Enqueued, QueuePlace, StoreError, ThreadWrite};
-use uuid::Uuid;
+use kratos_store::{Enqueued, QueuePlace};
 
 use super::actor::{Actor, Command, Done, Reply};
 use super::threads::{Link, Turn};
 use super::turns::read_history;
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
 use crate::providers::queue::{
-    held_message, pause_if_waiting, resume_queue, resume_when_settled, settling_action,
+    continuation_write, pause_if_waiting, resume_queue, resume_when_settled,
 };
-
-/// The text of the message Kratos sends to carry on a turn that stopped at a usage limit (D39).
-const CONTINUATION_TEXT: &str = "Continue the task you were working on. You stopped earlier because the usage limit was reached.";
 
 impl Actor {
     pub(super) async fn send(
@@ -206,42 +202,15 @@ impl Actor {
         resumed.map_err(ProviderError::Conflict)
     }
 
-    /// Queues the continuation's message ahead of the waiting ones, marks it sent, and lets the
-    /// queue run, in one write (D39). A continuation that is no longer open sends nothing. One
-    /// that would run past a message waiting on the user, or past a pause the limit did not cause,
-    /// or that finds the queue full (D85), goes back to the user.
+    /// Queues the continuation's message and lets the queue run. See [`continuation_write`].
     pub(super) async fn continue_thread(
         &mut self,
         thread_id: &ThreadId,
         continuation_id: ContinuationId,
     ) -> Result<Continued, ProviderError> {
         self.load(thread_id).await?;
-        let message_id = MessageId::new(Uuid::new_v4().to_string());
-        let input = vec![MessageInput::Text {
-            text: RequiredText::new(CONTINUATION_TEXT).expect("the continuation text is not blank"),
-        }];
-        self.write(thread_id, move |write| {
-            if let Some(why) = blocks_continuation(write)? {
-                return Ok(Continued::NeedsUser(why));
-            }
-            let sent = write.send_continuation(
-                &continuation_id,
-                &message_id,
-                input,
-                MAX_PENDING_MESSAGES,
-            )?;
-            Ok(match sent {
-                Some(Enqueued::Added(_) | Enqueued::Existing(_)) => {
-                    write.resume()?;
-                    Continued::Queued
-                }
-                Some(Enqueued::Full { pending }) => Continued::NeedsUser(format!(
-                    "The thread's queue is full with {pending} messages: remove one, then let Kratos continue"
-                )),
-                None => Continued::NotOpen,
-            })
-        })
-        .await
+        self.write(thread_id, continuation_write(continuation_id))
+            .await
     }
 
     pub(super) async fn message(
@@ -271,16 +240,4 @@ impl Actor {
             })
             .await;
     }
-}
-
-/// Why the thread cannot take a continuation on its own, if it cannot: a message waits on the user,
-/// or the queue is paused for something the reset does not fix.
-fn blocks_continuation(write: &mut ThreadWrite<'_>) -> Result<Option<String>, StoreError> {
-    if let Some(held) = held_message(write)? {
-        return Ok(settling_action(&held));
-    }
-    Ok(match write.provider_thread()?.paused {
-        None | Some(PauseReason::UsageLimit { .. } | PauseReason::Unavailable { .. }) => None,
-        Some(_) => Some("The thread is paused for another reason; resume it yourself".to_owned()),
-    })
 }

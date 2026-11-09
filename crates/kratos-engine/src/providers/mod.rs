@@ -2,10 +2,13 @@
 //! what they share is here: the errors a provider returns, what became of a sent message, and the
 //! queue rules.
 
+mod agent;
 mod changes;
 pub mod claude;
 pub mod codex;
 pub(crate) mod queue;
+
+pub(crate) use agent::Agent;
 
 use kratos_protocol::{ApprovalId, Message, MessageId, QuestionId, ThreadId};
 use kratos_store::StoreError;

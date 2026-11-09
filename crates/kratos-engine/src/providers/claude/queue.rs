@@ -6,13 +6,17 @@ use std::path::Path;
 
 use kratos_claude_client::{DeliveredMessages, transcript_path};
 use kratos_protocol::{
-    Message, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason, ThreadId,
+    ContinuationId, Message, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason,
+    ThreadId,
 };
 use kratos_store::{Enqueued, QueuePlace};
 
 use super::actor::{Actor, Done, Reply, TranscriptWork};
 use super::{MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
-use crate::providers::queue::{pause_if_waiting, resume_queue, resume_when_settled};
+use crate::providers::Continued;
+use crate::providers::queue::{
+    continuation_write, pause_if_waiting, resume_queue, resume_when_settled,
+};
 
 impl Actor {
     pub(super) async fn send(
@@ -84,6 +88,18 @@ impl Actor {
             Ok(queued)
         })
         .await
+    }
+
+    /// Queues the continuation's message and lets the queue run. See [`continuation_write`].
+    pub(super) async fn continue_thread(
+        &mut self,
+        thread_id: &ThreadId,
+        continuation_id: ContinuationId,
+    ) -> Result<Continued, ProviderError> {
+        self.running()?;
+        self.load(thread_id).await?;
+        self.write(thread_id, continuation_write(continuation_id))
+            .await
     }
 
     /// Lets a paused queue run again, which also lets a CLI that kept failing start once more.

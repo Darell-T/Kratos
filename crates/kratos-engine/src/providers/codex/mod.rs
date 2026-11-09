@@ -104,21 +104,21 @@ const QUEUED_COMMANDS: usize = 64;
 /// questions close. Codex itself starts only when a thread needs it (L5), or in the background to
 /// let its history settle a message whose delivery the restart left uncertain.
 ///
-/// The receiver hands the scheduler every turn that stops at a usage limit.
+/// Every turn that stops at a usage limit goes to the scheduler through `limit_stops`. The channel
+/// is unbounded so the actor never waits on the scheduler, which waits on the actor. A turn stops
+/// at a limit at most once, so it holds at most one entry per turn.
 pub async fn start(
     settings: CodexSettings,
     hub: Hub,
     store: StoreThread,
     usage: UsageTracker,
-) -> Result<(CodexProvider, mpsc::UnboundedReceiver<LimitStop>), StoreError> {
+    limit_stops: mpsc::UnboundedSender<LimitStop>,
+) -> Result<CodexProvider, StoreError> {
     let (commands, inbox) = mpsc::channel(QUEUED_COMMANDS);
-    // Unbounded so the actor never waits on the scheduler, which waits on the actor. A turn stops
-    // at a limit at most once, so the channel holds at most one entry per turn.
-    let (limit_stops, stops) = mpsc::unbounded_channel();
     let (actor, uncertain) =
         actor::Actor::recover(settings, hub, store, usage, limit_stops).await?;
     tokio::spawn(actor.run(inbox, uncertain));
-    Ok((CodexProvider { commands }, stops))
+    Ok(CodexProvider { commands })
 }
 
 impl CodexProvider {

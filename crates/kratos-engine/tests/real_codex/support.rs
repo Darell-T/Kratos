@@ -9,7 +9,7 @@ use kratos_api_client::Client;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
-use kratos_engine::server::{self, ClientToken, Codex, ServerState};
+use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread;
 use kratos_engine::usage::UsageTracker;
 use kratos_protocol::{Seq, Thread, ThreadEventBody, ThreadSettings, TurnOutcome};
@@ -109,10 +109,16 @@ impl Harness {
             platform: DangerousCommandPlatform::host(),
             mcp: None,
         };
-        let (provider, _stops) =
-            codex::start(codex_settings, hub.clone(), store.clone(), usage.clone())
-                .await
-                .unwrap();
+        let (limit_stops, _stops) = tokio::sync::mpsc::unbounded_channel();
+        let provider = codex::start(
+            codex_settings,
+            hub.clone(),
+            store.clone(),
+            usage.clone(),
+            limit_stops,
+        )
+        .await
+        .unwrap();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -147,11 +153,9 @@ impl Harness {
         let state = ServerState {
             store,
             hub: hub.clone(),
-            codex: Ok(Codex {
-                provider: provider.clone(),
-                scheduler: None,
-            }),
+            codex: Ok(provider.clone()),
             claude: Ok(claude.clone()),
+            scheduler: None,
             usage,
             token,
         };

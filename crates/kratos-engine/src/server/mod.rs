@@ -54,26 +54,21 @@ const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ServerState {
     pub store: StoreThread,
     pub hub: Hub,
-    /// Codex and its scheduler, or why Codex cannot run, such as no Codex installed.
-    pub codex: Result<Codex, String>,
+    /// Codex, or why Codex cannot run, such as no Codex installed.
+    pub codex: Result<CodexProvider, String>,
     /// Claude, or why Claude cannot run, such as no Claude Code installed.
     pub claude: Result<ClaudeProvider, String>,
+    /// The usage scheduler, which serves every provider that runs. `None` where no provider runs,
+    /// and where a test drives a provider without one.
+    pub scheduler: Option<SchedulerHandle>,
     pub usage: UsageTracker,
     pub token: ClientToken,
-}
-
-#[derive(Clone)]
-pub struct Codex {
-    pub provider: CodexProvider,
-    /// The usage scheduler. `None` only where a test drives Codex without one.
-    pub scheduler: Option<SchedulerHandle>,
 }
 
 impl ServerState {
     fn codex(&self) -> Result<&CodexProvider, ApiError> {
         self.codex
             .as_ref()
-            .map(|codex| &codex.provider)
             .map_err(|missing| ApiError::unavailable(missing.clone()))
     }
 

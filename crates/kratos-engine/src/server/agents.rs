@@ -16,11 +16,10 @@ use kratos_protocol::{
 use uuid::Uuid;
 
 use super::acting::Acting;
-use super::agent::Agent;
 use super::json::read_json;
 use super::threads::details;
 use super::{ApiError, MessagePath, ServerState, ThreadPath, json_reply, path};
-use crate::providers::{MAX_PENDING_MESSAGES, Sent};
+use crate::providers::{Agent, MAX_PENDING_MESSAGES, Sent};
 
 /// How long `GET /api/usage` waits for Codex's fresh read before it answers with what it knows.
 const USAGE_REFRESH_WAIT: Duration = Duration::from_secs(10);
@@ -270,14 +269,9 @@ pub(super) async fn schedule(
     id: Result<Path<ContinuationId>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let continuation_id = path(id)?;
-    let scheduler = state
-        .codex
-        .as_ref()
-        .ok()
-        .and_then(|codex| codex.scheduler.as_ref())
-        .ok_or_else(|| {
-            ApiError::unavailable("Kratos cannot schedule continuations without Codex".to_owned())
-        })?;
+    let scheduler = state.scheduler.as_ref().ok_or_else(|| {
+        ApiError::unavailable("Kratos cannot schedule continuations without Codex".to_owned())
+    })?;
     let continuation = scheduler.schedule(continuation_id).await?;
     Ok(json_reply(StatusCode::OK, &continuation))
 }

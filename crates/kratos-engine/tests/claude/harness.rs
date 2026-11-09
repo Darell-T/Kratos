@@ -176,11 +176,13 @@ impl Harness {
                 platform: kratos_command_safety::DangerousCommandPlatform::host(),
                 mcp: None,
             };
-            let (runner, _) = codex::start(
+            let (limit_stops, _) = tokio::sync::mpsc::unbounded_channel();
+            let runner = codex::start(
                 config,
                 hub.clone(),
                 store_thread.clone(),
                 kratos_engine::usage::UsageTracker::default(),
+                limit_stops,
             )
             .await
             .unwrap();

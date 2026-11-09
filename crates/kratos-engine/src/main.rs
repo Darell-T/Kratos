@@ -18,6 +18,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
+
 use kratos_api_client::{Client, ClientError};
 use kratos_claude_client::locate_claude;
 use kratos_codex_client::{LocateError, locate_codex};
@@ -28,11 +30,11 @@ use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
 use kratos_engine::mcp::{self, McpServer};
 use kratos_engine::providers::claude::{self, ClaudeProvider, ClaudeSettings};
-use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
-use kratos_engine::scheduler::{self, SystemClock};
+use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
+use kratos_engine::scheduler::{self, Providers, SystemClock};
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
-use kratos_engine::usage::UsageTracker;
+use kratos_engine::usage::{LimitStop, UsageTracker};
 
 /// The TypeScript provider's deadlines: a turn may run ten minutes without waiting on the user,
 /// and a request to Codex may take thirty seconds.
@@ -127,36 +129,26 @@ fn run_server(
         let hub = Hub::new(store.clone());
         let usage = UsageTracker::default();
         let port = listener.local_addr()?.port();
-        let codex = match codex_settings(config, port) {
-            Ok(settings) => {
-                let (provider, stops) =
-                    codex::start(settings, hub.clone(), store.clone(), usage.clone()).await?;
-                let clock = Arc::new(SystemClock);
-                let scheduler = scheduler::start(
-                    hub.clone(),
-                    store.clone(),
-                    usage.clone(),
-                    provider.clone(),
-                    clock,
-                    stops,
-                )
-                .await?;
-                Ok(server::Codex {
-                    provider,
-                    scheduler: Some(scheduler),
-                })
-            }
-            Err(missing) => {
-                eprintln!("Codex threads are unavailable: {missing}");
-                Err(missing.to_string())
-            }
-        };
+        let (limit_stops, stops) = mpsc::unbounded_channel();
+        let codex = start_codex(config, port, &hub, &store, &usage, limit_stops).await?;
         let claude = start_claude(config, &hub, &store, &codex).await?;
+        let providers = Providers {
+            codex: codex.as_ref().ok().cloned(),
+            claude: claude.as_ref().ok().cloned(),
+        };
+        let scheduler = if providers.is_empty() {
+            None
+        } else {
+            let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
+            let clock = Arc::new(SystemClock);
+            Some(scheduler::start(hub, store, usage, providers, clock, stops).await?)
+        };
         let state = ServerState {
             hub,
             store,
             codex,
             claude,
+            scheduler,
             usage,
             token,
         };
@@ -166,10 +158,33 @@ fn run_server(
             claude.shutdown().await;
         }
         if let Ok(codex) = &state.codex {
-            codex.provider.shutdown().await;
+            codex.shutdown().await;
         }
         Ok(())
     })
+}
+
+/// Codex, or why it cannot run, which the engine reports and serves on without.
+async fn start_codex(
+    config: &Config,
+    port: u16,
+    hub: &Hub,
+    store: &StoreThread,
+    usage: &UsageTracker,
+    limit_stops: mpsc::UnboundedSender<LimitStop>,
+) -> Result<Result<CodexProvider, String>, StoreError> {
+    match codex_settings(config, port) {
+        Ok(settings) => {
+            let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
+            Ok(Ok(
+                codex::start(settings, hub, store, usage, limit_stops).await?
+            ))
+        }
+        Err(missing) => {
+            eprintln!("Codex threads are unavailable: {missing}");
+            Ok(Err(missing.to_string()))
+        }
+    }
 }
 
 /// Claude, or why it cannot run, which the engine reports and serves on without.
@@ -177,12 +192,12 @@ async fn start_claude(
     config: &Config,
     hub: &Hub,
     store: &StoreThread,
-    codex: &Result<server::Codex, String>,
+    codex: &Result<CodexProvider, String>,
 ) -> Result<Result<ClaudeProvider, String>, StoreError> {
     match claude_settings(config) {
         Ok(mut settings) => {
             settings.tools = codex.as_ref().ok().map(|codex| claude::ClaudeTools {
-                runner: codex.provider.clone(),
+                runner: codex.clone(),
                 protected: ProtectedFolders::new(
                     config.home.clone(),
                     config.codex_home.clone(),

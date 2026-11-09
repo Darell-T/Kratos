@@ -116,10 +116,16 @@ impl Harness {
             platform: DangerousCommandPlatform::Posix,
             mcp: options.mcp,
         };
-        let (provider, stops) =
-            codex::start(settings, hub.clone(), store_thread.clone(), usage.clone())
-                .await
-                .unwrap();
+        let (limit_stops, stops) = mpsc::unbounded_channel();
+        let provider = codex::start(
+            settings,
+            hub.clone(),
+            store_thread.clone(),
+            usage.clone(),
+            limit_stops,
+        )
+        .await
+        .unwrap();
         let events = hub
             .follow(thread_id.clone(), Seq::BEFORE_FIRST)
             .await

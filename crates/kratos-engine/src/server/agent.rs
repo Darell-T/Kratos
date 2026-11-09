@@ -1,5 +1,5 @@
-//! The provider that drives a thread, chosen by the thread's own provider. A thread's routes
-//! reach its agent through [`Agent`], so a route is written once for both.
+//! The routes' side of [`Agent`], the provider that drives a thread, chosen by the thread's own
+//! provider. A thread's routes reach its agent through it, so a route is written once for both.
 
 use kratos_protocol::{
     AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, Message, MessageId, MessageInput,
@@ -7,14 +7,7 @@ use kratos_protocol::{
 };
 
 use super::{ApiError, ServerState};
-use crate::providers::claude::ClaudeProvider;
-use crate::providers::codex::CodexProvider;
-use crate::providers::{ProviderError, Sent};
-
-pub(super) enum Agent<'a> {
-    Codex(&'a CodexProvider),
-    Claude(&'a ClaudeProvider),
-}
+use crate::providers::{Agent, ProviderError, Sent};
 
 impl ServerState {
     pub(super) async fn approval_agent(&self, id: &ApprovalId) -> Result<Agent<'_>, ApiError> {

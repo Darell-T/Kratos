@@ -65,6 +65,15 @@ impl Actor {
                 reply,
             } => self.discard(thread_id, message_id, reply).await,
             Command::Stop { thread_id, reply } => self.stop(&thread_id, reply).await,
+            Command::Continue {
+                thread_id,
+                continuation_id,
+                reply,
+            } => {
+                let continued = self.continue_thread(&thread_id, continuation_id).await;
+                let _ = reply.send(continued);
+                self.dispatch(&thread_id).await;
+            }
             Command::Resume { thread_id, reply } => {
                 let resumed = self.resume(&thread_id).await;
                 let _ = reply.send(resumed);
