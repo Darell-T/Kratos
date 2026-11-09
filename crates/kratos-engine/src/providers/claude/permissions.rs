@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::super::codex::temp_folder;
+use super::super::codex::sandbox_may_write;
 use super::actor::Actor;
 use super::policy::{self, Action, Decision, Destination};
 use super::requests::{Answer, Pending};
@@ -352,18 +352,14 @@ fn file_action(
     let Some(path) = edit_path(&tool.tool_name, &tool.input) else {
         return Action::Invalid;
     };
-    match protected.containing(&Path::new(folder).join(path)) {
+    let target = Path::new(folder).join(path);
+    match protected.containing(&target) {
         Ok(Some(path)) => Action::File(Destination::Protected(path.display().to_string())),
-        Ok(None) => {
-            let target = Path::new(folder).join(path);
-            Action::File(
-                if target.starts_with(folder) || target.starts_with(temp_folder()) {
-                    Destination::Inside
-                } else {
-                    Destination::Outside
-                },
-            )
-        }
+        Ok(None) => match sandbox_may_write(&target, Path::new(folder)) {
+            Ok(true) => Action::File(Destination::Inside),
+            Ok(false) => Action::File(Destination::Outside),
+            Err(_) => Action::Invalid,
+        },
         Err(_) => Action::Invalid,
     }
 }

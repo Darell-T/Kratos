@@ -719,3 +719,70 @@ async fn a_server_borrowing_the_kratos_name_is_an_unchecked_tool_and_earns_no_co
             .unwrap();
     }
 }
+
+#[tokio::test]
+async fn a_write_path_is_judged_where_it_resolves_not_by_how_it_is_spelled() {
+    // Catches a `..` climb out of the thread's folder, or a different letter case, being judged by its text.
+    let harness = Harness::start(Options {
+        tools: true,
+        settings: ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    let folder = harness.folder();
+    std::fs::create_dir(folder.join("sub")).unwrap();
+    let temp = std::env::temp_dir();
+    let beyond_temp = folder
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("..")
+        .join("climbed.txt");
+    let mut cases = vec![
+        ("climb-out", beyond_temp, true),
+        (
+            "climb-within",
+            folder.join("sub").join("..").join("kept.txt"),
+            false,
+        ),
+        ("temp-climb-out", temp.join("..").join("climbed.txt"), true),
+    ];
+    if cfg!(windows) {
+        cases.push((
+            "other-case",
+            folder
+                .join("case.txt")
+                .to_string_lossy()
+                .to_uppercase()
+                .into(),
+            false,
+        ));
+    }
+    for (id, path, asks) in cases {
+        send(&harness, &launch, id, "Write", json!({ "file_path": path })).await;
+        if asks {
+            let asked = approval_before_answer(&harness, &launch, id).await;
+            assert_eq!(asked.why, AskReason::Escalation, "{id}");
+            harness
+                .provider
+                .decide(asked.id, ApprovalDecision::Decline)
+                .await
+                .unwrap();
+            assert_eq!(
+                response(&harness, &launch, id).await["behavior"],
+                "deny",
+                "{id}"
+            );
+        } else {
+            assert_eq!(
+                response(&harness, &launch, id).await["behavior"],
+                "allow",
+                "{id}: {path:?}"
+            );
+        }
+    }
+}

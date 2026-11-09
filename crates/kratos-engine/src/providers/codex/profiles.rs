@@ -154,6 +154,26 @@ pub(crate) fn temp_folder() -> PathBuf {
     std::env::temp_dir()
 }
 
+/// Whether the Ask me and Approve for me sandboxes let a command write `path` for a thread in
+/// `folder`: the folder and the temp folder, judged where the paths resolve, not by their spelling.
+pub(crate) fn sandbox_may_write(path: &Path, folder: &Path) -> io::Result<bool> {
+    let path = resolve_destination(path)?;
+    for root in [folder, &temp_folder()] {
+        let root = resolve_destination(root)?;
+        // Only Windows folds case. Elsewhere `Proj` is another folder than `proj`, and a write there
+        // is outside the sandbox.
+        let inside = if cfg!(windows) {
+            is_within(&path, &root)
+        } else {
+            path.starts_with(&root)
+        };
+        if inside {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// A TOML basic string, quoted and escaped, for a path used as a table key.
 fn toml_key(path: &Path) -> String {
     let mut key = String::from("\"");
@@ -313,6 +333,20 @@ mod tests {
             .filter(|argument| argument.contains("network"))
             .collect();
         assert_eq!(network, ["permissions.kratos-approve.network.enabled=true"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_differs_only_in_case_is_not_the_sandbox_scope() {
+        // Catches case folding, which is right for protected folders, widening the writable scope.
+        let root = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(root.path()).unwrap();
+        let (folder, other) = (base.join("proj"), base.join("PROJ"));
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::create_dir(&other).unwrap();
+
+        assert!(sandbox_may_write(&folder.join("a.txt"), &folder).unwrap());
+        assert!(!sandbox_may_write(&other.join("a.txt"), &folder).unwrap());
     }
 
     #[test]

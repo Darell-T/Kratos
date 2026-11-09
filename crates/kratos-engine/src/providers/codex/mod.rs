@@ -48,7 +48,7 @@ use crate::usage::{LimitStop, UsageTracker};
 
 use profiles::Profile;
 pub use profiles::ProtectedFolders;
-pub(crate) use profiles::temp_folder;
+pub(crate) use profiles::sandbox_may_write;
 
 /// The isolated profile for a Claude command, or an explicitly approved escape.
 #[derive(Clone, Debug)]
