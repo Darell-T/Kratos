@@ -361,8 +361,9 @@ async fn rejects_unknown_threads_shares_duplicate_sends_and_closes_every_thread_
 
 #[tokio::test]
 async fn starts_a_session_with_initialize_first_and_registers_no_hooks_or_tool_servers() {
-    // Catches a prompt written before Claude is initialized, hooks or SDK MCP servers registered
-    // before Kratos can answer them, and a session that reports the account behind it (D22).
+    // Catches a prompt written before Claude is initialized, and an initialize that registers
+    // hooks or SDK MCP servers before Kratos can answer them. The plan recorded without the
+    // account (D22, D24) is checked by `turns::records_the_plan_that_pays_for_the_session_and_never_the_account`.
     let harness = Harness::start(Options::default()).await;
     harness.send(A, "A").await;
     let launch = harness.launch(1).await;
