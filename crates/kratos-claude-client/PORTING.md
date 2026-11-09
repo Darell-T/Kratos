@@ -60,7 +60,7 @@ Every test has a `Catches` comment naming the regression it detects. The test na
 
 ## Preserved quirks
 
-Abort reasons take precedence over Claude's error flag. An explicitly empty plural UUID list takes precedence over the singular field. A missing or empty singular field produces no message ID. Assistant correlation can disappear after a fold. Ordinary user tool-result frames do not acknowledge submission. The replay flag can echo the driver's own control responses, which are ignored when no host request is pending. A folded message is saved as `attachment.queued_command.source_uuid`, rather than another prompt row. Session flags depend on the transcript's existence because the CLI refuses each flag in the other's case.
+Abort reasons take precedence over Claude's error flag. An explicitly empty plural UUID list takes precedence over the singular field. A missing or empty singular field produces no message ID. Assistant correlation can disappear after a fold. Ordinary user tool-result frames do not acknowledge submission. The replay flag can echo the driver's own control responses, which are ignored when no host request is pending. A folded message has `attachment.type` set to `queued_command` and its delivery UUID in `attachment.source_uuid`, rather than another prompt row. Session flags depend on the transcript's existence because the CLI refuses each flag in the other's case.
 
 ## Verification
 
