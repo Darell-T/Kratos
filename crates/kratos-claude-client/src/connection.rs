@@ -1,10 +1,8 @@
 //! One process and its ordered stdin, bounded stdout, reverse controls, and terminal state.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -12,11 +10,12 @@ use std::time::Duration;
 use kratos_process::OwnedChild;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
-use crate::{ControlRequest, Initialize, Initialized, ParseError, SessionStart, StreamMessage};
+use crate::launch::spawn;
+use crate::{ControlRequest, Initialize, Initialized, Launch, ParseError, StreamMessage};
 
 /// Largest of 1,089 messages in 34 spike recordings was 50,630 UTF-8 bytes without newline,
 /// s8-settings-isolation/b-user-project-local/wire.jsonl:6. 128 KiB gives 2.59 times headroom.
@@ -24,79 +23,6 @@ pub const MAX_LINE_BYTES: usize = 128 * 1024;
 const QUEUE_CAPACITY: usize = 256;
 const STDERR_BYTES_KEPT: usize = 16 * 1024;
 const STDERR_LINES_KEPT: usize = 20;
-
-/// The CLI's permission setting. Approval policy itself belongs to the engine.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PermissionMode {
-    #[default]
-    Default,
-    Auto,
-    Plan,
-    BypassPermissions,
-}
-
-impl PermissionMode {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Default => "default",
-            Self::Auto => "auto",
-            Self::Plan => "plan",
-            Self::BypassPermissions => "bypassPermissions",
-        }
-    }
-}
-
-/// Settings sources are explicit so project settings are never loaded accidentally.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettingSource {
-    User,
-    Project,
-    Local,
-}
-
-impl SettingSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Project => "project",
-            Self::Local => "local",
-        }
-    }
-}
-
-/// The complete native CLI launch, with intentional overrides applied after inherited filtering.
-#[derive(Clone, Debug)]
-pub struct Launch {
-    pub program: PathBuf,
-    pub cwd: PathBuf,
-    pub model: Option<String>,
-    pub permission_mode: PermissionMode,
-    pub setting_sources: Vec<SettingSource>,
-    pub session: SessionStart,
-    pub disallowed_tools: Vec<String>,
-    pub env_set: Vec<(OsString, OsString)>,
-    pub control_timeout: Duration,
-    pub close_timeout: Duration,
-}
-
-impl Launch {
-    /// Starts with no settings sources and the CLI's default model and permissions.
-    #[must_use]
-    pub fn new(program: PathBuf, cwd: PathBuf, session: SessionStart) -> Self {
-        Self {
-            program,
-            cwd,
-            session,
-            model: None,
-            permission_mode: PermissionMode::Default,
-            setting_sources: Vec::new(),
-            disallowed_tools: Vec::new(),
-            env_set: Vec::new(),
-            control_timeout: Duration::from_secs(30),
-            close_timeout: Duration::from_secs(5),
-        }
-    }
-}
 
 /// A control Kratos sends to the CLI, serialized with its `subtype` tag.
 #[derive(Clone, Debug)]
@@ -474,66 +400,6 @@ pub async fn connect(
             Err(ConnectError::Initialize(error))
         }
     }
-}
-
-fn spawn(launch: &Launch) -> Result<OwnedChild, ConnectError> {
-    let mut command = Command::new(&launch.program);
-    command
-        .args([
-            "--output-format",
-            "stream-json",
-            "--verbose",
-            "--input-format",
-            "stream-json",
-            "--permission-prompt-tool=stdio",
-            "--include-partial-messages",
-            "--replay-user-messages",
-        ])
-        .arg(launch.session.flag())
-        .arg(format!(
-            "--permission-mode={}",
-            launch.permission_mode.as_str()
-        ))
-        .arg(format!(
-            "--setting-sources={}",
-            launch
-                .setting_sources
-                .iter()
-                .map(|source| source.as_str())
-                .collect::<Vec<_>>()
-                .join(",")
-        ))
-        .current_dir(&launch.cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(model) = &launch.model {
-        command.arg(format!("--model={model}"));
-    }
-    if launch.permission_mode == PermissionMode::BypassPermissions {
-        command.arg("--allow-dangerously-skip-permissions");
-    }
-    if !launch.disallowed_tools.is_empty() {
-        command
-            .arg("--disallowedTools")
-            .arg(launch.disallowed_tools.join(","));
-    }
-    for (name, _) in std::env::vars_os() {
-        let upper = name.to_string_lossy().to_ascii_uppercase();
-        if upper.starts_with("CLAUDE")
-            || upper.starts_with("ANTHROPIC")
-            || upper.starts_with("KRATOS")
-        {
-            command.env_remove(name);
-        }
-    }
-    for (name, value) in &launch.env_set {
-        command.env(name, value);
-    }
-    OwnedChild::spawn(command).map_err(|source| ConnectError::Spawn {
-        program: launch.program.clone(),
-        source,
-    })
 }
 
 impl Claude {

@@ -1,14 +1,16 @@
 //! Drives Claude Code's structured stream without linking its Agent SDK.
 
 mod connection;
+mod launch;
 mod locate;
 mod protocol;
 mod transcript;
 
 pub use connection::{
-    Claude, ConnectError, Control, Exit, ExitCause, Incoming, IncomingControl, Launch,
-    MAX_LINE_BYTES, PermissionMode, RequestError, SettingSource, connect,
+    Claude, ConnectError, Control, Exit, ExitCause, Incoming, IncomingControl, MAX_LINE_BYTES,
+    RequestError, connect,
 };
+pub use launch::{Launch, PermissionMode, SettingSource};
 pub use locate::{LocateError, locate_claude};
 pub use protocol::{
     Account, Assistant, CanUseTool, ControlRequest, Elicitation, HookCallback, HookMatcher,
