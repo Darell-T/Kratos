@@ -731,7 +731,8 @@ async fn read(shared: Arc<Shared>, stdout: ChildStdout, incoming: mpsc::Sender<I
             return;
         }
     }
-    shared.shutdown(Duration::ZERO);
+    // Stdout closing usually means the CLI is exiting, and it may still flush its transcript.
+    shared.shutdown(shared.close_timeout);
     let mut exited = shared.exited.clone();
     let exit = exited
         .wait_for(Option::is_some)

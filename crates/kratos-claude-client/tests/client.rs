@@ -434,6 +434,23 @@ async fn exit_fails_every_pending_request_once_with_the_complete_stderr_tail() {
 }
 
 #[tokio::test]
+async fn a_cli_that_closes_stdout_is_given_time_to_finish_exiting() {
+    // Catches killing a CLI at stdout EOF before it flushes its transcript and exits with its own code.
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("finished.txt");
+    let (claude, mut incoming, _) = fake().await;
+    let request = json!({"subtype":"test/close_stdout_then_exit", "pause_ms":300, "code":3,
+        "marker":marker});
+    let failure = claude.control(request).await.unwrap_err();
+    assert!(matches!(failure, RequestError::Exited(ref exit) if exit.code == Some(3)));
+    let Incoming::Exited(exit) = next(&mut incoming).await else {
+        panic!("terminal exit");
+    };
+    assert_eq!(exit.code, Some(3), "the CLI's own exit code survives");
+    assert!(marker.exists(), "the CLI finished its work before exiting");
+}
+
+#[tokio::test]
 async fn process_exit_settles_requests_even_when_the_event_queue_is_full() {
     // Catches coupling pending-request failure to a consumer draining the incoming queue.
     let (claude, mut incoming, _) = fake().await;

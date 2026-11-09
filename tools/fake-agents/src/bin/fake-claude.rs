@@ -178,6 +178,7 @@ impl Fake {
                 eprintln!("final fake diagnostic");
                 std::process::exit(request["code"].as_i64().unwrap_or(17) as i32);
             }
+            Some("test/close_stdout_then_exit") => close_stdout_then_exit(request),
             Some("test/oversized") => {
                 let bytes = usize::try_from(request["bytes"].as_u64().unwrap_or(150_000))
                     .expect("bounded test length");
@@ -205,6 +206,41 @@ impl Fake {
             .expect("default initialize reply");
         reply(message, row.msg["response"]["response"].clone());
     }
+}
+
+/// Models a CLI that finishes its own shutdown after stdout closes: it flushes a marker, then exits.
+fn close_stdout_then_exit(request: &Value) -> ! {
+    close_stdout();
+    std::thread::sleep(std::time::Duration::from_millis(
+        request["pause_ms"].as_u64().unwrap_or(300),
+    ));
+    if let Some(marker) = request["marker"].as_str() {
+        std::fs::write(marker, "finished").expect("marker file is writable");
+    }
+    std::process::exit(request["code"].as_i64().unwrap_or(3) as i32);
+}
+
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "std has no safe way to close the inherited stdout handle"
+)]
+fn close_stdout() {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    let handle = std::io::stdout().as_raw_handle();
+    // SAFETY: this process owns its inherited stdout handle and never writes to it afterwards.
+    drop(unsafe { OwnedHandle::from_raw_handle(handle) });
+}
+
+#[cfg(unix)]
+#[expect(
+    unsafe_code,
+    reason = "std has no safe way to close the inherited stdout descriptor"
+)]
+fn close_stdout() {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    // SAFETY: descriptor 1 is this process's inherited stdout, and nothing writes to it afterwards.
+    drop(unsafe { OwnedFd::from_raw_fd(1) });
 }
 
 fn substitute(value: Value, bindings: &HashMap<String, String>) -> Value {
