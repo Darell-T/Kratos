@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use kratos_claude_client::{Claude, PermissionMode, SessionId};
 use kratos_protocol::{MessageId, ThreadSettings, TurnId};
+use tokio::task::AbortHandle;
 
-use super::ClaudeSettings;
 use super::actor::Reply;
 
 /// The longest wait before a CLI that keeps dying is started again.
@@ -68,38 +68,66 @@ pub(super) struct InFlight {
 pub(super) struct Restarts {
     failures_in_a_row: u32,
     not_before: Option<Instant>,
+    last_error: String,
+    /// The timer that starts the CLI when the wait ends. At most one runs.
+    timer: Option<AbortHandle>,
+}
+
+/// Whether a new CLI may start now.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Start {
+    Now,
+    /// The last failure's wait has not ended.
+    After(Duration),
+    /// The failures reached the limit, so only the user may start the CLI again. Holds why.
+    Refused(String),
 }
 
 impl Restarts {
-    /// `Err` with why a new process may not start now: the last failure's backoff still runs, or
-    /// the failures reached the limit and only the user may start it again.
-    pub(super) fn may_start(&self, settings: &ClaudeSettings) -> Result<(), String> {
-        if self.failures_in_a_row >= settings.max_restarts {
-            return Err(format!(
-                "Claude failed {} times in a row. Fix what stops it, then resume the thread",
-                self.failures_in_a_row
+    pub(super) fn start_at(&self, now: Instant, max_restarts: u32) -> Start {
+        if self.failures_in_a_row >= max_restarts {
+            return Start::Refused(format!(
+                "Claude failed {} times in a row; the last failure was: {}. Fix what stops it, then resume the thread",
+                self.failures_in_a_row, self.last_error
             ));
         }
         match self.not_before {
-            Some(not_before) if Instant::now() < not_before => Err(format!(
-                "Claude keeps failing to start; Kratos tries again in {} s",
-                (not_before - Instant::now()).as_secs().max(1)
-            )),
-            _ => Ok(()),
+            Some(not_before) if now < not_before => Start::After(not_before - now),
+            _ => Start::Now,
         }
     }
 
     /// Each failure in a row doubles the wait, up to a minute.
-    pub(super) fn failed(&mut self, first_wait: Duration) {
+    pub(super) fn failed(&mut self, now: Instant, first_wait: Duration, error: String) {
         let wait = first_wait
             .saturating_mul(1 << self.failures_in_a_row.min(6))
             .min(LONGEST_RESTART_WAIT);
         self.failures_in_a_row += 1;
-        self.not_before = Some(Instant::now() + wait);
+        self.not_before = Some(now + wait);
+        self.last_error = error;
+    }
+
+    /// Whether a timer will start the CLI when the wait ends.
+    pub(super) fn is_waiting(&self) -> bool {
+        self.timer.is_some()
+    }
+
+    pub(super) fn wait_with(&mut self, timer: AbortHandle) {
+        self.cancel_timer();
+        self.timer = Some(timer);
+    }
+
+    /// Drops the pending start. A timer that already fired is harmless: it only asks the thread to
+    /// look for work again.
+    pub(super) fn cancel_timer(&mut self) {
+        if let Some(timer) = self.timer.take() {
+            timer.abort();
+        }
     }
 
     /// A turn finished, or the user resumed the thread.
     pub(super) fn reset(&mut self) {
+        self.cancel_timer();
         *self = Restarts::default();
     }
 }
@@ -171,5 +199,74 @@ impl ThreadState {
             Session::Open(open) => Some(open),
             Session::Closed | Session::Opening => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FIRST_WAIT: Duration = Duration::from_secs(1);
+
+    fn failed_times(restarts: &mut Restarts, start: Instant, times: u32) {
+        let mut now = start;
+        for number in 1..=times {
+            restarts.failed(now, FIRST_WAIT, format!("failure {number}"));
+            now += Duration::from_secs(1000);
+        }
+    }
+
+    #[test]
+    fn each_failure_in_a_row_doubles_the_wait_before_the_next_start() {
+        // Catches a wait that stays the same after a second death, which would restart a dying
+        // CLI at a steady rate instead of backing off (L4).
+        let start = Instant::now();
+        let mut restarts = Restarts::default();
+
+        assert_eq!(restarts.start_at(start, 5), Start::Now);
+        restarts.failed(start, FIRST_WAIT, "one".into());
+        assert_eq!(restarts.start_at(start, 5), Start::After(FIRST_WAIT));
+        let later = start + FIRST_WAIT;
+        assert_eq!(restarts.start_at(later, 5), Start::Now, "the wait ended");
+        restarts.failed(later, FIRST_WAIT, "two".into());
+        assert_eq!(restarts.start_at(later, 5), Start::After(FIRST_WAIT * 2));
+        let again = later + FIRST_WAIT * 2;
+        restarts.failed(again, FIRST_WAIT, "three".into());
+        assert_eq!(restarts.start_at(again, 5), Start::After(FIRST_WAIT * 4));
+    }
+
+    #[test]
+    fn the_wait_stops_growing_at_a_minute() {
+        // Catches a wait that doubles without end, which would hold a thread for hours.
+        let start = Instant::now();
+        let mut restarts = Restarts::default();
+        failed_times(&mut restarts, start, 4);
+        let now = start + Duration::from_secs(10_000);
+
+        restarts.failed(now, Duration::from_secs(40), "slow".into());
+
+        assert_eq!(
+            restarts.start_at(now, 99),
+            Start::After(LONGEST_RESTART_WAIT)
+        );
+    }
+
+    #[test]
+    fn the_failure_that_reaches_the_limit_refuses_with_the_last_error_until_a_reset() {
+        // Catches a stop that hides what the CLI last failed with (L8), and a reset that leaves the
+        // count behind, so a user who fixed the problem still cannot start it.
+        let start = Instant::now();
+        let mut restarts = Restarts::default();
+        failed_times(&mut restarts, start, 3);
+
+        let refused = restarts.start_at(start + Duration::from_secs(10_000), 3);
+        restarts.reset();
+
+        assert!(
+            matches!(&refused, Start::Refused(why)
+                if why.contains("3 times in a row") && why.contains("failure 3")),
+            "{refused:?}"
+        );
+        assert_eq!(restarts.start_at(start, 3), Start::Now);
     }
 }

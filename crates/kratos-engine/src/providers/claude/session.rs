@@ -2,6 +2,7 @@
 //! when its next message needs one and never on a timer (L4, L5).
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use kratos_claude_client::{
     Incoming, Initialize, Launch, SessionId, SessionStart, SettingSource, connect,
@@ -11,7 +12,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::actor::{Actor, Connected, Done, SessionEvent};
-use super::threads::{OpenSession, Session, SessionConfig, ThreadState};
+use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState};
 use super::{ClaudeSettings, ProviderError, permissions, wire};
 
 /// The tools Claude Code runs commands with. Kratos runs commands itself, in the sandbox of the
@@ -55,14 +56,22 @@ impl Actor {
         Ok(())
     }
 
-    /// Starts the thread's CLI. A start that cannot happen, such as one inside the backoff after
-    /// failures, pauses the thread and leaves its message queued.
+    /// Starts the thread's CLI. Inside the wait after a failure it starts nothing: the message
+    /// stays queued and a timer asks again when the wait ends. A start that cannot happen at all,
+    /// such as one past the failure limit, pauses the thread and leaves its message queued.
     pub(super) async fn open_session(&mut self, thread_id: &ThreadId, config: SessionConfig) {
         let thread = self.threads.get_mut(thread_id).expect("dispatch loaded it");
-        let launch = thread
+        let launch = match thread
             .restarts
-            .may_start(&self.settings)
-            .and_then(|()| launch(&self.settings, thread, &config));
+            .start_at(Instant::now(), self.settings.max_restarts)
+        {
+            Start::Now => launch(&self.settings, thread, &config),
+            Start::After(wait) => {
+                self.start_after(thread_id, wait);
+                return;
+            }
+            Start::Refused(why) => Err(why),
+        };
         let launch = match launch {
             Ok(launch) => launch,
             Err(why) => {
@@ -89,6 +98,33 @@ impl Actor {
                 }),
             }
         });
+    }
+
+    /// Asks the thread to look for work again once `wait` has passed. One timer serves the thread,
+    /// however many sends and retries ask in the meantime.
+    fn start_after(&mut self, thread_id: &ThreadId, wait: Duration) {
+        let thread = self.threads.get_mut(thread_id).expect("dispatch loaded it");
+        if thread.restarts.is_waiting() {
+            return;
+        }
+        let (done, thread_id) = (self.done.clone(), thread_id.clone());
+        let timer = tokio::spawn({
+            let thread_id = thread_id.clone();
+            async move {
+                tokio::time::sleep(wait).await;
+                // The actor holds the receiver for as long as it runs.
+                let _ = done.send(Done::RestartDue { thread_id });
+            }
+        });
+        thread.restarts.wait_with(timer.abort_handle());
+    }
+
+    /// The wait after a failure ended. The thread starts its CLI if a message still waits.
+    pub(super) async fn on_restart_due(&mut self, thread_id: ThreadId) {
+        if let Some(thread) = self.threads.get_mut(&thread_id) {
+            thread.restarts.cancel_timer();
+            self.dispatch(&thread_id).await;
+        }
     }
 
     pub(super) async fn on_opened(
@@ -133,12 +169,11 @@ impl Actor {
             Err(error) => {
                 let thread = self.threads.get_mut(&thread_id).expect("checked above");
                 thread.session = Session::Closed;
-                thread.restarts.failed(self.settings.restart_wait);
-                self.pause_unavailable_if_waiting(
-                    &thread_id,
-                    format!("Claude could not start: {error}"),
-                )
-                .await;
+                let reason = format!("Claude could not start: {error}");
+                thread
+                    .restarts
+                    .failed(Instant::now(), self.settings.restart_wait, reason.clone());
+                self.pause_unavailable_if_waiting(&thread_id, reason).await;
             }
         }
         self.settle_idle_stops(&thread_id);

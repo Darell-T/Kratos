@@ -138,6 +138,8 @@ pub(super) enum Done {
         thread_id: ThreadId,
         deadline_epoch: u64,
     },
+    /// The wait after a CLI failure ended.
+    RestartDue { thread_id: ThreadId },
     Transcript {
         thread_id: ThreadId,
         work: TranscriptWork,
@@ -241,6 +243,7 @@ impl Actor {
                 thread_id,
                 deadline_epoch,
             } => self.on_deadline(thread_id, deadline_epoch).await,
+            Done::RestartDue { thread_id } => self.on_restart_due(thread_id).await,
             Done::Transcript {
                 thread_id,
                 work,
@@ -281,6 +284,7 @@ impl Actor {
         }
         for thread in self.threads.values_mut() {
             thread.epoch += 1;
+            thread.restarts.cancel_timer();
             if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
                 tokio::spawn(async move { open.claude.close().await });
             }
@@ -306,6 +310,7 @@ impl Actor {
         let mut closing = Vec::new();
         for thread in self.threads.values_mut() {
             thread.epoch += 1;
+            thread.restarts.cancel_timer();
             if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
                 closing.push(tokio::spawn(async move { open.claude.close().await }));
             }

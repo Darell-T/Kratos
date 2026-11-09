@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
+use std::time::Instant;
 
 use kratos_claude_client::{
     DeliveredMessages, Exit, SessionId, delivered_message_ids, transcript_path,
@@ -169,7 +170,9 @@ impl Actor {
             .take()
             .unwrap_or_else(|| exit.to_string());
         if !open.worked {
-            thread.restarts.failed(self.settings.restart_wait);
+            thread
+                .restarts
+                .failed(Instant::now(), self.settings.restart_wait, reason.clone());
         }
         for waiter in std::mem::take(&mut thread.stop_waiters) {
             let _ = waiter.send(Ok(()));

@@ -35,6 +35,12 @@ impl Actor {
             return;
         }
         let Some(next) = self.next_to_start(thread_id).await else {
+            // Nothing waits to be sent, so a pending start has no work.
+            self.threads
+                .get_mut(thread_id)
+                .expect("found above")
+                .restarts
+                .cancel_timer();
             return;
         };
         let thread = &self.threads[thread_id];

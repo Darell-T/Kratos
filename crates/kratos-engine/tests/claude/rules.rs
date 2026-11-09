@@ -2,7 +2,7 @@
 //! without a process (L1), a failed write stops the provider (L2), a CLI that keeps dying is held
 //! back (L4), a failed resume says so (L7), and each completed reply is saved (D88).
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kratos_claude_client::transcript_path;
 use kratos_engine::providers::ProviderError;
@@ -85,11 +85,69 @@ async fn a_failed_event_write_closes_claude_and_refuses_new_work() {
     assert_eq!(harness.launches().len(), 1, "nothing starts again");
 }
 
+/// Sends message A, kills the CLI that took it before it began a turn, and retries the message
+/// that failed, as many times as `deaths`. Returns when each retry was issued and when each
+/// restart showed up, both measured from a moment before the CLI was told to die, so a restart
+/// that came sooner than its wait would show.
+async fn die_and_retry(harness: &Harness, deaths: usize) -> Vec<(Instant, Instant)> {
+    harness.send(A, "A").await;
+    let mut timings = Vec::new();
+    for attempt in 1..=deaths {
+        let launch = harness.launch(attempt).await;
+        harness.wait_written(&launch, &[A]).await;
+        let before_the_death = Instant::now();
+        harness.exit(&launch, 1).await;
+        harness
+            .message_becomes(A, |s| matches!(s, MessageStatus::Failed { .. }))
+            .await;
+        harness
+            .provider
+            .retry(harness.thread_id.clone(), message_id(A))
+            .await
+            .unwrap();
+        harness.launch(attempt + 1).await;
+        timings.push((before_the_death, Instant::now()));
+    }
+    timings
+}
+
 #[tokio::test]
-async fn a_cli_that_keeps_dying_waits_longer_each_time_before_it_is_started_again() {
-    // Catches a respawn loop that starts a dying CLI as fast as the queue asks (L4).
+async fn a_retry_inside_the_wait_starts_the_cli_once_the_wait_ends_and_each_failure_doubles_it() {
+    // Catches a pause that promises a restart nothing performs (L4), a restart before the wait
+    // ends, and a wait that does not grow: the second death must hold the next start for twice
+    // the first wait.
+    const WAIT: Duration = Duration::from_millis(500);
     let harness = Harness::start(Options {
-        restart_wait: Duration::from_secs(30),
+        restart_wait: WAIT,
+        ..Options::default()
+    })
+    .await;
+
+    let timings = die_and_retry(&harness, 2).await;
+
+    for (attempt, (before_the_death, started)) in timings.iter().enumerate() {
+        let wait = WAIT * (1 << attempt);
+        assert!(
+            started.duration_since(*before_the_death) >= wait,
+            "start {} came {:?} after the CLI died, inside its wait of {wait:?}",
+            attempt + 2,
+            started.duration_since(*before_the_death)
+        );
+    }
+    assert_eq!(
+        harness.details().await.paused,
+        None,
+        "the wait pauses nothing"
+    );
+    let third = harness.launch(3).await;
+    harness.wait_written(&third, &[A]).await;
+}
+
+#[tokio::test]
+async fn removing_the_message_during_the_wait_starts_no_cli() {
+    // Catches a restart timer that starts a CLI for a thread with nothing left to send.
+    let harness = Harness::start(Options {
+        restart_wait: Duration::from_millis(500),
         ..Options::default()
     })
     .await;
@@ -100,26 +158,20 @@ async fn a_cli_that_keeps_dying_waits_longer_each_time_before_it_is_started_agai
     harness
         .message_becomes(A, |s| matches!(s, MessageStatus::Failed { .. }))
         .await;
-
     harness
         .provider
         .retry(harness.thread_id.clone(), message_id(A))
         .await
         .unwrap();
-    let paused = harness
-        .paused_for(|r| matches!(r, PauseReason::Unavailable { .. }))
-        .await;
 
-    assert!(
-        matches!(&paused, PauseReason::Unavailable { error } if error.contains("tries again in")),
-        "{paused:?}"
-    );
-    assert_eq!(
-        harness.launches().len(),
-        1,
-        "no process starts inside the wait"
-    );
-    assert_eq!(harness.message(A).await.status, MessageStatus::Queued);
+    harness
+        .provider
+        .remove(harness.thread_id.clone(), message_id(A))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    assert_eq!(harness.launches().len(), 1, "nothing was left to send");
 }
 
 #[tokio::test]
@@ -151,7 +203,8 @@ async fn a_cli_that_keeps_dying_is_started_a_bounded_number_of_times_until_the_u
         .await;
 
     assert!(
-        matches!(&paused, PauseReason::Unavailable { error } if error.contains("3 times in a row")),
+        matches!(&paused, PauseReason::Unavailable { error }
+            if error.contains("3 times in a row") && error.contains("Claude exited (code 1)")),
         "{paused:?}"
     );
     assert_eq!(harness.launches().len(), 3, "the fourth start is refused");
