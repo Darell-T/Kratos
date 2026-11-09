@@ -3,6 +3,10 @@
 //! `FAKE_CLAUDE_TRANSCRIPT` chooses a scrubbed wire recording. Recorded outgoing rows wait for
 //! real stdin; incoming rows substitute the client's request IDs and message UUIDs. `test/*`
 //! controls inspect received input, emit frames, hold requests, and inject transport faults.
+//!
+//! `FAKE_CLAUDE_LOG` switches to the scripted fake the engine's tests steer (see `scripted`).
+
+mod scripted;
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -11,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 const DEFAULT_RECORDING: &str = include_str!(
-    "../../../../crates/kratos-claude-client/tests/transcripts/s1-launch-and-stream/wire.jsonl"
+    "../../../../../crates/kratos-claude-client/tests/transcripts/s1-launch-and-stream/wire.jsonl"
 );
 
 #[derive(Deserialize)]
@@ -28,6 +32,10 @@ struct Fake {
 }
 
 fn main() {
+    if let Some(log) = std::env::var_os("FAKE_CLAUDE_LOG") {
+        scripted::run(std::path::Path::new(&log));
+        return;
+    }
     if let Ok(path) = std::env::var("FAKE_CLAUDE_PID_FILE") {
         std::fs::write(path, std::process::id().to_string())
             .expect("PID observation file is writable");
@@ -209,13 +217,18 @@ impl Fake {
             }
             _ => {}
         }
-        let row = DEFAULT_RECORDING
-            .lines()
-            .map(|line| serde_json::from_str::<Row>(line).expect("default recording row"))
-            .find(|row| row.dir == "in" && row.msg["type"] == "control_response")
-            .expect("default initialize reply");
-        reply(message, row.msg["response"]["response"].clone());
+        reply(message, initialize_response());
     }
+}
+
+/// The initialize answer the default recording holds: a Claude Pro login, no email.
+fn initialize_response() -> Value {
+    let row = DEFAULT_RECORDING
+        .lines()
+        .map(|line| serde_json::from_str::<Row>(line).expect("default recording row"))
+        .find(|row| row.dir == "in" && row.msg["type"] == "control_response")
+        .expect("default initialize reply");
+    row.msg["response"]["response"].clone()
 }
 
 /// Models a CLI that finishes its own shutdown after stdout closes: it flushes a marker, then exits.

@@ -123,6 +123,7 @@ impl Harness {
                 provider: provider.clone(),
                 scheduler: None,
             }),
+            claude: Err("These tests run Codex only".to_owned()),
             usage,
             token,
         };

@@ -1,4 +1,5 @@
 mod acting;
+mod agent;
 mod agents;
 mod auth;
 mod follows;
@@ -33,6 +34,7 @@ use tokio::sync::oneshot;
 
 use crate::hub::Hub;
 use crate::providers::ProviderError;
+use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
 use crate::scheduler::{SchedulerError, SchedulerHandle};
 use crate::store_thread::StoreThread;
@@ -54,6 +56,8 @@ pub struct ServerState {
     pub hub: Hub,
     /// Codex and its scheduler, or why Codex cannot run, such as no Codex installed.
     pub codex: Result<Codex, String>,
+    /// Claude, or why Claude cannot run, such as no Claude Code installed.
+    pub claude: Result<ClaudeProvider, String>,
     pub usage: UsageTracker,
     pub token: ClientToken,
 }
@@ -70,6 +74,12 @@ impl ServerState {
         self.codex
             .as_ref()
             .map(|codex| &codex.provider)
+            .map_err(|missing| ApiError::unavailable(missing.clone()))
+    }
+
+    fn claude(&self) -> Result<&ClaudeProvider, ApiError> {
+        self.claude
+            .as_ref()
             .map_err(|missing| ApiError::unavailable(missing.clone()))
     }
 }

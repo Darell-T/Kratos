@@ -3,6 +3,7 @@
 //! queue rules.
 
 mod changes;
+pub mod claude;
 pub mod codex;
 pub(crate) mod queue;
 

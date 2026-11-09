@@ -7,8 +7,9 @@
 //! and its tokio runtime run on a second thread. So a panic in the store ends the process, and the
 //! database closes only after the server, and every socket its runtime ran, has stopped.
 //!
-//! Codex is found through `CODEX_EXE`, else `PATH` (D2). Without it the engine still serves, and
-//! a request that needs Codex answers 503 saying why.
+//! Codex is found through `CODEX_EXE`, else `PATH` (D2), and Claude through `CLAUDE_EXE`, else
+//! `PATH` (L8). Without one the engine still serves, and a request that needs it answers 503
+//! saying why.
 
 use std::ffi::OsString;
 use std::io;
@@ -18,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kratos_api_client::{Client, ClientError};
+use kratos_claude_client::locate_claude;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
@@ -25,6 +27,7 @@ use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, St
 use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
 use kratos_engine::mcp::{self, McpServer};
+use kratos_engine::providers::claude::{self, ClaudeProvider, ClaudeSettings};
 use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
 use kratos_engine::scheduler::{self, SystemClock};
 use kratos_engine::server::{self, ClientToken, ServerState};
@@ -37,6 +40,10 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(600);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a turn Codex agreed to stop may take to end before Kratos closes Codex.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// The wait after a Claude process's first failure, doubled by each failure in a row (L4), and the
+/// failures after which only the user starts it again.
+const RESTART_WAIT: Duration = Duration::from_secs(1);
+const MAX_RESTARTS: u32 = 5;
 
 fn main() -> ExitCode {
     match run() {
@@ -144,19 +151,59 @@ fn run_server(
                 Err(missing.to_string())
             }
         };
+        let claude = start_claude(config, &hub, &store).await?;
         let state = ServerState {
             hub,
             store,
             codex,
+            claude,
             usage,
             token,
         };
         server::serve(listener, state.clone(), shutdown_signal()).await?;
-        // Codex ends before the store closes, so nothing it reports goes unrecorded (L2).
+        // The agents end before the store closes, so nothing they report goes unrecorded (L2).
         if let Ok(codex) = &state.codex {
             codex.provider.shutdown().await;
         }
+        if let Ok(claude) = &state.claude {
+            claude.shutdown().await;
+        }
         Ok(())
+    })
+}
+
+/// Claude, or why it cannot run, which the engine reports and serves on without.
+async fn start_claude(
+    config: &Config,
+    hub: &Hub,
+    store: &StoreThread,
+) -> Result<Result<ClaudeProvider, String>, StoreError> {
+    match claude_settings(config) {
+        Ok(settings) => Ok(Ok(
+            claude::start(settings, hub.clone(), store.clone()).await?
+        )),
+        Err(missing) => {
+            eprintln!("Claude threads are unavailable: {missing}");
+            Ok(Err(missing.to_string()))
+        }
+    }
+}
+
+fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
+    let program = locate_claude(config.claude_exe.as_deref(), config.path.as_deref())?;
+    let claude_home = config
+        .user_home
+        .clone()
+        .ok_or(ClaudeMissing::NoHomeFolder)?;
+    Ok(ClaudeSettings {
+        program,
+        claude_home,
+        env_set: Vec::new(),
+        turn_timeout: TURN_TIMEOUT,
+        stop_timeout: STOP_TIMEOUT,
+        control_timeout: REQUEST_TIMEOUT,
+        restart_wait: RESTART_WAIT,
+        max_restarts: MAX_RESTARTS,
     })
 }
 
@@ -184,6 +231,14 @@ fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMiss
             port,
         }),
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ClaudeMissing {
+    #[error(transparent)]
+    Locate(#[from] kratos_claude_client::LocateError),
+    #[error("cannot find the user's home folder, where Claude keeps its history")]
+    NoHomeFolder,
 }
 
 #[derive(Debug, thiserror::Error)]

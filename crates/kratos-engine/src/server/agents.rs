@@ -1,6 +1,6 @@
 //! The routes that drive a thread's agent: its messages, its turn, its settings, and what it waits
-//! on the user for. Codex is the only agent Kratos drives so far; a thread of another provider
-//! keeps R2's plain message log.
+//! on the user for. Each reaches the agent of the thread's own provider (see [`Agent`]); approvals
+//! and questions are Codex's alone until Claude's permission rules exist.
 
 use std::time::Duration;
 
@@ -11,12 +11,13 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
     AnswerQuestion, ApprovalId, ContinuationId, DecideApproval, MessageId, MessageOrigin,
-    PostMessage, Provider, QuestionId, QueueFull, SendMessage, ThreadEventBody, ThreadId,
-    ThreadSettings, ThreadSkills,
+    PostMessage, QuestionId, QueueFull, SendMessage, ThreadEventBody, ThreadId, ThreadSettings,
+    ThreadSkills,
 };
 use uuid::Uuid;
 
 use super::acting::Acting;
+use super::agent::{Agent, Drive};
 use super::json::read_json;
 use super::threads::details;
 use super::{ApiError, MessagePath, ServerState, ThreadPath, json_reply, path};
@@ -25,13 +26,18 @@ use crate::providers::{MAX_PENDING_MESSAGES, Sent};
 /// How long `GET /api/usage` waits for Codex's fresh read before it answers with what it knows.
 const USAGE_REFRESH_WAIT: Duration = Duration::from_secs(10);
 
+const NO_CLAUDE_SKILLS: &str =
+    "Kratos does not list a Claude thread's skills and slash commands yet";
+
 const NO_SLASH_COMMANDS: &str =
     "Codex's app-server protocol does not list its slash commands, so Kratos cannot offer them";
 
-/// `POST /api/threads/{id}/messages`. To a Codex thread: 201 with the queued message, 200 with the
-/// message the client sent before under the same `messageId` (D85), 409 when that id holds another
-/// message, or 429 when the queue is full, which a client may retry with the same `messageId`. To
-/// any other thread: 201 with the appended event, as R2 answers.
+/// `POST /api/threads/{id}/messages`: 201 with the queued message, 200 with the message the
+/// client sent before under the same `messageId` (D85), 409 when that id holds another message, or
+/// 429 when the queue is full, which a client may retry with the same `messageId`.
+///
+/// A Claude thread on an engine that cannot run Claude keeps R2's plain message log: 201 with the
+/// appended event, and 400 for a message from another thread, which has no agent to read it.
 ///
 /// The thread is checked before the body is read: a post to an unknown thread answers 404 without
 /// reading or size-checking its body.
@@ -42,25 +48,19 @@ pub(super) async fn post_message(
     body: Body,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    let lookup = thread_id.clone();
-    let provider = state
-        .store
-        .call(move |store| store.provider_thread(&lookup))
-        .await?
-        .thread
-        .provider;
+    let provider = state.provider_of(&thread_id).await?;
     let acting = Acting::of(&state, &headers).await?;
-    match (provider, acting) {
-        (Provider::Codex, acting) => send_to_codex(&state, acting, thread_id, body).await,
-        (_, None) => log_message(&state, thread_id, body).await,
-        (_, Some(_)) => Err(ApiError::bad_request(
+    match (state.drive(provider)?, acting) {
+        (Drive::Agent(agent), acting) => send_to_agent(&agent, acting, thread_id, body).await,
+        (Drive::LogOnly, None) => log_message(&state, thread_id, body).await,
+        (Drive::LogOnly, Some(_)) => Err(ApiError::bad_request(
             "Kratos runs no agent in this thread yet, so it takes no messages from other threads",
         )),
     }
 }
 
-async fn send_to_codex(
-    state: &ServerState,
+async fn send_to_agent(
+    agent: &Agent<'_>,
     acting: Option<Acting>,
     thread_id: ThreadId,
     body: Body,
@@ -72,15 +72,14 @@ async fn send_to_codex(
             acting.origin()
         }
     };
-    let codex = state.codex()?;
     let SendMessage { message_id, input } = read_json(body).await?;
     let message_id = message_id.unwrap_or_else(|| MessageId::new(Uuid::new_v4().to_string()));
     Ok(sent_reply(
-        codex.send(thread_id, message_id, input, origin).await?,
+        agent.send(thread_id, message_id, input, origin).await?,
     ))
 }
 
-/// R2's answer for a thread whose agent Kratos does not drive yet: the message only joins the log.
+/// R2's answer for a thread whose agent cannot run: the message only joins the log.
 async fn log_message(
     state: &ServerState,
     thread_id: ThreadId,
@@ -118,7 +117,11 @@ pub(super) async fn steer(
     ids: MessagePath,
 ) -> Result<Response, ApiError> {
     let (thread_id, message_id) = path(ids)?;
-    let message = state.codex()?.steer(thread_id, message_id).await?;
+    let message = state
+        .agent(&thread_id)
+        .await?
+        .steer(thread_id, message_id)
+        .await?;
     Ok(json_reply(StatusCode::OK, &message))
 }
 
@@ -128,7 +131,11 @@ pub(super) async fn remove_message(
     ids: MessagePath,
 ) -> Result<Response, ApiError> {
     let (thread_id, message_id) = path(ids)?;
-    let message = state.codex()?.remove(thread_id, message_id).await?;
+    let message = state
+        .agent(&thread_id)
+        .await?
+        .remove(thread_id, message_id)
+        .await?;
     Ok(json_reply(StatusCode::OK, &message))
 }
 
@@ -138,7 +145,11 @@ pub(super) async fn retry_message(
     ids: MessagePath,
 ) -> Result<Response, ApiError> {
     let (thread_id, message_id) = path(ids)?;
-    let message = state.codex()?.retry(thread_id, message_id).await?;
+    let message = state
+        .agent(&thread_id)
+        .await?
+        .retry(thread_id, message_id)
+        .await?;
     Ok(json_reply(StatusCode::OK, &message))
 }
 
@@ -149,7 +160,11 @@ pub(super) async fn discard_message(
     ids: MessagePath,
 ) -> Result<Response, ApiError> {
     let (thread_id, message_id) = path(ids)?;
-    let message = state.codex()?.discard(thread_id, message_id).await?;
+    let message = state
+        .agent(&thread_id)
+        .await?
+        .discard(thread_id, message_id)
+        .await?;
     Ok(json_reply(StatusCode::OK, &message))
 }
 
@@ -164,7 +179,11 @@ pub(super) async fn stop(
     if let Some(acting) = Acting::of(&state, &headers).await? {
         acting.not_on_itself(&thread_id)?;
     }
-    state.codex()?.stop(thread_id.clone()).await?;
+    state
+        .agent(&thread_id)
+        .await?
+        .stop(thread_id.clone())
+        .await?;
     details(&state, thread_id, None).await
 }
 
@@ -174,7 +193,11 @@ pub(super) async fn resume(
     id: ThreadPath,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    state.codex()?.resume(thread_id.clone()).await?;
+    state
+        .agent(&thread_id)
+        .await?
+        .resume(thread_id.clone())
+        .await?;
     details(&state, thread_id, None).await
 }
 
@@ -186,9 +209,9 @@ pub(super) async fn put_settings(
     body: Body,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    let codex = state.codex()?;
+    let agent = state.agent(&thread_id).await?;
     let settings: ThreadSettings = read_json(body).await?;
-    codex.set_settings(thread_id.clone(), settings).await?;
+    agent.set_settings(thread_id.clone(), settings).await?;
     details(&state, thread_id, None).await
 }
 
@@ -199,7 +222,10 @@ pub(super) async fn skills(
     id: ThreadPath,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    let skills = state.codex()?.skills(thread_id).await?;
+    let Agent::Codex(codex) = state.agent(&thread_id).await? else {
+        return Err(ApiError::bad_request(NO_CLAUDE_SKILLS));
+    };
+    let skills = codex.skills(thread_id).await?;
     let reply = ThreadSkills {
         skills,
         slash_commands_gap: Some(NO_SLASH_COMMANDS.to_owned()),

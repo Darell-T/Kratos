@@ -57,6 +57,17 @@ impl RunningEngine {
         Self::from_child(home, command.spawn().unwrap())
     }
 
+    /// Starts with `CLAUDE_EXE` set to the scripted `fake-claude`, which logs each process it
+    /// starts to the returned file instead of the engine ever running the user's own Claude.
+    pub fn start_with_fake_claude(home: &Path) -> (RunningEngine, PathBuf) {
+        let log = home.join("fake-claude.log");
+        let mut command = command(home, "0");
+        command
+            .env("CLAUDE_EXE", fake_agents::executable("fake-claude"))
+            .env("FAKE_CLAUDE_LOG", &log);
+        (Self::from_child(home, command.spawn().unwrap()), log)
+    }
+
     /// Gives this engine its own hidden console so Ctrl+C cannot reach the test runner.
     #[cfg(windows)]
     pub fn start_for_shutdown(home: &Path, signal: ShutdownSignal) -> RunningEngine {
@@ -88,6 +99,7 @@ impl RunningEngine {
             .env("KRATOS_PORT", "0")
             .env("CODEX_EXE", fake_agents::executable("fake-codex"))
             .env("FAKE_CODEX_CONTROL_FILE", home.join(FAKE_CODEX_CONTROL))
+            .env("CLAUDE_EXE", home.join("no-claude-here"))
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW for the PowerShell helper.
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -363,6 +375,8 @@ fn command(home: &Path, port: &str) -> Command {
         .env("KRATOS_PORT", port)
         .env("CODEX_EXE", fake_agents::executable("fake-codex"))
         .env("FAKE_CODEX_CONTROL_FILE", home.join(FAKE_CODEX_CONTROL))
+        // No test engine runs the user's own Claude. A Claude thread keeps R2's plain message log.
+        .env("CLAUDE_EXE", home.join("no-claude-here"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
