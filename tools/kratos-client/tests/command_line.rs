@@ -81,10 +81,10 @@ fn an_unreachable_engine_exits_1_with_a_json_error() {
 }
 
 #[test]
-fn bench_post_runs_against_the_session_url_like_every_other_command() {
-    // Catches bench-post taking the engine URL as its own argument and ignoring --url, so a lane
+fn bench_turns_runs_against_the_session_url_like_every_other_command() {
+    // Catches bench-turns taking the engine URL as its own argument and ignoring --url, so a lane
     // that sets --url or KRATOS_URL benchmarks a different engine than the rest of its commands.
-    let output = kratos_client(&["bench-post"]);
+    let output = kratos_client(&["bench-turns", "no-control-file"]);
 
     assert_eq!(output.status.code(), Some(1));
     let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();

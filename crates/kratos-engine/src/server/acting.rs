@@ -10,7 +10,6 @@ use axum::response::{IntoResponse, Response};
 use kratos_protocol::{ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings};
 use kratos_store::StoreError;
 
-use super::agent::Drive;
 use super::{ApiError, ServerState};
 
 /// Answers 403 to a request that names a thread, whatever the header holds, before the route runs.
@@ -52,10 +51,10 @@ impl Acting {
                 }
                 error => error.into(),
             })?;
-        let access = match state.drive(thread.thread.provider)? {
-            Drive::Agent(agent) => agent.access(thread.thread.id.clone()).await?,
-            Drive::LogOnly => thread.settings.access(),
-        };
+        let access = state
+            .agent_of(thread.thread.provider)?
+            .access(thread.thread.id.clone())
+            .await?;
         Ok(Some(Acting {
             thread_id: thread.thread.id,
             access,

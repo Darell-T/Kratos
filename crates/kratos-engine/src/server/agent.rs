@@ -16,12 +16,6 @@ pub(super) enum Agent<'a> {
     Claude(&'a ClaudeProvider),
 }
 
-/// What drives a thread: its provider's agent, or nothing, so that a message only joins the log.
-pub(super) enum Drive<'a> {
-    Agent(Agent<'a>),
-    LogOnly,
-}
-
 impl ServerState {
     /// The provider of `thread_id`. 404 for a thread that does not exist.
     pub(super) async fn provider_of(&self, thread_id: &ThreadId) -> Result<Provider, ApiError> {
@@ -39,16 +33,6 @@ impl ServerState {
         match provider {
             Provider::Codex => Ok(Agent::Codex(self.codex()?)),
             Provider::Claude => Ok(Agent::Claude(self.claude()?)),
-        }
-    }
-
-    /// How `provider`'s threads are driven. A provider that cannot run answers 503 saying why,
-    /// except Claude, whose threads keep R2's plain message log until Claude is installed.
-    pub(super) fn drive(&self, provider: Provider) -> Result<Drive<'_>, ApiError> {
-        match (provider, self.agent_of(provider)) {
-            (_, Ok(agent)) => Ok(Drive::Agent(agent)),
-            (Provider::Claude, Err(_)) => Ok(Drive::LogOnly),
-            (Provider::Codex, Err(unavailable)) => Err(unavailable),
         }
     }
 

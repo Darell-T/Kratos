@@ -11,7 +11,6 @@ use kratos_protocol::{
 };
 
 use super::acting::Acting;
-use super::agent::Drive;
 use super::json::read_json;
 use super::{ApiError, ServerState, ThreadPath, json_reply, path};
 use crate::hub::PAGE_BYTES;
@@ -43,9 +42,8 @@ pub(super) async fn create_thread(
     if let Some(acting) = Acting::of(&state, &headers).await? {
         acting.may_create(&request.settings_or_default())?;
     }
-    if let Some(settings) = &request.settings
-        && let Drive::Agent(agent) = state.drive(request.provider)?
-    {
+    if let Some(settings) = &request.settings {
+        let agent = state.agent_of(request.provider)?;
         agent.check_settings(settings.clone()).await?;
     }
     let thread = state

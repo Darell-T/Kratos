@@ -53,7 +53,8 @@ fn a_claude_thread_takes_messages_through_the_agent_routes_and_a_stop_reaches_it
     // Claude can run: the message must reach the CLI as a queued message (201 with a message, not
     // an event), a stop must reach the CLI, and a setting the CLI cannot honor must be refused.
     let home = tempfile::tempdir().unwrap();
-    let (engine, log) = RunningEngine::start_with_fake_claude(home.path());
+    let engine = RunningEngine::start_with_answering_claude(home.path());
+    let log = engine.fake_claude_log();
     let client = engine.client();
     let claude = engine.create_thread_of(Provider::Claude);
 

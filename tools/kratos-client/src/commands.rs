@@ -5,13 +5,12 @@
 //! refusals. The create commands send their arguments unchecked, so a lane can send blank or
 //! relative values.
 
-use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
 use kratos_api_client::{ApiReply, ApiRequest, Client, ClientError, Followed, Incoming};
-use kratos_client::{BenchError, Normalizer, bench_post, bench_turns};
+use kratos_client::{BenchError, Normalizer, bench_turns};
 use kratos_protocol::{
     ApprovalId, ContinuationId, DEFAULT_PORT, HOME_VAR, MessageId, QuestionId, Seq, ServerMessage,
     ThreadId, WorkspaceId, engine_home, routes,
@@ -44,7 +43,6 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   subscribe <thread-id> [--after <seq>] [--count <n>] [--read-delay-ms <ms>]
   request <METHOD> <path> [--header <name:value>]... [--json <body> | --body-bytes <n>]
   socket-send <bytes> [--header <name:value>]...
-  bench-post
   bench-turns <fake-control-file>
 
 create-thread's --settings sets a thread's model, permission, and planMode, such as
@@ -63,7 +61,6 @@ the socket.";
 const SUBSCRIBE_WAIT: Duration = Duration::from_secs(60);
 /// `socket-send` waits this long to learn whether the engine closes the socket.
 const SOCKET_SEND_WAIT: Duration = Duration::from_secs(2);
-const BENCH_MESSAGES: NonZeroUsize = NonZeroUsize::new(500).unwrap();
 
 pub(crate) enum Failure {
     /// The command line is wrong. Nothing was sent.
@@ -96,7 +93,7 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 25] = [
+const COMMANDS: [Command; 24] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
@@ -130,7 +127,6 @@ const COMMANDS: [Command; 25] = [
         options: &["--header", "--json", "--body-bytes"], run: request,
     },
     Command { name: "socket-send", positional: 1, options: &["--header"], run: socket_send },
-    Command { name: "bench-post", positional: 0, options: &[], run: bench },
     Command { name: "bench-turns", positional: 1, options: &[], run: turns_bench },
 ];
 
@@ -478,15 +474,6 @@ fn socket_send(session: &mut Session, args: &Args) -> Result<(), Failure> {
         Err(error) => json!({ "socket": "closed", "code": null, "error": error.to_string() }),
     };
     session.print(line);
-    Ok(())
-}
-
-fn bench(session: &mut Session, _: &Args) -> Result<(), Failure> {
-    let report = bench_post(&session.client, BENCH_MESSAGES)?;
-    println!(
-        "{}",
-        serde_json::to_string(&report).expect("a bench report serializes")
-    );
     Ok(())
 }
 

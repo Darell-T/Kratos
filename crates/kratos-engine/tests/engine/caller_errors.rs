@@ -38,9 +38,10 @@ fn malformed_path_and_query_extractors_return_json_errors() {
 
 #[test]
 fn settings_no_provider_can_hold_are_refused_with_400_before_they_are_stored() {
-    // Catches a zero or oversized context limit and a blank model reaching the database through a
-    // thread of a provider that checks nothing: the blank model was stored, and both limits failed
-    // the insert and answered 500.
+    // Catches a zero or oversized context limit and a blank model reaching the database: the
+    // blank model was stored, and both limits failed the insert and answered 500. A model's
+    // surrounding blanks are trimmed. No provider accepts a context limit on a new Claude thread,
+    // so the largest limit is covered by `ContextLimit`'s own test.
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
@@ -72,9 +73,9 @@ fn settings_no_provider_can_hold_are_refused_with_400_before_they_are_stored() {
         let message = refused.body["error"].as_str().unwrap();
         assert!(message.contains(field), "{bad}: {message}");
     }
-    let largest = create(settings(json!(" model "), json!(i64::MAX)));
+    let trimmed = create(settings(json!(" model "), json!(null)));
 
-    assert_eq!(largest.status, 201, "{}", largest.body);
+    assert_eq!(trimmed.status, 201, "{}", trimmed.body);
     let threads = client
         .get(&format!("/api/threads?workspaceId={}", workspace.as_str()))
         .unwrap();
@@ -86,9 +87,9 @@ fn settings_no_provider_can_hold_are_refused_with_400_before_they_are_stored() {
     let details = client
         .get(&format!(
             "/api/threads/{}",
-            largest.body["id"].as_str().unwrap()
+            trimmed.body["id"].as_str().unwrap()
         ))
         .unwrap();
     assert_eq!(details.body["settings"]["model"], "model");
-    assert_eq!(details.body["settings"]["contextLimitTokens"], i64::MAX);
+    assert_eq!(details.body["settings"]["contextLimitTokens"], json!(null));
 }

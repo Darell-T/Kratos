@@ -11,13 +11,12 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
     AnswerQuestion, ApprovalId, ContinuationId, DecideApproval, MessageId, MessageOrigin,
-    PostMessage, QuestionId, QueueFull, SendMessage, ThreadEventBody, ThreadId, ThreadSettings,
-    ThreadSkills,
+    QuestionId, QueueFull, SendMessage, ThreadId, ThreadSettings, ThreadSkills,
 };
 use uuid::Uuid;
 
 use super::acting::Acting;
-use super::agent::{Agent, Drive};
+use super::agent::Agent;
 use super::json::read_json;
 use super::threads::details;
 use super::{ApiError, MessagePath, ServerState, ThreadPath, json_reply, path};
@@ -36,9 +35,6 @@ const NO_SLASH_COMMANDS: &str =
 /// client sent before under the same `messageId` (D85), 409 when that id holds another message, or
 /// 429 when the queue is full, which a client may retry with the same `messageId`.
 ///
-/// A Claude thread on an engine that cannot run Claude keeps R2's plain message log: 201 with the
-/// appended event, and 400 for a message from another thread, which has no agent to read it.
-///
 /// The thread is checked before the body is read: a post to an unknown thread answers 404 without
 /// reading or size-checking its body.
 pub(super) async fn post_message(
@@ -48,15 +44,9 @@ pub(super) async fn post_message(
     body: Body,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    let provider = state.provider_of(&thread_id).await?;
+    let agent = state.agent(&thread_id).await?;
     let acting = Acting::of(&state, &headers).await?;
-    match (state.drive(provider)?, acting) {
-        (Drive::Agent(agent), acting) => send_to_agent(&agent, acting, thread_id, body).await,
-        (Drive::LogOnly, None) => log_message(&state, thread_id, body).await,
-        (Drive::LogOnly, Some(_)) => Err(ApiError::bad_request(
-            "Kratos runs no agent in this thread yet, so it takes no messages from other threads",
-        )),
-    }
+    send_to_agent(&agent, acting, thread_id, body).await
 }
 
 async fn send_to_agent(
@@ -77,20 +67,6 @@ async fn send_to_agent(
     Ok(sent_reply(
         agent.send(thread_id, message_id, input, origin).await?,
     ))
-}
-
-/// R2's answer for a thread whose agent cannot run: the message only joins the log.
-async fn log_message(
-    state: &ServerState,
-    thread_id: ThreadId,
-    body: Body,
-) -> Result<Response, ApiError> {
-    let PostMessage { text } = read_json(body).await?;
-    let body = ThreadEventBody::UserMessage {
-        text: text.into_string(),
-    };
-    let event = state.hub.append(thread_id, body).await?;
-    Ok(json_reply(StatusCode::CREATED, &event))
 }
 
 fn sent_reply(sent: Sent) -> Response {

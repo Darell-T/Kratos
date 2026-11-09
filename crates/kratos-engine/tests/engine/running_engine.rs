@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use fake_agents::codex_control::{self, ControlRequest};
 use kratos_api_client::{Client, EventSocket, Incoming};
 use kratos_protocol::{
-    CLIENT_TOKEN_FILE, CreateThread, CreateWorkspace, Provider, RequiredText, Seq, ServerMessage,
-    Thread, ThreadEvent, ThreadId, Workspace,
+    CLIENT_TOKEN_FILE, CreateThread, CreateWorkspace, Message, Provider, RequiredText, Seq,
+    ServerMessage, Thread, ThreadEvent, ThreadEventBody, ThreadId, Workspace,
 };
 use serde_json::json;
 
@@ -41,6 +41,9 @@ pub struct RunningEngine {
 /// Where the fake Codex an engine starts writes its control port.
 const FAKE_CODEX_CONTROL: &str = "fake-codex-control";
 
+/// Where the scripted fake Claude logs each process it starts.
+const FAKE_CLAUDE_LOG: &str = "fake-claude.log";
+
 impl RunningEngine {
     pub fn start(home: &Path) -> RunningEngine {
         RunningEngine::start_on(home, 0)
@@ -50,6 +53,20 @@ impl RunningEngine {
         Self::from_child(home, spawn(home, port))
     }
 
+    /// Starts with a scripted Claude that answers, so a Claude thread runs its messages.
+    pub fn start_with_answering_claude(home: &Path) -> RunningEngine {
+        let mut command = command(home, "0");
+        command.env_remove("FAKE_CLAUDE_SILENT");
+        Self::from_child(home, command.spawn().unwrap())
+    }
+
+    /// Starts with `CLAUDE_EXE` set to `claude_exe` instead of the scripted fake.
+    pub fn start_with_claude(home: &Path, claude_exe: &Path) -> RunningEngine {
+        let mut command = command(home, "0");
+        command.env("CLAUDE_EXE", claude_exe);
+        Self::from_child(home, command.spawn().unwrap())
+    }
+
     /// Starts with `CODEX_EXE` set to `codex_exe` instead of the fake.
     pub fn start_with_codex(home: &Path, codex_exe: &Path) -> RunningEngine {
         let mut command = command(home, "0");
@@ -57,15 +74,9 @@ impl RunningEngine {
         Self::from_child(home, command.spawn().unwrap())
     }
 
-    /// Starts with `CLAUDE_EXE` set to the scripted `fake-claude`, which logs each process it
-    /// starts to the returned file instead of the engine ever running the user's own Claude.
-    pub fn start_with_fake_claude(home: &Path) -> (RunningEngine, PathBuf) {
-        let log = home.join("fake-claude.log");
-        let mut command = command(home, "0");
-        command
-            .env("CLAUDE_EXE", fake_agents::executable("fake-claude"))
-            .env("FAKE_CLAUDE_LOG", &log);
-        (Self::from_child(home, command.spawn().unwrap()), log)
+    /// The file where the scripted `fake-claude` logs each process the engine starts.
+    pub fn fake_claude_log(&self) -> PathBuf {
+        self.home.join(FAKE_CLAUDE_LOG)
     }
 
     /// Gives this engine its own hidden console so Ctrl+C cannot reach the test runner.
@@ -99,7 +110,9 @@ impl RunningEngine {
             .env("KRATOS_PORT", "0")
             .env("CODEX_EXE", fake_agents::executable("fake-codex"))
             .env("FAKE_CODEX_CONTROL_FILE", home.join(FAKE_CODEX_CONTROL))
-            .env("CLAUDE_EXE", home.join("no-claude-here"))
+            .env("CLAUDE_EXE", fake_agents::executable("fake-claude"))
+            .env("FAKE_CLAUDE_LOG", home.join(FAKE_CLAUDE_LOG))
+            .env("FAKE_CLAUDE_SILENT", "1")
             .creation_flags(0x0800_0000) // CREATE_NO_WINDOW for the PowerShell helper.
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -268,7 +281,8 @@ impl RunningEngine {
     }
 
     /// Creates a workspace on the engine's home, which is an existing absolute folder, and a
-    /// Claude thread in it, which keeps R2's plain message log.
+    /// Claude thread in it. The test engine's Claude never finishes starting, so each message
+    /// posted to it adds one `message.queued` event to the log and nothing else (see [`post`]).
     pub fn create_thread(&self) -> Thread {
         self.create_thread_of(Provider::Claude)
     }
@@ -375,8 +389,12 @@ fn command(home: &Path, port: &str) -> Command {
         .env("KRATOS_PORT", port)
         .env("CODEX_EXE", fake_agents::executable("fake-codex"))
         .env("FAKE_CODEX_CONTROL_FILE", home.join(FAKE_CODEX_CONTROL))
-        // No test engine runs the user's own Claude. A Claude thread keeps R2's plain message log.
-        .env("CLAUDE_EXE", home.join("no-claude-here"))
+        // Claude is the scripted fake too, so no test reaches a Claude installed on the machine.
+        .env("CLAUDE_EXE", fake_agents::executable("fake-claude"))
+        .env("FAKE_CLAUDE_LOG", home.join(FAKE_CLAUDE_LOG))
+        // It never finishes starting, so a Claude thread's log holds one `message.queued` event
+        // per message and nothing a process would add. Tests of a working Claude remove this.
+        .env("FAKE_CLAUDE_SILENT", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
@@ -387,13 +405,55 @@ fn listening_port_of(line: &str) -> Option<u16> {
     rest.split_once(' ')?.0.parse().ok()
 }
 
-pub fn post(client: &Client, thread: &Thread, text: &str) -> ThreadEvent {
+/// Posts a message to a thread whose agent never finishes starting, so it stays queued.
+pub fn post(client: &Client, thread: &Thread, text: &str) -> Message {
     let path = format!("/api/threads/{}/messages", thread.id);
-    client
-        .post(&path, &json!({ "text": text }))
+    let reply = client.post(&path, &json!({ "text": text })).unwrap();
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    reply.parse().unwrap()
+}
+
+/// Posts a message and returns the `message.queued` event that recorded it, found among the events
+/// after the log's last number before the post. Only one client may write to the thread meanwhile.
+pub fn post_event(client: &Client, thread: &Thread, text: &str) -> ThreadEvent {
+    let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
+    let last = details.body["lastSeq"].as_u64().unwrap();
+    let message = post(client, thread, text);
+    let log: Vec<ThreadEvent> = client
+        .get(&format!("/api/threads/{}/events?after={last}", thread.id))
         .unwrap()
         .parse()
-        .unwrap()
+        .unwrap();
+    log.into_iter()
+        .find(|event| {
+            matches!(&event.event, ThreadEventBody::MessageQueued { message_id, .. }
+                if *message_id == message.id)
+        })
+        .expect("the message was recorded as queued")
+}
+
+/// Changes the thread's model, which appends one `settings.changed` event holding `model`. Unlike
+/// a message, it never waits in a queue, so a test that needs many events of any size uses it.
+pub fn change_model(client: &Client, thread: &Thread, model: &str) {
+    let settings = json!({ "model": model, "permission": "askMe", "planMode": false,
+                           "contextLimitTokens": null });
+    let reply = client
+        .put(&format!("/api/threads/{}/settings", thread.id), &settings)
+        .unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+}
+
+/// The model a `settings.changed` event recorded.
+pub fn changed_model(event: &ThreadEventBody) -> String {
+    match event {
+        ThreadEventBody::SettingsChanged { settings } => settings
+            .model
+            .as_ref()
+            .expect("the change named a model")
+            .as_str()
+            .to_owned(),
+        other => panic!("expected a settings change, got {other:?}"),
+    }
 }
 
 pub fn subscribed(engine: &RunningEngine, thread_id: &ThreadId, after: u64) -> EventSocket {

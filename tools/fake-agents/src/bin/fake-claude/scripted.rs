@@ -5,6 +5,9 @@
 //! The fake binds a localhost port and appends `{pid, port, arguments, cwd}` as one line to the
 //! file `FAKE_CLAUDE_LOG` names, so a test finds each process the engine started, however many
 //! start. A test sends JSON lines `{id, method, params}` to the port and reads `{id, result}`.
+//! `FAKE_CLAUDE_SILENT` makes the fake read its input and answer nothing, not even `initialize`,
+//! so a thread stays starting and its log holds only what the engine appends before a process is
+//! up.
 //! `FAKE_CLAUDE_FAIL_START` names a file: while it exists, a start exits with the exit code it
 //! holds and a "Not logged in" message, so a test chooses which starts fail by writing the file.
 
@@ -83,7 +86,7 @@ fn log_start(log: &Path, port: u16) {
 
 fn handle(script: &Shared, message: Value) {
     lock(script).received.push(message.clone());
-    if message["type"] != "control_request" {
+    if message["type"] != "control_request" || std::env::var_os("FAKE_CLAUDE_SILENT").is_some() {
         return;
     }
     match message["request"]["subtype"].as_str() {

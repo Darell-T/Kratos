@@ -295,7 +295,7 @@ fn without_codex_a_codex_thread_answers_503_and_other_threads_still_work() {
     let refused = client
         .post(&messages_path(&codex), &json!({ "text": "hello" }))
         .unwrap();
-    let logged = client
+    let delivered = client
         .post(&messages_path(&claude), &json!({ "text": "hello" }))
         .unwrap();
 
@@ -308,7 +308,77 @@ fn without_codex_a_codex_thread_answers_503_and_other_threads_still_work() {
         "{}",
         refused.body
     );
-    assert_eq!(logged.status, 201);
+    assert_eq!(delivered.status, 201, "{}", delivered.body);
+    assert_eq!(delivered.body["status"], "queued");
+}
+
+#[test]
+fn without_claude_a_claude_thread_answers_503_with_the_reason_and_stores_nothing() {
+    // Catches a message accepted for a thread whose agent cannot run, which the user then
+    // believes Claude will read: a 201 that says nothing about the missing CLI (L8), and an event
+    // logged that no agent will ever act on.
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("no-claude-here");
+    let engine = RunningEngine::start_with_claude(home.path(), &missing);
+    let client = engine.client();
+    let claude = engine.create_thread_of(Provider::Claude);
+
+    let refused = client
+        .post(&messages_path(&claude), &json!({ "text": "hello" }))
+        .unwrap();
+    let events = client
+        .get(&format!("/api/threads/{}/events", claude.id))
+        .unwrap();
+
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert!(
+        refused.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("CLAUDE_EXE"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(events.body, json!([]), "nothing was stored");
+}
+
+#[test]
+fn without_claude_every_route_that_reaches_the_agent_answers_503_not_a_success() {
+    // Catches a route that skips the agent when Claude cannot run and answers 200 or 204 as if it
+    // had acted: a stop, a resume, a settings change, or a change to a queued message.
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("no-claude-here");
+    let engine = RunningEngine::start_with_claude(home.path(), &missing);
+    let client = engine.client();
+    let claude = engine.create_thread_of(Provider::Claude);
+    let thread = format!("/api/threads/{}", claude.id);
+    let settings = json!({ "model": null, "permission": "askMe", "planMode": false,
+                           "contextLimitTokens": null });
+
+    let replies = [
+        client.post(&format!("{thread}/stop"), &json!({})).unwrap(),
+        client
+            .post(&format!("{thread}/resume"), &json!({}))
+            .unwrap(),
+        client
+            .put(&format!("{thread}/settings"), &settings)
+            .unwrap(),
+        client
+            .post(&format!("{thread}/messages/m/steer"), &json!({}))
+            .unwrap(),
+        client
+            .post(&format!("{thread}/messages/m/retry"), &json!({}))
+            .unwrap(),
+        client
+            .post(&format!("{thread}/messages/m/discard"), &json!({}))
+            .unwrap(),
+        client.delete(&format!("{thread}/messages/m")).unwrap(),
+    ];
+
+    for reply in replies {
+        assert_eq!(reply.status, 503, "{}", reply.body);
+        assert!(reply.body["error"].as_str().unwrap().contains("CLAUDE_EXE"));
+    }
 }
 
 #[test]
