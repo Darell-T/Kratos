@@ -37,6 +37,33 @@ fn a_mistyped_command_line_is_a_usage_error_and_sends_nothing() {
 }
 
 #[test]
+fn create_thread_settings_must_be_json_before_anything_is_sent() {
+    // Catches a Claude thread created without the model or permission a lane asked for because
+    // its settings were not read, and settings that are valid JSON never reaching the engine.
+    let create = |settings: &str| {
+        kratos_client(&[
+            "create-thread",
+            "workspace",
+            "chat",
+            "claude",
+            "--settings",
+            settings,
+        ])
+    };
+
+    let mistyped = create("{model: haiku");
+    let valid = create(r#"{"model":"claude-haiku-5-5","permission":"askMe","planMode":false}"#);
+
+    assert_eq!(mistyped.status.code(), Some(2));
+    assert!(mistyped.stdout.is_empty());
+    assert_eq!(
+        valid.status.code(),
+        Some(1),
+        "the request reached for the engine"
+    );
+}
+
+#[test]
 fn an_unreachable_engine_exits_1_with_a_json_error() {
     // Catches a client that prints nothing, or exits 0, when the engine is down, so a lane would
     // read a dead engine as a pass.

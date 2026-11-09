@@ -25,7 +25,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   workspaces
   create-workspace <name> <path>
   threads <workspace-id>
-  create-thread <workspace-id> <title> <provider>
+  create-thread <workspace-id> <title> <provider> [--settings <settings-json>]
   post <thread-id> <text>
   send <thread-id> <text> [--message-id <id>] [--image <path>]... [--file <path>]...
   thread <thread-id>
@@ -47,6 +47,8 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   bench-post
   bench-turns <fake-control-file>
 
+create-thread's --settings sets a thread's model, permission, and planMode, such as
+'{\"model\":\"claude-haiku-5-5\",\"permission\":\"askMe\",\"planMode\":false,\"contextLimitTokens\":null}'.
 The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
 engine wrote to $KRATOS_HOME/client-token (default ~/.kratos/client-token), when there is one.
 --normalize replaces ids and times, so two engines' output compares with a plain diff.
@@ -99,7 +101,9 @@ const COMMANDS: [Command; 25] = [
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
     Command { name: "threads", positional: 1, options: &[], run: threads },
-    Command { name: "create-thread", positional: 3, options: &[], run: create_thread },
+    Command {
+        name: "create-thread", positional: 3, options: &["--settings"], run: create_thread,
+    },
     Command { name: "post", positional: 2, options: &[], run: post },
     Command {
         name: "send", positional: 2, options: &["--message-id", "--image", "--file"], run: send,
@@ -278,7 +282,10 @@ fn threads(session: &mut Session, args: &Args) -> Result<(), Failure> {
 
 fn create_thread(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let [workspace_id, title, provider] = [0, 1, 2].map(|index| &args.positional[index]);
-    let body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
+    let mut body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
+    if let Some(settings) = args.option("--settings") {
+        body["settings"] = json_argument(settings, "settings-json")?;
+    }
     session.post(routes::THREADS, &body)
 }
 
