@@ -786,3 +786,123 @@ async fn a_write_path_is_judged_where_it_resolves_not_by_how_it_is_spelled() {
         }
     }
 }
+
+fn drive_forms(path: &std::path::Path) -> Vec<String> {
+    let text = path
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
+    let Some((drive, rest)) = text.split_once(":/") else {
+        return Vec::new();
+    };
+    let drive = drive.to_lowercase();
+    vec![
+        format!("/{drive}/{rest}"),
+        format!("/mnt/{drive}/{rest}"),
+        format!("/cygdrive/{drive}/{rest}"),
+    ]
+}
+
+#[tokio::test]
+async fn paths_claude_expands_are_judged_as_the_files_they_name() {
+    // Catches `~` and `/c/...` being joined to the workspace as plain folder names, so a write to the
+    // user's Claude settings, where a planted hook runs outside every sandbox, looks like a workspace file.
+    for permission in [
+        Permission::ApproveForMe,
+        Permission::FullAccess,
+        Permission::AskMe,
+    ] {
+        let harness = Harness::start(Options {
+            tools: true,
+            settings: ThreadSettings {
+                permission,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+        let home = harness.root.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let settings = home.join(".claude").join("settings.json");
+        let mut forms = vec![
+            "~/.claude/settings.json".to_owned(),
+            r"~\.claude\settings.json".to_owned(),
+            "  ~/.claude/settings.json ".to_owned(),
+        ];
+        if cfg!(windows) {
+            forms.extend(drive_forms(&settings));
+        }
+        for (index, form) in forms.iter().enumerate() {
+            let id = format!("write-{index}");
+            send(
+                &harness,
+                &launch,
+                &id,
+                "Write",
+                json!({ "file_path": form }),
+            )
+            .await;
+            let asked = approval_before_answer(&harness, &launch, &id).await;
+            assert!(
+                matches!(asked.why, AskReason::ProtectedFolder { .. }),
+                "{permission:?} {form:?}: {:?}",
+                asked.why
+            );
+            harness
+                .provider
+                .decide(asked.id, ApprovalDecision::Decline)
+                .await
+                .unwrap();
+            assert_eq!(
+                response(&harness, &launch, &id).await["behavior"],
+                "deny",
+                "{permission:?} {form:?}"
+            );
+        }
+        if permission == Permission::FullAccess {
+            continue;
+        }
+        for (index, form) in ["~/.claude/settings.json", "~/../kratos/client-token"]
+            .into_iter()
+            .enumerate()
+        {
+            let id = format!("read-{index}");
+            send(&harness, &launch, &id, "Read", json!({ "file_path": form })).await;
+            assert_eq!(
+                response(&harness, &launch, &id).await["behavior"],
+                "deny",
+                "{permission:?} {form:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_tilde_form_claude_may_expand_to_another_user_is_refused() {
+    // Catches `~name/...` being judged as a workspace folder when the CLI may resolve it elsewhere.
+    let harness = Harness::start(Options {
+        tools: true,
+        settings: ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    for (id, tool, input) in [
+        (
+            "write",
+            "Write",
+            json!({ "file_path": "~other/.ssh/authorized_keys" }),
+        ),
+        ("read", "Read", json!({ "file_path": "~other/.ssh/id_rsa" })),
+    ] {
+        send(&harness, &launch, id, tool, input).await;
+        assert_eq!(
+            response(&harness, &launch, id).await["behavior"],
+            "deny",
+            "{id}"
+        );
+    }
+}

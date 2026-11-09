@@ -19,6 +19,7 @@ mod actor;
 mod commands;
 mod hooks;
 mod incoming;
+mod paths;
 mod permissions;
 mod policy;
 mod queue;

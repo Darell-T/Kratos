@@ -59,6 +59,7 @@ impl Profile {
 pub struct ProtectedFolders {
     kratos_home: PathBuf,
     read_only: Vec<PathBuf>,
+    home: Option<PathBuf>,
 }
 
 /// Credential folders under the user's home folder, besides Codex's and Claude's own.
@@ -75,7 +76,13 @@ impl ProtectedFolders {
         ProtectedFolders {
             kratos_home,
             read_only,
+            home,
         }
+    }
+
+    /// The user's home folder, which `~` names.
+    pub(crate) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
     }
 
     pub fn kratos_home(&self) -> &Path {

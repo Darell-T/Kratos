@@ -1,7 +1,7 @@
 //! Claude tool requests at the trust boundary. Without the command service the provider refuses
 //! every request; with it, parsing precedes the pure permission table.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kratos_claude_client::{CanUseTool, ControlRequest, IncomingControl};
 use kratos_protocol::{
@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::super::codex::sandbox_may_write;
 use super::actor::Actor;
+use super::paths;
 use super::policy::{self, Action, Decision, Destination};
 use super::requests::{Answer, Pending};
 use super::tools;
@@ -124,8 +125,9 @@ fn read_action(tool: &CanUseTool) -> Action {
     }
 }
 
-fn read_scope(tool: &CanUseTool, folder: &str) -> Option<std::path::PathBuf> {
-    let path = if tool.tool_name == "Read" {
+fn read_scope(tool: &CanUseTool, folder: &str, home: Option<&Path>) -> Option<PathBuf> {
+    let base = Path::new(folder);
+    let raw = if tool.tool_name == "Read" {
         tool.input["file_path"].as_str()?
     } else {
         let pattern = tool.input["pattern"].as_str()?;
@@ -134,10 +136,13 @@ fn read_scope(tool: &CanUseTool, folder: &str) -> Option<std::path::PathBuf> {
         }
         match tool.input.get("path") {
             Some(path) => path.as_str()?,
-            None => folder,
+            None => return Some(base.to_path_buf()),
         }
     };
-    (!path.trim().is_empty() && !path.contains('\0')).then(|| Path::new(folder).join(path))
+    if raw.trim().is_empty() || raw.contains('\0') {
+        return None;
+    }
+    paths::expand(raw, base, home)
 }
 
 fn glob_prefix(pattern: &str) -> Option<&str> {
@@ -157,18 +162,19 @@ fn local_read_action(
     folder: &str,
     protected: &super::super::codex::ProtectedFolders,
 ) -> Action {
-    let Some(scope) = read_scope(tool, folder) else {
+    let Some(scope) = read_scope(tool, folder, protected.home()) else {
         return Action::Invalid;
     };
-    let target = if tool.tool_name == "Glob" {
+    let mut searched = vec![scope.clone()];
+    if tool.tool_name == "Glob" {
         let Some(prefix) = tool.input["pattern"].as_str().and_then(glob_prefix) else {
             return Action::Invalid;
         };
-        scope.join(prefix)
-    } else {
-        scope.clone()
-    };
-    for path in [&scope, &target] {
+        // The CLI may or may not expand the pattern, so a protected reading of either counts.
+        searched.push(scope.join(prefix));
+        searched.extend(paths::expand(prefix, &scope, protected.home()));
+    }
+    for path in &searched {
         match protected.overlaps(path) {
             Ok(true) => return Action::ProtectedRead,
             Ok(false) => {}
@@ -352,7 +358,9 @@ fn file_action(
     let Some(path) = edit_path(&tool.tool_name, &tool.input) else {
         return Action::Invalid;
     };
-    let target = Path::new(folder).join(path);
+    let Some(target) = paths::expand(path, Path::new(folder), protected.home()) else {
+        return Action::Invalid;
+    };
     match protected.containing(&target) {
         Ok(Some(path)) => Action::File(Destination::Protected(path.display().to_string())),
         Ok(None) => match sandbox_may_write(&target, Path::new(folder)) {
