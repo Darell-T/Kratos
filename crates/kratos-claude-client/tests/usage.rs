@@ -204,3 +204,42 @@ async fn get_usage_asks_without_the_transcript_scan_and_a_refused_control_is_not
     assert_eq!(request["request"]["skip_behaviors"], true);
     claude.close().await;
 }
+
+/// A result whose requests differ from each other and from the cumulative top level, so reading
+/// the wrong one gives a different number: the first request, the sum, and the top level each
+/// differ from the last request.
+fn result_with_two_requests() -> Value {
+    json!({
+        "subtype": "success", "is_error": false,
+        "modelUsage": { "model-a": { "contextWindow": 200_000 } },
+        "usage": {
+            "input_tokens": 900, "cache_creation_input_tokens": 800,
+            "cache_read_input_tokens": 700, "output_tokens": 600,
+            "iterations": [
+                { "input_tokens": 10, "cache_creation_input_tokens": 20,
+                  "cache_read_input_tokens": 30, "output_tokens": 40 },
+                { "input_tokens": 1, "cache_creation_input_tokens": 2,
+                  "cache_read_input_tokens": 3, "output_tokens": 4 },
+            ],
+        },
+    })
+}
+
+#[test]
+fn the_context_is_the_last_request_not_the_first_the_sum_or_the_top_level() {
+    // Catches the three ways to read the wrong request: the first of several, the sum over the
+    // turn, or the cumulative top-level usage. Only the last request fills the window.
+    let result = TurnResult::parse(result_with_two_requests()).unwrap();
+
+    let last = result.context.last.unwrap();
+
+    assert_eq!(
+        (
+            last.input_tokens,
+            last.cache_creation_input_tokens,
+            last.cache_read_input_tokens,
+            last.output_tokens
+        ),
+        (1, 2, 3, 4)
+    );
+}

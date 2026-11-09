@@ -785,3 +785,49 @@ async fn a_turn_the_user_stopped_is_never_a_limit_stop_whatever_its_result_says(
     assert!(harness.stops.as_mut().unwrap().try_recv().is_err());
     assert!(open_continuations(&harness).await.is_empty());
 }
+
+#[tokio::test]
+async fn the_context_is_the_last_request_not_the_first_the_sum_or_the_top_level() {
+    // Catches the three ways to read the wrong request: the first of several, the sum over the
+    // turn, or the cumulative top-level usage. Only the last request fills the window.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+
+    harness
+        .finish(
+            &launch,
+            &[A],
+            json!({
+                "modelUsage": { "model-a": { "contextWindow": 200_000 } },
+                "usage": {
+                    "input_tokens": 900, "cache_creation_input_tokens": 800,
+                    "cache_read_input_tokens": 700, "output_tokens": 600,
+                    "iterations": [
+                        { "input_tokens": 10, "cache_creation_input_tokens": 20,
+                          "cache_read_input_tokens": 30, "output_tokens": 40 },
+                        { "input_tokens": 1, "cache_creation_input_tokens": 2,
+                          "cache_read_input_tokens": 3, "output_tokens": 4 },
+                    ],
+                },
+            }),
+        )
+        .await;
+
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    let ThreadEventBody::TurnCompleted { context, .. } = ended else {
+        unreachable!("wait_for picked a turn end");
+    };
+    assert_eq!(
+        context,
+        Some(ContextUsage {
+            input_tokens: 6,
+            cached_input_tokens: 3,
+            output_tokens: 4,
+            reasoning_output_tokens: 0,
+            total_tokens: 10,
+            context_window: Some(200_000),
+        })
+    );
+}
