@@ -15,10 +15,13 @@
 //! Kratos decides each tool request and records approvals and questions through the shared Hub.
 //! Every command uses the Codex runner. No thread launches in a mode that skips the ask.
 
+mod account;
 mod actor;
 mod commands;
+mod ends;
 mod hooks;
 mod incoming;
+mod limits;
 mod paths;
 mod permissions;
 mod policy;
@@ -47,6 +50,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::hub::Hub;
 use crate::providers::{Continued, ProviderError, Sent};
 use crate::store_thread::StoreThread;
+use crate::usage::{LimitStop, UsageTracker};
 
 use crate::providers::MAX_PENDING_MESSAGES;
 
@@ -103,14 +107,20 @@ pub struct ClaudeProvider {
 
 /// Starts the actor. It first settles what an earlier engine left unfinished (L1): turns shown
 /// running end as interrupted, and messages being sent are settled from Claude's transcripts.
-/// A CLI starts only when a thread's message needs one (L5).
+/// A CLI starts only when a thread's message needs one (L5), or when the scheduler needs the
+/// account's usage through a thread's session.
+///
+/// Every turn that stops at a usage limit goes to the scheduler through `limit_stops`, and the
+/// account's usage goes to `usage`.
 pub async fn start(
     settings: ClaudeSettings,
     hub: Hub,
     store: StoreThread,
+    usage: UsageTracker,
+    limit_stops: mpsc::UnboundedSender<LimitStop>,
 ) -> Result<ClaudeProvider, StoreError> {
     let (commands, inbox) = mpsc::channel(QUEUED_COMMANDS);
-    let actor = actor::Actor::recover(settings, hub, store).await?;
+    let actor = actor::Actor::recover(settings, hub, store, usage, limit_stops).await?;
     tokio::spawn(actor.run(inbox));
     Ok(ClaudeProvider { commands })
 }
@@ -286,12 +296,11 @@ impl ClaudeProvider {
         .await
     }
 
-    /// Reads the account's usage through a session of the thread.
-    pub(crate) async fn refresh_usage(&self, thread_id: ThreadId) -> Result<(), ProviderError> {
-        let _ = thread_id;
-        Err(ProviderError::Unavailable(
-            "Kratos does not read Claude's usage yet".into(),
-        ))
+    /// Reads the account's usage through a session of the thread, starting one when none runs,
+    /// because the continuation that follows needs it (D38, D39).
+    pub async fn refresh_usage(&self, thread_id: ThreadId) -> Result<(), ProviderError> {
+        self.ask(|reply| actor::Command::RefreshUsage { thread_id, reply })
+            .await
     }
 
     /// The access the thread's settings give its agent.

@@ -8,8 +8,6 @@
 //! ask, never permission to send.
 
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -21,6 +19,7 @@ use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
+pub use crate::clock::{Clock, SystemClock};
 use crate::hub::Hub;
 use crate::providers::claude::ClaudeProvider;
 use crate::providers::codex::CodexProvider;
@@ -49,26 +48,6 @@ pub enum SchedulerError {
     Stopped,
     #[error(transparent)]
     Store(#[from] StoreError),
-}
-
-/// Wall-clock time, and waiting for it. Tests move a clock by hand instead of waiting hours.
-pub trait Clock: Send + Sync + 'static {
-    fn now(&self) -> SystemTime;
-    /// Resolves at `at`, or at once when `at` has passed.
-    fn sleep_until(&self, at: SystemTime) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-}
-
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> SystemTime {
-        SystemTime::now()
-    }
-
-    fn sleep_until(&self, at: SystemTime) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        let wait = at.duration_since(SystemTime::now()).unwrap_or_default();
-        Box::pin(tokio::time::sleep(wait))
-    }
 }
 
 /// The providers the scheduler reaches, each only while it runs. A provider that is not running

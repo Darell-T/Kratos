@@ -10,6 +10,7 @@ use std::future::Future;
 
 use kratos_claude_client::{
     Claude, ConnectError, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError,
+    UsageRead,
 };
 use kratos_protocol::{
     AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
@@ -23,6 +24,7 @@ use super::threads::{Session, SessionConfig, ThreadState};
 use super::{ClaudeSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
+use crate::usage::{LimitStop, UsageTracker};
 
 /// How many frames from the CLI processes wait for the actor. A full queue stops the readers,
 /// which stops the CLIs writing, so a slow actor slows Claude instead of growing without bound.
@@ -77,6 +79,10 @@ pub(super) enum Command {
         thread_id: ThreadId,
         continuation_id: ContinuationId,
         reply: Reply<Continued>,
+    },
+    RefreshUsage {
+        thread_id: ThreadId,
+        reply: Reply<()>,
     },
     Resume {
         thread_id: ThreadId,
@@ -167,6 +173,15 @@ pub(super) enum Done {
         work: TranscriptWork,
         result: Result<DeliveredMessages, TranscriptError>,
     },
+    /// A `get_usage` read finished. The account's usage outlives the session that read it, so the
+    /// answer needs no epoch; a read of an account that has since changed is dropped by its
+    /// generation.
+    UsageRead {
+        generation: u64,
+        plan: Option<String>,
+        result: Result<UsageRead, RequestError>,
+        reply: Option<Reply<()>>,
+    },
 }
 
 pub(crate) struct Actor {
@@ -174,6 +189,8 @@ pub(crate) struct Actor {
     pub(super) settings: ClaudeSettings,
     pub(super) hub: Hub,
     pub(super) store: StoreThread,
+    pub(super) usage: UsageTracker,
+    pub(super) limit_stops: mpsc::UnboundedSender<LimitStop>,
     pub(super) threads: HashMap<ThreadId, ThreadState>,
     /// Set when a write failed: no CLI runs after that, because its work would go unrecorded (L2).
     pub(super) parked: Option<String>,
@@ -184,7 +201,13 @@ pub(crate) struct Actor {
 }
 
 impl Actor {
-    pub(super) fn new(settings: ClaudeSettings, hub: Hub, store: StoreThread) -> Actor {
+    pub(super) fn new(
+        settings: ClaudeSettings,
+        hub: Hub,
+        store: StoreThread,
+        usage: UsageTracker,
+        limit_stops: mpsc::UnboundedSender<LimitStop>,
+    ) -> Actor {
         let (done, completions) = mpsc::unbounded_channel();
         let (frames, incoming) = mpsc::channel(QUEUED_FRAMES);
         Actor {
@@ -192,6 +215,8 @@ impl Actor {
             settings,
             hub,
             store,
+            usage,
+            limit_stops,
             threads: HashMap::new(),
             parked: None,
             done,
@@ -284,6 +309,12 @@ impl Actor {
                 work,
                 result,
             } => self.on_transcript(thread_id, work, result).await,
+            Done::UsageRead {
+                generation,
+                plan,
+                result,
+                reply,
+            } => self.on_usage_read(generation, plan, result, reply),
         }
     }
 
@@ -326,6 +357,9 @@ impl Actor {
             }
             thread.pending.clear();
             thread.run = None;
+            for waiter in std::mem::take(&mut thread.waiters) {
+                waiter.fail(&reason);
+            }
             thread.stopping = false;
             for waiter in std::mem::take(&mut thread.stop_waiters) {
                 let _ = waiter.send(Err(ProviderError::Unavailable(reason.clone())));

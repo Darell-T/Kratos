@@ -130,8 +130,8 @@ fn run_server(
         let usage = UsageTracker::default();
         let port = listener.local_addr()?.port();
         let (limit_stops, stops) = mpsc::unbounded_channel();
-        let codex = start_codex(config, port, &hub, &store, &usage, limit_stops).await?;
-        let claude = start_claude(config, &hub, &store, &codex).await?;
+        let codex = start_codex(config, port, &hub, &store, &usage, limit_stops.clone()).await?;
+        let claude = start_claude(config, &hub, &store, &codex, &usage, limit_stops).await?;
         let providers = Providers {
             codex: codex.as_ref().ok().cloned(),
             claude: claude.as_ref().ok().cloned(),
@@ -193,6 +193,8 @@ async fn start_claude(
     hub: &Hub,
     store: &StoreThread,
     codex: &Result<CodexProvider, String>,
+    usage: &UsageTracker,
+    limit_stops: mpsc::UnboundedSender<LimitStop>,
 ) -> Result<Result<ClaudeProvider, String>, StoreError> {
     match claude_settings(config) {
         Ok(mut settings) => {
@@ -204,8 +206,9 @@ async fn start_claude(
                     config.user_home.clone(),
                 ),
             });
+            let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
             Ok(Ok(
-                claude::start(settings, hub.clone(), store.clone()).await?
+                claude::start(settings, hub, store, usage, limit_stops).await?
             ))
         }
         Err(missing) => {

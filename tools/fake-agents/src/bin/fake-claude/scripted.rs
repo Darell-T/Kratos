@@ -9,7 +9,10 @@
 //! so a thread stays starting and its log holds only what the engine appends before a process is
 //! up.
 //! `get_usage` answers a plan read that a test changes with `test/usage` (see `usage_answer`), or
-//! refuses it as a CLI without the control does with `test/usageUnsupported`.
+//! refuses it as a CLI without the control does with `test/usageUnsupported`. `test/usageHold`
+//! keeps the next reads unanswered until `test/usageRelease` answers them with the plan read then
+//! set, as a slow usage endpoint does. `FAKE_CLAUDE_PLAN` names a file holding the subscription
+//! type `initialize` reports, so a test chooses which account a start signs in as.
 //! `FAKE_CLAUDE_FAIL_START` names a file: while it exists, a start exits with the exit code it
 //! holds and a "Not logged in" message, so a test chooses which starts fail by writing the file.
 
@@ -43,6 +46,9 @@ struct Script {
     received: Vec<Value>,
     interrupts: Interrupts,
     usage: Usage,
+    /// Whether reads wait for `test/usageRelease`, and the reads that wait.
+    holding_usage: bool,
+    held_usage: Vec<Value>,
 }
 
 type Shared = Arc<Mutex<Script>>;
@@ -61,6 +67,8 @@ pub fn run(log: &Path) {
         received: Vec::new(),
         interrupts: Interrupts::Acknowledge,
         usage: Usage::Answer(json!({})),
+        holding_usage: false,
+        held_usage: Vec::new(),
     }));
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a localhost port is free");
     let port = listener.local_addr().expect("a bound port").port();
@@ -136,11 +144,16 @@ fn answer(script: &Shared, message: Value) {
         }
         Some("initialize") => reply(&message, initialize_response()),
         Some("interrupt") => interrupt(script, &message),
-        Some("get_usage") => match &lock(script).usage {
-            Usage::Answer(window) => reply(&message, usage_answer(window)),
-            Usage::Unsupported => fail(&message, "Unsupported control request subtype: get_usage"),
-        },
+        Some("get_usage") if lock(script).holding_usage => lock(script).held_usage.push(message),
+        Some("get_usage") => answer_usage(&lock(script).usage, &message),
         _ => fail(&message, "unsupported fake control"),
+    }
+}
+
+fn answer_usage(usage: &Usage, message: &Value) {
+    match usage {
+        Usage::Answer(window) => reply(message, usage_answer(window)),
+        Usage::Unsupported => fail(message, "Unsupported control request subtype: get_usage"),
     }
 }
 
@@ -194,15 +207,26 @@ fn control(script: &Shared, method: &Value, params: &Value) -> Value {
             };
             json!({})
         }
-        Some("test/usage") => {
-            lock(script).usage = Usage::Answer(params.clone());
-            json!({})
-        }
-        Some("test/usageUnsupported") => {
-            lock(script).usage = Usage::Unsupported;
-            json!({})
-        }
+        Some(name) if name.starts_with("test/usage") => usage_control(script, name, params),
         Some("test/exit") => std::process::exit(params["code"].as_i64().unwrap_or(1) as i32),
         other => json!({ "error": format!("unknown control {other:?}") }),
     }
+}
+
+/// The controls that steer `get_usage`: what it answers, and whether answers wait for a release.
+fn usage_control(script: &Shared, method: &str, params: &Value) -> Value {
+    let mut script = lock(script);
+    match method {
+        "test/usage" => script.usage = Usage::Answer(params.clone()),
+        "test/usageUnsupported" => script.usage = Usage::Unsupported,
+        "test/usageHold" => script.holding_usage = true,
+        "test/usageRelease" => {
+            script.holding_usage = false;
+            for held in std::mem::take(&mut script.held_usage) {
+                answer_usage(&script.usage, &held);
+            }
+        }
+        _ => return json!({ "error": format!("unknown control {method:?}") }),
+    }
+    json!({})
 }

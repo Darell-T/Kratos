@@ -231,6 +231,11 @@ fn initialize_response() -> Value {
         .find(|row| row.dir == "in" && row.msg["type"] == "control_response")
         .expect("default initialize reply");
     let mut response = row.msg["response"]["response"].clone();
+    if let Some(plan) =
+        std::env::var_os("FAKE_CLAUDE_PLAN").and_then(|file| std::fs::read_to_string(file).ok())
+    {
+        response["account"]["subscriptionType"] = json!(plan.trim());
+    }
     response["commands"] = json!([
         { "name": "synthetic-command", "description": "Synthetic command", "argumentHint": "",
           "aliases": ["synthetic-alias"], "builtin": true },

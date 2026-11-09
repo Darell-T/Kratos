@@ -51,9 +51,9 @@ impl Actor {
             StreamMessage::Assistant(assistant) => self.on_assistant(thread_id, &assistant).await,
             StreamMessage::StreamEvent(stream) => self.on_stream(thread_id, &stream),
             StreamMessage::Result(result) => self.on_result(thread_id, result).await,
-            StreamMessage::RateLimit(_)
-            | StreamMessage::ApiRetry(_)
-            | StreamMessage::Unrecognized { .. } => {}
+            StreamMessage::RateLimit(event) => self.on_rate_limit(thread_id, event),
+            // The CLI is retrying by itself, so it is still working, and nothing is sent for it.
+            StreamMessage::ApiRetry(_) | StreamMessage::Unrecognized { .. } => {}
         }
     }
 
@@ -70,6 +70,11 @@ impl Actor {
 
     /// Saves each reply and tool call of a completed assistant message (D88).
     async fn on_assistant(&mut self, thread_id: &ThreadId, assistant: &Assistant) {
+        if let Some(thread) = self.threads.get_mut(thread_id)
+            && let Some(model) = assistant.message["model"].as_str()
+        {
+            thread.answering_model = Some(model.to_owned());
+        }
         let items = wire::assistant_items(assistant);
         let Some(head) = self.threads.get(thread_id).and_then(|thread| {
             thread

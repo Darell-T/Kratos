@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use kratos_claude_client::{Claude, PermissionMode, SessionId};
-use kratos_protocol::{MessageId, ThreadSettings, TurnId};
+use kratos_protocol::{MessageId, ThreadSettings, Timestamp, TurnId};
 use tokio::task::AbortHandle;
 
 use super::actor::Reply;
@@ -33,6 +33,30 @@ impl SessionConfig {
             } else {
                 PermissionMode::Default
             },
+        }
+    }
+}
+
+/// The latest `rate_limit_event` of a turn. Only the turn's result decides whether the turn
+/// stopped at the usage limit (D39), so the event is kept until then.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct SeenLimit {
+    pub rejected: bool,
+    pub resets_at: Option<Timestamp>,
+}
+
+/// A caller waiting for the thread's CLI to be up.
+pub(super) enum Waiter {
+    /// Reads the account's usage through the session.
+    Usage(Reply<()>),
+}
+
+impl Waiter {
+    pub(super) fn fail(self, reason: &str) {
+        match self {
+            Waiter::Usage(reply) => {
+                let _ = reply.send(Err(super::ProviderError::Unavailable(reason.to_owned())));
+            }
         }
     }
 }
@@ -158,6 +182,12 @@ pub(super) struct ThreadState {
     /// Why Kratos is closing the CLI, when it chose to, in place of the exit's own text.
     pub close_reason: Option<String>,
     pub restarts: Restarts,
+    /// The latest rate limit event of the running turn, read by the turn's result.
+    pub rate_limit: Option<SeenLimit>,
+    /// The model that wrote the last reply, which names the window of the turn's context (D76).
+    pub answering_model: Option<String>,
+    /// Callers that wait for the CLI to be up, answered when it is or when it cannot start.
+    pub waiters: Vec<Waiter>,
 }
 
 impl ThreadState {
@@ -185,6 +215,9 @@ impl ThreadState {
             deadline_epoch: 0,
             close_reason: None,
             restarts: Restarts::default(),
+            rate_limit: None,
+            answering_model: None,
+            waiters: Vec::new(),
         }
     }
 

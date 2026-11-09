@@ -17,14 +17,17 @@ use kratos_protocol::{
     MessageId, MessageStatus, PauseReason, Provider, ThreadId, TurnId, TurnOutcome,
 };
 use kratos_store::{Store, StoreError, ThreadWrite};
+use tokio::sync::mpsc;
 
 use super::actor::{Actor, Done, TranscriptWork};
+use super::ends::{TurnEnd, end_turn};
 use super::threads::{InFlight, Session};
 use super::{ClaudeSettings, wire};
 use crate::hub::Hub;
 use crate::providers::changes::ChangesRecorder;
 use crate::providers::queue::{mark_refused, mark_uncertain, pause_if_waiting};
 use crate::store_thread::StoreThread;
+use crate::usage::{LimitStop, UsageTracker};
 
 const RESTARTED: &str = "Kratos restarted before Claude confirmed it had the message";
 
@@ -89,31 +92,14 @@ pub(super) fn settle_messages(
     Ok(())
 }
 
-/// Ends `turn_id` with `outcome`, in the caller's write. A failure pauses the queue behind it when
-/// messages wait, because they may no longer make sense.
-pub(super) fn end_turn(
-    write: &mut ThreadWrite<'_>,
-    turn_id: TurnId,
-    outcome: TurnOutcome,
-    changes: kratos_protocol::TurnChanges,
-) -> Result<(), StoreError> {
-    let failure = match &outcome {
-        TurnOutcome::Failed { error } => Some(error.clone()),
-        TurnOutcome::Completed | TurnOutcome::Interrupted => None,
-    };
-    write.complete_turn(turn_id.clone(), outcome, changes, None)?;
-    match failure {
-        Some(error) => pause_if_waiting(write, PauseReason::TurnFailed { turn_id, error }),
-        None => Ok(()),
-    }
-}
-
 impl Actor {
     /// Settles what the last engine left, then returns the actor.
     pub(super) async fn recover(
         settings: ClaudeSettings,
         hub: Hub,
         store: StoreThread,
+        usage: UsageTracker,
+        limit_stops: mpsc::UnboundedSender<LimitStop>,
     ) -> Result<Actor, StoreError> {
         let unfinished = store.call(unfinished_claude_work).await?;
         for (thread_id, work) in unfinished {
@@ -157,7 +143,7 @@ impl Actor {
             })
             .await?;
         }
-        Ok(Actor::new(settings, hub, store))
+        Ok(Actor::new(settings, hub, store, usage, limit_stops))
     }
 
     /// A CLI ended. The turn it ran ends as failed and the queue behind it pauses. A message it was
@@ -207,12 +193,7 @@ impl Actor {
         .finish();
         let ended = self
             .write(thread_id, move |write| match run {
-                Some(turn_id) => end_turn(
-                    write,
-                    turn_id,
-                    TurnOutcome::Failed { error: reason },
-                    changes,
-                ),
+                Some(turn_id) => end_turn(write, turn_id, TurnEnd::failed(reason), changes),
                 // No turn started, but messages were in flight, so the user must hear why the
                 // process ended.
                 None => write

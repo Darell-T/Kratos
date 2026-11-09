@@ -63,8 +63,12 @@ async fn launches_claude_lazily_and_delivers_queued_messages_one_turn_at_a_time_
     harness.wait_written(&launch, &[A]).await;
     let received = harness.received(&launch).await;
     assert_eq!(received[0]["request"]["subtype"], "initialize");
+    let user = received
+        .iter()
+        .find(|frame| frame["type"] == "user")
+        .unwrap();
     assert_eq!(
-        received[1]["message"]["content"],
+        user["message"]["content"],
         json!([{ "type": "text", "text": "Fix the test" }])
     );
     assert_eq!(harness.message(A).await.status, MessageStatus::Submitting);

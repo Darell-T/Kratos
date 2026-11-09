@@ -373,6 +373,18 @@ async fn starts_a_session_with_initialize_first_and_registers_no_hooks_or_tool_s
 
     assert_eq!(received[0]["type"], "control_request");
     assert_eq!(received[0]["request"], json!({ "subtype": "initialize" }));
-    assert_eq!(received[1]["type"], "user");
-    assert_eq!(received.len(), 2, "nothing else was written");
+    // The usage read and the message are written together once Claude is up, in either order.
+    let mut after: Vec<_> = received[1..]
+        .iter()
+        .map(|frame| {
+            if frame["type"] == "user" {
+                "user".to_owned()
+            } else {
+                frame["request"].to_string()
+            }
+        })
+        .collect();
+    after.sort();
+    let read = json!({ "subtype": "get_usage", "skip_behaviors": true }).to_string();
+    assert_eq!(after, ["user".to_owned(), read], "nothing else was written");
 }

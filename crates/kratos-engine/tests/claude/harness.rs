@@ -4,6 +4,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -11,7 +12,9 @@ use kratos_claude_client::{SessionId, transcript_path};
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::providers::Sent;
 use kratos_engine::providers::claude::{self, ClaudeProvider, ClaudeSettings};
+use kratos_engine::scheduler::{self, Clock, Providers, SchedulerHandle};
 use kratos_engine::store_thread::{self, StoreThread};
+use kratos_engine::usage::{LimitStop, UsageTracker};
 use kratos_protocol::{
     CreateThread, CreateWorkspace, Message, MessageId, MessageInput, MessageOrigin, RequiredText,
     Seq, ThreadDetails, ThreadEvent, ThreadEventBody, ThreadId, ThreadSettings,
@@ -21,6 +24,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
 /// How long a test waits for something it expects. Generous: CI machines stall.
 pub const WAIT: Duration = Duration::from_secs(20);
@@ -49,6 +53,8 @@ pub struct Options {
     pub restart_wait: Duration,
     pub max_restarts: u32,
     pub settings: ThreadSettings,
+    /// The time the account's usage is judged at, when a test moves it by hand.
+    pub clock: Option<Arc<dyn Clock>>,
 }
 
 impl Default for Options {
@@ -61,6 +67,7 @@ impl Default for Options {
             restart_wait: Duration::from_millis(1),
             max_restarts: 5,
             settings: ThreadSettings::default(),
+            clock: None,
         }
     }
 }
@@ -104,6 +111,10 @@ pub struct Harness {
     pub hub: Hub,
     pub store: StoreThread,
     pub provider: ClaudeProvider,
+    pub usage: UsageTracker,
+    /// Usage-limit stops, until a test starts the scheduler, which takes them.
+    pub stops: Option<mpsc::UnboundedReceiver<LimitStop>>,
+    pub scheduler: Option<SchedulerHandle>,
     pub thread_id: ThreadId,
     store_runner: std::thread::JoinHandle<()>,
     events: EventPages,
@@ -139,6 +150,10 @@ impl Harness {
         let env_set: Vec<(OsString, OsString)> = vec![
             ("FAKE_CLAUDE_LOG".into(), log.clone().into()),
             ("FAKE_CLAUDE_FAIL_START".into(), fail_start.clone().into()),
+            (
+                "FAKE_CLAUDE_PLAN".into(),
+                root.path().join("plan").into_os_string(),
+            ),
         ];
         let settings = ClaudeSettings {
             tools: None,
@@ -152,6 +167,10 @@ impl Harness {
             max_restarts: options.max_restarts,
         };
         let mut settings = settings;
+        let usage = options
+            .clock
+            .map_or_else(UsageTracker::default, UsageTracker::with_clock);
+        let (limit_stops, stops) = mpsc::unbounded_channel();
         let runner = if options.tools {
             use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
             let server_folder = root.path().join("command-server");
@@ -176,13 +195,12 @@ impl Harness {
                 platform: kratos_command_safety::DangerousCommandPlatform::host(),
                 mcp: None,
             };
-            let (limit_stops, _) = tokio::sync::mpsc::unbounded_channel();
             let runner = codex::start(
                 config,
                 hub.clone(),
                 store_thread.clone(),
-                kratos_engine::usage::UsageTracker::default(),
-                limit_stops,
+                UsageTracker::default(),
+                limit_stops.clone(),
             )
             .await
             .unwrap();
@@ -194,9 +212,15 @@ impl Harness {
         } else {
             None
         };
-        let provider = claude::start(settings, hub.clone(), store_thread.clone())
-            .await
-            .unwrap();
+        let provider = claude::start(
+            settings,
+            hub.clone(),
+            store_thread.clone(),
+            usage.clone(),
+            limit_stops,
+        )
+        .await
+        .unwrap();
         let events = hub
             .follow(thread_id.clone(), Seq::BEFORE_FIRST)
             .await
@@ -207,6 +231,9 @@ impl Harness {
             hub,
             store: store_thread,
             provider,
+            usage,
+            stops: Some(stops),
+            scheduler: None,
             thread_id,
             store_runner,
             events,
@@ -214,6 +241,27 @@ impl Harness {
             log,
             fail_start,
         }
+    }
+
+    /// Starts the usage scheduler on `clock`, as the engine does after the providers.
+    pub async fn start_scheduler(&mut self, clock: Arc<dyn Clock>) -> SchedulerHandle {
+        let stops = self.stops.take().expect("the scheduler starts once");
+        let providers = Providers {
+            codex: self.runner.clone(),
+            claude: Some(self.provider.clone()),
+        };
+        let handle = scheduler::start(
+            self.hub.clone(),
+            self.store.clone(),
+            self.usage.clone(),
+            providers,
+            clock,
+            stops,
+        )
+        .await
+        .unwrap();
+        self.scheduler = Some(handle.clone());
+        handle
     }
 
     /// Shuts the provider down and closes the store, then hands back the data directory, for a
@@ -231,9 +279,10 @@ impl Harness {
             thread_id,
             store_runner,
             events,
+            scheduler,
             ..
         } = self;
-        drop((hub, store, provider, events));
+        drop((hub, store, provider, events, scheduler));
         let deadline = tokio::time::Instant::now() + WAIT;
         while !store_runner.is_finished() {
             assert!(
@@ -281,6 +330,20 @@ impl Harness {
     /// Claude's home folder, where its transcripts live.
     pub fn claude_home(&self) -> PathBuf {
         self.root.path().join("home")
+    }
+
+    /// Makes every start of the fake after this one sign in under the subscription `plan`.
+    pub fn set_plan(&self, plan: &str) {
+        std::fs::write(self.root.path().join("plan"), plan).unwrap();
+    }
+
+    /// Creates another Claude thread with default settings, in a folder of its own named `name`.
+    pub async fn another_thread(&self, name: &str) -> ThreadId {
+        let folder = self.root.path().join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        self.store
+            .call(move |store| create_thread(store, &folder, ThreadSettings::default()))
+            .await
     }
 
     /// Makes every start of the fake fail with `code` until [`Self::start_working`].

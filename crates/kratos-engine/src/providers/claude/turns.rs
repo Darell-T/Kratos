@@ -7,12 +7,12 @@
 
 use kratos_claude_client::{Control, TurnResult};
 use kratos_protocol::{
-    Message, MessageId, MessageStatus, PauseReason, Provider, ThreadId, TurnId, TurnOutcome,
+    LiveUpdate, Message, MessageId, MessageStatus, PauseReason, Provider, ThreadId, TurnId,
 };
 use kratos_store::{StoreError, ThreadWrite};
 
 use super::actor::{Actor, Done, Reply};
-use super::recovery::end_turn;
+use super::ends::{Stop, TurnEnd, end_turn};
 use super::threads::{InFlight, SessionConfig};
 use super::{ProviderError, wire};
 use crate::providers::queue::mark_refused;
@@ -49,9 +49,11 @@ impl Actor {
             Some(open) if open.config == wanted => self.start_turn(thread_id, next).await,
             Some(_) => {
                 self.retire_session(thread_id);
-                self.open_session(thread_id, wanted).await;
+                let _ = self.open_session(thread_id, wanted).await;
             }
-            None => self.open_session(thread_id, wanted).await,
+            None => {
+                let _ = self.open_session(thread_id, wanted).await;
+            }
         }
     }
 
@@ -255,17 +257,20 @@ impl Actor {
         thread.restarts.reset();
         self.close_requests(thread_id, None, "Claude's turn ended")
             .await;
-        let outcome = match result.outcome {
-            kratos_claude_client::TurnOutcome::Completed => TurnOutcome::Completed,
-            kratos_claude_client::TurnOutcome::Interrupted => TurnOutcome::Interrupted,
-            kratos_claude_client::TurnOutcome::Failed { error } => TurnOutcome::Failed { error },
-        };
-        if self
-            .record_run(thread_id, ended.clone(), Some(outcome))
-            .await
-            .is_err()
-        {
+        let thread = self.threads.get_mut(thread_id).expect("found above");
+        let limit = thread.rate_limit.take();
+        let end = TurnEnd::of(&result, limit.as_ref(), thread.answering_model.as_deref());
+        let (context, stop) = (end.context.clone(), end.stop.clone());
+        let Ok(turn_id) = self.record_run(thread_id, ended.clone(), Some(end)).await else {
             return;
+        };
+        if let Some(usage) = context {
+            let turn_id = turn_id.clone();
+            self.hub
+                .publish(thread_id, LiveUpdate::Context { turn_id, usage });
+        }
+        if matches!(stop, Stop::UsageLimit { .. }) {
+            self.report_limit_stop(thread_id, turn_id);
         }
         let thread = self.threads.get_mut(thread_id).expect("found above");
         thread
@@ -294,7 +299,7 @@ impl Actor {
         &mut self,
         thread_id: &ThreadId,
         accept: Vec<MessageId>,
-        end: Option<TurnOutcome>,
+        end: Option<TurnEnd>,
     ) -> Result<TurnId, ProviderError> {
         let thread = &self.threads[thread_id];
         let (turn_id, started) = match &thread.run {
@@ -327,9 +332,7 @@ impl Actor {
             if !started {
                 write.start_turn(recorded_turn.clone())?;
             }
-            end.map_or(Ok(()), |outcome| {
-                end_turn(write, recorded_turn, outcome, changes)
-            })
+            end.map_or(Ok(()), |end| end_turn(write, recorded_turn, end, changes))
         })
         .await?;
         let thread = self.threads.get_mut(thread_id).expect("found above");

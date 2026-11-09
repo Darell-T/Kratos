@@ -115,7 +115,7 @@ impl Harness {
             hub.clone(),
             store.clone(),
             usage.clone(),
-            limit_stops,
+            limit_stops.clone(),
         )
         .await
         .unwrap();
@@ -147,6 +147,8 @@ impl Harness {
             },
             hub.clone(),
             store.clone(),
+            usage.clone(),
+            limit_stops.clone(),
         )
         .await
         .unwrap();

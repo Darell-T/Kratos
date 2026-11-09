@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::actor::{Actor, Connected, Done, SessionEvent};
-use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState};
+use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState, Waiter};
 use super::{ClaudeSettings, ProviderError, hooks, permissions, wire};
 
 /// The tools Claude Code runs commands with. Kratos runs commands itself, in the sandbox of the
@@ -56,8 +56,13 @@ impl Actor {
 
     /// Starts the thread's CLI. Inside the wait after a failure it starts nothing: the message
     /// stays queued and a timer asks again when the wait ends. A start that cannot happen at all,
-    /// such as one past the failure limit, pauses the thread and leaves its message queued.
-    pub(super) async fn open_session(&mut self, thread_id: &ThreadId, config: SessionConfig) {
+    /// such as one past the failure limit, pauses the thread and leaves its message queued. The
+    /// error says why nothing started.
+    pub(super) async fn open_session(
+        &mut self,
+        thread_id: &ThreadId,
+        config: SessionConfig,
+    ) -> Result<(), String> {
         let thread = self.threads.get_mut(thread_id).expect("dispatch loaded it");
         let launch = match thread
             .restarts
@@ -66,15 +71,18 @@ impl Actor {
             Start::Now => launch(&self.settings, thread, &config),
             Start::After(wait) => {
                 self.start_after(thread_id, wait);
-                return;
+                return Err(format!(
+                    "Claude failed to start a moment ago and may start again in {wait:?}"
+                ));
             }
             Start::Refused(why) => Err(why),
         };
         let launch = match launch {
             Ok(launch) => launch,
             Err(why) => {
-                self.pause_unavailable_if_waiting(thread_id, why).await;
-                return;
+                self.pause_unavailable_if_waiting(thread_id, why.clone())
+                    .await;
+                return Err(why);
             }
         };
         thread.epoch += 1;
@@ -100,6 +108,41 @@ impl Actor {
                 }),
             }
         });
+        Ok(())
+    }
+
+    /// Runs `waiter` once the thread's CLI is up, starting one when none runs. A CLI that cannot
+    /// start answers the waiter with why.
+    pub(super) async fn when_open(&mut self, thread_id: &ThreadId, waiter: Waiter) {
+        let thread = self
+            .threads
+            .get_mut(thread_id)
+            .expect("the caller loaded it");
+        match thread.session {
+            Session::Open(_) => self.serve(thread_id, waiter),
+            Session::Opening => thread.waiters.push(waiter),
+            Session::Closed => {
+                thread.waiters.push(waiter);
+                let config = SessionConfig::of(&thread.settings);
+                if let Err(why) = self.open_session(thread_id, config).await {
+                    self.fail_waiters(thread_id, &why);
+                }
+            }
+        }
+    }
+
+    fn serve(&self, thread_id: &ThreadId, waiter: Waiter) {
+        match waiter {
+            Waiter::Usage(reply) => self.read_usage(thread_id, Some(reply)),
+        }
+    }
+
+    fn fail_waiters(&mut self, thread_id: &ThreadId, why: &str) {
+        if let Some(thread) = self.threads.get_mut(thread_id) {
+            for waiter in std::mem::take(&mut thread.waiters) {
+                waiter.fail(why);
+            }
+        }
     }
 
     /// Asks the thread to look for work again once `wait` has passed. One timer serves the thread,
@@ -152,13 +195,15 @@ impl Actor {
                     incoming,
                     initialized,
                 } = *connected;
+                let plan = wire::plan(&initialized);
+                self.note_plan(&plan);
                 let thread = self.threads.get_mut(&thread_id).expect("checked above");
                 thread.session = Session::Open(OpenSession {
                     claude,
                     config,
                     started: false,
                     worked: false,
-                    plan: wire::plan(&initialized),
+                    plan,
                 });
                 tokio::spawn(forward(
                     thread_id.clone(),
@@ -166,6 +211,11 @@ impl Actor {
                     incoming,
                     self.frames.clone(),
                 ));
+                let waiters = std::mem::take(&mut thread.waiters);
+                self.read_usage(&thread_id, None);
+                for waiter in waiters {
+                    self.serve(&thread_id, waiter);
+                }
                 self.dispatch(&thread_id).await;
             }
             Err(error) => {
@@ -175,6 +225,7 @@ impl Actor {
                 thread
                     .restarts
                     .failed(Instant::now(), self.settings.restart_wait, reason.clone());
+                self.fail_waiters(&thread_id, &reason);
                 self.pause_unavailable_if_waiting(&thread_id, reason).await;
             }
         }
