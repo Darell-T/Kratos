@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use kratos_engine::providers::codex::ProviderError;
+use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
     AccessLimit, MessageOrigin, MessageStatus, PauseReason, Permission, Seq, ThreadEventBody,
 };

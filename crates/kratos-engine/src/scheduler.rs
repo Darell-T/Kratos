@@ -22,7 +22,8 @@ use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::hub::Hub;
-use crate::providers::codex::{CodexProvider, Continued};
+use crate::providers::Continued;
+use crate::providers::codex::CodexProvider;
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 

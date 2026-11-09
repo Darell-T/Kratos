@@ -20,8 +20,9 @@ use super::actor::{Actor, Done, Opened, Server};
 use super::profiles::Profile;
 use super::recovery::{self, EndReason, EndingTurn, Unfinished};
 use super::threads::{Link, ThreadState, Turn};
-use super::{CodexSettings, ProviderError, policy, queue, wire};
+use super::{CodexSettings, ProviderError, policy, wire};
 use crate::mcp::{self, McpServer};
+use crate::providers::queue;
 
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(1);
 const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);

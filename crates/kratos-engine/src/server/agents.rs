@@ -20,7 +20,7 @@ use super::acting::Acting;
 use super::json::read_json;
 use super::threads::details;
 use super::{ApiError, MessagePath, ServerState, ThreadPath, json_reply, path};
-use crate::providers::codex::{MAX_PENDING_MESSAGES, Sent};
+use crate::providers::{MAX_PENDING_MESSAGES, Sent};
 
 /// How long `GET /api/usage` waits for Codex's fresh read before it answers with what it knows.
 const USAGE_REFRESH_WAIT: Duration = Duration::from_secs(10);

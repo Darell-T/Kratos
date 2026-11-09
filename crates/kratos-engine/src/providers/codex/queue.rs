@@ -5,8 +5,8 @@
 
 use kratos_codex_client::{RequestError, types};
 use kratos_protocol::{
-    ContinuationId, ContinuationState, Message, MessageId, MessageInput, MessageOrigin,
-    MessageStatus, PauseReason, RequiredText, ThreadId, TurnId,
+    ContinuationId, Message, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason,
+    RequiredText, ThreadId,
 };
 use kratos_store::{Enqueued, QueuePlace, StoreError, ThreadWrite};
 use uuid::Uuid;
@@ -15,81 +15,12 @@ use super::actor::{Actor, Command, Done, Reply};
 use super::threads::{Link, Turn};
 use super::turns::read_history;
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
+use crate::providers::queue::{
+    held_message, pause_if_waiting, resume_queue, resume_when_settled, settling_action,
+};
 
 /// The text of the message Kratos sends to carry on a turn that stopped at a usage limit (D39).
 const CONTINUATION_TEXT: &str = "Continue the task you were working on. You stopped earlier because the usage limit was reached.";
-
-/// Whether a message holds the queue until the user settles it: Codex refused it, or its delivery
-/// is uncertain (D11).
-pub(super) fn holds_queue(status: &MessageStatus) -> bool {
-    matches!(
-        status,
-        MessageStatus::Failed { .. } | MessageStatus::Unknown { .. }
-    )
-}
-
-fn settling_action(message: &Message) -> Option<String> {
-    let message_id = &message.id;
-    match message.status {
-        MessageStatus::Submitting => {
-            Some(format!("Wait for message {message_id} to finish sending"))
-        }
-        MessageStatus::Failed { .. } => Some(format!("Retry or remove message {message_id}")),
-        MessageStatus::Unknown { .. } => Some(format!("Discard message {message_id}")),
-        MessageStatus::Queued | MessageStatus::Accepted { .. } | MessageStatus::Cancelled => None,
-    }
-}
-
-pub(super) fn held_message(write: &ThreadWrite<'_>) -> Result<Option<Message>, StoreError> {
-    Ok(write
-        .pending_messages()?
-        .into_iter()
-        .find(|message| holds_queue(&message.status)))
-}
-
-pub(super) fn pause_if_waiting(
-    write: &mut ThreadWrite<'_>,
-    reason: PauseReason,
-) -> Result<(), StoreError> {
-    if !write.pending_messages()?.is_empty() {
-        write.pause(reason)?;
-    }
-    Ok(())
-}
-
-/// Marks a message Codex refused before acting on it, and pauses the queue on it until the user
-/// retries or removes it.
-pub(super) fn mark_refused(
-    write: &mut ThreadWrite<'_>,
-    message_id: MessageId,
-    error: String,
-) -> Result<(), StoreError> {
-    write.set_message_status(
-        &message_id,
-        MessageStatus::Failed {
-            error: error.clone(),
-        },
-    )?;
-    write.pause(PauseReason::Refused { message_id, error })?;
-    Ok(())
-}
-
-/// Marks a message whose delivery is uncertain, and pauses the queue on it until Codex's history or
-/// the user settles it.
-pub(super) fn mark_uncertain(
-    write: &mut ThreadWrite<'_>,
-    message_id: MessageId,
-    error: String,
-) -> Result<(), StoreError> {
-    write.set_message_status(
-        &message_id,
-        MessageStatus::Unknown {
-            error: error.clone(),
-        },
-    )?;
-    write.pause(PauseReason::DeliveryUncertain { message_id, error })?;
-    Ok(())
-}
 
 impl Actor {
     pub(super) async fn send(
@@ -268,31 +199,10 @@ impl Actor {
         self.dispatch(&thread_id).await;
     }
 
-    /// Lets a paused queue run again. Refused while a message is still being sent, which the user
-    /// can only wait out, and while a message holds the queue, because only the user may settle it
-    /// (D11). An open continuation is cancelled: the user took over (D39).
+    /// Lets a paused queue run again. See [`resume_queue`].
     pub(super) async fn resume(&mut self, thread_id: &ThreadId) -> Result<(), ProviderError> {
         self.load(thread_id).await?;
-        let resumed = self
-            .write(thread_id, |write| {
-                // Unlike held_message, a message still being sent refuses the resume too.
-                let refusal = write.pending_messages()?.iter().find_map(settling_action);
-                if let Some(refusal) = refusal {
-                    return Ok(Err(format!("{refusal} before resuming")));
-                }
-                if let Some(open) = write.open_continuation()? {
-                    write.update_continuation(
-                        &open.id,
-                        open.resets_at,
-                        ContinuationState::Cancelled {
-                            reason: "The user resumed the thread".into(),
-                        },
-                    )?;
-                }
-                write.resume()?;
-                Ok(Ok(()))
-            })
-            .await?;
+        let resumed = self.write(thread_id, resume_queue).await?;
         resumed.map_err(ProviderError::Conflict)
     }
 
@@ -373,44 +283,4 @@ fn blocks_continuation(write: &mut ThreadWrite<'_>) -> Result<Option<String>, St
         None | Some(PauseReason::UsageLimit { .. } | PauseReason::Unavailable { .. }) => None,
         Some(_) => Some("The thread is paused for another reason; resume it yourself".to_owned()),
     })
-}
-
-fn resume_when_settled(write: &mut ThreadWrite<'_>) -> Result<(), StoreError> {
-    let held = held_message(write)?.is_some();
-    let paused_by_message = matches!(
-        write.provider_thread()?.paused,
-        Some(PauseReason::Refused { .. } | PauseReason::DeliveryUncertain { .. })
-    );
-    if paused_by_message && !held {
-        write.resume()?;
-    }
-    Ok(())
-}
-
-/// Records each found message as accepted by its turn, then lifts a delivery pause once nothing
-/// uncertain is left, or turns it into an interrupted pause while messages wait.
-pub(super) fn settle_from_history(
-    write: &mut ThreadWrite<'_>,
-    found: Vec<(kratos_protocol::MessageId, TurnId)>,
-) -> Result<(), StoreError> {
-    for (message_id, turn_id) in found {
-        write.set_message_status(&message_id, MessageStatus::Accepted { turn_id })?;
-    }
-    let pending = write.pending_messages()?;
-    let held = pending.iter().any(|message| holds_queue(&message.status));
-    // Only a delivery pause lifts here; resume_when_settled also lifts a refusal's.
-    let paused_for_delivery = matches!(
-        write.provider_thread()?.paused,
-        Some(PauseReason::DeliveryUncertain { .. })
-    );
-    match (paused_for_delivery && !held, pending.is_empty()) {
-        (false, _) => {}
-        (true, true) => {
-            write.resume()?;
-        }
-        (true, false) => {
-            write.pause(PauseReason::Interrupted)?;
-        }
-    }
-    Ok(())
 }

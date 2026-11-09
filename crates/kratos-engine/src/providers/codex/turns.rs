@@ -14,7 +14,8 @@ use super::actor::{Actor, Done, MAX_STARTING, Reply};
 use super::approvals::settle_closed;
 use super::profiles::Profile;
 use super::threads::{Turn, TurnWork};
-use super::{ProviderError, policy, queue, wire};
+use super::{ProviderError, policy, wire};
+use crate::providers::queue;
 
 /// How long `turn/interrupt` may take to answer.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);

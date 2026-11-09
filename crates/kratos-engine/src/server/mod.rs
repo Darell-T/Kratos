@@ -32,7 +32,8 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::hub::Hub;
-use crate::providers::codex::{CodexProvider, ProviderError};
+use crate::providers::ProviderError;
+use crate::providers::codex::CodexProvider;
 use crate::scheduler::{SchedulerError, SchedulerHandle};
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;

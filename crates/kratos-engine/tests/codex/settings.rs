@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use kratos_engine::providers::codex::ProviderError;
+use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
     AccessLimit, AskReason, ContextLimit, MessageOrigin, Permission, ThreadEventBody,
     ThreadSettings,

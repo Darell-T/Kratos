@@ -42,13 +42,11 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::hub::Hub;
 use crate::mcp::McpServer;
+use crate::providers::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent};
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 
 pub use profiles::ProtectedFolders;
-
-/// The most undelivered messages one thread holds (D85).
-pub(crate) const MAX_PENDING_MESSAGES: usize = 10;
 
 /// How the provider starts Codex and how long it waits on it.
 #[derive(Clone, Debug)]
@@ -71,56 +69,6 @@ pub struct CodexSettings {
     pub request_timeout: Duration,
     pub platform: DangerousCommandPlatform,
     pub mcp: Option<McpServer>,
-}
-
-/// What became of a continuation the scheduler sent (D39).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Continued {
-    Queued,
-    /// The continuation was cancelled or sent before; there is nothing to send.
-    NotOpen,
-    /// The thread cannot continue on its own, and the text says why: the user decides.
-    NeedsUser(String),
-}
-
-/// What became of a message sent to a thread.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Sent {
-    Queued(Message),
-    /// The client sent an id the thread already has; this is that message.
-    Existing(Message),
-    /// The thread's queue is full; nothing was stored.
-    Full {
-        pending: usize,
-    },
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
-    #[error("Unknown thread {0}")]
-    UnknownThread(ThreadId),
-    #[error("Unknown message {0}")]
-    UnknownMessage(MessageId),
-    #[error("Unknown approval {0}")]
-    UnknownApproval(ApprovalId),
-    #[error("Unknown question {0}")]
-    UnknownQuestion(QuestionId),
-    /// The request does not fit the thread's state, for example a retry of a message that did not
-    /// fail. The text says what would.
-    #[error("{0}")]
-    Conflict(String),
-    #[error("{0}")]
-    Forbidden(String),
-    /// The setting is not one the pinned Codex supports, or is out of its reported bounds (D76).
-    #[error("{0}")]
-    Unsupported(String),
-    /// Codex cannot run: it is missing, failed to start, or keeps exiting.
-    #[error("{0}")]
-    Unavailable(String),
-    #[error(transparent)]
-    Store(#[from] StoreError),
-    #[error("The Codex provider has stopped")]
-    Stopped,
 }
 
 /// The handle to the Codex actor. Clones share it.

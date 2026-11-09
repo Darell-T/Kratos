@@ -11,7 +11,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::providers::codex::{ProtectedFolders, queue};
+use crate::providers::codex::ProtectedFolders;
+use crate::providers::queue;
 use crate::store_thread;
 
 const WAIT: Duration = Duration::from_secs(20);

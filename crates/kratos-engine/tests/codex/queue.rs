@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use kratos_engine::providers::codex::{ProviderError, Sent};
+use kratos_engine::providers::{ProviderError, Sent};
 use kratos_protocol::{MessageStatus, PauseReason, ThreadEventBody, TurnOutcome};
 use serde_json::json;
 
