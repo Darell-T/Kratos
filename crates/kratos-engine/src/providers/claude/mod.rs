@@ -80,6 +80,8 @@ pub struct ClaudeSettings {
     pub env_set: Vec<(OsString, OsString)>,
     /// How long a stopped turn may take to end before Kratos closes the CLI.
     pub stop_timeout: Duration,
+    /// A session nobody used for this long is closed, and the thread's next message resumes it.
+    pub idle_close: Duration,
     /// The deadline of a control request to the CLI, such as an interrupt.
     pub control_timeout: Duration,
     /// The wait after a CLI's first failure to run. Each failure in a row doubles it (L4).

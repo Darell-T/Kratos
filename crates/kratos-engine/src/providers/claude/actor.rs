@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
+use std::time::Duration;
 
 use kratos_claude_client::{
     Claude, ConnectError, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError,
@@ -29,6 +30,9 @@ use crate::usage::{LimitStop, UsageTracker};
 /// How many frames from the CLI processes wait for the actor. A full queue stops the readers,
 /// which stops the CLIs writing, so a slow actor slows Claude instead of growing without bound.
 const QUEUED_FRAMES: usize = 256;
+/// How often the actor looks for sessions idle past the idle window, so one closes at most this
+/// long after its window ends.
+const IDLE_CHECK_EVERY: Duration = Duration::from_secs(60);
 
 pub(super) type Reply<T> = oneshot::Sender<Result<T, ProviderError>>;
 
@@ -227,6 +231,8 @@ impl Actor {
     }
 
     pub(super) async fn run(mut self, mut commands: mpsc::Receiver<Command>) {
+        let mut idle_check = tokio::time::interval(self.settings.idle_close.min(IDLE_CHECK_EVERY));
+        idle_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -243,6 +249,7 @@ impl Actor {
                 },
                 Some(done) = self.completions.recv() => self.on_done(done).await,
                 Some(event) = self.incoming.recv() => self.on_event(event).await,
+                _ = idle_check.tick() => self.close_idle_sessions(),
             }
         }
     }

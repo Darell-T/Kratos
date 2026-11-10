@@ -1,10 +1,13 @@
 //! What a CLI sends: messages become thread events and live updates, and controls reach Kratos
 //! permission, question, hook, and MCP handlers.
 
+use std::time::Instant;
+
 use kratos_claude_client::{Assistant, Incoming, StreamEvent, StreamMessage};
 use kratos_protocol::{LiveUpdate, ThreadEventBody, ThreadId, TurnId};
 
 use super::actor::{Actor, SessionEvent};
+use super::threads::ThreadState;
 use super::wire;
 
 impl Actor {
@@ -21,6 +24,13 @@ impl Actor {
         if !current {
             // A request dropped here is answered with an error, so the old CLI is not left waiting.
             return;
+        }
+        if let Some(open) = self
+            .threads
+            .get_mut(&thread_id)
+            .and_then(ThreadState::open_mut)
+        {
+            open.last_active = Instant::now();
         }
         match incoming {
             Incoming::Message(message) => self.on_message(&thread_id, message).await,

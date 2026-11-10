@@ -138,6 +138,7 @@ impl Harness {
                     "FAKE_CLAUDE_LOG".into(),
                     root.path().join("fake-claude.log").into(),
                 )],
+                idle_close: Duration::from_secs(30 * 60),
                 stop_timeout: Duration::from_secs(10),
                 control_timeout: Duration::from_secs(30),
                 restart_wait: Duration::from_secs(1),

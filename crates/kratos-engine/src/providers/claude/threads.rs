@@ -78,6 +78,8 @@ pub(super) struct OpenSession {
     pub plan: Option<String>,
     /// The slash commands `initialize` listed, which the CLI fixes for the life of the process.
     pub commands: Vec<kratos_claude_client::SlashCommand>,
+    /// When the process last sent a frame or served a request.
+    pub last_active: Instant,
 }
 
 pub(super) enum Session {
@@ -230,6 +232,14 @@ impl ThreadState {
 
     pub(super) fn is_busy(&self) -> bool {
         !self.pending.is_empty() || matches!(self.session, Session::Opening)
+    }
+
+    /// When the open process last did anything, if it has nothing to do: no message in flight,
+    /// no stop, and no command running.
+    pub(super) fn idle_since(&self) -> Option<Instant> {
+        let open = self.open()?;
+        let has_work = !self.pending.is_empty() || self.stopping || !self.commands.is_empty();
+        (!has_work).then_some(open.last_active)
     }
 
     pub(super) fn turn_settings(&self) -> &ThreadSettings {

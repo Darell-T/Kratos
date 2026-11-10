@@ -129,7 +129,10 @@ impl Actor {
             .get_mut(thread_id)
             .expect("when_open loaded the thread above");
         match thread.session {
-            Session::Open(_) => self.serve(thread_id, waiter),
+            Session::Open(ref mut open) => {
+                open.last_active = Instant::now();
+                self.serve(thread_id, waiter);
+            }
             Session::Opening => thread.waiters.push(waiter),
             Session::Closed => {
                 thread.waiters.push(waiter);
@@ -223,6 +226,7 @@ impl Actor {
                     worked: false,
                     plan,
                     commands,
+                    last_active: Instant::now(),
                 });
                 tokio::spawn(forward(
                     thread_id.clone(),
@@ -263,6 +267,26 @@ impl Actor {
         thread.epoch += 1;
         if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
             tokio::spawn(async move { open.claude.close().await });
+        }
+    }
+
+    /// Ends every process that sat idle for the idle window. Its thread loses nothing: the next
+    /// message resumes the session, as Zeron does for a warm session nobody comes back to.
+    pub(super) fn close_idle_sessions(&mut self) {
+        let now = Instant::now();
+        let idle_close = self.settings.idle_close;
+        let idle: Vec<ThreadId> = self
+            .threads
+            .iter()
+            .filter(|(_, thread)| {
+                thread
+                    .idle_since()
+                    .is_some_and(|since| now.duration_since(since) >= idle_close)
+            })
+            .map(|(thread_id, _)| thread_id.clone())
+            .collect();
+        for thread_id in idle {
+            self.retire_session(&thread_id);
         }
     }
 

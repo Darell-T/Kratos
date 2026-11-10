@@ -445,3 +445,63 @@ async fn lets_steered_input_that_outlives_a_stopped_run_finish_and_stops_it_with
         "{paused:?}"
     );
 }
+
+#[tokio::test]
+async fn an_idle_session_closes_after_the_idle_window_and_the_next_message_resumes_it() {
+    // Catches an unused CLI kept running forever, and a closed idle session whose next message
+    // starts a new conversation instead of resuming the thread's own.
+    let mut harness = Harness::start(Options {
+        idle_close: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    let first = harness.begin(A, 1).await;
+    harness.finish(&first, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+
+    harness.wait_ended(&first).await;
+    assert_eq!(harness.details().await.paused, None);
+    harness.send(B, "B").await;
+    let second = harness.launch(2).await;
+
+    assert_eq!(
+        second.value("--resume"),
+        Some(first.session().to_string().as_str())
+    );
+    assert!(second.value("--session-id").is_none());
+    harness.wait_written(&second, &[B]).await;
+    harness.init(&second).await;
+    harness.accept(&second, B).await;
+    harness.message_becomes(B, |s| accepted_by(s, B)).await;
+}
+
+#[tokio::test]
+async fn a_turn_that_runs_past_the_idle_window_keeps_its_process() {
+    // Catches the idle check closing a CLI that is working on a turn.
+    let mut harness = Harness::start(Options {
+        idle_close: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+
+    assert!(harness.is_running(&launch), "the working CLI still runs");
+    harness.finish(&launch, &[A], json!({})).await;
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+                ..
+            }
+        ),
+        "{ended:?}"
+    );
+}

@@ -50,6 +50,7 @@ pub fn interrupted() -> Value {
 pub struct Options {
     pub tools: bool,
     pub stop_timeout: Duration,
+    pub idle_close: Duration,
     pub control_timeout: Duration,
     pub restart_wait: Duration,
     pub max_restarts: u32,
@@ -63,6 +64,7 @@ impl Default for Options {
         Options {
             tools: false,
             stop_timeout: Duration::from_secs(5),
+            idle_close: Duration::from_secs(30 * 60),
             control_timeout: Duration::from_secs(10),
             restart_wait: Duration::from_millis(1),
             max_restarts: 5,
@@ -161,6 +163,7 @@ impl Harness {
             claude_home: root.path().join("home"),
             env_set,
             stop_timeout: options.stop_timeout,
+            idle_close: options.idle_close,
             control_timeout: options.control_timeout,
             restart_wait: options.restart_wait,
             max_restarts: options.max_restarts,
