@@ -14,7 +14,7 @@ string_id! {
 )]
 pub enum TurnOutcome {
     Completed,
-    /// The user stopped it, or Kratos did at its deadline.
+    /// The user stopped it, or an earlier engine did at the turn deadline it no longer has.
     Interrupted,
     Failed {
         error: String,
