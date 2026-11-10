@@ -49,7 +49,6 @@ pub fn interrupted() -> Value {
 
 pub struct Options {
     pub tools: bool,
-    pub turn_timeout: Duration,
     pub stop_timeout: Duration,
     pub control_timeout: Duration,
     pub restart_wait: Duration,
@@ -63,7 +62,6 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             tools: false,
-            turn_timeout: Duration::from_secs(600),
             stop_timeout: Duration::from_secs(5),
             control_timeout: Duration::from_secs(10),
             restart_wait: Duration::from_millis(1),
@@ -162,7 +160,6 @@ impl Harness {
             program: fake_agents::executable("fake-claude"),
             claude_home: root.path().join("home"),
             env_set,
-            turn_timeout: options.turn_timeout,
             stop_timeout: options.stop_timeout,
             control_timeout: options.control_timeout,
             restart_wait: options.restart_wait,
@@ -191,7 +188,6 @@ impl Harness {
                 env_set: Vec::new(),
                 server_folder,
                 protected: protected.clone(),
-                turn_timeout: options.turn_timeout,
                 stop_timeout: options.stop_timeout,
                 request_timeout: options.control_timeout,
                 platform: kratos_command_safety::DangerousCommandPlatform::host(),

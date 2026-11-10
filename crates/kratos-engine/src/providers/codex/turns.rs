@@ -35,20 +35,14 @@ pub(super) enum Delivery {
     Steer,
 }
 
-/// Who asked Codex to stop a turn, which decides what follows when Codex does not stop it.
-pub(super) enum Stopper {
-    /// The turn ran out of time. Nothing would ask again, so Codex is closed instead.
-    Deadline,
-    /// Users who asked. They hear whether Codex stopped the turn, and may ask again.
-    Users(Vec<Reply<()>>),
-}
+/// The users who asked Codex to stop a turn. They hear whether Codex stopped it, and may ask
+/// again.
+pub(super) struct StopWaiters(pub(super) Vec<Reply<()>>);
 
-impl Stopper {
+impl StopWaiters {
     pub(super) fn tell(self, result: impl Fn() -> Result<(), ProviderError>) {
-        if let Stopper::Users(waiters) = self {
-            for waiter in waiters {
-                let _ = waiter.send(result());
-            }
+        for waiter in self.0 {
+            let _ = waiter.send(result());
         }
     }
 }
@@ -454,7 +448,6 @@ impl Actor {
         thread.turn = Turn::Running {
             turn_id: turn_id.clone(),
             stopping: false,
-            deadline_epoch: 0,
             work,
         };
         if recorded.is_err() {
@@ -471,9 +464,8 @@ impl Actor {
             self.finish_turn(thread_id, finished).await;
             return;
         }
-        self.arm_deadline(thread_id);
         if !stop_waiters.is_empty() {
-            self.interrupt(thread_id, Stopper::Users(stop_waiters));
+            self.interrupt(thread_id, StopWaiters(stop_waiters));
         }
     }
 
@@ -587,56 +579,6 @@ impl Actor {
         Ok(())
     }
 
-    pub(super) fn arm_deadline(&mut self, thread_id: &ThreadId) {
-        let Some(Turn::Running {
-            turn_id,
-            deadline_epoch,
-            ..
-        }) = self
-            .threads
-            .get_mut(thread_id)
-            .map(|thread| &mut thread.turn)
-        else {
-            return;
-        };
-        *deadline_epoch += 1;
-        let (epoch, turn_id, thread_id) = (*deadline_epoch, turn_id.clone(), thread_id.clone());
-        let timeout = self.settings.turn_timeout;
-        self.spawn(async move {
-            tokio::time::sleep(timeout).await;
-            Done::Deadline {
-                thread_id,
-                turn_id,
-                epoch,
-            }
-        });
-    }
-
-    /// The turn ran out of time. One that waits on the user is not counted, and its deadline
-    /// starts again; any other is stopped, and the queue behind it pauses.
-    pub(super) async fn on_deadline(&mut self, thread_id: ThreadId, turn_id: TurnId, epoch: u64) {
-        let is_current = matches!(
-            self.threads.get(&thread_id).map(|thread| &thread.turn),
-            Some(Turn::Running { turn_id: running, stopping: false, deadline_epoch, .. })
-                if *running == turn_id && *deadline_epoch == epoch
-        );
-        if !is_current {
-            return;
-        }
-        if self.requests.blocks(&thread_id) {
-            self.arm_deadline(&thread_id);
-            return;
-        }
-        let paused = self
-            .write(&thread_id, move |write| {
-                write.pause(PauseReason::TimedOut { turn_id })
-            })
-            .await;
-        if paused.is_ok() {
-            self.interrupt(&thread_id, Stopper::Deadline);
-        }
-    }
-
     pub(super) async fn stop(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
         if let Err(error) = self.load(thread_id).await {
             let _ = reply.send(Err(error));
@@ -647,11 +589,11 @@ impl Actor {
             Turn::Idle => drop(reply.send(Ok(()))),
             // Stopped as soon as its id is known.
             Turn::Starting { stop_waiters, .. } => stop_waiters.push(reply),
-            Turn::Running { .. } => self.interrupt(thread_id, Stopper::Users(vec![reply])),
+            Turn::Running { .. } => self.interrupt(thread_id, StopWaiters(vec![reply])),
         }
     }
 
-    pub(super) fn interrupt(&mut self, thread_id: &ThreadId, stopper: Stopper) {
+    pub(super) fn interrupt(&mut self, thread_id: &ThreadId, stopper: StopWaiters) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
@@ -695,7 +637,7 @@ impl Actor {
         thread_id: ThreadId,
         turn_id: TurnId,
         result: Result<(), RequestError>,
-        stopper: Stopper,
+        stopper: StopWaiters,
     ) {
         let still_running = self
             .threads
@@ -712,10 +654,6 @@ impl Actor {
                     });
                 }
                 stopper.tell(|| Ok(()));
-            }
-            Err(error) if still_running && matches!(stopper, Stopper::Deadline) => {
-                self.stop_server(&format!("a timed-out turn did not stop: {error}"))
-                    .await;
             }
             Err(error) => {
                 if still_running

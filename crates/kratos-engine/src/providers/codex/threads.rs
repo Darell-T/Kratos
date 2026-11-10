@@ -104,8 +104,6 @@ pub(super) enum Turn {
         turn_id: TurnId,
         /// Set once `turn/interrupt` is out or accepted.
         stopping: bool,
-        /// Changes whenever the deadline is set again, so an earlier deadline's timer is ignored.
-        deadline_epoch: u64,
         work: TurnWork,
     },
 }

@@ -150,16 +150,12 @@ async fn records_the_plan_that_pays_for_the_session_and_never_the_account() {
 }
 
 #[tokio::test]
-async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_settles_stop_on_that_result_and_keeps_the_deadline_after_a_failed_stop()
+async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_settles_stop_on_that_result_and_keeps_the_turn_after_a_failed_stop()
  {
     // Catches a queued message started on a stop's acknowledgement instead of the stopped turn's
     // result, a second stop that sends a second interrupt, a stop that outlives the result that
-    // ended it, and a failed stop that leaves the turn without its deadline.
-    let mut harness = Harness::start(Options {
-        turn_timeout: Duration::from_millis(1500),
-        ..Options::default()
-    })
-    .await;
+    // ended it, and a failed stop after which Kratos stops or pauses the turn on its own.
+    let mut harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     harness.send(B, "B").await;
 
@@ -198,22 +194,16 @@ async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_settles
         "{refused:?}"
     );
     harness.interrupts(&launch, "ack").await;
-    let paused = harness
-        .paused_for(|r| matches!(r, PauseReason::TimedOut { .. }))
-        .await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
 
+    assert_eq!(harness.details().await.paused, None);
+    assert!(harness.is_running(&launch), "the turn still runs");
     assert_eq!(
-        paused,
-        PauseReason::TimedOut {
-            turn_id: TurnId::new(B.to_owned())
-        }
+        harness.controls(&launch, "interrupt").await,
+        2,
+        "only the user stops a turn"
     );
-    assert!(
-        harness.is_running(&launch),
-        "a timed-out turn is stopped, not killed"
-    );
-    assert_eq!(harness.controls(&launch, "interrupt").await, 3);
-    harness.finish(&launch, &[B], interrupted()).await;
+    harness.finish(&launch, &[B], json!({})).await;
     harness.message_becomes(B, |s| accepted_by(s, B)).await;
 }
 

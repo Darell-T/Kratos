@@ -213,11 +213,10 @@ async fn routes_tool_approvals_to_kratos_and_answers_each_request_exactly_once()
 }
 
 #[tokio::test]
-async fn answers_questions_and_elicitations_and_defers_the_turn_deadline_while_any_are_pending() {
-    // Catches a deadline interrupting a user who is answering, duplicate answers, or an answer lost before reaching Claude.
+async fn answers_questions_and_elicitations_and_never_stops_the_turn_while_any_are_pending() {
+    // Catches Kratos interrupting a user who is answering, duplicate answers, or an answer lost before reaching Claude.
     let mut harness = Harness::start(Options {
         tools: true,
-        turn_timeout: Duration::from_millis(400),
         ..Options::default()
     })
     .await;
@@ -290,17 +289,14 @@ async fn answers_questions_and_elicitations_and_defers_the_turn_deadline_while_a
             .unwrap(),
         QuestionOutcome::Closed { .. }
     ));
-    harness
-        .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
-        .await;
-    assert_eq!(harness.controls(&launch, "interrupt").await, 1);
-    harness
-        .finish(&launch, &[A], crate::harness::interrupted())
-        .await;
+    tokio::time::sleep(Duration::from_millis(900)).await;
+    assert_eq!(harness.controls(&launch, "interrupt").await, 0);
+    assert_eq!(harness.details().await.paused, None);
+    harness.finish(&launch, &[A], json!({})).await;
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
         .await;
-    assert_eq!(harness.written(&launch).await, [A]);
+    harness.wait_written(&launch, &[A, B]).await;
 }
 
 #[tokio::test]

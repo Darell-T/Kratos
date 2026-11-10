@@ -1,7 +1,7 @@
 //! The actor: its inputs, its state, and the loop that serves them one at a time.
 //!
 //! Three inputs: commands from handles, messages from Codex, and completions of the work the actor
-//! started (a request to Codex, a deadline). Each handler runs to its end before the next input,
+//! started (a request to Codex, a timer). Each handler runs to its end before the next input,
 //! so no two handlers see a thread half changed. A handler awaits only the store, never Codex.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::approvals::Requests;
 use super::connection::StartError;
 use super::threads::ThreadState;
-use super::turns::{Delivery, Stopper};
+use super::turns::{Delivery, StopWaiters};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
@@ -174,16 +174,11 @@ pub(super) enum Done {
         thread_id: ThreadId,
         turn_id: kratos_protocol::TurnId,
         result: Result<(), RequestError>,
-        stopper: Stopper,
+        stopper: StopWaiters,
     },
     StopExpired {
         thread_id: ThreadId,
         turn_id: kratos_protocol::TurnId,
-    },
-    Deadline {
-        thread_id: ThreadId,
-        turn_id: kratos_protocol::TurnId,
-        epoch: u64,
     },
     HistoryForDiscard {
         thread_id: ThreadId,
@@ -235,8 +230,7 @@ impl Done {
             | Done::StartAnswered { .. }
             | Done::DeliveryChecked { .. }
             | Done::Steered { .. }
-            | Done::StopExpired { .. }
-            | Done::Deadline { .. } => {}
+            | Done::StopExpired { .. } => {}
         }
     }
 }
@@ -376,11 +370,6 @@ impl Actor {
             Done::StopExpired { thread_id, turn_id } => {
                 self.on_stop_expired(&thread_id, &turn_id).await
             }
-            Done::Deadline {
-                thread_id,
-                turn_id,
-                epoch,
-            } => self.on_deadline(thread_id, turn_id, epoch).await,
             Done::HistoryForDiscard {
                 thread_id,
                 message_id,

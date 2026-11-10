@@ -79,8 +79,6 @@ pub struct CodexSettings {
     /// server's folder writable exposes nothing.
     pub server_folder: PathBuf,
     pub protected: ProtectedFolders,
-    /// A turn that runs this long without waiting on the user is stopped (TypeScript: 10 minutes).
-    pub turn_timeout: Duration,
     /// How long a stopped turn may take to end before Kratos closes the app-server.
     pub stop_timeout: Duration,
     /// The deadline of an ordinary request to Codex.

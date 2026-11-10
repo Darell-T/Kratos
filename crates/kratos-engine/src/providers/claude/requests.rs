@@ -49,15 +49,6 @@ pub(super) struct Requests {
     questions: HashMap<QuestionId, Pending>,
 }
 
-impl Requests {
-    pub(super) fn blocks(&self, thread_id: &ThreadId) -> bool {
-        self.approvals
-            .values()
-            .chain(self.questions.values())
-            .any(|waiting| &waiting.thread_id == thread_id)
-    }
-}
-
 impl Actor {
     pub(super) async fn request_approval(&mut self, pending: Pending, why: AskReason) {
         let request = super::permissions::shown(&pending, &self.threads[&pending.thread_id].folder);
@@ -166,12 +157,11 @@ impl Actor {
                     ApprovalDecision::Decline | ApprovalDecision::Cancel => pending.deny(),
                 }
                 if decision == ApprovalDecision::Cancel {
-                    self.interrupt(&thread_id, Vec::new(), false);
+                    self.interrupt(&thread_id, Vec::new());
                 }
             }
             _ => pending.deny(),
         }
-        self.arm_deadline(&thread_id);
         outcome
     }
 
@@ -211,14 +201,12 @@ impl Actor {
                 write.settle_question(&id, settlement)
             })
             .await;
-        let thread_id = pending.thread_id.clone();
         if matches!(outcome, Ok(QuestionOutcome::Answered)) {
             let body = question_response(pending.answer, answers);
             let _ = pending.control.answer(body);
         } else {
             pending.deny();
         }
-        self.arm_deadline(&thread_id);
         outcome
     }
 
@@ -273,7 +261,6 @@ impl Actor {
         for pending in pending {
             pending.deny();
         }
-        self.arm_deadline(thread_id);
     }
 }
 

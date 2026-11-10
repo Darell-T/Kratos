@@ -323,14 +323,9 @@ async fn codex_exiting_closes_every_waiting_request() {
 }
 
 #[tokio::test]
-async fn a_turn_waiting_on_the_user_is_not_stopped_at_its_deadline() {
-    // Catches the deadline counting time the user takes to decide, which would stop every turn
-    // whose approval waited longer than the deadline.
-    let mut harness = Harness::start(Options {
-        turn_timeout: Duration::from_millis(300),
-        ..Options::default()
-    })
-    .await;
+async fn a_turn_waiting_on_the_user_is_never_stopped_by_kratos() {
+    // Catches Kratos stopping a turn while the user takes their time to decide its approval.
+    let mut harness = Harness::start(Options::default()).await;
     harness.running_turn("a", "turn-1").await;
     harness.ask("ask-1", COMMAND, command("item-1", "ls")).await;
     let approval = requested(&mut harness).await;
@@ -349,7 +344,15 @@ async fn a_turn_waiting_on_the_user_is_not_stopped_at_its_deadline() {
         .decide(approval.id, ApprovalDecision::Accept)
         .await
         .unwrap();
-    harness.held("turn/interrupt", 1).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let interrupts = harness
+        .turn_requests()
+        .await
+        .into_iter()
+        .filter(|request| request["method"] == "turn/interrupt")
+        .count();
+    assert_eq!(interrupts, 0, "the decided turn keeps running");
+    assert_eq!(harness.details().await.paused, None);
 }
 
 #[tokio::test]

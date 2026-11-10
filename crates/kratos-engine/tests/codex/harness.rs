@@ -37,7 +37,6 @@ use tokio::sync::mpsc;
 pub const WAIT: Duration = Duration::from_secs(20);
 
 pub struct Options {
-    pub turn_timeout: Duration,
     pub stop_timeout: Duration,
     pub settings: ThreadSettings,
     pub fake_args: Vec<OsString>,
@@ -47,7 +46,6 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Options {
         Options {
-            turn_timeout: Duration::from_secs(600),
             stop_timeout: Duration::from_secs(5),
             settings: ThreadSettings::default(),
             fake_args: Vec::new(),
@@ -161,7 +159,6 @@ impl Harness {
             env_set: Vec::new(),
             server_folder,
             protected: ProtectedFolders::new(root.path().join("kratos"), None, None),
-            turn_timeout: options.turn_timeout,
             stop_timeout: options.stop_timeout,
             request_timeout: Duration::from_secs(10),
             platform: DangerousCommandPlatform::Posix,

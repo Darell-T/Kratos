@@ -157,7 +157,6 @@ impl Actor {
             return;
         };
         thread.epoch += 1;
-        thread.deadline_epoch += 1;
         thread.stop_epoch += 1;
         thread.stopping = false;
         let reason = thread

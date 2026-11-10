@@ -36,9 +36,8 @@ use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::{LimitStop, UsageTracker};
 
-/// The TypeScript provider's deadlines: a turn may run ten minutes without waiting on the user,
-/// and a request to Codex may take thirty seconds.
-const TURN_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a request to Codex may take, from the TypeScript provider. A turn has no deadline: a
+/// live CLI is working, and every way it can die reports its own error.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a turn Codex agreed to stop may take to end before Kratos closes Codex.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -225,7 +224,6 @@ fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
         program,
         claude_home,
         env_set: Vec::new(),
-        turn_timeout: TURN_TIMEOUT,
         stop_timeout: STOP_TIMEOUT,
         control_timeout: REQUEST_TIMEOUT,
         restart_wait: RESTART_WAIT,
@@ -247,7 +245,6 @@ fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMiss
             config.codex_home.clone(),
             config.user_home.clone(),
         ),
-        turn_timeout: TURN_TIMEOUT,
         stop_timeout: STOP_TIMEOUT,
         request_timeout: REQUEST_TIMEOUT,
         platform: DangerousCommandPlatform::host(),

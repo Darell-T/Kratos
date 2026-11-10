@@ -102,29 +102,6 @@ impl Requests {
             },
         ))
     }
-
-    /// Whether the thread's turn waits on the user, so its deadline does not run.
-    pub(super) fn blocks(&self, thread_id: &ThreadId) -> bool {
-        self.approvals
-            .values()
-            .any(|waiting| &waiting.thread_id == thread_id)
-            || self
-                .questions
-                .values()
-                .any(|waiting| &waiting.thread_id == thread_id && waiting.is_blocking())
-    }
-}
-
-impl Waiting {
-    fn is_blocking(&self) -> bool {
-        match &self.request.request {
-            ServerRequest::UserInput(params) => params.is_blocking,
-            ServerRequest::CommandApproval(_)
-            | ServerRequest::FileChangeApproval(_)
-            | ServerRequest::Permissions(_)
-            | ServerRequest::McpElicitation(_) => true,
-        }
-    }
 }
 
 fn take_where<K: Clone + Eq + std::hash::Hash, A>(

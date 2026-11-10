@@ -1,7 +1,7 @@
 //! The actor: its inputs, its state, and the loop that serves them one at a time.
 //!
 //! Three inputs: commands from handles, frames from the CLI processes, and completions of the work
-//! the actor started (opening a process, writing a message, a deadline). Each handler runs to its
+//! the actor started (opening a process, writing a message, a timer). Each handler runs to its
 //! end before the next input, so no two handlers see a thread half changed. A handler awaits only
 //! the store, never a CLI.
 
@@ -155,17 +155,11 @@ pub(super) enum Done {
         thread_id: ThreadId,
         epoch: u64,
         stop_epoch: u64,
-        /// The turn ran out of time, so nothing but Kratos asked for this stop.
-        by_deadline: bool,
         result: Result<(), RequestError>,
     },
     StopExpired {
         thread_id: ThreadId,
         stop_epoch: u64,
-    },
-    Deadline {
-        thread_id: ThreadId,
-        deadline_epoch: u64,
     },
     /// The wait after a CLI failure ended.
     RestartDue { thread_id: ThreadId },
@@ -295,20 +289,15 @@ impl Actor {
                 thread_id,
                 epoch,
                 stop_epoch,
-                by_deadline,
                 result,
             } => {
-                self.on_interrupted(thread_id, epoch, stop_epoch, by_deadline, result)
-                    .await;
+                self.on_interrupted(thread_id, epoch, stop_epoch, result)
+                    .await
             }
             Done::StopExpired {
                 thread_id,
                 stop_epoch,
             } => self.on_stop_expired(&thread_id, stop_epoch),
-            Done::Deadline {
-                thread_id,
-                deadline_epoch,
-            } => self.on_deadline(thread_id, deadline_epoch).await,
             Done::RestartDue { thread_id } => self.on_restart_due(thread_id).await,
             Done::Transcript {
                 thread_id,

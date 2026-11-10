@@ -186,8 +186,6 @@ pub(super) struct ThreadState {
     pub stop_waiters: Vec<Reply<()>>,
     /// Changes whenever a stop starts or ends, so an earlier stop's timer or answer is ignored.
     pub stop_epoch: u64,
-    /// Changes whenever the turn's deadline is set again, so an earlier deadline is ignored.
-    pub deadline_epoch: u64,
     /// Why Kratos is closing the CLI, when it chose to, in place of the exit's own text.
     pub close_reason: Option<String>,
     pub restarts: Restarts,
@@ -222,7 +220,6 @@ impl ThreadState {
             stopping: false,
             stop_waiters: Vec::new(),
             stop_epoch: 0,
-            deadline_epoch: 0,
             close_reason: None,
             restarts: Restarts::default(),
             rejection: None,

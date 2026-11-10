@@ -78,8 +78,6 @@ pub struct ClaudeSettings {
     pub claude_home: PathBuf,
     /// Variables set for the CLI after Kratos's own and the provider's are removed.
     pub env_set: Vec<(OsString, OsString)>,
-    /// A turn that runs this long is stopped (TypeScript: 10 minutes).
-    pub turn_timeout: Duration,
     /// How long a stopped turn may take to end before Kratos closes the CLI.
     pub stop_timeout: Duration,
     /// The deadline of a control request to the CLI, such as an interrupt.

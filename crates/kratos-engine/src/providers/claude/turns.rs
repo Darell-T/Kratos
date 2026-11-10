@@ -6,9 +6,7 @@
 //! message still waiting for its result starts the next run when Claude takes it.
 
 use kratos_claude_client::{Control, TurnResult};
-use kratos_protocol::{
-    LiveUpdate, Message, MessageId, MessageStatus, PauseReason, Provider, ThreadId, TurnId,
-};
+use kratos_protocol::{LiveUpdate, Message, MessageId, MessageStatus, Provider, ThreadId, TurnId};
 use kratos_store::{StoreError, ThreadWrite};
 
 use super::actor::{Actor, Done, Reply};
@@ -119,15 +117,11 @@ impl Actor {
             .claude
             .clone();
         let native = wire::native_id(&message.id).to_string();
-        let first = thread.pending.is_empty();
         thread.pending.push(InFlight {
             message_id: message.id.clone(),
             native: native.clone(),
         });
         let epoch = thread.epoch;
-        if first {
-            self.arm_deadline(thread_id);
-        }
         let (thread_id, message_id) = (thread_id.clone(), message.id.clone());
         let content = wire::user_content(&message.input);
         self.spawn(async move {
@@ -158,7 +152,7 @@ impl Actor {
             Ok(()) => {
                 if !thread.stop_waiters.is_empty() && !thread.stopping {
                     let waiters = std::mem::take(&mut thread.stop_waiters);
-                    self.interrupt(&thread_id, waiters, false);
+                    self.interrupt(&thread_id, waiters);
                 }
             }
             Err(error) => {
@@ -166,9 +160,6 @@ impl Actor {
                 thread
                     .pending
                     .retain(|flight| flight.message_id != message_id);
-                if thread.pending.is_empty() {
-                    thread.deadline_epoch += 1;
-                }
                 let error = format!("Claude was not sent the message: {error}");
                 let _ = self
                     .write(&thread_id, move |write| {
@@ -309,11 +300,6 @@ impl Actor {
         for waiter in std::mem::take(&mut thread.stop_waiters) {
             let _ = waiter.send(Ok(()));
         }
-        if thread.pending.is_empty() {
-            thread.deadline_epoch += 1;
-        } else {
-            self.arm_deadline(thread_id);
-        }
         self.dispatch(thread_id).await;
     }
 
@@ -392,18 +378,13 @@ impl Actor {
             // Stopped when the interrupt is answered, or once the message is written.
             thread.stop_waiters.push(reply);
         } else {
-            self.interrupt(thread_id, vec![reply], false);
+            self.interrupt(thread_id, vec![reply]);
         }
     }
 
     /// Asks Claude to stop the turn. The turn ends with its result, which settles every waiting
     /// stop. A CLI that neither stops nor answers is closed after the stop timeout.
-    pub(super) fn interrupt(
-        &mut self,
-        thread_id: &ThreadId,
-        waiters: Vec<Reply<()>>,
-        by_deadline: bool,
-    ) {
+    pub(super) fn interrupt(&mut self, thread_id: &ThreadId, waiters: Vec<Reply<()>>) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
@@ -434,7 +415,6 @@ impl Actor {
                 thread_id,
                 epoch,
                 stop_epoch,
-                by_deadline,
                 result,
             }
         });
@@ -452,7 +432,6 @@ impl Actor {
         thread_id: ThreadId,
         epoch: u64,
         stop_epoch: u64,
-        by_deadline: bool,
         result: Result<(), kratos_claude_client::RequestError>,
     ) {
         let Some(thread) = self.threads.get_mut(&thread_id) else {
@@ -472,12 +451,8 @@ impl Actor {
                 kratos_claude_client::RequestError::Exited(_)
                 | kratos_claude_client::RequestError::Closing,
             ) => {}
-            Err(error) if by_deadline => {
-                let reason = format!("{STOP_FAILED} ({error})");
-                self.close_session(&thread_id, &reason);
-            }
             Err(error) => {
-                // Another stop may try again, and the turn's deadline runs again.
+                // Another stop may try again.
                 thread.stopping = false;
                 thread.stop_epoch += 1;
                 for waiter in std::mem::take(&mut thread.stop_waiters) {
@@ -485,7 +460,6 @@ impl Actor {
                         "Claude did not stop the turn: {error}"
                     ))));
                 }
-                self.arm_deadline(&thread_id);
             }
         }
     }
@@ -498,52 +472,6 @@ impl Actor {
             .is_some_and(|thread| thread.stopping && thread.stop_epoch == stop_epoch);
         if expired {
             self.close_session(thread_id, STOP_FAILED);
-        }
-    }
-
-    pub(super) fn arm_deadline(&mut self, thread_id: &ThreadId) {
-        let Some(thread) = self.threads.get_mut(thread_id) else {
-            return;
-        };
-        thread.deadline_epoch += 1;
-        let (deadline_epoch, thread_id) = (thread.deadline_epoch, thread_id.clone());
-        let timeout = self.settings.turn_timeout;
-        self.spawn(async move {
-            tokio::time::sleep(timeout).await;
-            Done::Deadline {
-                thread_id,
-                deadline_epoch,
-            }
-        });
-    }
-
-    /// The turn ran out of time: the queue behind it pauses, and Claude is asked to stop it.
-    pub(super) async fn on_deadline(&mut self, thread_id: ThreadId, deadline_epoch: u64) {
-        let Some(thread) = self.threads.get(&thread_id) else {
-            return;
-        };
-        if thread.deadline_epoch != deadline_epoch || thread.stopping {
-            return;
-        }
-        if self.requests.blocks(&thread_id) {
-            self.arm_deadline(&thread_id);
-            return;
-        }
-        let Some(turn_id) = thread.run.clone().or_else(|| {
-            thread
-                .pending
-                .first()
-                .map(|flight| wire::turn_of(&flight.message_id))
-        }) else {
-            return;
-        };
-        let paused = self
-            .write(&thread_id, move |write| {
-                write.pause(PauseReason::TimedOut { turn_id })
-            })
-            .await;
-        if paused.is_ok() {
-            self.interrupt(&thread_id, Vec::new(), true);
         }
     }
 }
