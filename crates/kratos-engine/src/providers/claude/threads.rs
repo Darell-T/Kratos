@@ -196,6 +196,9 @@ pub(super) struct ThreadState {
     pub rejection: Option<Rejection>,
     /// The model that wrote the last reply, which names the window of the turn's context (D76).
     pub answering_model: Option<String>,
+    /// The context window the thread's last turn reported, shown with the context each request
+    /// reports while a turn runs. `None` until a turn has reported one.
+    pub context_window: Option<i64>,
     /// Callers that wait for the CLI to be up, answered when it is or when it cannot start.
     pub waiters: Vec<Waiter>,
 }
@@ -226,6 +229,7 @@ impl ThreadState {
             restarts: Restarts::default(),
             rejection: None,
             answering_model: None,
+            context_window: None,
             waiters: Vec::new(),
         }
     }

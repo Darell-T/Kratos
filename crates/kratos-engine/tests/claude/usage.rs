@@ -1081,3 +1081,88 @@ async fn a_retry_frame_the_crate_cannot_read_leaves_no_error_on_the_running_turn
         .count();
     assert_eq!(errors, 0);
 }
+
+/// A stream event of one request, carrying the tokens it has used so far.
+fn request_event(kind: &str, input: i64, cache_read: i64, output: i64) -> Value {
+    let usage = json!({ "input_tokens": input, "cache_creation_input_tokens": 0,
+                        "cache_read_input_tokens": cache_read, "output_tokens": output });
+    let event = if kind == "message_start" {
+        json!({ "type": kind, "message": { "usage": usage } })
+    } else {
+        json!({ "type": kind, "delta": {}, "usage": usage })
+    };
+    json!({ "type": "stream_event", "session_id": "s", "event": event })
+}
+
+async fn next_context(
+    live: &mut tokio::sync::broadcast::Receiver<kratos_protocol::LiveUpdate>,
+) -> ContextUsage {
+    loop {
+        let update = tokio::time::timeout(crate::harness::WAIT, live.recv())
+            .await
+            .expect("a live update arrives")
+            .expect("the live feed stays open");
+        if let kratos_protocol::LiveUpdate::Context { usage, .. } = update {
+            return usage;
+        }
+    }
+}
+
+fn context(input: i64, cached: i64, output: i64, window: Option<i64>) -> ContextUsage {
+    ContextUsage {
+        input_tokens: input,
+        cached_input_tokens: cached,
+        output_tokens: output,
+        reasoning_output_tokens: 0,
+        total_tokens: input + output,
+        context_window: window,
+    }
+}
+
+#[tokio::test]
+async fn each_request_reports_its_context_live_before_the_turn_ends() {
+    // Catches context shown only when a turn ends, a request's cache counted outside its input,
+    // and a window guessed before any turn reported one or forgotten after one did (D76).
+    let harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    let (_, mut live) = harness.hub.watch_live(&harness.thread_id);
+
+    harness
+        .emit(&launch, request_event("message_start", 10, 1_000, 1))
+        .await;
+    assert_eq!(
+        next_context(&mut live).await,
+        context(1_010, 1_000, 1, None)
+    );
+    harness
+        .emit(&launch, request_event("message_delta", 10, 1_000, 40))
+        .await;
+    assert_eq!(
+        next_context(&mut live).await,
+        context(1_010, 1_000, 40, None)
+    );
+
+    let result = recorded("result");
+    harness
+        .finish(
+            &launch,
+            &[A],
+            json!({ "usage": result["usage"], "modelUsage": result["modelUsage"] }),
+        )
+        .await;
+    assert_eq!(
+        next_context(&mut live).await.context_window,
+        Some(1_000_000)
+    );
+    harness.send(B, B).await;
+    harness.wait_written(&launch, &[A, B]).await;
+    harness.accept(&launch, B).await;
+    harness
+        .emit(&launch, request_event("message_start", 20, 2_000, 1))
+        .await;
+
+    assert_eq!(
+        next_context(&mut live).await,
+        context(2_020, 2_000, 1, Some(1_000_000))
+    );
+}

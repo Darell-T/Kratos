@@ -124,13 +124,39 @@ pub struct ApiRetry {
     pub error: String,
 }
 
-/// The tokens one request of a turn used, from the last entry of the result's `usage.iterations`.
+/// The tokens one request of a turn used: from the result's `usage.iterations`, or from the
+/// request's own stream events while the turn runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IterationTokens {
     pub input_tokens: i64,
     pub cache_creation_input_tokens: i64,
     pub cache_read_input_tokens: i64,
     pub output_tokens: i64,
+}
+
+impl IterationTokens {
+    /// The tokens a request has used so far, from its `message_start` (its whole input, before
+    /// the reply streams) or its `message_delta` (the input again, with the final output). Any
+    /// other stream event says nothing about tokens.
+    #[must_use]
+    pub fn of_stream_event(event: &Value) -> Option<IterationTokens> {
+        let usage = match event["type"].as_str()? {
+            "message_start" => &event["message"]["usage"],
+            "message_delta" => &event["usage"],
+            _ => return None,
+        };
+        IterationTokens::of_usage(usage)
+    }
+
+    fn of_usage(usage: &Value) -> Option<IterationTokens> {
+        let count = |key: &str| usage[key].as_i64();
+        Some(IterationTokens {
+            input_tokens: count("input_tokens")?,
+            cache_creation_input_tokens: count("cache_creation_input_tokens").unwrap_or(0),
+            cache_read_input_tokens: count("cache_read_input_tokens").unwrap_or(0),
+            output_tokens: count("output_tokens")?,
+        })
+    }
 }
 
 /// What the result says of the turn's context: the last request's tokens, and each model's window.
@@ -147,15 +173,7 @@ impl TurnContext {
         let last = result["usage"]["iterations"]
             .as_array()
             .and_then(|iterations| iterations.last())
-            .and_then(|iteration| {
-                let count = |key: &str| iteration[key].as_i64();
-                Some(IterationTokens {
-                    input_tokens: count("input_tokens")?,
-                    cache_creation_input_tokens: count("cache_creation_input_tokens").unwrap_or(0),
-                    cache_read_input_tokens: count("cache_read_input_tokens").unwrap_or(0),
-                    output_tokens: count("output_tokens")?,
-                })
-            });
+            .and_then(IterationTokens::of_usage);
         let windows = result["modelUsage"]
             .as_object()
             .into_iter()

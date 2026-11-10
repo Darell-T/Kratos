@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use kratos_claude_client::{
-    Control, Initialize, Launch, RateLimitStatus, RateLimitType, RequestError, SessionId,
-    SessionStart, StreamMessage, TurnResult, UsageRead, connect,
+    Control, Initialize, IterationTokens, Launch, RateLimitStatus, RateLimitType, RequestError,
+    SessionId, SessionStart, StreamMessage, TurnResult, UsageRead, connect,
 };
 use serde_json::{Value, json};
 
@@ -256,5 +256,45 @@ fn an_api_retry_frame_that_fails_the_typed_parse_is_kept_as_an_unrecognized_fram
     assert!(
         matches!(&message, Ok(StreamMessage::Unrecognized { kind, .. }) if kind == "system"),
         "{message:?}"
+    );
+}
+
+#[test]
+fn a_request_reports_its_tokens_in_its_start_and_end_events_and_no_other() {
+    // Catches live context read from the wrong field of the recorded stream events, or a text
+    // delta mistaken for a request's usage (D76).
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/transcripts/s1-launch-and-stream/wire.jsonl");
+    let events: Vec<Value> = std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap()["msg"].clone())
+        .filter(|message| message["type"] == "stream_event")
+        .map(|message| message["event"].clone())
+        .collect();
+    let of_kind = |kind: &str| {
+        events
+            .iter()
+            .find(|event| event["type"] == kind)
+            .unwrap_or_else(|| panic!("the recording holds a {kind}"))
+    };
+    let recorded = IterationTokens {
+        input_tokens: 2,
+        cache_creation_input_tokens: 6_851,
+        cache_read_input_tokens: 15_768,
+        output_tokens: 4,
+    };
+
+    assert_eq!(
+        IterationTokens::of_stream_event(of_kind("message_start")),
+        Some(recorded)
+    );
+    assert_eq!(
+        IterationTokens::of_stream_event(of_kind("message_delta")),
+        Some(recorded)
+    );
+    assert_eq!(
+        IterationTokens::of_stream_event(of_kind("content_block_delta")),
+        None
     );
 }

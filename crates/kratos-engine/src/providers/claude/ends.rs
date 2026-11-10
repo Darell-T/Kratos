@@ -2,7 +2,9 @@
 //! account's usage limit (D39). One write records all three, so the log never shows a turn that
 //! ended without the pause that explains why nothing follows it.
 
-use kratos_claude_client::{TurnContext, TurnOutcome as ClaudeOutcome, TurnResult};
+use kratos_claude_client::{
+    IterationTokens, TurnContext, TurnOutcome as ClaudeOutcome, TurnResult,
+};
 use kratos_protocol::{ContextUsage, PauseReason, Timestamp, TurnId, TurnOutcome};
 use kratos_store::{StoreError, ThreadWrite};
 
@@ -75,7 +77,12 @@ pub(super) fn context_usage(
     context: &TurnContext,
     answering: Option<&str>,
 ) -> Option<ContextUsage> {
-    let last = context.last?;
+    context_of(context.last?, context.window_of(answering))
+}
+
+/// The context one request filled, in `window` when it is known. A request's cache reads and
+/// writes are part of what it sent, so they count as input.
+pub(super) fn context_of(last: IterationTokens, window: Option<i64>) -> Option<ContextUsage> {
     let input_tokens = last
         .input_tokens
         .checked_add(last.cache_creation_input_tokens)?
@@ -86,7 +93,7 @@ pub(super) fn context_usage(
         output_tokens: last.output_tokens,
         reasoning_output_tokens: 0,
         total_tokens: input_tokens.checked_add(last.output_tokens)?,
-        context_window: context.window_of(answering),
+        context_window: window,
     })
 }
 
@@ -124,8 +131,6 @@ pub(super) fn end_turn(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-
-    use kratos_claude_client::IterationTokens;
 
     use super::*;
 

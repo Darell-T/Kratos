@@ -277,6 +277,11 @@ impl Actor {
             return;
         };
         if let Some(usage) = context {
+            if let (Some(window), Some(thread)) =
+                (usage.context_window, self.threads.get_mut(thread_id))
+            {
+                thread.context_window = Some(window);
+            }
             let turn_id = turn_id.clone();
             self.hub
                 .publish(thread_id, LiveUpdate::Context { turn_id, usage });

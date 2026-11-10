@@ -3,12 +3,12 @@
 
 use std::time::Instant;
 
-use kratos_claude_client::{Assistant, Incoming, StreamEvent, StreamMessage};
+use kratos_claude_client::{Assistant, Incoming, IterationTokens, StreamEvent, StreamMessage};
 use kratos_protocol::{LiveUpdate, ThreadEventBody, ThreadId, TurnId};
 
 use super::actor::{Actor, SessionEvent};
 use super::threads::ThreadState;
-use super::wire;
+use super::{ends, wire};
 
 impl Actor {
     pub(super) async fn on_event(&mut self, event: SessionEvent) {
@@ -113,12 +113,13 @@ impl Actor {
             .await;
     }
 
-    /// Shows a reply as it is written, to the clients following the thread.
+    /// Shows a reply as it is written, and the context each request fills as it starts and ends
+    /// (D76), to the clients following the thread.
     fn on_stream(&mut self, thread_id: &ThreadId, stream: &StreamEvent) {
-        let Some(turn_id) = self
+        let Some((turn_id, window)) = self
             .threads
             .get(thread_id)
-            .and_then(|thread| thread.run.clone())
+            .and_then(|thread| Some((thread.run.clone()?, thread.context_window)))
         else {
             return;
         };
@@ -126,11 +127,17 @@ impl Actor {
             self.hub.publish(
                 thread_id,
                 LiveUpdate::ReplyDelta {
-                    turn_id,
+                    turn_id: turn_id.clone(),
                     item_id,
                     delta,
                 },
             );
+        }
+        let context = IterationTokens::of_stream_event(&stream.event)
+            .and_then(|tokens| ends::context_of(tokens, window));
+        if let Some(usage) = context {
+            self.hub
+                .publish(thread_id, LiveUpdate::Context { turn_id, usage });
         }
     }
 
