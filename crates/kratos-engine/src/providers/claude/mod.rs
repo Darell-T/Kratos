@@ -317,6 +317,13 @@ impl ClaudeProvider {
         .await
     }
 
+    /// Reads the account's usage through a session that is already open, for a usage report
+    /// that should be current (D38). It starts no process, so it fails when none is open.
+    pub async fn refresh_open_usage(&self) -> Result<(), ProviderError> {
+        self.ask(|reply| actor::Command::RefreshOpenUsage { reply })
+            .await
+    }
+
     /// The slash commands the thread's session reports, opening one when none runs (D97).
     pub(crate) async fn slash_commands(
         &self,

@@ -84,6 +84,10 @@ pub(super) enum Command {
         continuation_id: ContinuationId,
         reply: Reply<Continued>,
     },
+    /// Reads the account's usage through the open session used last, and starts none.
+    RefreshOpenUsage {
+        reply: Reply<()>,
+    },
     /// Runs `waiter` once the thread's CLI is up, starting one when none runs.
     WhenOpen {
         thread_id: ThreadId,

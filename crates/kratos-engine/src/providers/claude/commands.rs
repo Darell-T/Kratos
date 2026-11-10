@@ -74,6 +74,7 @@ impl Actor {
                 let _ = reply.send(continued);
                 self.dispatch(&thread_id).await;
             }
+            Command::RefreshOpenUsage { reply } => self.refresh_open_usage(reply),
             Command::WhenOpen { thread_id, waiter } => {
                 self.when_open(&thread_id, waiter).await;
             }

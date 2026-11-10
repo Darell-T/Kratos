@@ -590,3 +590,46 @@ fn usage_lists_the_claude_account_s_two_windows_beside_codex_s() {
         20
     );
 }
+
+fn next_usage(socket: &mut kratos_api_client::EventSocket) -> kratos_protocol::UsageReport {
+    match serde_json::from_str(&next_text(socket)).unwrap() {
+        ServerMessage::Usage { report } => report,
+        other => panic!("expected a usage report, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_usage_watcher_gets_the_report_at_once_and_again_when_an_account_changes() {
+    // Catches usage that reaches a client only when it polls, and a watcher that waits for a
+    // change before it sees anything (D38).
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start_with_answering_claude(home.path());
+    let client = engine.client();
+    let mut socket = client.connect_events(&[]).unwrap();
+    socket
+        .send_text(json!({ "type": "watchUsage" }).to_string())
+        .unwrap();
+
+    let first = next_usage(&mut socket);
+    assert!(
+        first
+            .accounts
+            .iter()
+            .all(|account| account.provider != Provider::Claude),
+        "no Claude session has run yet: {first:?}"
+    );
+    let thread = engine.create_thread_of(Provider::Claude);
+    post(&client, &thread, "hello");
+
+    let deadline = std::time::Instant::now() + crate::running_engine::WAIT;
+    while !next_usage(&mut socket)
+        .accounts
+        .iter()
+        .any(|account| account.provider == Provider::Claude)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Claude account never reached the watcher"
+        );
+    }
+}

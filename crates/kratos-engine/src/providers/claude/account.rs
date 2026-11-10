@@ -36,6 +36,25 @@ impl Actor {
 
     /// Asks the thread's open session for the account's usage. A read finished after the account
     /// changed is dropped (D38).
+    /// Reads the usage through the session used last, so a report shows the account as it is
+    /// now. A process is never started only to read: with none open, the read fails.
+    pub(super) fn refresh_open_usage(&self, reply: Reply<()>) {
+        let used_last = self
+            .threads
+            .iter()
+            .filter_map(|(thread_id, thread)| Some((thread.open()?.last_active, thread_id)))
+            .max_by_key(|(last_active, _)| *last_active)
+            .map(|(_, thread_id)| thread_id.clone());
+        match used_last {
+            Some(thread_id) => self.read_usage(&thread_id, Some(reply)),
+            None => {
+                let _ = reply.send(Err(ProviderError::Unavailable(
+                    "no Claude session is open to ask".into(),
+                )));
+            }
+        }
+    }
+
     pub(super) fn read_usage(&self, thread_id: &ThreadId, reply: Option<Reply<()>>) {
         let open = self.threads.get(thread_id).and_then(|thread| thread.open());
         let Some(open) = open else {

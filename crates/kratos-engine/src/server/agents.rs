@@ -21,7 +21,8 @@ use super::threads::details;
 use super::{ApiError, MessagePath, ServerState, ThreadPath, json_reply, path};
 use crate::providers::{Agent, MAX_PENDING_MESSAGES, Sent};
 
-/// How long `GET /api/usage` waits for Codex's fresh read before it answers with what it knows.
+/// How long `GET /api/usage` waits for each provider's fresh read before it answers with what it
+/// knows.
 const USAGE_REFRESH_WAIT: Duration = Duration::from_secs(10);
 
 /// `POST /api/threads/{id}/messages`: 201 with the queued message, 200 with the message the
@@ -264,12 +265,20 @@ pub(super) async fn schedule(
     Ok(json_reply(StatusCode::OK, &continuation))
 }
 
-/// `GET /api/usage`: 200 with each account's usage, read fresh from Codex when it answers in time
-/// (D38). Context use is a thread's, in its turn events, never this report (D76).
+/// `GET /api/usage`: 200 with each account's usage, read fresh from Codex, and from Claude through
+/// an open session, when they answer in time (D38). Context use is a thread's, in its turn events, never this report (D76).
 pub(super) async fn usage(State(state): State<ServerState>) -> Response {
-    if let Ok(codex) = state.codex() {
-        // A failed or slow read leaves the last snapshot, which says so in its allowance.
-        let _ = tokio::time::timeout(USAGE_REFRESH_WAIT, codex.refresh_usage()).await;
-    }
+    // A failed or slow read leaves the last snapshot, which says so in its allowance.
+    let codex = async {
+        if let Ok(codex) = state.codex() {
+            let _ = tokio::time::timeout(USAGE_REFRESH_WAIT, codex.refresh_usage()).await;
+        }
+    };
+    let claude = async {
+        if let Ok(claude) = &state.providers.claude {
+            let _ = tokio::time::timeout(USAGE_REFRESH_WAIT, claude.refresh_open_usage()).await;
+        }
+    };
+    tokio::join!(codex, claude);
     json_reply(StatusCode::OK, &state.usage.report())
 }

@@ -90,7 +90,8 @@ impl ThreadFollower {
                 ServerMessage::Live { thread_id, update } if thread_id == self.thread_id => {
                     return Ok(Some(Followed::Live(update)));
                 }
-                ServerMessage::Live { .. } => {}
+                // Another thread's update, or a usage report this follower never asked for.
+                ServerMessage::Live { .. } | ServerMessage::Usage { .. } => {}
             }
         }
     }

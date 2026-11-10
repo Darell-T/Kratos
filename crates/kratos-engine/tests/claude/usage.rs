@@ -1166,3 +1166,25 @@ async fn each_request_reports_its_context_live_before_the_turn_ends() {
         context(2_020, 2_000, 1, Some(1_000_000))
     );
 }
+
+#[tokio::test]
+async fn a_report_reads_claude_through_an_open_session_and_never_starts_one() {
+    // Catches a usage report that starts a CLI only to ask, or that keeps showing an old reading
+    // while a session is open to ask (D38).
+    let harness = Harness::start(Options {
+        idle_close: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    harness.finish(&launch, &[A], json!({})).await;
+    read_says(&harness, &launch, 42, RESET).await;
+    harness.provider.refresh_open_usage().await.unwrap();
+    let usage = harness.usage.account(Provider::Claude).unwrap();
+    assert_eq!(unified_percents(&usage).0, Some(42));
+
+    harness.wait_ended(&launch).await;
+    assert!(harness.provider.refresh_open_usage().await.is_err());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(harness.launches().len(), 1, "a report started a CLI");
+}
