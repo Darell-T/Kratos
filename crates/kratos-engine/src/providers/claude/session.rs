@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use kratos_claude_client::{Incoming, Launch, SessionId, SessionStart, SettingSource, connect};
 use kratos_protocol::{Provider, ThreadId};
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 use super::actor::{Actor, Connected, Done, SessionEvent};
 use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState, Waiter};
@@ -49,9 +48,13 @@ impl Actor {
             .map_err(|error| {
                 ProviderError::Unavailable(format!("The thread's saved Claude session: {error}"))
             })?;
+        let (session_id, recorded) = match session_id {
+            Some(stored) => (stored, true),
+            None => (wire::first_session(thread_id), false),
+        };
         self.threads.insert(
             thread_id.clone(),
-            ThreadState::new(stored.folder, stored.settings, session_id),
+            ThreadState::new(stored.folder, stored.settings, session_id, recorded),
         );
         Ok(())
     }
@@ -324,9 +327,7 @@ fn launch(
     thread: &mut ThreadState,
     config: &SessionConfig,
 ) -> Result<Launch, String> {
-    let id = *thread
-        .session_id
-        .get_or_insert_with(|| SessionId::from(Uuid::new_v4()));
+    let id = thread.session_id;
     let start = SessionStart::for_session(&settings.claude_home, Path::new(&thread.folder), id)
         .map_err(|error| format!("Kratos cannot check Claude's saved session: {error}"))?;
     if thread.recorded && matches!(start, SessionStart::New(_)) {

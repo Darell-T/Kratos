@@ -155,6 +155,30 @@ async fn a_message_in_flight_when_claude_exits_stays_unknown_until_the_user_sett
 }
 
 #[tokio::test]
+async fn a_restart_before_claude_echoes_the_first_message_resumes_that_session() {
+    // Catches the thread's first session forgotten when the engine stops after Claude took the
+    // first message but before Kratos saw it: the message was called unknown, and the next one
+    // started a new conversation without it (L7).
+    let harness = Harness::start(Options::default()).await;
+    harness.send(A, A).await;
+    let first = harness.launch(1).await;
+    harness.wait_written(&first, &[A]).await;
+    harness.record(&first, A);
+    let (root, thread_id) = harness.stop().await;
+
+    let harness = Harness::start_in(root, Options::default(), Some(thread_id)).await;
+
+    let status = harness.message(A).await.status;
+    assert!(accepted_by(&status, A), "{status:?}");
+    harness.send(B, B).await;
+    let second = harness.launch(2).await;
+    assert_eq!(
+        second.value("--resume"),
+        Some(first.session().to_string().as_str())
+    );
+}
+
+#[tokio::test]
 async fn restores_a_thread_after_an_engine_restart_without_resending_delivered_work() {
     // Catches a restart that starts Claude again for a thread that only needs settling, a message
     // in the transcript that is called unknown, one it lacks that is called delivered, and a

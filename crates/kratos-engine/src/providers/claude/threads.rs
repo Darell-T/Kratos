@@ -177,9 +177,9 @@ pub(super) struct ThreadState {
     pub command_grants: Vec<super::tools::CommandArgs>,
     pub folder: String,
     pub settings: ThreadSettings,
-    /// The session Claude keeps the thread's history in: the stored one, or the one chosen for a
-    /// thread that has none yet.
-    pub session_id: Option<SessionId>,
+    /// The session Claude keeps the thread's history in: the stored one, or the thread's first
+    /// session (`wire::first_session`) while the store has none.
+    pub session_id: SessionId,
     /// The store holds `session_id`, so Claude has a transcript to resume from.
     pub recorded: bool,
     pub session: Session,
@@ -213,7 +213,8 @@ impl ThreadState {
     pub(super) fn new(
         folder: String,
         settings: ThreadSettings,
-        stored: Option<SessionId>,
+        session_id: SessionId,
+        recorded: bool,
     ) -> ThreadState {
         ThreadState {
             commands: std::collections::HashMap::new(),
@@ -222,8 +223,8 @@ impl ThreadState {
             command_grants: Vec::new(),
             folder,
             settings,
-            recorded: stored.is_some(),
-            session_id: stored,
+            recorded,
+            session_id,
             session: Session::Closed,
             epoch: 0,
             pending: Vec::new(),

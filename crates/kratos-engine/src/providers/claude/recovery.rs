@@ -103,7 +103,7 @@ impl Actor {
     ) -> Result<Actor, StoreError> {
         let unfinished = store.call(unfinished_claude_work).await?;
         for (thread_id, work) in unfinished {
-            let delivered = read_transcript(&settings.claude_home, &work).await;
+            let delivered = read_transcript(&settings.claude_home, &thread_id, &work).await;
             let settling = Settling {
                 sent: work
                     .sending
@@ -299,20 +299,26 @@ fn unfinished_claude_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfini
 }
 
 /// The transcript of an unfinished thread. One that cannot be read, or does not parse as a
-/// session, is treated as cut off: nothing it holds is proof either way.
-async fn read_transcript(claude_home: &Path, work: &Unfinished) -> DeliveredMessages {
-    let Some(session) = work.session.as_deref() else {
-        return DeliveredMessages::default();
-    };
-    let path = session
-        .parse::<SessionId>()
-        .map(|id| transcript_path(claude_home, Path::new(&work.folder), id));
-    let read = match path {
-        Ok(path) => delivered_message_ids(&path).await.ok(),
-        Err(_) => None,
-    };
-    read.unwrap_or(DeliveredMessages {
+/// session, is treated as cut off: nothing it holds is proof either way. A thread whose session
+/// the store never recorded reads its first session, and a missing transcript there means Claude
+/// took no message, since Claude writes it when it takes the first.
+async fn read_transcript(
+    claude_home: &Path,
+    thread_id: &ThreadId,
+    work: &Unfinished,
+) -> DeliveredMessages {
+    let cut_off = DeliveredMessages {
         ids: HashSet::new(),
         torn_tail: true,
-    })
+    };
+    let session = match work.session.as_deref().map(str::parse::<SessionId>) {
+        Some(Ok(stored)) => stored,
+        Some(Err(_)) => return cut_off,
+        None => wire::first_session(thread_id),
+    };
+    let path = transcript_path(claude_home, Path::new(&work.folder), session);
+    if work.session.is_none() && !tokio::fs::try_exists(&path).await.unwrap_or(true) {
+        return DeliveredMessages::default();
+    }
+    delivered_message_ids(&path).await.unwrap_or(cut_off)
 }

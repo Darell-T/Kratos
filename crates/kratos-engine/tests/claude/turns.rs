@@ -35,7 +35,7 @@ async fn launches_claude_lazily_and_delivers_queued_messages_one_turn_at_a_time_
     // Catches a CLI started before a message needs one (L5), a launch missing the flags that
     // isolate settings and remove Claude's command tools, a second message written before the
     // turn ahead of it has a result (D11), and a turn that does not end on its result.
-    let harness = Harness::start(Options::default()).await;
+    let mut harness = Harness::start(Options::default()).await;
     assert!(
         harness.launches().is_empty(),
         "nothing starts before a message"
@@ -94,6 +94,10 @@ async fn launches_claude_lazily_and_delivers_queued_messages_one_turn_at_a_time_
     harness.accept(&launch, C).await;
     harness.finish(&launch, &[C], json!({})).await;
     harness.message_becomes(C, |s| accepted_by(s, C)).await;
+    // C is accepted before its result arrives, so the thread is read once C's turn has ended.
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { turn_id, .. } if turn_id.as_str() == C))
+        .await;
     let ended = harness.details().await;
 
     assert_eq!(harness.launches().len(), 1, "one process serves the thread");

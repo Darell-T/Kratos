@@ -163,11 +163,11 @@ impl Actor {
         Ok(self.transcript_of(thread_id))
     }
 
-    /// Where Claude keeps the thread's history, once the thread has a session. The file may not exist:
-    /// Claude writes it when it takes the first message.
+    /// Where Claude keeps the thread's history. The file may not exist: Claude writes it when it
+    /// takes the first message.
     pub(super) fn transcript_of(&self, thread_id: &ThreadId) -> Option<std::path::PathBuf> {
         let thread = self.threads.get(thread_id)?;
-        let id = thread.session_id?;
+        let id = thread.session_id;
         Some(transcript_path(
             &self.settings.claude_home,
             Path::new(&thread.folder),

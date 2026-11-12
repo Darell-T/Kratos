@@ -323,8 +323,8 @@ impl Actor {
             Some(turn_id) => (turn_id.clone(), true),
             None => (wire::turn_of(&accept[0]), false),
         };
-        let session = match (thread.recorded, thread.session_id, thread.open()) {
-            (false, Some(id), Some(open)) => Some((id.to_string(), open.plan.clone())),
+        let session = match (thread.recorded, thread.open()) {
+            (false, Some(open)) => Some((thread.session_id.to_string(), open.plan.clone())),
             _ => None,
         };
         let ends = end.is_some();

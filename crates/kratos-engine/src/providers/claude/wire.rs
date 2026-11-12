@@ -1,13 +1,26 @@
-//! Claude's frames in Kratos's terms: the uuid a message travels under, the content Claude is
-//! sent, the items its replies become, and the plan that pays for the session.
+//! Claude's frames in Kratos's terms: the uuids a message and a first session go by, the content
+//! Claude is sent, the items its replies become, and the plan that pays for the session.
 
-use kratos_claude_client::{Assistant, Initialized, StreamEvent};
-use kratos_protocol::{AgentItem, MessageId, MessageInput, SlashCommand, TurnId};
+use kratos_claude_client::{Assistant, Initialized, SessionId, StreamEvent};
+use kratos_protocol::{AgentItem, MessageId, MessageInput, SlashCommand, ThreadId, TurnId};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 /// The namespace of the uuids Kratos derives for message ids that are not uuids themselves.
 const MESSAGE_NAMESPACE: Uuid = Uuid::from_u128(0x6b72_6174_6f73_4d73_6749_6400_0000_0001);
+
+/// The namespace of the session id each thread's first Claude session takes.
+const SESSION_NAMESPACE: Uuid = Uuid::from_u128(0x6b72_6174_6f73_5365_7373_696f_6e00_0001);
+
+/// The session a thread's first Claude process starts. It is derived from the thread id, so an
+/// engine that stopped after Claude took the first message, and before Kratos saw Claude take it,
+/// finds that session's transcript again instead of starting a conversation without it (L7).
+pub(super) fn first_session(thread_id: &ThreadId) -> SessionId {
+    SessionId::from(Uuid::new_v5(
+        &SESSION_NAMESPACE,
+        thread_id.as_str().as_bytes(),
+    ))
+}
 
 /// The uuid Claude knows `message_id` by. Claude's transcript and replay echo hold only this uuid,
 /// so reconciling a crash (D11) recomputes it from the id. A client's id that is a uuid is used as
