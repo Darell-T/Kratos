@@ -44,6 +44,8 @@ enum Usage {
 struct Script {
     initializing: Option<Value>,
     received: Vec<Value>,
+    /// When each `received` frame arrived, in microseconds since the Unix epoch, for perf probes.
+    received_at: Vec<u128>,
     interrupts: Interrupts,
     usage: Usage,
     /// Whether reads wait for `test/usageRelease`, and the reads that wait.
@@ -65,6 +67,7 @@ pub fn run(log: &Path) {
     let script: Shared = Arc::new(Mutex::new(Script {
         initializing: None,
         received: Vec::new(),
+        received_at: Vec::new(),
         interrupts: Interrupts::Acknowledge,
         usage: Usage::Answer(json!({})),
         holding_usage: false,
@@ -106,7 +109,14 @@ fn log_start(log: &Path, port: u16) {
 }
 
 fn handle(script: &Shared, message: Value) {
-    lock(script).received.push(message.clone());
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("the clock is after 1970")
+        .as_micros();
+    let mut locked = lock(script);
+    locked.received.push(message.clone());
+    locked.received_at.push(at);
+    drop(locked);
     if message["type"] == "control_response"
         && message["response"]["request_id"] == "fake-sdk-initialize"
     {
@@ -188,6 +198,8 @@ fn control_connection(stream: TcpStream, script: &Shared) {
 fn control(script: &Shared, method: &Value, params: &Value) -> Value {
     match method.as_str() {
         Some("test/received") => json!(lock(script).received),
+        // Microseconds since the Unix epoch, one per `test/received` frame.
+        Some("test/receivedAt") => json!(lock(script).received_at),
         Some("test/emit") => {
             send(&params["message"]);
             json!({})

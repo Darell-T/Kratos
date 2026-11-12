@@ -6,6 +6,7 @@
 mod clock;
 mod guards;
 mod harness;
+mod perf;
 mod permissions;
 mod protected_reads;
 mod release;
