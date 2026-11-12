@@ -292,8 +292,8 @@ pub(super) async fn claude_cli(State(state): State<ServerState>) -> Result<Respo
 }
 
 /// `POST /api/agents/claude/cli/update`: runs Claude Code's own updater, then 200 with the release
-/// now installed. 409 while another update runs, 503 when the updater fails. Agents cannot reach
-/// it, since it is a user route.
+/// now installed. 400 when another manager installed the CLI, 409 while another update runs, and
+/// 503 when the updater fails. Agents cannot reach it, since it is a user route.
 pub(super) async fn update_claude_cli(
     State(state): State<ServerState>,
 ) -> Result<Response, ApiError> {

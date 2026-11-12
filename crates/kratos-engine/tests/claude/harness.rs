@@ -61,6 +61,8 @@ pub struct Options {
     /// release is the text of `root/release`, 2.1.303 when it is absent, and the newest release
     /// the feed names is the text of `root/feed/latest`.
     pub update_to: &'static str,
+    /// The method `claude doctor` says installed the CLI.
+    pub install: &'static str,
 }
 
 impl Default for Options {
@@ -75,6 +77,7 @@ impl Default for Options {
             settings: ThreadSettings::default(),
             clock: None,
             update_to: "2.1.400",
+            install: "native",
         }
     }
 }
@@ -174,6 +177,7 @@ impl Harness {
                 root.path().join("release").into_os_string(),
             ),
             ("FAKE_CLAUDE_UPDATE_TO".into(), options.update_to.into()),
+            ("FAKE_CLAUDE_INSTALL".into(), options.install.into()),
         ];
         let settings = ClaudeSettings {
             tools: None,

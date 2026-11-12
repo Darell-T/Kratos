@@ -4,7 +4,9 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use kratos_claude_client::{Latest, Version, installed_version, latest_version, update};
+use kratos_claude_client::{
+    Latest, ReleaseError, Version, installed_version, latest_version, update,
+};
 use kratos_protocol::{CliRelease, CliUpdate};
 use tokio::sync::Mutex;
 
@@ -49,19 +51,23 @@ impl Release {
         }
     }
 
-    /// Runs the CLI's updater. Sessions already running keep the release they started on.
+    /// Runs the native install's updater. Sessions already running keep the release they started
+    /// on. Another manager's install is refused, since its updater replaces their files.
     pub async fn update(&self) -> Result<(), ProviderError> {
         let Ok(_updating) = self.updating.try_lock() else {
             return Err(ProviderError::Conflict(
                 "Claude Code is already updating".to_owned(),
             ));
         };
-        update(&self.program, &self.env_set)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                ProviderError::Unavailable(format!("Claude Code did not update: {error}"))
-            })
+        match update(&self.program, &self.env_set).await {
+            Ok(_) => Ok(()),
+            Err(not_native @ ReleaseError::NotNative { .. }) => {
+                Err(ProviderError::Unsupported(not_native.to_string()))
+            }
+            Err(error) => Err(ProviderError::Unavailable(format!(
+                "Claude Code did not update: {error}"
+            ))),
+        }
     }
 }
 

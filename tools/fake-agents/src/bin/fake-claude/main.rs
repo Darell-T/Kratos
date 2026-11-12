@@ -6,9 +6,10 @@
 //!
 //! `FAKE_CLAUDE_LOG` switches to the scripted fake the engine's tests steer (see `scripted`).
 //!
-//! `--version`, `doctor`, and `update` answer as the native install does. The installed release
-//! is the text of the file `FAKE_CLAUDE_RELEASE` names, or 2.1.303 without one. `update` writes
-//! `FAKE_CLAUDE_UPDATE_TO` there, or fails when that is `fail`.
+//! `--version`, `doctor`, and `update` answer as the install `FAKE_CLAUDE_INSTALL` names does, the
+//! native one without it. The installed release is the text of the file `FAKE_CLAUDE_RELEASE`
+//! names, or 2.1.303 without one. `update` writes `FAKE_CLAUDE_UPDATE_TO` there, or fails when that
+//! is `fail`.
 
 mod scripted;
 
@@ -19,10 +20,11 @@ fn release(command: &str) -> bool {
         .as_ref()
         .and_then(|file| std::fs::read_to_string(file).ok())
         .unwrap_or_else(|| "2.1.303".to_owned());
+    let method = std::env::var("FAKE_CLAUDE_INSTALL").unwrap_or_else(|_| "native".to_owned());
     match command {
         "--version" => println!("{} (Claude Code)", installed.trim()),
         "doctor" => println!(
-            "Claude Code doctor\n\n  Running: native ({})\n  Config install method: native\n  \
+            "Claude Code doctor\n\n  Running: {method} ({})\n  Config install method: {method}\n  \
              Auto-update channel: latest",
             installed.trim()
         ),

@@ -100,3 +100,34 @@ async fn a_failed_update_says_why_and_leaves_the_release_and_its_sessions() {
         after.update
     );
 }
+
+#[tokio::test]
+async fn a_cli_another_manager_installed_is_never_updated_under_its_running_sessions() {
+    // Catches Kratos running npm's or WinGet's updater, which replaces files a running CLI still
+    // loads, and a refusal that hides which manager to update with.
+    let harness = Harness::start(Options {
+        install: "npm",
+        ..Options::default()
+    })
+    .await;
+    let first = harness.begin(A, 1).await;
+
+    let error = harness.provider.update_cli().await.unwrap_err();
+
+    assert!(
+        matches!(&error, ProviderError::Unsupported(why) if why.contains("npm")),
+        "{error}"
+    );
+    assert!(harness.is_running(&first), "the session still runs");
+    let after = harness.provider.cli_release().await;
+    assert_eq!(
+        after.installed.as_deref(),
+        Some("2.1.303"),
+        "nothing updated"
+    );
+    assert!(
+        matches!(&after.update, CliUpdate::Unknown { reason } if reason.contains("npm")),
+        "{:?}",
+        after.update
+    );
+}

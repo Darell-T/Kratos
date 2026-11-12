@@ -4,8 +4,12 @@
 //! The newest release comes from the feed `claude update` itself reads for a native install
 //! (measured on 2.1.303: `{feed}/latest` answers `2.1.322`). It is fetched with the system's
 //! `curl`, which Windows 10 and later, macOS, and the Linux CI images ship, so the engine needs no
-//! TLS stack of its own. Other installs (npm, Homebrew, WinGet) are updated by their own manager,
-//! so Kratos reports their newest release as unknown.
+//! TLS stack of its own.
+//!
+//! Kratos updates only the native install, which keeps each release in its own folder, so a
+//! thread already running keeps its release. Other installs (npm, Homebrew, WinGet) are updated by
+//! their own manager, which replaces files a running CLI still loads, so Kratos neither reads their
+//! newest release nor updates them.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -91,6 +95,12 @@ pub enum ReleaseError {
     },
     #[error("{what} printed no release number: {output}")]
     Unreadable { what: String, output: String },
+    #[error(
+        "Claude Code was installed by {method}, whose updater replaces files running threads still \
+         load, so Kratos updates only the native install. Update it with {method} while no Claude \
+         thread runs"
+    )]
+    NotNative { method: String },
 }
 
 /// The release `program --version` reports, as `2.1.303 (Claude Code)`. The CLI gets the
@@ -117,15 +127,12 @@ pub async fn latest_version(
     env_set: &[(OsString, OsString)],
     feed: &str,
 ) -> Result<Latest, ReleaseError> {
-    let doctor = run(program, &["doctor"], env_set, READ_TIMEOUT).await?;
-    let method = doctor_line(&doctor, "Config install method:");
-    if method != Some("native") {
-        return Ok(Latest::Unknown(format!(
-            "Claude Code was installed by {}, which updates it; Kratos reads the newest release \
-             only for the native install",
-            method.unwrap_or("an unknown method")
-        )));
-    }
+    let doctor = match native_doctor(program, env_set).await {
+        Err(not_native @ ReleaseError::NotNative { .. }) => {
+            return Ok(Latest::Unknown(not_native.to_string()));
+        }
+        doctor => doctor?,
+    };
     let channel = doctor_line(&doctor, "Auto-update channel:").unwrap_or("latest");
     if !channel.chars().all(|c| c.is_ascii_alphanumeric()) {
         return Ok(Latest::Unknown(format!(
@@ -151,12 +158,32 @@ pub async fn latest_version(
 
 /// Runs `claude update`, which installs the newest release on the CLI's channel, and returns
 /// the release installed afterward. Sessions already running keep their release until they end.
+///
+/// # Errors
+///
+/// [`ReleaseError::NotNative`], before anything is updated, when another manager installed the
+/// CLI.
 pub async fn update(
     program: &Path,
     env_set: &[(OsString, OsString)],
 ) -> Result<Version, ReleaseError> {
+    native_doctor(program, env_set).await?;
     run(program, &["update"], env_set, UPDATE_TIMEOUT).await?;
     installed_version(program, env_set).await
+}
+
+/// What `claude doctor` prints, when Claude Code's own installer put the CLI in place.
+async fn native_doctor(
+    program: &Path,
+    env_set: &[(OsString, OsString)],
+) -> Result<String, ReleaseError> {
+    let doctor = run(program, &["doctor"], env_set, READ_TIMEOUT).await?;
+    match doctor_line(&doctor, "Config install method:") {
+        Some("native") => Ok(doctor),
+        method => Err(ReleaseError::NotNative {
+            method: method.unwrap_or("an unknown method").to_owned(),
+        }),
+    }
 }
 
 /// `claude doctor`'s value after `label`, such as `native` after `Config install method:`.

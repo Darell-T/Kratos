@@ -25,7 +25,7 @@ pub enum CliUpdate {
         latest: String,
     },
     /// Kratos cannot tell whether a newer release is out, and `reason` says why. The update route
-    /// still runs the CLI's own updater.
+    /// still runs the native install's updater, and refuses any other install.
     Unknown {
         reason: String,
     },
