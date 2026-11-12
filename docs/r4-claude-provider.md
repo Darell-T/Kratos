@@ -93,17 +93,21 @@ These choices are not written in the plan. Each one is in its commit message.
 
 ## Still open
 
-R4 is not verified until these close. Each item says what closes it.
+### Blocks the merge
 
-| Item | Why it is open | What closes it |
-| --- | --- | --- |
-| Comparison against the reference SDK | The plan's unit box asks for a saved-real-case comparison with the TypeScript SDK provider for tool permissions, resume, plan-mode model selection, and structured reports. Live lane 1 asks for the same approval turn through the SDK at trunk. Neither ran. | Run the SDK provider's tests at trunk on the same Haiku cases as lanes 1 to 9, and save `r4-regression.jsonl` with both sides. |
-| Live lane 10, a real usage limit | A real limit cannot be triggered on demand. Replays of the recorded `allowed` event and the typed `rejected` frames cover the logic, but no run has seen a real `rejected` event. | Capture the first real limit, from a lane or from daily use, and add it to `fake-agents` (plan Appendix C). |
-| Sandbox tests that run only in CI | `a_claude_mcp_command_runs_in_the_real_sandbox_and_cannot_write_outside_its_root` (D99) needs the pinned Codex 0.159.1 and a provisioned Windows sandbox home. Setting one up locally changes Windows security settings, so it was not run. | The Windows `real-codex` CI job passes. CI runs only on a pull request or on `main`, so this waits for R4's PR. |
-| Claude tests on Linux and macOS | Every Claude test so far ran on Windows. The fake CLI's Unix `close_stdout` has never run. | The Linux and macOS CI jobs pass on R4's PR. |
-| Windows update under running sessions | On Windows the native launcher `~/.local/bin/claude.exe` is a copy, not a link. Whether `claude update` can replace it while Kratos sessions run is not measured, because running the updater on the owner's machine needs the owner's go-ahead. A failure reaches the user as a 503 with the updater's text. | Run `kratos-client update-claude-cli` once with a session open, with the owner's go-ahead, and record what the updater does. |
-| Skills | Agents cannot use the `Skill`, `Agent`, or `Task` tools, and project skills are not listed. | The unified skills design. `docs/unified-skills.md` records its open questions. |
-| `kratos-client bench-post` | Stage 2 deleted it with its test. It was R2's latency probe, and `bench-turns` now covers the live path. | The owner decides whether it stays deleted. |
+- **Comparison against the reference SDK.** This is the parity evidence for the new provider. Run the SDK provider's tests at trunk on the same Haiku cases as lanes 1 to 9, and save `r4-regression.jsonl` with both sides.
+- **The Windows `real-codex` sandbox tests (D99).** The sandbox is one of Kratos's highest-risk areas. The job needs the pinned Codex 0.159.1 and a provisioned sandbox home, so it runs only in CI. CI runs on every pull request, drafts included.
+- **Linux and macOS CI.** Every Claude test so far ran on Windows. The fake CLI's Unix `close_stdout` has never run.
+
+### Can follow the merge
+
+- **Live lane 10, a real usage limit.** It closes only when a limit happens on its own, so it gates nothing. Condition: an unrecognized limit response must fail loudly, never hang or retry without end, with a test that proves it. Not done yet.
+- **Skills.** They wait on the unified skills design. Condition: nothing in R4 may fix how skills will work. `docs/unified-skills.md` records the open questions. The audit of what R4 commits to is not done yet.
+- **`kratos-client bench-post`.** Stage 2 deleted it. The owner decides whether it stays deleted.
+
+### Update rule for every provider
+
+Kratos never updates a CLI on its own and never under a running session. When an update is available, Kratos tells the user, and the user decides. For Claude Code, `GET /api/agents/claude/cli` reports the newest release, `POST /api/agents/claude/cli/update` runs only when the user asks, it refuses while a Claude thread works, and every session starts with `DISABLE_AUTOUPDATER=1`. Codex has no update route yet, and Kratos never updates it.
 
 ## How it was checked
 
