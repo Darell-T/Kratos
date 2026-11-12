@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use kratos_codex_client::{Codex, RequestError, methods, rejected_before_execution, types};
 use kratos_protocol::{
-    Message, MessageId, MessageStatus, PauseReason, ThreadId, ThreadSettings, TurnId, TurnOutcome,
+    Message, MessageId, MessageStatus, PauseReason, ThreadEventBody, ThreadId, ThreadSettings,
+    TurnId, TurnOutcome,
 };
 use serde_json::json;
 
@@ -15,7 +16,7 @@ use super::approvals::settle_closed;
 use super::profiles::Profile;
 use super::threads::{Turn, TurnWork};
 use super::{ProviderError, policy, wire};
-use crate::providers::queue;
+use crate::providers::{queue, report_item};
 
 /// How long `turn/interrupt` may take to answer.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -555,13 +556,34 @@ impl Actor {
         work: TurnWork,
         after: After,
     ) -> Result<(), ProviderError> {
-        let TurnWork { changes, context } = work;
+        let TurnWork {
+            changes,
+            context,
+            last_reply,
+        } = work;
         let changes = changes.finish();
+        // Codex holds the final reply to the format, so a reply that is not JSON means the turn
+        // did not end on its report, and none is recorded.
+        let report = match outcome {
+            TurnOutcome::Completed => self
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.turn_settings().turn_report_format())
+                .and(last_reply)
+                .and_then(|reply| serde_json::from_str(&reply).ok()),
+            TurnOutcome::Interrupted | TurnOutcome::Failed { .. } => None,
+        };
         let closed = self
             .requests
             .close(thread_id, |waiting_turn| *waiting_turn == turn_id);
         self.write(thread_id, move |write| {
             settle_closed(write, &closed, "The turn ended")?;
+            if let Some(report) = report {
+                write.append(ThreadEventBody::ItemCompleted {
+                    item: report_item(&turn_id, report),
+                    turn_id: turn_id.clone(),
+                })?;
+            }
             write.complete_turn(turn_id, outcome, changes, context)?;
             match after {
                 After::Continue => {}
@@ -706,9 +728,7 @@ fn turn_start_params(
     params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
     params.permissions = Some(Profile::for_settings(settings).id().to_owned());
     params.output_schema = settings
-        .report_format
-        .as_ref()
-        .filter(|_| !settings.plan_mode)
+        .turn_report_format()
         .map(|format| serde_json::Value::Object(format.schema().clone()));
     params.collaboration_mode = model.map(|model| types::CollaborationMode {
         mode: if settings.plan_mode {

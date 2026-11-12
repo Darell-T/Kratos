@@ -87,6 +87,8 @@ pub(super) struct TurnWork {
     pub changes: ChangesRecorder,
     /// The latest context report (D76).
     pub context: Option<ContextUsage>,
+    /// The text of the turn's latest reply, which is the report under a report format.
+    pub last_reply: Option<String>,
 }
 
 pub(super) enum Turn {

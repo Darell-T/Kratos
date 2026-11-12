@@ -115,9 +115,9 @@ pub struct ThreadSettings {
     pub report_format: Option<ReportFormat>,
 }
 
-/// A JSON Schema object the agent's final reply must match. Claude returns the reply as an
-/// [`AgentItem::Report`](crate::AgentItem::Report); Codex returns it as message text holding the
-/// JSON.
+/// A JSON Schema object the agent's final reply must match. A completed turn under one ends with
+/// an [`AgentItem::Report`](crate::AgentItem::Report) holding the parsed reply, whichever provider
+/// ran it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ReportFormat(serde_json::Map<String, serde_json::Value>);
@@ -150,6 +150,12 @@ impl ThreadSettings {
             permission: self.permission,
             plan_mode: self.plan_mode,
         }
+    }
+
+    /// The report format a turn under these settings follows. Plan mode has none, since the plan
+    /// is that turn's reply.
+    pub fn turn_report_format(&self) -> Option<&ReportFormat> {
+        self.report_format.as_ref().filter(|_| !self.plan_mode)
     }
 
     /// These settings with no more access than `limit`.

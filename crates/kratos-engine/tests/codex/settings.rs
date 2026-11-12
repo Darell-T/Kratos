@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
-    AccessLimit, AskReason, ContextLimit, MessageOrigin, Permission, ReportFormat, ThreadEventBody,
-    ThreadSettings,
+    AccessLimit, AgentItem, AskReason, ContextLimit, MessageOrigin, Permission, ReportFormat,
+    ThreadEventBody, ThreadSettings,
 };
 use serde_json::json;
 
@@ -443,5 +443,71 @@ async fn a_report_format_reaches_each_codex_turn_except_a_planning_one() {
         started[1]["params"]["outputSchema"].is_null(),
         "{}",
         started[1]
+    );
+}
+
+/// The items of the turn that completes next, in order.
+async fn items_until_completed(harness: &mut Harness) -> Vec<AgentItem> {
+    let mut items = Vec::new();
+    loop {
+        match harness.next_event().await.event {
+            ThreadEventBody::ItemCompleted { item, .. } => items.push(item),
+            ThreadEventBody::TurnCompleted { .. } => return items,
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_codex_turn_under_a_report_format_ends_with_its_reply_as_a_report() {
+    // Catches a Codex report left as message text while a Claude one is a report item, so a reader
+    // of the history needs to know which provider ran the turn, and a reply that is not JSON
+    // recorded as a report.
+    let reporting = ThreadSettings {
+        report_format: Some(ReportFormat::new(
+            json!({ "type": "object" }).as_object().unwrap().clone(),
+        )),
+        ..ThreadSettings::default()
+    };
+    let mut harness = Harness::start(Options {
+        settings: reporting,
+        ..Options::default()
+    })
+    .await;
+    let verdict = json!({ "verdict": "approve" });
+    harness.running_turn("a", "turn-1").await;
+    harness
+        .emit(
+            "item/completed",
+            json!({ "threadId": THREAD, "turnId": "turn-1", "completedAtMs": 0,
+                    "item": { "type": "agentMessage", "id": "reply-1", "text": verdict.to_string() } }),
+        )
+        .await;
+    harness.complete(THREAD, "turn-1", "completed").await;
+
+    let items = items_until_completed(&mut harness).await;
+
+    assert!(
+        matches!(items.last(), Some(AgentItem::Report { report, .. }) if *report == verdict),
+        "{items:?}"
+    );
+
+    harness.running_turn("b", "turn-2").await;
+    harness
+        .emit(
+            "item/completed",
+            json!({ "threadId": THREAD, "turnId": "turn-2", "completedAtMs": 0,
+                    "item": { "type": "agentMessage", "id": "reply-2", "text": "Not a report." } }),
+        )
+        .await;
+    harness.complete(THREAD, "turn-2", "completed").await;
+
+    let items = items_until_completed(&mut harness).await;
+
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, AgentItem::Report { .. })),
+        "{items:?}"
     );
 }

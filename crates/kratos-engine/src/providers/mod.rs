@@ -11,11 +11,20 @@ pub(crate) mod queue;
 pub(crate) use agent::Agent;
 pub use agent::Providers;
 
-use kratos_protocol::{ApprovalId, Message, MessageId, QuestionId, ThreadId};
+use kratos_protocol::{AgentItem, ApprovalId, Message, MessageId, QuestionId, ThreadId, TurnId};
 use kratos_store::StoreError;
 
 /// The most undelivered messages one thread holds (D85).
 pub(crate) const MAX_PENDING_MESSAGES: usize = 10;
+
+/// The item a completed turn under a report format ends with. No provider gives the report an id,
+/// so it takes one from its turn.
+pub(crate) fn report_item(turn_id: &TurnId, report: serde_json::Value) -> AgentItem {
+    AgentItem::Report {
+        id: format!("{turn_id}-report"),
+        report,
+    }
+}
 
 /// What became of a continuation the scheduler sent (D39).
 #[derive(Clone, Debug, PartialEq, Eq)]

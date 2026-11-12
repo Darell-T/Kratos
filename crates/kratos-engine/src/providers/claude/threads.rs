@@ -35,10 +35,7 @@ impl SessionConfig {
             } else {
                 PermissionMode::Default
             },
-            report_format: settings
-                .report_format
-                .clone()
-                .filter(|_| !settings.plan_mode),
+            report_format: settings.turn_report_format().cloned(),
         }
     }
 }

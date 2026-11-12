@@ -5,13 +5,12 @@
 use kratos_claude_client::{
     IterationTokens, TurnContext, TurnOutcome as ClaudeOutcome, TurnResult,
 };
-use kratos_protocol::{
-    AgentItem, ContextUsage, PauseReason, ThreadEventBody, Timestamp, TurnId, TurnOutcome,
-};
+use kratos_protocol::{ContextUsage, PauseReason, ThreadEventBody, Timestamp, TurnId, TurnOutcome};
 use kratos_store::{StoreError, ThreadWrite};
 
 use super::threads::Rejection;
 use crate::providers::queue::pause_if_waiting;
+use crate::providers::report_item;
 
 /// Whether the turn stopped because the account ran out of usage.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,11 +119,8 @@ pub(super) fn end_turn(
     } = end;
     if let Some(report) = report {
         write.append(ThreadEventBody::ItemCompleted {
+            item: report_item(&turn_id, report),
             turn_id: turn_id.clone(),
-            item: AgentItem::Report {
-                id: format!("{turn_id}-report"),
-                report,
-            },
         })?;
     }
     let failure = match &outcome {

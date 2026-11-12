@@ -100,7 +100,7 @@ pub enum AgentItem {
     Message { id: String, text: String },
     /// The plan a planning turn ends with.
     Plan { id: String, text: String },
-    /// The reply a turn under a report format ends with, already parsed (Claude only).
+    /// The reply a turn under a report format ends with, already parsed.
     Report {
         id: String,
         report: serde_json::Value,
