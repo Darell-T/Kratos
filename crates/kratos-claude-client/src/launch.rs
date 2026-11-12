@@ -125,6 +125,16 @@ pub(crate) fn spawn(launch: &Launch) -> Result<OwnedChild, ConnectError> {
             .arg("--disallowedTools")
             .arg(launch.disallowed_tools.join(","));
     }
+    set_environment(&mut command, &launch.env_set);
+    OwnedChild::spawn(command).map_err(|source| ConnectError::Spawn {
+        program: launch.program.clone(),
+        source,
+    })
+}
+
+/// Removes every inherited `CLAUDE*`, `ANTHROPIC*`, and `KRATOS*` variable, so the CLI uses the
+/// subscription login and none of Kratos's secrets, then sets `env_set`.
+pub(crate) fn set_environment(command: &mut Command, env_set: &[(OsString, OsString)]) {
     for (name, _) in std::env::vars_os() {
         let upper = name.to_string_lossy().to_ascii_uppercase();
         if upper.starts_with("CLAUDE")
@@ -134,11 +144,7 @@ pub(crate) fn spawn(launch: &Launch) -> Result<OwnedChild, ConnectError> {
             command.env_remove(name);
         }
     }
-    for (name, value) in &launch.env_set {
+    for (name, value) in env_set {
         command.env(name, value);
     }
-    OwnedChild::spawn(command).map_err(|source| ConnectError::Spawn {
-        program: launch.program.clone(),
-        source,
-    })
 }

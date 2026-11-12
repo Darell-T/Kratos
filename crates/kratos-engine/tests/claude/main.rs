@@ -8,6 +8,7 @@ mod guards;
 mod harness;
 mod permissions;
 mod protected_reads;
+mod release;
 mod reliability;
 mod requests;
 mod rules;

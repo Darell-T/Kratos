@@ -22,9 +22,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use kratos_protocol::routes::{
-    APPROVAL, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE, MESSAGE_DISCARD, MESSAGE_RETRY,
-    MESSAGE_STEER, QUESTION, THREAD, THREAD_EVENTS, THREAD_MESSAGES, THREAD_RESUME,
-    THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE, WORKSPACES,
+    APPROVAL, CLAUDE_CLI, CLAUDE_CLI_UPDATE, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE,
+    MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_EVENTS,
+    THREAD_MESSAGES, THREAD_RESUME, THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE,
+    WORKSPACES,
 };
 use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
 use kratos_store::{Refusal, StoreError};
@@ -189,6 +190,8 @@ fn user_routes() -> Router<ServerState> {
         .route(THREAD_SKILLS, get(agents::skills))
         .route(CONTINUATION_SCHEDULE, post(agents::schedule))
         .route(USAGE, get(agents::usage))
+        .route(CLAUDE_CLI, get(agents::claude_cli))
+        .route(CLAUDE_CLI_UPDATE, post(agents::update_claude_cli))
         .route(EVENTS, get(socket::events))
 }
 

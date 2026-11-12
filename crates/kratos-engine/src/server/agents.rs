@@ -19,6 +19,7 @@ use super::acting::Acting;
 use super::json::read_json;
 use super::threads::details;
 use super::{ApiError, MessagePath, ServerState, ThreadPath, json_reply, path};
+use crate::providers::claude::ClaudeProvider;
 use crate::providers::{Agent, MAX_PENDING_MESSAGES, Sent};
 
 /// How long `GET /api/usage` waits for each provider's fresh read before it answers with what it
@@ -281,4 +282,27 @@ pub(super) async fn usage(State(state): State<ServerState>) -> Response {
     };
     tokio::join!(codex, claude);
     json_reply(StatusCode::OK, &state.usage.report())
+}
+
+/// `GET /api/agents/claude/cli`: 200 with the installed Claude Code release and whether a newer
+/// one is out, or 503 when Claude threads are unavailable.
+pub(super) async fn claude_cli(State(state): State<ServerState>) -> Result<Response, ApiError> {
+    let claude = claude(&state)?;
+    Ok(json_reply(StatusCode::OK, &claude.cli_release().await))
+}
+
+/// `POST /api/agents/claude/cli/update`: runs Claude Code's own updater, then 200 with the release
+/// now installed. 409 while another update runs, 503 when the updater fails. Agents cannot reach
+/// it, since it is a user route.
+pub(super) async fn update_claude_cli(
+    State(state): State<ServerState>,
+) -> Result<Response, ApiError> {
+    let claude = claude(&state)?;
+    Ok(json_reply(StatusCode::OK, &claude.update_cli().await?))
+}
+
+fn claude(state: &ServerState) -> Result<&ClaudeProvider, ApiError> {
+    state.providers.claude.as_ref().map_err(|missing| {
+        ApiError::unavailable(format!("Claude threads are unavailable: {missing}"))
+    })
 }

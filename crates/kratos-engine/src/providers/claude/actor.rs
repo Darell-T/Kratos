@@ -10,8 +10,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use kratos_claude_client::{
-    Claude, ConnectError, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError,
-    UsageRead,
+    Claude, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError, UsageRead,
 };
 use kratos_protocol::{
     AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
@@ -88,6 +87,10 @@ pub(super) enum Command {
     RefreshOpenUsage {
         reply: Reply<()>,
     },
+    /// Closes every session with no turn running, after the CLI was updated.
+    CloseQuietSessions {
+        reply: Reply<()>,
+    },
     /// Runs `waiter` once the thread's CLI is up, starting one when none runs.
     WhenOpen {
         thread_id: ThreadId,
@@ -151,7 +154,8 @@ pub(super) enum Done {
         thread_id: ThreadId,
         epoch: u64,
         config: SessionConfig,
-        result: Result<Box<Connected>, ConnectError>,
+        /// Why the CLI did not start, when it did not.
+        result: Result<Box<Connected>, String>,
     },
     Sent {
         thread_id: ThreadId,
@@ -253,7 +257,7 @@ impl Actor {
                 },
                 Some(done) = self.completions.recv() => self.on_done(done).await,
                 Some(event) = self.incoming.recv() => self.on_event(event).await,
-                _ = idle_check.tick() => self.close_idle_sessions(),
+                _ = idle_check.tick() => self.close_sessions_idle_for(self.settings.idle_close),
             }
         }
     }

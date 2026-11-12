@@ -40,6 +40,8 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   answer <question-id> <answers-json>
   schedule <continuation-id>
   usage
+  claude-cli
+  update-claude-cli
   subscribe <thread-id> [--after <seq>] [--count <n>] [--read-delay-ms <ms>]
   request <METHOD> <path> [--header <name:value>]... [--json <body> | --body-bytes <n>]
   socket-send <bytes> [--header <name:value>]...
@@ -54,6 +56,8 @@ subscribe follows a thread through disconnects and engine restarts and prints ea
 and live updates, such as a reply as it is written, as they come; --count counts events only.
 --read-delay-ms makes it a stalled reader: it subscribes, waits, then reads.
 request sends exactly what it is told, for the Host, Origin, and size-cap checks.
+update-claude-cli runs Claude Code's updater in the engine, which keeps going if this client
+times out; claude-cli then shows the release installed.
 socket-send sends one message of exactly <bytes> bytes and reports whether the engine closed
 the socket.";
 
@@ -93,7 +97,7 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 24] = [
+const COMMANDS: [Command; 26] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
@@ -118,6 +122,8 @@ const COMMANDS: [Command; 24] = [
     Command { name: "answer", positional: 2, options: &[], run: answer },
     Command { name: "schedule", positional: 1, options: &[], run: schedule },
     Command { name: "usage", positional: 0, options: &[], run: usage_report },
+    Command { name: "claude-cli", positional: 0, options: &[], run: claude_cli },
+    Command { name: "update-claude-cli", positional: 0, options: &[], run: update_claude_cli },
     Command {
         name: "subscribe", positional: 1,
         options: &["--after", "--count", "--read-delay-ms"], run: subscribe,
@@ -387,6 +393,14 @@ fn schedule(session: &mut Session, args: &Args) -> Result<(), Failure> {
 
 fn usage_report(session: &mut Session, _: &Args) -> Result<(), Failure> {
     session.get(routes::USAGE)
+}
+
+fn claude_cli(session: &mut Session, _: &Args) -> Result<(), Failure> {
+    session.get(routes::CLAUDE_CLI)
+}
+
+fn update_claude_cli(session: &mut Session, _: &Args) -> Result<(), Failure> {
+    session.post(routes::CLAUDE_CLI_UPDATE, &json!({}))
 }
 
 fn json_argument(text: &str, name: &str) -> Result<Value, Failure> {

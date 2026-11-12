@@ -1,5 +1,7 @@
 //! What handles ask of the actor. `on_command` hands each command to the method that serves it.
 
+use std::time::Duration;
+
 use super::actor::{Actor, Command};
 use super::settings::check_settings;
 
@@ -75,6 +77,10 @@ impl Actor {
                 self.dispatch(&thread_id).await;
             }
             Command::RefreshOpenUsage { reply } => self.refresh_open_usage(reply),
+            Command::CloseQuietSessions { reply } => {
+                self.close_sessions_idle_for(Duration::ZERO);
+                let _ = reply.send(Ok(()));
+            }
             Command::WhenOpen { thread_id, waiter } => {
                 self.when_open(&thread_id, waiter).await;
             }

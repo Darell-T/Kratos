@@ -4,6 +4,7 @@ mod connection;
 mod launch;
 mod locate;
 mod protocol;
+mod release;
 mod transcript;
 mod usage;
 
@@ -18,6 +19,9 @@ pub use protocol::{
     Initialize, Initialized, McpServer, Model, ParseError, RateLimitEvent, RateLimitInfo,
     SessionInit, SlashCommand, StreamEvent, StreamMessage, TurnOutcome, TurnResult, UnifiedWindows,
     UsageWindow,
+};
+pub use release::{
+    Latest, ParseVersionError, ReleaseError, Version, installed_version, latest_version, update,
 };
 pub use transcript::{
     DeliveredMessages, SessionId, SessionStart, TranscriptError, delivered_message_ids,

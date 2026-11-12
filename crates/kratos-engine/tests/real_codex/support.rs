@@ -133,6 +133,7 @@ impl Harness {
                     ),
                 }),
                 program: fake_agents::executable("fake-claude"),
+                release_feed: "file:///nowhere".to_owned(),
                 claude_home: root.path().join("claude-home"),
                 env_set: vec![(
                     "FAKE_CLAUDE_LOG".into(),

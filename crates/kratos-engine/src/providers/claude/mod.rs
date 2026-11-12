@@ -36,6 +36,7 @@ mod permissions;
 mod policy;
 mod queue;
 mod recovery;
+mod release;
 mod requests;
 mod session;
 mod settings;
@@ -47,12 +48,13 @@ mod wire;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use kratos_protocol::{
-    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
-    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, SlashCommand, ThreadId,
-    ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, CliRelease, ContinuationId,
+    Message, MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, SlashCommand,
+    ThreadId, ThreadSettings,
 };
 use kratos_store::StoreError;
 use tokio::sync::{mpsc, oneshot};
@@ -74,6 +76,8 @@ pub struct ClaudeSettings {
     pub tools: Option<ClaudeTools>,
     /// The native `claude` executable, found as the user's shell finds it (L8).
     pub program: PathBuf,
+    /// Where Claude Code's native updater reads the newest release on each channel.
+    pub release_feed: String,
     /// The user's home folder, under which Claude keeps each session's transcript.
     pub claude_home: PathBuf,
     /// Variables set for the CLI after Kratos's own and the provider's are removed.
@@ -114,6 +118,7 @@ const QUEUED_COMMANDS: usize = 64;
 #[derive(Clone)]
 pub struct ClaudeProvider {
     commands: mpsc::Sender<actor::Command>,
+    release: Arc<release::Release>,
 }
 
 /// Starts the actor. It first settles what an earlier engine left unfinished (L1): turns shown
@@ -131,9 +136,15 @@ pub async fn start(
     limit_stops: mpsc::UnboundedSender<LimitStop>,
 ) -> Result<ClaudeProvider, StoreError> {
     let (commands, inbox) = mpsc::channel(QUEUED_COMMANDS);
+    let release = Arc::new(release::Release {
+        program: settings.program.clone(),
+        env_set: settings.env_set.clone(),
+        feed: settings.release_feed.clone(),
+        updating: tokio::sync::Mutex::new(()),
+    });
     let actor = actor::Actor::recover(settings, hub, store, usage, limit_stops).await?;
     tokio::spawn(actor.run(inbox));
-    Ok(ClaudeProvider { commands })
+    Ok(ClaudeProvider { commands, release })
 }
 
 impl ClaudeProvider {
@@ -322,6 +333,29 @@ impl ClaudeProvider {
     pub async fn refresh_open_usage(&self) -> Result<(), ProviderError> {
         self.ask(|reply| actor::Command::RefreshOpenUsage { reply })
             .await
+    }
+
+    /// The installed Claude Code release and whether a newer one is out.
+    pub async fn cli_release(&self) -> CliRelease {
+        self.release.status().await
+    }
+
+    /// Installs the newest release with the CLI's own updater, then closes every session with no
+    /// turn running, so its thread's next message resumes on the new release. A turn already
+    /// running finishes on its old release, whose process closes once it sits idle.
+    pub async fn update_cli(&self) -> Result<CliRelease, ProviderError> {
+        // A task of its own, so a client that disconnects mid-update never stops the updater
+        // halfway through replacing the CLI.
+        let provider = self.clone();
+        tokio::spawn(async move {
+            provider.release.update().await?;
+            provider
+                .ask(|reply| actor::Command::CloseQuietSessions { reply })
+                .await?;
+            Ok(provider.release.status().await)
+        })
+        .await
+        .map_err(|_| ProviderError::Stopped)?
     }
 
     /// The slash commands the thread's session reports, opening one when none runs (D97).

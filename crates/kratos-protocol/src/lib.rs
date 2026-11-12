@@ -35,6 +35,7 @@ macro_rules! string_id {
 
 mod api;
 mod approvals;
+mod cli;
 mod context_limit;
 mod events;
 mod messages;
@@ -56,6 +57,7 @@ pub use approvals::{
     AskReason, DecideApproval, ExtraAccess, NetworkAccess, PathAccess, PathAccessMode, Question,
     QuestionId, QuestionItem, QuestionOption, QuestionOutcome,
 };
+pub use cli::{CliRelease, CliUpdate};
 pub use context_limit::ContextLimit;
 pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody};
 pub use messages::{

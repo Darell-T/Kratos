@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use super::actor::{Actor, Connected, Done, SessionEvent};
 use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState, Waiter};
-use super::{ClaudeSettings, ProviderError, hooks, permissions, wire};
+use super::{ClaudeSettings, ProviderError, hooks, permissions, release, wire};
 
 /// The tools Claude Code runs commands with. Kratos runs commands itself, in the sandbox of the
 /// thread's permission (D17), so the CLI cannot use its native command tools.
@@ -92,11 +92,17 @@ impl Actor {
         let epoch = thread.epoch;
         let thread_id = thread_id.clone();
         let enabled = self.settings.tools.is_some();
+        let program = self.settings.program.clone();
+        let env_set = self.settings.env_set.clone();
         self.spawn(async move {
-            let result = connect(launch, hooks::initialize(enabled), move |control| {
-                permissions::startup(control, enabled)
-            })
-            .await;
+            let result = match release::supported(&program, &env_set).await {
+                Err(why) => Err(why),
+                Ok(()) => connect(launch, hooks::initialize(enabled), move |control| {
+                    permissions::startup(control, enabled)
+                })
+                .await
+                .map_err(|error| error.to_string()),
+            };
             Done::Opened {
                 thread_id,
                 epoch,
@@ -197,7 +203,7 @@ impl Actor {
         thread_id: ThreadId,
         epoch: u64,
         config: SessionConfig,
-        result: Result<Box<Connected>, kratos_claude_client::ConnectError>,
+        result: Result<Box<Connected>, String>,
     ) {
         let waiting = self.threads.get(&thread_id).is_some_and(|thread| {
             thread.epoch == epoch && matches!(thread.session, Session::Opening)
@@ -272,16 +278,17 @@ impl Actor {
 
     /// Ends every process that sat idle for the idle window. Its thread loses nothing: the next
     /// message resumes the session, as Zeron does for a warm session nobody comes back to.
-    pub(super) fn close_idle_sessions(&mut self) {
+    /// Closes every session with no turn running that nobody has used for `idle_for`. Its
+    /// thread's next message resumes it.
+    pub(super) fn close_sessions_idle_for(&mut self, idle_for: Duration) {
         let now = Instant::now();
-        let idle_close = self.settings.idle_close;
         let idle: Vec<ThreadId> = self
             .threads
             .iter()
             .filter(|(_, thread)| {
                 thread
                     .idle_since()
-                    .is_some_and(|since| now.duration_since(since) >= idle_close)
+                    .is_some_and(|since| now.duration_since(since) >= idle_for)
             })
             .map(|(thread_id, _)| thread_id.clone())
             .collect();

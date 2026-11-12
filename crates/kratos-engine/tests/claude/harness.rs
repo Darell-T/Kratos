@@ -57,6 +57,10 @@ pub struct Options {
     pub settings: ThreadSettings,
     /// The time the account's usage is judged at, when a test moves it by hand.
     pub clock: Option<Arc<dyn Clock>>,
+    /// The release `claude update` installs, or `fail` for an updater that fails. The installed
+    /// release is the text of `root/release`, 2.1.303 when it is absent, and the newest release
+    /// the feed names is the text of `root/feed/latest`.
+    pub update_to: &'static str,
 }
 
 impl Default for Options {
@@ -70,8 +74,17 @@ impl Default for Options {
             max_restarts: 5,
             settings: ThreadSettings::default(),
             clock: None,
+            update_to: "2.1.400",
         }
     }
+}
+
+/// A `file://` feed in `root/feed`, so a test names the newest release without the network.
+fn release_feed(root: &std::path::Path) -> String {
+    let feed = root.join("feed");
+    std::fs::create_dir_all(&feed).unwrap();
+    let path = feed.to_string_lossy().replace('\\', "/");
+    format!("file:///{}", path.trim_start_matches('/'))
 }
 
 /// One process the provider started: where the test reaches it, and how it was launched.
@@ -156,10 +169,16 @@ impl Harness {
                 "FAKE_CLAUDE_PLAN".into(),
                 root.path().join("plan").into_os_string(),
             ),
+            (
+                "FAKE_CLAUDE_RELEASE".into(),
+                root.path().join("release").into_os_string(),
+            ),
+            ("FAKE_CLAUDE_UPDATE_TO".into(), options.update_to.into()),
         ];
         let settings = ClaudeSettings {
             tools: None,
             program: fake_agents::executable("fake-claude"),
+            release_feed: release_feed(root.path()),
             claude_home: root.path().join("home"),
             env_set,
             stop_timeout: options.stop_timeout,

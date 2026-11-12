@@ -5,8 +5,44 @@
 //! controls inspect received input, emit frames, hold requests, and inject transport faults.
 //!
 //! `FAKE_CLAUDE_LOG` switches to the scripted fake the engine's tests steer (see `scripted`).
+//!
+//! `--version`, `doctor`, and `update` answer as the native install does. The installed release
+//! is the text of the file `FAKE_CLAUDE_RELEASE` names, or 2.1.303 without one. `update` writes
+//! `FAKE_CLAUDE_UPDATE_TO` there, or fails when that is `fail`.
 
 mod scripted;
+
+/// Answers a release command and returns true, or returns false for a session.
+fn release(command: &str) -> bool {
+    let file = std::env::var_os("FAKE_CLAUDE_RELEASE");
+    let installed = file
+        .as_ref()
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .unwrap_or_else(|| "2.1.303".to_owned());
+    match command {
+        "--version" => println!("{} (Claude Code)", installed.trim()),
+        "doctor" => println!(
+            "Claude Code doctor\n\n  Running: native ({})\n  Config install method: native\n  \
+             Auto-update channel: latest",
+            installed.trim()
+        ),
+        "update" => {
+            let target = std::env::var("FAKE_CLAUDE_UPDATE_TO").unwrap_or_default();
+            if target == "fail" {
+                eprintln!("Error: the download was interrupted");
+                std::process::exit(1);
+            }
+            let file = file.expect("an update test names FAKE_CLAUDE_RELEASE");
+            std::fs::write(file, &target).expect("the release file is writable");
+            println!(
+                "Successfully updated from {} to version {target}",
+                installed.trim()
+            );
+        }
+        _ => return false,
+    }
+    true
+}
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -32,6 +68,11 @@ struct Fake {
 }
 
 fn main() {
+    if let Some(command) = std::env::args().nth(1)
+        && release(&command)
+    {
+        return;
+    }
     if let Some(log) = std::env::var_os("FAKE_CLAUDE_LOG") {
         scripted::run(std::path::Path::new(&log));
         return;
