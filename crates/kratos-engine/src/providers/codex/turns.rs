@@ -564,15 +564,13 @@ impl Actor {
         let changes = changes.finish();
         // Codex holds the final reply to the format, so a reply that is not JSON means the turn
         // did not end on its report, and none is recorded.
-        let report = match outcome {
-            TurnOutcome::Completed => self
-                .threads
-                .get(thread_id)
-                .and_then(|thread| thread.turn_settings().turn_report_format())
-                .and(last_reply)
-                .and_then(|reply| serde_json::from_str(&reply).ok()),
-            TurnOutcome::Interrupted | TurnOutcome::Failed { .. } => None,
-        };
+        let report: Option<serde_json::Value> = self
+            .threads
+            .get(thread_id)
+            .and_then(|thread| thread.turn_settings().turn_report_format())
+            .filter(|_| outcome == TurnOutcome::Completed)
+            .and(last_reply)
+            .and_then(|reply| serde_json::from_str(&reply).ok());
         let closed = self
             .requests
             .close(thread_id, |waiting_turn| *waiting_turn == turn_id);
