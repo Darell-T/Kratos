@@ -277,16 +277,29 @@ fn has_force_delete_cmdlet(tokens: &[String]) -> bool {
             if DELETE_CMDLETS.iter().any(|cmd| a.eq_ignore_ascii_case(cmd)) {
                 has_delete = true;
             }
-            if a.eq_ignore_ascii_case("-force")
-                || a.get(..7)
-                    .is_some_and(|p| p.eq_ignore_ascii_case("-force:"))
-            {
+            if is_force_parameter(a) {
                 has_force = true;
             }
         }
 
         has_delete && has_force
     })
+}
+
+/// PowerShell binds any unambiguous prefix of a parameter name, so `-Fo` is `-Force` for every
+/// delete cmdlet here (`-F` alone also matches `-Filter` and fails). It reads an en dash, em dash,
+/// or horizontal bar as `-` too.
+fn is_force_parameter(atom: &str) -> bool {
+    let Some(parameter) = atom.strip_prefix(['-', '\u{2013}', '\u{2014}', '\u{2015}']) else {
+        return false;
+    };
+    let name = parameter
+        .split_once(':')
+        .map_or(parameter, |(name, _)| name);
+    name.len() >= 2
+        && "force"
+            .get(..name.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(name))
 }
 
 /// Check for /f or /F flag in CMD del/erase arguments.
@@ -515,6 +528,36 @@ mod tests {
             "-Command",
             "ri test -Force"
         ])));
+    }
+
+    #[test]
+    fn powershell_force_written_as_a_prefix_or_with_a_typographic_dash_is_dangerous() {
+        for script in [
+            "Remove-Item test -Fo",
+            "Remove-Item test -Recurse -FORC",
+            "rm test -for:$true",
+            "Remove-Item test \u{2013}Force",
+            "Remove-Item test \u{2014}fo",
+        ] {
+            assert!(
+                is_dangerous_command_windows(&vec_str(&["powershell", "-Command", script])),
+                "{script}"
+            );
+        }
+    }
+
+    #[test]
+    fn powershell_parameters_that_only_share_a_letter_with_force_are_not_flagged() {
+        for script in [
+            "Remove-Item test -F",
+            "Remove-Item test -Filter *.log",
+            "Remove-Item test -Forced",
+        ] {
+            assert!(
+                !is_dangerous_command_windows(&vec_str(&["powershell", "-Command", script])),
+                "{script}"
+            );
+        }
     }
 
     #[test]
