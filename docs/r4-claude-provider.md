@@ -91,13 +91,19 @@ These choices are not written in the plan. Each one is in its commit message.
 - **Only a failed turn after a `rejected` event is a limit stop.** A CLI that waits out the limit and resumes by itself gets nothing sent (D39).
 - **Claude processes close after 30 idle minutes,** as Zeron's do. The next message resumes the session.
 
-## Known gaps
+## Still open
 
-- The plan's comparison against the reference SDK did not run: the SDK half of live lane 1 and the saved-real-case comparison.
-- Live lane 10, a real usage limit, cannot be triggered on demand. Replays of the recorded and typed events cover it.
-- The D99 sandbox test and the Unix case test run only in CI, so they need a push.
-- Agents cannot use the `Skill`, `Agent`, or `Task` tools, and project skills are not listed. `docs/unified-skills.md` records the open design.
-- Whether `claude update` can replace the Windows launcher while sessions run is not measured. A failure reaches the user as a 503 with the updater's text.
+R4 is not verified until these close. Each item says what closes it.
+
+| Item | Why it is open | What closes it |
+| --- | --- | --- |
+| Comparison against the reference SDK | The plan's unit box asks for a saved-real-case comparison with the TypeScript SDK provider for tool permissions, resume, plan-mode model selection, and structured reports. Live lane 1 asks for the same approval turn through the SDK at trunk. Neither ran. | Run the SDK provider's tests at trunk on the same Haiku cases as lanes 1 to 9, and save `r4-regression.jsonl` with both sides. |
+| Live lane 10, a real usage limit | A real limit cannot be triggered on demand. Replays of the recorded `allowed` event and the typed `rejected` frames cover the logic, but no run has seen a real `rejected` event. | Capture the first real limit, from a lane or from daily use, and add it to `fake-agents` (plan Appendix C). |
+| Sandbox tests that run only in CI | `a_claude_mcp_command_runs_in_the_real_sandbox_and_cannot_write_outside_its_root` (D99) needs the pinned Codex 0.159.1 and a provisioned Windows sandbox home. Setting one up locally changes Windows security settings, so it was not run. | The Windows `real-codex` CI job passes. CI runs only on a pull request or on `main`, so this waits for R4's PR. |
+| Claude tests on Linux and macOS | Every Claude test so far ran on Windows. The fake CLI's Unix `close_stdout` has never run. | The Linux and macOS CI jobs pass on R4's PR. |
+| Windows update under running sessions | On Windows the native launcher `~/.local/bin/claude.exe` is a copy, not a link. Whether `claude update` can replace it while Kratos sessions run is not measured, because running the updater on the owner's machine needs the owner's go-ahead. A failure reaches the user as a 503 with the updater's text. | Run `kratos-client update-claude-cli` once with a session open, with the owner's go-ahead, and record what the updater does. |
+| Skills | Agents cannot use the `Skill`, `Agent`, or `Task` tools, and project skills are not listed. | The unified skills design. `docs/unified-skills.md` records its open questions. |
+| `kratos-client bench-post` | Stage 2 deleted it with its test. It was R2's latency probe, and `bench-turns` now covers the live path. | The owner decides whether it stays deleted. |
 
 ## How it was checked
 
