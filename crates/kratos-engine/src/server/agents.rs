@@ -267,7 +267,8 @@ pub(super) async fn schedule(
 }
 
 /// `GET /api/usage`: 200 with each account's usage, read fresh from Codex, and from Claude through
-/// an open session, when they answer in time (D38). Context use is a thread's, in its turn events, never this report (D76).
+/// an open session, when they answer in time (D38). Context use is a thread's, in its turn events,
+/// never this report (D76).
 pub(super) async fn usage(State(state): State<ServerState>) -> Response {
     // A failed or slow read leaves the last snapshot, which says so in its allowance.
     let codex = async {

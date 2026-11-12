@@ -615,7 +615,7 @@ impl Actor {
         }
     }
 
-    pub(super) fn interrupt(&mut self, thread_id: &ThreadId, stopper: StopWaiters) {
+    pub(super) fn interrupt(&mut self, thread_id: &ThreadId, waiters: StopWaiters) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
@@ -623,7 +623,7 @@ impl Actor {
             turn_id, stopping, ..
         } = &mut thread.turn
         else {
-            stopper.tell(|| Ok(()));
+            waiters.tell(|| Ok(()));
             return;
         };
         *stopping = true;
@@ -632,7 +632,7 @@ impl Actor {
             thread.native_id().map(str::to_owned),
             self.connection().ok().flatten(),
         ) else {
-            stopper.tell(|| Err(ProviderError::Unavailable("Codex is not running".into())));
+            waiters.tell(|| Err(ProviderError::Unavailable("Codex is not running".into())));
             return;
         };
         let thread_id = thread_id.clone();
@@ -649,7 +649,7 @@ impl Actor {
                 thread_id,
                 turn_id,
                 result,
-                stopper,
+                waiters,
             }
         });
     }
@@ -659,7 +659,7 @@ impl Actor {
         thread_id: ThreadId,
         turn_id: TurnId,
         result: Result<(), RequestError>,
-        stopper: StopWaiters,
+        waiters: StopWaiters,
     ) {
         let still_running = self
             .threads
@@ -675,7 +675,7 @@ impl Actor {
                         Done::StopExpired { thread_id, turn_id }
                     });
                 }
-                stopper.tell(|| Ok(()));
+                waiters.tell(|| Ok(()));
             }
             Err(error) => {
                 if still_running
@@ -687,7 +687,7 @@ impl Actor {
                     // Another stop may try again; the queue stays where it is.
                     *stopping = false;
                 }
-                stopper.tell(|| {
+                waiters.tell(|| {
                     Err(ProviderError::Unavailable(format!(
                         "Codex did not stop the turn: {error}"
                     )))

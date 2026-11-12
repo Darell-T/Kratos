@@ -34,8 +34,6 @@ impl Actor {
         self.signed_in.as_deref() == plan
     }
 
-    /// Asks the thread's open session for the account's usage. A read finished after the account
-    /// changed is dropped (D38).
     /// Reads the usage through the session used last, so a report shows the account as it is
     /// now. A process is never started only to read: with none open, the read fails.
     pub(super) fn refresh_open_usage(&self, reply: Reply<()>) {
@@ -55,6 +53,8 @@ impl Actor {
         }
     }
 
+    /// Asks the thread's open session for the account's usage. A read finished after the account
+    /// changed is dropped (D38).
     pub(super) fn read_usage(&self, thread_id: &ThreadId, reply: Option<Reply<()>>) {
         let open = self.threads.get(thread_id).and_then(|thread| thread.open());
         let Some(open) = open else {

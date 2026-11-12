@@ -174,7 +174,7 @@ pub(super) enum Done {
         thread_id: ThreadId,
         turn_id: kratos_protocol::TurnId,
         result: Result<(), RequestError>,
-        stopper: StopWaiters,
+        waiters: StopWaiters,
     },
     StopExpired {
         thread_id: ThreadId,
@@ -222,7 +222,7 @@ impl Done {
             Done::UsageRead {
                 reply: Some(reply), ..
             } => drop(reply.send(Err(process_exited()))),
-            Done::Interrupted { stopper, .. } => stopper.tell(|| Ok(())),
+            Done::Interrupted { waiters, .. } => waiters.tell(|| Ok(())),
             Done::Connected { result: Err(_) }
             | Done::UsageRead { reply: None, .. }
             | Done::Account { .. }
@@ -362,9 +362,9 @@ impl Actor {
                 thread_id,
                 turn_id,
                 result,
-                stopper,
+                waiters,
             } => {
-                self.on_interrupted(thread_id, turn_id, result, stopper)
+                self.on_interrupted(thread_id, turn_id, result, waiters)
                     .await
             }
             Done::StopExpired { thread_id, turn_id } => {

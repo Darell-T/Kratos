@@ -282,10 +282,9 @@ impl Actor {
         }
     }
 
-    /// Ends every process that sat idle for the idle window. Its thread loses nothing: the next
-    /// message resumes the session, as Zeron does for a warm session nobody comes back to.
-    /// Closes every session with no turn running that nobody has used for `idle_for`. Its
-    /// thread's next message resumes it.
+    /// Closes every session with no turn running that nobody has used for `idle_for`. Its thread
+    /// loses nothing: the next message resumes the session, as Zeron does for a warm session
+    /// nobody comes back to.
     pub(super) fn close_sessions_idle_for(&mut self, idle_for: Duration) {
         let now = Instant::now();
         let idle: Vec<ThreadId> = self
