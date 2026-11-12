@@ -4,6 +4,7 @@
 //! `allow(dead_code)`: each file uses a different part of it.
 
 mod clock;
+mod context;
 mod guards;
 mod harness;
 mod perf;
