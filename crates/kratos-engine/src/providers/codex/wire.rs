@@ -16,7 +16,7 @@ use serde_json::Value;
 
 /// The most of a command's output a stored event keeps (L3). A proposal until measured on real
 /// sessions: Codex already shortens what it shows the model.
-pub(super) const OUTPUT_BYTES: usize = 16 * 1024;
+pub(crate) const OUTPUT_BYTES: usize = 16 * 1024;
 /// The most of one file's diff a stored event keeps (L3), also a proposal.
 pub(super) const DIFF_BYTES: usize = 32 * 1024;
 

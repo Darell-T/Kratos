@@ -49,6 +49,7 @@ use crate::usage::{LimitStop, UsageTracker};
 use profiles::Profile;
 pub use profiles::ProtectedFolders;
 pub(crate) use profiles::sandbox_may_write;
+pub(crate) use wire::OUTPUT_BYTES as COMMAND_OUTPUT_BYTES;
 
 /// The isolated profile for a Claude command, or an explicitly approved escape.
 #[derive(Clone, Debug)]

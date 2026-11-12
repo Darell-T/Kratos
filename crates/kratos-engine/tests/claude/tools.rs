@@ -1,8 +1,8 @@
 //! MCP execution and fail-closed tool classification.
 
 use kratos_protocol::{
-    ApprovalDecision, ApprovalRequest, AskReason, ExtraAccess, NetworkAccess, Permission,
-    ThreadSettings,
+    AgentItem, ApprovalDecision, ApprovalRequest, AskReason, ExtraAccess, ItemStatus,
+    NetworkAccess, Permission, ThreadEventBody, ThreadSettings,
 };
 use serde_json::{Value, json};
 
@@ -106,8 +106,9 @@ async fn powershell_quoting_cannot_hide_a_forced_delete_from_either_command_entr
 
 #[tokio::test]
 async fn sdk_server_metadata_and_command_output_reach_claude_through_the_shared_runner() {
-    // Catches wrong MCP envelopes, a command outside the thread's sandbox, or output lost before Claude receives it.
-    let harness = Harness::start(Options {
+    // Catches wrong MCP envelopes, a command outside the thread's sandbox, output lost before
+    // Claude receives it, and a command missing from the thread's history or shown twice.
+    let mut harness = Harness::start(Options {
         tools: true,
         settings: ThreadSettings {
             permission: Permission::ApproveForMe,
@@ -185,6 +186,64 @@ async fn sdk_server_metadata_and_command_output_reach_claude_through_the_shared_
     assert_eq!(result["mcp_response"]["id"], 3);
     assert_eq!(result["mcp_response"]["result"]["isError"], false);
     assert!(result.to_string().contains("KRATOS_COMMAND"));
+
+    let recorded = harness
+        .wait_for(|event| {
+            matches!(
+                event,
+                ThreadEventBody::ItemCompleted {
+                    item: AgentItem::Command { .. },
+                    ..
+                }
+            )
+        })
+        .await;
+    let ThreadEventBody::ItemCompleted {
+        item:
+            AgentItem::Command {
+                command,
+                cwd,
+                status,
+                exit_code,
+                output,
+                ..
+            },
+        ..
+    } = recorded
+    else {
+        unreachable!()
+    };
+    assert_eq!(command, "echo KRATOS_COMMAND");
+    assert_eq!(cwd.as_deref(), Some(harness.folder().to_str().unwrap()));
+    assert_eq!((status, exit_code), (ItemStatus::Completed, Some(0)));
+    assert!(output.text.contains("KRATOS_COMMAND"), "{output:?}");
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "assistant", "uuid": "u1", "session_id": "s",
+                    "message": { "id": "msg_1", "content": [
+                        { "type": "tool_use", "id": "toolu_1", "name": "mcp__kratos__run_command",
+                          "input": { "commandLine": "echo KRATOS_COMMAND" } },
+                        { "type": "text", "text": "done" } ] } }),
+        )
+        .await;
+    harness
+        .wait_for(|event| {
+            matches!(
+                event,
+                ThreadEventBody::ItemCompleted {
+                    item: AgentItem::Message { .. },
+                    ..
+                }
+            )
+        })
+        .await;
+    assert!(
+        !harness.log().await.iter().any(|event| matches!(event,
+            ThreadEventBody::ItemCompleted { item: AgentItem::Other { provider_type, .. }, .. }
+                if provider_type.contains("run_command"))),
+        "the command is recorded once, as a command"
+    );
 }
 
 #[tokio::test]

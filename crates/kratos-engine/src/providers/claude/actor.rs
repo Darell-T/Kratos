@@ -13,8 +13,9 @@ use kratos_claude_client::{
     Claude, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError, UsageRead,
 };
 use kratos_protocol::{
-    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
-    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
+    AccessLimit, AgentItem, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message,
+    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadEventBody, ThreadId,
+    ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -149,6 +150,7 @@ pub(super) enum Done {
         thread_id: ThreadId,
         epoch: u64,
         control_id: String,
+        item: AgentItem,
     },
     Opened {
         thread_id: ThreadId,
@@ -281,11 +283,22 @@ impl Actor {
                 thread_id,
                 epoch,
                 control_id,
+                item,
             } => {
-                if let Some(thread) = self.threads.get_mut(&thread_id)
-                    && thread.epoch == epoch
-                {
-                    thread.commands.remove(&control_id);
+                let Some(thread) = self.threads.get_mut(&thread_id) else {
+                    return;
+                };
+                if thread.epoch != epoch {
+                    return;
+                }
+                thread.commands.remove(&control_id);
+                if let Some(turn_id) = thread.run.clone() {
+                    let _ = self
+                        .write(&thread_id, move |write| {
+                            write.append(ThreadEventBody::ItemCompleted { turn_id, item })?;
+                            Ok(())
+                        })
+                        .await;
                 }
             }
             Done::Opened {

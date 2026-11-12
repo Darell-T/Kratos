@@ -7,7 +7,8 @@ use kratos_command_safety::{
     DangerousCommandPlatform, dangerous_command, reads_commands_from_input, split_command_text,
 };
 use kratos_protocol::{
-    ApprovalRequest, ExtraAccess, NetworkAccess, PathAccess, PathAccessMode, ThreadId,
+    AgentItem, ApprovalRequest, CappedText, CommandResult, ExtraAccess, ItemStatus, NetworkAccess,
+    PathAccess, PathAccessMode, ThreadId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -250,6 +251,7 @@ impl Actor {
         let command = tokio::spawn({
             let control_id = control_id.clone();
             let thread_id = thread_id.clone();
+            let cwd = folder.clone();
             async move {
                 let output = runner
                     .run_at(
@@ -259,6 +261,8 @@ impl Actor {
                         Duration::from_millis(args.timeout_ms.unwrap_or(30_000)),
                     )
                     .await;
+                let item =
+                    command_item(control_id.clone(), args.command_line.clone(), cwd, &output);
                 let body = match output {
                     Ok(output) => {
                         json!({ "content": [{ "type": "text", "text": serde_json::to_string(&output).expect("command results serialize") }], "isError": !matches!(output, kratos_protocol::CommandResult::Exited { exit_code: 0, .. }) })
@@ -272,6 +276,7 @@ impl Actor {
                     thread_id,
                     epoch,
                     control_id,
+                    item,
                 });
             }
         });
@@ -280,5 +285,40 @@ impl Actor {
             .expect("pending thread is loaded")
             .commands
             .insert(control_id, command.abort_handle());
+    }
+}
+
+/// The thread's record of a command Kratos ran for Claude, as a Codex thread records one.
+fn command_item(
+    id: String,
+    command: String,
+    cwd: String,
+    output: &Result<CommandResult, crate::providers::ProviderError>,
+) -> AgentItem {
+    let (status, exit_code, text) = match output {
+        Ok(CommandResult::Exited {
+            exit_code,
+            stdout,
+            stderr,
+        }) => (
+            if *exit_code == 0 {
+                ItemStatus::Completed
+            } else {
+                ItemStatus::Failed
+            },
+            Some(*exit_code),
+            format!("{stdout}{stderr}"),
+        ),
+        Ok(CommandResult::TimedOut { output }) => (ItemStatus::Failed, None, output.clone()),
+        Ok(CommandResult::Refused { error }) => (ItemStatus::Declined, None, error.clone()),
+        Err(error) => (ItemStatus::Failed, None, error.to_string()),
+    };
+    AgentItem::Command {
+        id,
+        command,
+        cwd: Some(cwd),
+        status,
+        exit_code,
+        output: CappedText::new(&text, crate::providers::codex::COMMAND_OUTPUT_BYTES),
     }
 }

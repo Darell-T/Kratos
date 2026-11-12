@@ -71,6 +71,8 @@ pub(super) fn assistant_items(assistant: &Assistant) -> Vec<AgentItem> {
                 let text = block["text"].as_str().unwrap_or_default().to_owned();
                 items.push(AgentItem::Message { id, text });
             }
+            // Kratos records each command it runs itself, with its output.
+            Some("tool_use") if block["name"] == "mcp__kratos__run_command" => {}
             Some("tool_use") => items.push(AgentItem::Other {
                 id: block["id"]
                     .as_str()
