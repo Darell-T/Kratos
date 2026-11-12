@@ -236,6 +236,7 @@ async fn relaunches_an_idle_session_when_its_settings_change_and_never_launches_
         permission,
         plan_mode,
         context_limit_tokens: None,
+        report_format: None,
     };
 
     harness

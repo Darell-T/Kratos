@@ -10,6 +10,7 @@ mod permissions;
 mod protected_reads;
 mod release;
 mod reliability;
+mod reports;
 mod requests;
 mod rules;
 mod tools;

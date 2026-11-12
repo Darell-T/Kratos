@@ -45,8 +45,8 @@ impl Store {
         // One statement, so the workspace cannot go missing between the check and the insert.
         let inserted = self.connection.execute(
             "INSERT INTO threads (id, workspace_id, title, provider, created_at, updated_at, model,
-               permission, plan_mode, context_limit_tokens)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+               permission, plan_mode, context_limit_tokens, report_format)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
              WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?2)",
             params![
                 thread.id.as_str(),
@@ -59,6 +59,7 @@ impl Store {
                 permission_name(settings.permission),
                 settings.plan_mode,
                 settings.context_limit_tokens.map(i64::from),
+                report_format_text(&settings),
             ],
         )?;
         if inserted == 0 {
@@ -129,13 +130,15 @@ impl ThreadWrite<'_> {
     /// Replaces the thread's settings, which apply from its next turn (D87).
     pub fn set_settings(&mut self, settings: ThreadSettings) -> Result<(), StoreError> {
         self.transaction.execute(
-            "UPDATE threads SET model = ?1, permission = ?2, plan_mode = ?3, context_limit_tokens = ?4
-             WHERE id = ?5",
+            "UPDATE threads SET model = ?1, permission = ?2, plan_mode = ?3, context_limit_tokens = ?4,
+               report_format = ?5
+             WHERE id = ?6",
             params![
                 settings.model.as_ref().map(RequiredText::as_str),
                 permission_name(settings.permission),
                 settings.plan_mode,
                 settings.context_limit_tokens.map(i64::from),
+                report_format_text(&settings),
                 self.thread_id().as_str(),
             ],
         )?;
@@ -245,7 +248,8 @@ fn provider_thread(
                threads.paused, threads.running_turn,
                (SELECT native_id FROM provider_sessions
                 WHERE thread_id = threads.id AND ended_at IS NULL
-                ORDER BY started_at DESC LIMIT 1)
+                ORDER BY started_at DESC LIMIT 1),
+               threads.report_format
              FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
              WHERE threads.id = ?1",
             [thread_id.as_str()],
@@ -267,7 +271,7 @@ fn provider_thread_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderThread> {
     })
 }
 
-/// Columns 7 to 10: `model, permission, plan_mode, context_limit_tokens`.
+/// Columns 7 to 10, `model, permission, plan_mode, context_limit_tokens`, and 15, `report_format`.
 ///
 /// A stored blank model loads as unset, which runs the provider's default, so a thread written
 /// before every provider's settings were checked stays readable. A stored limit that
@@ -295,7 +299,22 @@ fn settings_from_row(row: &Row<'_>) -> rusqlite::Result<ThreadSettings> {
                     .ok_or_else(|| unreadable(10, format!("context limit {tokens} out of range")))
             })
             .transpose()?,
+        report_format: row
+            .get::<_, Option<String>>(15)?
+            .map(|text| {
+                serde_json::from_str(&text)
+                    .map_err(|error| unreadable(15, format!("report format: {error}")))
+            })
+            .transpose()?,
     })
+}
+
+/// The stored text of the settings' report format.
+fn report_format_text(settings: &ThreadSettings) -> Option<String> {
+    settings
+        .report_format
+        .as_ref()
+        .map(|format| serde_json::to_string(format).expect("a JSON object always serializes"))
 }
 
 /// A row whose first six columns are `id, workspace_id, title, provider, created_at, updated_at`.

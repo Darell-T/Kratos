@@ -59,6 +59,7 @@ fn item_line(item: &AgentItem) -> Option<String> {
     match item {
         AgentItem::Message { text, .. } => Some(format!("agent: {text}")),
         AgentItem::Plan { text, .. } => Some(format!("plan: {text}")),
+        AgentItem::Report { report, .. } => Some(format!("report: {report}")),
         AgentItem::Command {
             command, exit_code, ..
         } => Some(match exit_code {

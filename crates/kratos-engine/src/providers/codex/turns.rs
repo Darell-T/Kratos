@@ -705,6 +705,11 @@ fn turn_start_params(
     params.approval_policy = Some(policy::APPROVAL_POLICY);
     params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
     params.permissions = Some(Profile::for_settings(settings).id().to_owned());
+    params.output_schema = settings
+        .report_format
+        .as_ref()
+        .filter(|_| !settings.plan_mode)
+        .map(|format| serde_json::Value::Object(format.schema().clone()));
     params.collaboration_mode = model.map(|model| types::CollaborationMode {
         mode: if settings.plan_mode {
             types::ModeKind::Plan

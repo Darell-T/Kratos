@@ -8,8 +8,8 @@ use kratos_protocol::{
     Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest, AskReason,
     ContextLimit, Continuation, ContinuationId, ContinuationState, CreateThread, CreateWorkspace,
     ExtraAccess, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason, Permission,
-    Provider, Question, QuestionId, QuestionOutcome, RequiredText, Seq, ThreadEventBody, ThreadId,
-    ThreadSettings, TurnChanges, TurnId, TurnOutcome, UsageWait,
+    Provider, Question, QuestionId, QuestionOutcome, ReportFormat, RequiredText, Seq,
+    ThreadEventBody, ThreadId, ThreadSettings, TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
 use kratos_store::{Enqueued, QueuePlace, Settle, Store, StoreError, restore};
 use rusqlite::Connection;
@@ -660,6 +660,12 @@ fn settings_pauses_and_running_turns_survive_reopening() {
         permission: Permission::FullAccess,
         plan_mode: true,
         context_limit_tokens: ContextLimit::new(100_000),
+        report_format: Some(ReportFormat::new(
+            json!({ "type": "object", "required": ["verdict"] })
+                .as_object()
+                .unwrap()
+                .clone(),
+        )),
     };
     let reason = PauseReason::TimedOut {
         turn_id: TurnId::new("turn-0".into()),

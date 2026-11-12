@@ -92,14 +92,17 @@ impl Actor {
         let epoch = thread.epoch;
         let thread_id = thread_id.clone();
         let enabled = self.settings.tools.is_some();
+        let report_format = config.report_format.clone();
         let program = self.settings.program.clone();
         let env_set = self.settings.env_set.clone();
         self.spawn(async move {
             let result = match release::supported(&program, &env_set).await {
                 Err(why) => Err(why),
-                Ok(()) => connect(launch, hooks::initialize(enabled), move |control| {
-                    permissions::startup(control, enabled)
-                })
+                Ok(()) => connect(
+                    launch,
+                    hooks::initialize(enabled, report_format),
+                    move |control| permissions::startup(control, enabled),
+                )
                 .await
                 .map_err(|error| error.to_string()),
             };

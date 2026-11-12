@@ -69,7 +69,7 @@ pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};
 pub use text::{RequiredText, is_javascript_whitespace};
 pub use threads::{
     AccessLimit, CreateThread, ListEvents, ListThreads, OutsideWrites, Permission, Provider,
-    Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
+    ReportFormat, Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
 };
 pub use time::{Timestamp, TimestampError};
 pub use turns::{

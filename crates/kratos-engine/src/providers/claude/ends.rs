@@ -1,11 +1,13 @@
-//! How a turn ends: its outcome, the context it used (D76), and whether it stopped at the
-//! account's usage limit (D39). One write records all three, so the log never shows a turn that
-//! ended without the pause that explains why nothing follows it.
+//! How a turn ends: its outcome, the report a report format asks for, the context it used (D76),
+//! and whether it stopped at the account's usage limit (D39). One write records them all, so the
+//! log never shows a turn that ended without the pause that explains why nothing follows it.
 
 use kratos_claude_client::{
     IterationTokens, TurnContext, TurnOutcome as ClaudeOutcome, TurnResult,
 };
-use kratos_protocol::{ContextUsage, PauseReason, Timestamp, TurnId, TurnOutcome};
+use kratos_protocol::{
+    AgentItem, ContextUsage, PauseReason, ThreadEventBody, Timestamp, TurnId, TurnOutcome,
+};
 use kratos_store::{StoreError, ThreadWrite};
 
 use super::threads::Rejection;
@@ -28,6 +30,8 @@ pub(super) struct TurnEnd {
     pub outcome: TurnOutcome,
     pub context: Option<ContextUsage>,
     pub stop: Stop,
+    /// The final reply parsed against the session's report format.
+    pub report: Option<serde_json::Value>,
 }
 
 impl TurnEnd {
@@ -37,6 +41,7 @@ impl TurnEnd {
             outcome: TurnOutcome::Failed { error },
             context: None,
             stop: Stop::Ordinary,
+            report: None,
         }
     }
 
@@ -65,6 +70,7 @@ impl TurnEnd {
             outcome,
             context: context_usage(&result.context, answering),
             stop,
+            report: result.structured_output.clone(),
         }
     }
 }
@@ -110,7 +116,17 @@ pub(super) fn end_turn(
         outcome,
         context,
         stop,
+        report,
     } = end;
+    if let Some(report) = report {
+        write.append(ThreadEventBody::ItemCompleted {
+            turn_id: turn_id.clone(),
+            item: AgentItem::Report {
+                id: format!("{turn_id}-report"),
+                report,
+            },
+        })?;
+    }
     let failure = match &outcome {
         TurnOutcome::Failed { error } => Some(error.clone()),
         TurnOutcome::Completed | TurnOutcome::Interrupted => None,

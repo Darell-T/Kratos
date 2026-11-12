@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use kratos_claude_client::{Claude, PermissionMode, SessionId};
-use kratos_protocol::{MessageId, SlashCommand, ThreadSettings, Timestamp, TurnId};
+use kratos_protocol::{MessageId, ReportFormat, SlashCommand, ThreadSettings, Timestamp, TurnId};
 use tokio::task::AbortHandle;
 
 use super::actor::Reply;
@@ -18,6 +18,8 @@ const LONGEST_RESTART_WAIT: Duration = Duration::from_secs(60);
 pub(super) struct SessionConfig {
     pub model: Option<String>,
     pub mode: PermissionMode,
+    /// Claude takes the report format in `initialize`, so a change needs a new process too.
+    pub report_format: Option<ReportFormat>,
 }
 
 impl SessionConfig {
@@ -33,6 +35,10 @@ impl SessionConfig {
             } else {
                 PermissionMode::Default
             },
+            report_format: settings
+                .report_format
+                .clone()
+                .filter(|_| !settings.plan_mode),
         }
     }
 }

@@ -393,6 +393,7 @@ fn thread_and_provider_events_keep_their_stored_shape() {
                 permission: Permission::ApproveForMe,
                 plan_mode: false,
                 context_limit_tokens: ContextLimit::new(200_000),
+                report_format: None,
             },
         },
         r#"{"kind":"settings.changed","settings":{"model":"gpt-5.4-mini","permission":"approveForMe","planMode":false,"contextLimitTokens":200000}}"#,
@@ -510,6 +511,32 @@ fn thread_settings_refuse_unknown_fields() {
         serde_json::from_str::<ThreadSettings>(
             r#"{"permission":"askMe","planMode":false,"contextWindow":1}"#
         )
+        .is_err()
+    );
+}
+
+#[test]
+fn a_report_format_is_a_json_object_and_settings_from_before_it_have_none() {
+    // Catches stored settings changes written before report formats becoming unreadable, and a
+    // report format that is not a schema object reaching a provider.
+    let older: ThreadSettings = serde_json::from_str(
+        r#"{"model":null,"permission":"askMe","planMode":false,"contextLimitTokens":null}"#,
+    )
+    .unwrap();
+    assert_eq!(older.report_format, None);
+    let schema = serde_json::json!({ "type": "object", "required": ["verdict"] });
+    let settings: ThreadSettings = serde_json::from_value(serde_json::json!({
+        "permission": "askMe", "planMode": false, "reportFormat": schema
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(settings.report_format.unwrap()).unwrap(),
+        schema
+    );
+    assert!(
+        serde_json::from_value::<ThreadSettings>(serde_json::json!({
+            "permission": "askMe", "planMode": false, "reportFormat": "verdict"
+        }))
         .is_err()
     );
 }

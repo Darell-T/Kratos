@@ -47,7 +47,8 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   socket-send <bytes> [--header <name:value>]...
   bench-turns <fake-control-file>
 
-create-thread's --settings sets a thread's model, permission, and planMode, such as
+create-thread's --settings sets a thread's model, permission, planMode, and reportFormat (a JSON
+Schema object the final reply must match), such as
 '{\"model\":\"claude-haiku-5-5\",\"permission\":\"askMe\",\"planMode\":false,\"contextLimitTokens\":null}'.
 The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
 engine wrote to $KRATOS_HOME/client-token (default ~/.kratos/client-token), when there is one.

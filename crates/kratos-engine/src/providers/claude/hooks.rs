@@ -1,17 +1,27 @@
 //! Post-tool observations count changes; they never grant a tool permission.
 
 use kratos_claude_client::{HookCallback, HookMatcher, IncomingControl, Initialize};
-use kratos_protocol::{AgentItem, CappedText, FileChange, FileChangeKind, ItemStatus, ThreadId};
+use kratos_protocol::{
+    AgentItem, CappedText, FileChange, FileChangeKind, ItemStatus, ReportFormat, ThreadId,
+};
 use serde_json::json;
 
 use super::actor::Actor;
 use super::permissions::edit_path;
 
-pub(super) fn initialize(enabled: bool) -> Initialize {
+/// The session's `initialize`: the tool server and hooks when Kratos executes tools, and the
+/// report format the turns' final replies must match.
+pub(super) fn initialize(enabled: bool, report_format: Option<ReportFormat>) -> Initialize {
+    let json_schema =
+        report_format.map(|format| serde_json::Value::Object(format.schema().clone()));
     if !enabled {
-        return Initialize::default();
+        return Initialize {
+            json_schema,
+            ..Initialize::default()
+        };
     }
     Initialize {
+        json_schema,
         sdk_mcp_servers: vec!["kratos".into()],
         hooks: [
             ("PostToolUse", "kratos-post"),
@@ -27,7 +37,6 @@ pub(super) fn initialize(enabled: bool) -> Initialize {
             )
         })
         .into(),
-        ..Initialize::default()
     }
 }
 

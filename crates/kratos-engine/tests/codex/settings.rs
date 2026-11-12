@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
-    AccessLimit, AskReason, ContextLimit, MessageOrigin, Permission, ThreadEventBody,
+    AccessLimit, AskReason, ContextLimit, MessageOrigin, Permission, ReportFormat, ThreadEventBody,
     ThreadSettings,
 };
 use serde_json::json;
@@ -403,4 +403,45 @@ async fn a_permission_changed_mid_turn_applies_from_the_next_turn() {
     let started = harness.held("turn/start", 2).await;
     assert_eq!(started[1]["params"]["permissions"], ":danger-full-access");
     tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+#[tokio::test]
+async fn a_report_format_reaches_each_codex_turn_except_a_planning_one() {
+    // Catches a schema Codex never receives, and a plan forced into a report's shape.
+    let schema = json!({ "type": "object", "required": ["verdict"] });
+    let reporting = ThreadSettings {
+        report_format: Some(ReportFormat::new(schema.as_object().unwrap().clone())),
+        ..ThreadSettings::default()
+    };
+    let mut harness = Harness::start(Options {
+        settings: reporting.clone(),
+        ..Options::default()
+    })
+    .await;
+    harness.running_turn("a", "turn-1").await;
+    assert_eq!(
+        harness.held("turn/start", 1).await[0]["params"]["outputSchema"],
+        schema
+    );
+    harness.complete(THREAD, "turn-1", "completed").await;
+
+    harness
+        .provider
+        .set_settings(
+            harness.thread_id.clone(),
+            ThreadSettings {
+                plan_mode: true,
+                ..reporting
+            },
+        )
+        .await
+        .unwrap();
+    harness.send("b", "plan it").await;
+
+    let started = harness.held("turn/start", 2).await;
+    assert!(
+        started[1]["params"]["outputSchema"].is_null(),
+        "{}",
+        started[1]
+    );
 }
