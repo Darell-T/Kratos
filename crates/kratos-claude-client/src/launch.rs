@@ -125,6 +125,9 @@ pub(crate) fn spawn(launch: &Launch) -> Result<OwnedChild, ConnectError> {
             .arg("--disallowedTools")
             .arg(launch.disallowed_tools.join(","));
     }
+    // A session never updates the CLI in the background: the updater would replace files running
+    // sessions load, and the user decides when to update (Kratos's update route).
+    command.env("DISABLE_AUTOUPDATER", "1");
     set_environment(&mut command, &launch.env_set);
     OwnedChild::spawn(command).map_err(|source| ConnectError::Spawn {
         program: launch.program.clone(),

@@ -88,8 +88,13 @@ pub(super) enum Command {
     RefreshOpenUsage {
         reply: Reply<()>,
     },
-    /// Closes every session with no turn running, after the CLI was updated.
-    CloseQuietSessions {
+    /// Closes every session and starts none until `EndUpdateHold`, so Claude Code's updater
+    /// replaces no file a CLI uses. Refused while a thread works or another update runs.
+    HoldForUpdate {
+        reply: Reply<()>,
+    },
+    /// Ends the hold: queued messages start on the release now installed.
+    EndUpdateHold {
         reply: Reply<()>,
     },
     /// Runs `waiter` once the thread's CLI is up, starting one when none runs.
@@ -207,6 +212,8 @@ pub(crate) struct Actor {
     pub(super) threads: HashMap<ThreadId, ThreadState>,
     /// Set when a write failed: no CLI runs after that, because its work would go unrecorded (L2).
     pub(super) parked: Option<String>,
+    /// Set while Claude Code's updater runs. No CLI starts, and queued messages wait.
+    pub(super) updating: bool,
     pub(super) done: mpsc::UnboundedSender<Done>,
     completions: mpsc::UnboundedReceiver<Done>,
     pub(super) frames: mpsc::Sender<SessionEvent>,
@@ -233,6 +240,7 @@ impl Actor {
             limit_stops,
             threads: HashMap::new(),
             parked: None,
+            updating: false,
             done,
             completions,
             frames,

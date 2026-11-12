@@ -15,6 +15,8 @@
 //! type `initialize` reports, so a test chooses which account a start signs in as.
 //! `FAKE_CLAUDE_FAIL_START` names a file: while it exists, a start exits with the exit code it
 //! holds and a "Not logged in" message, so a test chooses which starts fail by writing the file.
+//! `FAKE_CLAUDE_EXIT_DELAY_MS` keeps the process alive that long after its input closes, as a CLI
+//! that takes time to exit does.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -83,6 +85,12 @@ pub fn run(log: &Path) {
         let line = line.expect("stdin remains readable");
         let message: Value = serde_json::from_str(&line).expect("the engine sends JSON");
         handle(&script, message);
+    }
+    if let Some(delay) = std::env::var("FAKE_CLAUDE_EXIT_DELAY_MS")
+        .ok()
+        .and_then(|delay| delay.parse().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(delay));
     }
 }
 

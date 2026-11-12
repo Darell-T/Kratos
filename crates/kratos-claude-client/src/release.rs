@@ -157,7 +157,8 @@ pub async fn latest_version(
 }
 
 /// Runs `claude update`, which installs the newest release on the CLI's channel, and returns
-/// the release installed afterward. Sessions already running keep their release until they end.
+/// the release installed afterward. Close every CLI first: the updater replaces files a running
+/// one may still load.
 ///
 /// # Errors
 ///
@@ -167,9 +168,21 @@ pub async fn update(
     program: &Path,
     env_set: &[(OsString, OsString)],
 ) -> Result<Version, ReleaseError> {
-    native_doctor(program, env_set).await?;
+    check_native(program, env_set).await?;
     run(program, &["update"], env_set, UPDATE_TIMEOUT).await?;
     installed_version(program, env_set).await
+}
+
+/// Whether Kratos may update this install, checked before anything is closed for an update.
+///
+/// # Errors
+///
+/// [`ReleaseError::NotNative`] when another manager installed the CLI.
+pub async fn check_native(
+    program: &Path,
+    env_set: &[(OsString, OsString)],
+) -> Result<(), ReleaseError> {
+    native_doctor(program, env_set).await.map(|_| ())
 }
 
 /// What `claude doctor` prints, when Claude Code's own installer put the CLI in place.

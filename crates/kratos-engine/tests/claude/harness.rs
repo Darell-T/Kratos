@@ -63,6 +63,8 @@ pub struct Options {
     pub update_to: &'static str,
     /// The method `claude doctor` says installed the CLI.
     pub install: &'static str,
+    /// How long a session process lives on after Kratos closes its input.
+    pub exit_delay: Duration,
 }
 
 impl Default for Options {
@@ -78,6 +80,7 @@ impl Default for Options {
             clock: None,
             update_to: "2.1.400",
             install: "native",
+            exit_delay: Duration::ZERO,
         }
     }
 }
@@ -178,6 +181,10 @@ impl Harness {
             ),
             ("FAKE_CLAUDE_UPDATE_TO".into(), options.update_to.into()),
             ("FAKE_CLAUDE_INSTALL".into(), options.install.into()),
+            (
+                "FAKE_CLAUDE_EXIT_DELAY_MS".into(),
+                options.exit_delay.as_millis().to_string().into(),
+            ),
         ];
         let settings = ClaudeSettings {
             tools: None,

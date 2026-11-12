@@ -292,9 +292,10 @@ pub(super) async fn claude_cli(State(state): State<ServerState>) -> Result<Respo
     Ok(json_reply(StatusCode::OK, &claude.cli_release().await))
 }
 
-/// `POST /api/agents/claude/cli/update`: runs Claude Code's own updater, then 200 with the release
-/// now installed. 400 when another manager installed the CLI, 409 while another update runs, and
-/// 503 when the updater fails. Agents cannot reach it, since it is a user route.
+/// `POST /api/agents/claude/cli/update`: closes every idle Claude session, runs Claude Code's own
+/// updater, then 200 with the release now installed. 400 when another manager installed the CLI,
+/// 409 while a Claude thread works or another update runs, and 503 when the updater fails. Kratos
+/// never updates on its own: only the user calls this, and agents cannot reach a user route.
 pub(super) async fn update_claude_cli(
     State(state): State<ServerState>,
 ) -> Result<Response, ApiError> {

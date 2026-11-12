@@ -5,10 +5,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use kratos_claude_client::{
-    Latest, ReleaseError, Version, installed_version, latest_version, update,
+    Latest, ReleaseError, Version, check_native, installed_version, latest_version, update,
 };
 use kratos_protocol::{CliRelease, CliUpdate};
-use tokio::sync::Mutex;
 
 use crate::providers::ProviderError;
 
@@ -22,8 +21,6 @@ pub(super) struct Release {
     pub env_set: Vec<(OsString, OsString)>,
     /// Where the native install's updater reads the newest release on each channel.
     pub feed: String,
-    /// Held while `claude update` runs, so a second request is refused instead of racing it.
-    pub updating: Mutex<()>,
 }
 
 impl Release {
@@ -51,23 +48,28 @@ impl Release {
         }
     }
 
-    /// Runs the native install's updater. Sessions already running keep the release they started
-    /// on. Another manager's install is refused, since its updater replaces their files.
+    /// Refuses an install another manager owns, whose updater Kratos does not run.
+    pub async fn check_native(&self) -> Result<(), ProviderError> {
+        check_native(&self.program, &self.env_set)
+            .await
+            .map_err(update_error)
+    }
+
+    /// Runs the native install's updater. The caller closes every session first.
     pub async fn update(&self) -> Result<(), ProviderError> {
-        let Ok(_updating) = self.updating.try_lock() else {
-            return Err(ProviderError::Conflict(
-                "Claude Code is already updating".to_owned(),
-            ));
-        };
-        match update(&self.program, &self.env_set).await {
-            Ok(_) => Ok(()),
-            Err(not_native @ ReleaseError::NotNative { .. }) => {
-                Err(ProviderError::Unsupported(not_native.to_string()))
-            }
-            Err(error) => Err(ProviderError::Unavailable(format!(
-                "Claude Code did not update: {error}"
-            ))),
+        update(&self.program, &self.env_set)
+            .await
+            .map(|_| ())
+            .map_err(update_error)
+    }
+}
+
+fn update_error(error: ReleaseError) -> ProviderError {
+    match error {
+        not_native @ ReleaseError::NotNative { .. } => {
+            ProviderError::Unsupported(not_native.to_string())
         }
+        error => ProviderError::Unavailable(format!("Claude Code did not update: {error}")),
     }
 }
 

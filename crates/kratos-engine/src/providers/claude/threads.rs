@@ -242,12 +242,15 @@ impl ThreadState {
         !self.pending.is_empty() || matches!(self.session, Session::Opening)
     }
 
-    /// When the open process last did anything, if it has nothing to do: no message in flight,
-    /// no stop, and no command running.
+    /// The thread has a message in flight, a process starting, a stop, or a command running.
+    pub(super) fn is_working(&self) -> bool {
+        self.is_busy() || self.stopping || !self.commands.is_empty()
+    }
+
+    /// When the open process last did anything, if it has nothing to do.
     pub(super) fn idle_since(&self) -> Option<Instant> {
         let open = self.open()?;
-        let has_work = !self.pending.is_empty() || self.stopping || !self.commands.is_empty();
-        (!has_work).then_some(open.last_active)
+        (!self.is_working()).then_some(open.last_active)
     }
 
     pub(super) fn turn_settings(&self) -> &ThreadSettings {

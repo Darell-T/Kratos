@@ -140,7 +140,6 @@ pub async fn start(
         program: settings.program.clone(),
         env_set: settings.env_set.clone(),
         feed: settings.release_feed.clone(),
-        updating: tokio::sync::Mutex::new(()),
     });
     let actor = actor::Actor::recover(settings, hub, store, usage, limit_stops).await?;
     tokio::spawn(actor.run(inbox));
@@ -340,18 +339,24 @@ impl ClaudeProvider {
         self.release.status().await
     }
 
-    /// Installs the newest release with the CLI's own updater, then closes every session with no
-    /// turn running, so its thread's next message resumes on the new release. A turn already
-    /// running finishes on its old release, whose process closes once it sits idle.
+    /// Installs the newest release with the CLI's own updater, when the user asks for it. Kratos
+    /// never updates on its own, and never under a running session: the update is refused while a
+    /// thread works, and every idle session closes first. Messages sent meanwhile wait, then start
+    /// on the new release.
     pub async fn update_cli(&self) -> Result<CliRelease, ProviderError> {
         // A task of its own, so a client that disconnects mid-update never stops the updater
         // halfway through replacing the CLI.
         let provider = self.clone();
         tokio::spawn(async move {
-            provider.release.update().await?;
+            provider.release.check_native().await?;
             provider
-                .ask(|reply| actor::Command::CloseQuietSessions { reply })
+                .ask(|reply| actor::Command::HoldForUpdate { reply })
                 .await?;
+            let updated = provider.release.update().await;
+            provider
+                .ask(|reply| actor::Command::EndUpdateHold { reply })
+                .await?;
+            updated?;
             Ok(provider.release.status().await)
         })
         .await

@@ -24,7 +24,7 @@ impl Actor {
     /// is in flight, the queue is not paused, and a process with the right settings runs. Safe to
     /// call at any time; it does nothing otherwise.
     pub(super) async fn dispatch(&mut self, thread_id: &ThreadId) {
-        if self.parked.is_some() {
+        if self.parked.is_some() || self.updating {
             return;
         }
         let Some(thread) = self.threads.get(thread_id) else {

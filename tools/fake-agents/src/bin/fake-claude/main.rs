@@ -8,8 +8,8 @@
 //!
 //! `--version`, `doctor`, and `update` answer as the install `FAKE_CLAUDE_INSTALL` names does, the
 //! native one without it. The installed release is the text of the file `FAKE_CLAUDE_RELEASE`
-//! names, or 2.1.303 without one. `update` writes `FAKE_CLAUDE_UPDATE_TO` there, or fails when that
-//! is `fail`.
+//! names, or 2.1.303 without one. `update` writes `FAKE_CLAUDE_UPDATE_TO` there. It fails when that
+//! is `fail`, or while a session it logged still runs.
 
 mod scripted;
 
@@ -34,6 +34,10 @@ fn release(command: &str) -> bool {
                 eprintln!("Error: the download was interrupted");
                 std::process::exit(1);
             }
+            if let Some(pid) = live_session() {
+                eprintln!("Error: Claude Code is in use by process {pid}");
+                std::process::exit(1);
+            }
             let file = file.expect("an update test names FAKE_CLAUDE_RELEASE");
             std::fs::write(file, &target).expect("the release file is writable");
             println!(
@@ -44,6 +48,16 @@ fn release(command: &str) -> bool {
         _ => return false,
     }
     true
+}
+
+/// A scripted session from `FAKE_CLAUDE_LOG` that is still running. Its files are in use, so the
+/// fake's updater refuses, as Windows refuses to replace a running program.
+fn live_session() -> Option<u32> {
+    let log = std::fs::read_to_string(std::env::var_os("FAKE_CLAUDE_LOG")?).ok()?;
+    log.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok()?["pid"].as_u64())
+        .filter_map(|pid| u32::try_from(pid).ok())
+        .find(|pid| fake_agents::process_is_running(*pid))
 }
 
 use std::collections::HashMap;

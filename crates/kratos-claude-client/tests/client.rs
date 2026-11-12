@@ -666,6 +666,7 @@ fn launch_filters_inherited_provider_and_engine_environment_in_a_helper_process(
         .env("CLAUDE_PARENT_SECRET", "synthetic-claude")
         .env("anthropic_parent_secret", "synthetic-anthropic")
         .env("KRATOS_API_TOKEN", "synthetic-token")
+        .env("DISABLE_AUTOUPDATER", "0")
         .output()
         .unwrap();
     assert!(
@@ -677,7 +678,8 @@ fn launch_filters_inherited_provider_and_engine_environment_in_a_helper_process(
 
 #[tokio::test]
 async fn environment_probe_child() {
-    // Catches leaked inherited prefixes and launch flags that disable subscription authentication.
+    // Catches leaked inherited prefixes, launch flags that disable subscription authentication,
+    // and a session left free to update the CLI by itself.
     if std::env::var_os("FAKE_CLAUDE_ENVIRONMENT_PROBE").is_none() {
         return;
     }
@@ -719,5 +721,9 @@ async fn environment_probe_child() {
     );
     assert_eq!(environment["CLAUDE_INTENTIONAL"], "allowed");
     assert_eq!(environment["SYNTHETIC_OVERRIDE"], "arrived");
+    assert_eq!(
+        environment["DISABLE_AUTOUPDATER"], "1",
+        "a session may update the CLI under the others"
+    );
     claude.close().await;
 }

@@ -21,7 +21,8 @@ pub use protocol::{
     UsageWindow,
 };
 pub use release::{
-    Latest, ParseVersionError, ReleaseError, Version, installed_version, latest_version, update,
+    Latest, ParseVersionError, ReleaseError, Version, check_native, installed_version,
+    latest_version, update,
 };
 pub use transcript::{
     DeliveredMessages, SessionId, SessionStart, TranscriptError, delivered_message_ids,

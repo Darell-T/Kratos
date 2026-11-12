@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use kratos_claude_client::{Incoming, Launch, SessionId, SessionStart, SettingSource, connect};
 use kratos_protocol::{Provider, ThreadId};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
-use super::actor::{Actor, Connected, Done, SessionEvent};
+use super::actor::{Actor, Connected, Done, Reply, SessionEvent};
 use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState, Waiter};
 use super::{ClaudeSettings, ProviderError, hooks, permissions, release, wire};
 
@@ -128,6 +129,12 @@ impl Actor {
     /// Runs `waiter` once the thread's CLI is up, starting one when none runs. A CLI that cannot
     /// start answers the waiter with why.
     pub(super) async fn when_open(&mut self, thread_id: &ThreadId, waiter: Waiter) {
+        if self.updating {
+            waiter.reject(ProviderError::Conflict(
+                "Claude Code is updating. Ask again once it finishes".to_owned(),
+            ));
+            return;
+        }
         let ready = match self.running() {
             Ok(()) => self.load(thread_id).await,
             Err(error) => Err(error),
@@ -272,14 +279,45 @@ impl Actor {
 
     /// Ends the thread's CLI while it is idle, so the next message starts one with the settings
     /// then in force. Its exit is not heard.
-    pub(super) fn retire_session(&mut self, thread_id: &ThreadId) {
-        let Some(thread) = self.threads.get_mut(thread_id) else {
-            return;
-        };
+    pub(super) fn retire_session(&mut self, thread_id: &ThreadId) -> Option<JoinHandle<()>> {
+        let thread = self.threads.get_mut(thread_id)?;
         thread.epoch += 1;
-        if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
-            tokio::spawn(async move { open.claude.close().await });
+        match std::mem::replace(&mut thread.session, Session::Closed) {
+            Session::Open(open) => Some(tokio::spawn(async move { open.claude.close().await })),
+            _ => None,
         }
+    }
+
+    /// Clears the way for Claude Code's updater, which must not replace files a running CLI
+    /// loads. It refuses while any thread works, since its turn would be cut off. Otherwise it
+    /// closes every session, holds new ones off, and answers once the processes have exited. The
+    /// threads lose nothing: their next messages resume their sessions after the update.
+    pub(super) fn hold_for_update(&mut self, reply: Reply<()>) {
+        if self.updating {
+            let _ = reply.send(Err(ProviderError::Conflict(
+                "Claude Code is already updating".to_owned(),
+            )));
+            return;
+        }
+        if self.threads.values().any(ThreadState::is_working) {
+            let _ = reply.send(Err(ProviderError::Conflict(
+                "Claude Code cannot update while a Claude thread is working. Update once its turn ends"
+                    .to_owned(),
+            )));
+            return;
+        }
+        self.updating = true;
+        let thread_ids: Vec<ThreadId> = self.threads.keys().cloned().collect();
+        let closing: Vec<JoinHandle<()>> = thread_ids
+            .iter()
+            .filter_map(|thread_id| self.retire_session(thread_id))
+            .collect();
+        tokio::spawn(async move {
+            for close in closing {
+                let _ = close.await;
+            }
+            let _ = reply.send(Ok(()));
+        });
     }
 
     /// Closes every session with no turn running that nobody has used for `idle_for`. Its thread
