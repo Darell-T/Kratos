@@ -346,10 +346,25 @@ mod tests {
     #[test]
     fn a_folder_that_differs_only_in_case_is_not_the_sandbox_scope() {
         // Catches case folding, which is right for protected folders, widening the writable scope.
-        let root = tempfile::tempdir().unwrap();
+        // The folders sit outside the temp folder, which the sandbox lets every command write.
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&target).unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("sandbox-case-")
+            .tempdir_in(target)
+            .unwrap();
         let base = std::fs::canonicalize(root.path()).unwrap();
+        assert!(
+            !base.starts_with(std::fs::canonicalize(temp_folder()).unwrap()),
+            "the fixture must be outside the temp folder"
+        );
         let (folder, other) = (base.join("proj"), base.join("PROJ"));
         std::fs::create_dir(&folder).unwrap();
+        if other.exists() {
+            // The file system folds case, as macOS's does by default, so `PROJ` is `proj` and the
+            // property this test checks cannot arise.
+            return;
+        }
         std::fs::create_dir(&other).unwrap();
 
         assert!(sandbox_may_write(&folder.join("a.txt"), &folder).unwrap());
