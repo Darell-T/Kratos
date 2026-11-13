@@ -5,6 +5,7 @@ use kratos_codex_client::{Incoming, Notification, RequestId, types};
 use kratos_protocol::{AgentItem, LiveUpdate, Provider, ThreadEventBody, ThreadId, TurnId};
 
 use super::actor::Actor;
+use super::threads::{Link, Turn};
 use super::wire;
 
 impl Actor {
@@ -43,10 +44,8 @@ impl Actor {
                 self.withdraw(&RequestId::from(&resolved.request_id)).await;
             }
             Notification::ThreadClosed(closed) => {
-                if let Some(thread_id) = self.thread_of(&closed.thread_id)
-                    && let Some(thread) = self.threads.get_mut(&thread_id)
-                {
-                    thread.link = super::threads::Link::Detached;
+                if let Some(thread_id) = self.thread_of(&closed.thread_id) {
+                    self.on_thread_closed(&thread_id).await;
                 }
             }
             Notification::ThreadTokenUsageUpdated(usage) => self.on_token_usage(usage),
@@ -62,6 +61,21 @@ impl Actor {
             | Notification::WindowsSandboxSetupCompleted(_)
             | Notification::Other { .. } => {}
         }
+    }
+
+    /// Codex closed the thread. Work that runs in it can never finish, so it ends as it would if
+    /// Codex had exited. An idle thread only detaches and is loaded again for its next turn.
+    async fn on_thread_closed(&mut self, thread_id: &ThreadId) {
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
+        if matches!(thread.turn, Turn::Idle) && thread.steering.is_empty() {
+            thread.link = Link::Detached;
+            return;
+        }
+        self.detach(thread_id, "Codex closed the thread while it worked")
+            .await;
+        self.dispatch(thread_id).await;
     }
 
     /// The Kratos thread a Codex thread id belongs to, among the threads loaded in this server.

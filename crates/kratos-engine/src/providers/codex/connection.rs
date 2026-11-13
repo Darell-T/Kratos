@@ -428,6 +428,43 @@ impl Actor {
         .await
     }
 
+    /// Detaches the thread from its Codex thread, which is gone, and ends the work that depended
+    /// on it: its running turn ends, waiting requests close, and a start or steer Codex never
+    /// answered is uncertain. `error` says why.
+    pub(super) async fn detach(&mut self, thread_id: &ThreadId, error: &str) {
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
+        thread.link = Link::Detached;
+        fail_discards(thread, &format!("Codex could not load the thread: {error}"));
+        let mut sending = std::mem::take(&mut thread.steering);
+        if let Turn::Starting { message_id, .. } = &thread.turn {
+            sending.insert(message_id.clone());
+        }
+        let mut unfinished = Unfinished {
+            sending: sending.into_iter().collect(),
+            requests: self.requests.close(thread_id, |_| true),
+            ..Unfinished::default()
+        };
+        let stopped = matches!(thread.turn, Turn::Running { stopping: true, .. });
+        if let Some((turn_id, work)) = thread.turn.end_running() {
+            unfinished.running_turn = Some(EndingTurn {
+                id: turn_id,
+                stopped,
+                changes: work.changes.finish(),
+                context: work.context,
+            });
+        }
+        thread.file_items.clear();
+        self.end_start(thread_id, Ok(()));
+        let reason = EndReason::Exited(error.to_owned());
+        let _ = self
+            .write(thread_id, move |write| {
+                recovery::settle(write, unfinished, reason)
+            })
+            .await;
+    }
+
     /// Ends the generation first, so replies still in flight from this process are dropped. Then
     /// every thread detaches and its running turn ends. A start or steer Codex never answered is
     /// uncertain, since the process may have taken it. Waiting stops and requests are answered, and
@@ -439,35 +476,7 @@ impl Actor {
         let error = exit.to_string();
         let thread_ids: Vec<ThreadId> = self.threads.keys().cloned().collect();
         for thread_id in &thread_ids {
-            let thread = self.threads.get_mut(thread_id).expect("listed above");
-            thread.link = Link::Detached;
-            fail_discards(thread, &format!("Codex could not load the thread: {error}"));
-            let mut sending = std::mem::take(&mut thread.steering);
-            if let Turn::Starting { message_id, .. } = &thread.turn {
-                sending.insert(message_id.clone());
-            }
-            let mut unfinished = Unfinished {
-                sending: sending.into_iter().collect(),
-                requests: self.requests.close(thread_id, |_| true),
-                ..Unfinished::default()
-            };
-            let stopped = matches!(thread.turn, Turn::Running { stopping: true, .. });
-            if let Some((turn_id, work)) = thread.turn.end_running() {
-                unfinished.running_turn = Some(EndingTurn {
-                    id: turn_id,
-                    stopped,
-                    changes: work.changes.finish(),
-                    context: work.context,
-                });
-            }
-            thread.file_items.clear();
-            self.end_start(thread_id, Ok(()));
-            let reason = EndReason::Exited(error.clone());
-            let _ = self
-                .write(thread_id, move |write| {
-                    recovery::settle(write, unfinished, reason)
-                })
-                .await;
+            self.detach(thread_id, &error).await;
         }
         self.ready.clear();
         for thread_id in &thread_ids {

@@ -434,3 +434,28 @@ async fn codex_exiting_mid_start_leaves_the_message_uncertain() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn a_thread_codex_closes_mid_turn_ends_its_turn_as_failed() {
+    // Catches a closed thread whose turn stayed running, which Stop could not end because the
+    // thread had no Codex id left, holding the queue until the engine restarted.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness.settle_start("turn-1", "inProgress").await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
+        .await;
+
+    harness
+        .emit("thread/closed", json!({ "threadId": THREAD }))
+        .await;
+
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(&ended, ThreadEventBody::TurnCompleted { outcome: TurnOutcome::Failed { error }, .. } if error.contains("closed the thread")),
+        "{ended:?}"
+    );
+}
