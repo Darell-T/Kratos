@@ -64,7 +64,7 @@ These are the edits to look at hardest, because they touch Codex threads and sha
 - **Shared queue rules.** `providers/queue.rs` and `ProviderError` moved out of the Codex module, so both providers use them (`d96586c`).
 - **One scheduler for both providers.** `scheduler.rs` continues a limit-stopped turn for either provider (`063617a`).
 - **No turn deadline.** The 10-minute turn timer is gone for Codex and for Claude (`4d2bc05`). A live CLI is working, and each way it can die reports its own error. Zeron has no deadline either. One Codex test of the removed path was deleted, with the owner's approval. `PauseReason::TimedOut` stays readable, because an older engine may have stored it.
-- **Scheduler planning takes the current time.** `scheduler::plan` never schedules a resume at a reset already behind it, for either provider (`ee283ac`).
+- **Scheduler planning takes the current time.** `scheduler::plan` never schedules a resume at a reset already behind it, for either provider (`4d7c4a4`).
 - **Report formats on Codex.** A Codex turn sends `outputSchema` and now ends with an `AgentItem::Report`, the same item a Claude turn records.
 - **Live usage over the socket.** A client sends `watchUsage` and receives a `usage` message on each change (`bbe5398`).
 - **Command safety.** `-Force` written as a prefix such as `-Fo`, or with an en dash or em dash, now counts as a forced delete (`cfb68fc`). This change is security-sensitive.
@@ -102,7 +102,7 @@ These choices are not written in the plan. Each one is in its commit message.
 
 ### Can follow the merge
 
-- **Live lane 10, a real usage limit.** It closes only when a limit happens on its own, so it gates nothing. Its condition is met: a limit response Kratos does not recognize fails where the user sees it and never loops (`ee283ac`, `tests/claude/limit_failures.rs`). A status Kratos does not know is written on the turn and never continued. A refusal for an unknown window waits for the user. Each CLI retry is written on the turn, so a CLI waiting out a limit does not look hung. Planning never schedules a resume at a reset already behind it.
+- **Live lane 10, a real usage limit.** It closes only when a limit happens on its own, so it gates nothing. Its condition is met: a limit response Kratos does not recognize fails where the user sees it and never loops (`4d7c4a4`, `tests/claude/limit_failures.rs`). A status Kratos does not know is written on the turn and never continued. A refusal for an unknown window waits for the user. Each CLI retry is written on the turn, so a CLI waiting out a limit does not look hung. Planning never schedules a resume at a reset already behind it.
 - **Skills.** They wait on the unified skills design. Its condition is met: nothing in R4 fixes how skills will work. `docs/unified-skills.md` lists each skills-related part of R4 and why it stays free to change. The `ThreadSkills` reply shape is the one choice to settle before a UI reads it.
 - **The update route against the real CLI.** Only the fake's updater has run. Running `claude update` on the owner's machine needs the owner's go-ahead. A failure reaches the user as a 503 with the updater's text.
 - **`kratos-client bench-post`.** Stage 2 deleted it. The owner decides whether it stays deleted.
@@ -115,7 +115,7 @@ Kratos never updates a CLI on its own and never under a running session. When an
 
 - **Tests.** The full workspace suite passes: 844 passed, 0 failed, and 9 ignored, of which 7 need the pinned Codex and run in CI, 1 runs only as another test's child process, and 1 is the hand-run perf probe. It includes 85 Claude engine tests against the scripted fake CLI, and client tests that replay the scrubbed recordings. `transcripts_are_scrubbed` fails on a recording that holds an email address, a user path, or a session id.
 - **Gates.** `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, and `lizard -C 11` are clean.
-- **Live lanes.** Lanes 1 to 9 passed against the real CLI (2.1.322) with Haiku at `2827d59`. They covered approval, interrupt, resume after restart, a denied write, `run_command`, a declined dangerous command, settings isolation, a question, and a killed CLI.
+- **Live lanes.** Lanes 1 to 9 passed against the real CLI (2.1.322) with Haiku at `9ddfc4a`. They covered approval, interrupt, resume after restart, a denied write, `run_command`, a declined dangerous command, settings isolation, a question, and a killed CLI.
 - **Performance.** The budgets were written before measuring. With the fake CLI, stream forwarding is 1.8 ms at p95 and dispatch is 5.8 ms at p95. Over ten real Haiku turns, the first token arrives in 524 ms at the median. One `claude.exe` runs per thread, engine memory stayed near 18 MB, and no process outlived a killed engine.
 - **Reviews.** Each stage had a Review.MD review and a security review. A final Review.MD, rust-review, and thermo-nuclear pass covered stages 5 and 6 and found four issues, which are fixed on the branch.
 
