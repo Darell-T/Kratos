@@ -466,3 +466,22 @@ async fn malformed_delivery_markers_fail_instead_of_reporting_non_delivery() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_folder_reached_through_a_symbolic_link_names_the_project_of_its_physical_path() {
+    // Catches a transcript looked for under the folder's spelling when the CLI, whose working
+    // folder is the physical path, stores it under the resolved one, which refused the thread's
+    // next start as "its saved session is gone".
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let linked = root.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    let id: SessionId = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+
+    assert_eq!(
+        transcript_path(root.path(), &linked, id),
+        transcript_path(root.path(), &std::fs::canonicalize(&real).unwrap(), id)
+    );
+}

@@ -73,9 +73,20 @@ impl SessionStart {
 }
 
 /// The pinned layout under the user's home directory, not an already appended `.claude` folder.
+///
+/// The CLI names the project after its working folder as the system reports it. On macOS and
+/// Linux that is the physical path, with symbolic links resolved (`/var` is `/private/var` on
+/// macOS), so `cwd` is resolved the same way. Windows reports the folder as it was given.
 #[must_use]
 pub fn transcript_path(claude_home: &Path, cwd: &Path, id: SessionId) -> PathBuf {
-    let project: String = cwd
+    let physical = if cfg!(windows) {
+        None
+    } else {
+        std::fs::canonicalize(cwd).ok()
+    };
+    let project: String = physical
+        .as_deref()
+        .unwrap_or(cwd)
         .to_string_lossy()
         .chars()
         .map(|character| {

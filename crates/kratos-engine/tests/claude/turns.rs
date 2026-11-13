@@ -45,7 +45,11 @@ async fn launches_claude_lazily_and_delivers_queued_messages_one_turn_at_a_time_
         panic!("the message is queued");
     };
     let launch = harness.launch(1).await;
-    assert_eq!(launch.cwd, harness.folder().display().to_string());
+    // The fake reports its working folder as the system does: the physical path on macOS.
+    assert_eq!(
+        std::fs::canonicalize(&launch.cwd).unwrap(),
+        std::fs::canonicalize(harness.folder()).unwrap()
+    );
     assert!(launch.has("--replay-user-messages") && launch.has("--include-partial-messages"));
     assert_eq!(launch.value("--permission-mode"), Some("default"));
     assert_eq!(launch.value("--setting-sources"), Some("user"));
