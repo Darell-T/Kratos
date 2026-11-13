@@ -28,3 +28,17 @@ The deny is deliberate for now. A skill can carry its own instructions and scrip
 - What the slash-command list shows for a skill a provider cannot run.
 
 Until then, the `Skill`, `Agent`, and `Task` tools stay denied, and the skills route reports what each CLI reports.
+
+## What R4 leaves free to change
+
+R4 was checked for anything that would fix how skills work before the design exists. Nothing durable does.
+
+| What R4 has | Why it does not fix the design |
+| --- | --- |
+| The `Skill`, `Agent`, and `Task` denial | A runtime rule in `policy::decide`. No stored state depends on it, and no test pins these tools by name. |
+| `--setting-sources=user` | A launch flag in `session.rs`, set again for each process. |
+| `ThreadSkills` with `skills`, `slashCommands`, and `slashCommandsGap` | An API reply, built fresh on each request and never stored. Only `kratos-client` reads it, since no UI exists yet. A Claude thread fills only `slashCommands`, because that is where the CLI lists its skills. |
+| The skills route starting a Claude process | A side effect of asking the CLI. Watching skill folders would remove it. |
+| Slash commands in memory | `OpenSession.commands` lives as long as the process. |
+
+Nothing about skills is in the store, a migration, or the settings. The shape of `ThreadSkills` is the one choice that gets harder to change once a client depends on it. Settle it in the design before the UI reads it.
