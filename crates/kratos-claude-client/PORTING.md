@@ -19,7 +19,7 @@ This crate replaces the SDK's subprocess transport for the first R4 slice. The e
 
 `connect` takes a synchronous startup-control callback because the recorded CLI requests SDK MCP initialization before returning the main initialization response. The callback answers the owned control or hands it to an application task. It must return promptly. After initialization, the receiver owns subsequent controls. A transport does not invent application MCP responses.
 
-`transcript_path` takes the operating-system user home, then appends `.claude/projects`. Its path encoding replaces each non-ASCII-alphanumeric character with `-`, as pinned by the Windows recording layout. `SessionId` validates UUIDs before they become filenames. An unreadable transcript or malformed recognized delivery marker is an error rather than evidence of non-delivery. An unterminated final line is not an error: the rows before it are returned with `torn_tail` set, so the engine treats delivery as unknown.
+`transcript_path` takes the operating-system user home, then appends `.claude/projects`. Its path encoding replaces each non-ASCII-alphanumeric character with `-`, as pinned by the Windows recording layout. `SessionId` validates UUIDs before they become filenames. A transcript that cannot be read is an error rather than evidence of non-delivery. A row that is not JSON, or a recognized delivery marker without a UUID, is not an error: the rows around it are returned with `incomplete` set, so the engine treats delivery of any message not found as unknown. A line torn by a crash and then followed by rows a resumed CLI appended reads the same way.
 
 ## Test mapping
 

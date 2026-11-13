@@ -441,3 +441,38 @@ async fn a_line_kratos_cannot_read_ends_the_turn_instead_of_leaving_claude_waiti
         );
     }
 }
+
+#[tokio::test]
+async fn a_transcript_with_a_bad_line_in_the_middle_still_lets_the_user_discard() {
+    // Catches a hard error on a line torn by a crash and followed by later rows, which answered
+    // every discard with 503 and left the uncertain message holding the queue for good.
+    let harness = Harness::start(Options::default()).await;
+    let first = harness.begin(A, 1).await;
+    harness.send(E, "E").await;
+    harness
+        .provider
+        .steer(harness.thread_id.clone(), message_id(E))
+        .await
+        .unwrap();
+    harness.wait_written(&first, &[A, E]).await;
+    let path = kratos_claude_client::transcript_path(
+        &harness.claude_home(),
+        &harness.folder(),
+        first.session(),
+    );
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str("{\"type\":\"user\",\"uu\n{\"type\":\"assistant\"}\n");
+    std::fs::write(&path, text).unwrap();
+
+    harness.exit(&first, 3).await;
+    harness
+        .message_becomes(E, |s| matches!(s, MessageStatus::Unknown { .. }))
+        .await;
+    let discarded = harness
+        .provider
+        .discard(harness.thread_id.clone(), message_id(E))
+        .await
+        .unwrap();
+
+    assert_eq!(discarded.status, MessageStatus::Cancelled);
+}

@@ -53,7 +53,7 @@ enum Verdict {
 fn verdict(native: &str, delivered: &DeliveredMessages, started: bool) -> Verdict {
     if delivered.ids.contains(native) {
         Verdict::Delivered
-    } else if !delivered.torn_tail && !started {
+    } else if !delivered.incomplete && !started {
         Verdict::NeverTaken
     } else {
         Verdict::Uncertain
@@ -243,7 +243,7 @@ impl Actor {
                     eprintln!("claude: cannot read the transcript: {error}");
                     DeliveredMessages {
                         ids: HashSet::new(),
-                        torn_tail: true,
+                        incomplete: true,
                     }
                 });
                 let _ = self
@@ -317,7 +317,7 @@ async fn read_transcript(
 ) -> DeliveredMessages {
     let cut_off = DeliveredMessages {
         ids: HashSet::new(),
-        torn_tail: true,
+        incomplete: true,
     };
     let session = match work.session.as_deref().map(str::parse::<SessionId>) {
         Some(Ok(stored)) => stored,
