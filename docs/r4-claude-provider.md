@@ -10,7 +10,7 @@ git diff origin/main..finish-claude-provider
 
 ## Size and shape
 
-The branch holds 61 commits on `origin/main` (da30d7e). It changes 198 files, with about 21,700 lines added and 1,000 deleted. About 3,000 of the added lines are scrubbed CLI recordings under `crates/kratos-claude-client/tests/transcripts/`.
+The branch holds 70 commits on `origin/main` (da30d7e). It changes 200 files, with about 22,200 lines added and 1,000 deleted. About 3,000 of the added lines are scrubbed CLI recordings under `crates/kratos-claude-client/tests/transcripts/`.
 
 | Area | Lines | What it is |
 | --- | --- | --- |
@@ -113,7 +113,7 @@ Kratos never updates a CLI on its own and never under a running session. When an
 
 ## How it was checked
 
-- **Tests.** The full workspace suite passes: 844 passed, 0 failed, and 9 ignored, of which 7 need the pinned Codex and run in CI, 1 runs only as another test's child process, and 1 is the hand-run perf probe. It includes 85 Claude engine tests against the scripted fake CLI, and client tests that replay the scrubbed recordings. `transcripts_are_scrubbed` fails on a recording that holds an email address, a user path, or a session id.
+- **Tests.** The full workspace suite passes: 850 passed, 0 failed, and 9 ignored, of which 7 need the pinned Codex and run in CI, 1 runs only as another test's child process, and 1 is the hand-run perf probe. It includes 90 Claude engine tests against the scripted fake CLI, and client tests that replay the scrubbed recordings. `transcripts_are_scrubbed` fails on a recording that holds an email address, a user path, or a session id.
 - **Gates.** `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`, and `lizard -C 11` are clean.
 - **Live lanes.** Lanes 1 to 9 passed against the real CLI (2.1.322) with Haiku at `9ddfc4a`. They covered approval, interrupt, resume after restart, a denied write, `run_command`, a declined dangerous command, settings isolation, a question, and a killed CLI.
 - **Performance.** The budgets were written before measuring. With the fake CLI, stream forwarding is 1.8 ms at p95 and dispatch is 5.8 ms at p95. Over ten real Haiku turns, the first token arrives in 524 ms at the median. One `claude.exe` runs per thread, engine memory stayed near 18 MB, and no process outlived a killed engine.
