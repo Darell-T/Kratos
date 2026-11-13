@@ -101,13 +101,6 @@ pub(super) enum Command {
         timeout: Duration,
         reply: Reply<CommandResult>,
     },
-    RunAt {
-        folder: String,
-        profile: String,
-        command: Vec<String>,
-        timeout: Duration,
-        reply: Reply<CommandResult>,
-    },
     RefreshUsage {
         reply: Reply<()>,
     },
@@ -127,9 +120,7 @@ impl Command {
             Command::Discard { reply, .. } => drop(reply.send(Err(error))),
             Command::RefreshUsage { reply } => drop(reply.send(Err(error))),
             Command::Skills { reply, .. } => drop(reply.send(Err(error))),
-            Command::Run { reply, .. } | Command::RunAt { reply, .. } => {
-                drop(reply.send(Err(error)));
-            }
+            Command::Run { reply, .. } => drop(reply.send(Err(error))),
             _ => {
                 unreachable!("only discard, refresh usage, skills and run commands wait for Codex")
             }

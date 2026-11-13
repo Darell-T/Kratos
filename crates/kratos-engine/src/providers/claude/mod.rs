@@ -22,7 +22,8 @@
 //! sends nothing.
 //!
 //! Kratos decides each tool request and records approvals and questions through the shared Hub.
-//! Every command uses the Codex runner. No thread launches in a mode that skips the ask.
+//! Claude runs its own shell commands, as the user and with no sandbox. A pre-tool hook sends each
+//! one to Kratos's decision, and no thread launches in a mode that skips the ask.
 
 mod account;
 mod actor;
@@ -40,8 +41,8 @@ mod release;
 mod requests;
 mod session;
 mod settings;
+mod shell;
 mod threads;
-mod tools;
 mod turns;
 mod wire;
 
@@ -72,8 +73,8 @@ pub use wire::native_id;
 /// How the provider starts Claude and how long it waits on it.
 #[derive(Clone, Debug)]
 pub struct ClaudeSettings {
-    /// The command and permission boundary. Without it, every tool request is refused.
-    pub tools: Option<ClaudeTools>,
+    /// The folders a Claude tool may not read or write without the rules for protected folders.
+    pub protected: super::codex::ProtectedFolders,
     /// The native `claude` executable, found as the user's shell finds it (L8).
     pub program: PathBuf,
     /// Where Claude Code's native updater reads the newest release on each channel.
@@ -92,22 +93,6 @@ pub struct ClaudeSettings {
     pub restart_wait: Duration,
     /// Failures in a row after which only the user may start the CLI again (L4).
     pub max_restarts: u32,
-}
-
-/// Dependencies that let Claude execute tools under Kratos's policy.
-#[derive(Clone)]
-pub struct ClaudeTools {
-    pub runner: super::codex::CodexProvider,
-    pub protected: super::codex::ProtectedFolders,
-}
-
-impl std::fmt::Debug for ClaudeTools {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ClaudeTools")
-            .field("protected", &self.protected)
-            .finish_non_exhaustive()
-    }
 }
 
 /// Commands that may wait for the actor. A burst of requests waits for room instead of growing

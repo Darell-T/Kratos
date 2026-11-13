@@ -15,9 +15,9 @@ use super::actor::{Actor, Connected, Done, Reply, SessionEvent};
 use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState, Waiter};
 use super::{ClaudeSettings, ProviderError, hooks, permissions, release, wire};
 
-/// The tools Claude Code runs commands with. Kratos runs commands itself, in the sandbox of the
-/// thread's permission (D17), so the CLI cannot use its native command tools.
-const DISALLOWED_TOOLS: [&str; 3] = ["Bash", "PowerShell", "Monitor"];
+/// Tools the CLI may not offer. `Monitor` streams a long-running command's output back into the
+/// turn, and whether a Claude thread may use it is not decided.
+const DISALLOWED_TOOLS: [&str; 1] = ["Monitor"];
 
 impl Actor {
     /// The thread's state, read from the store the first time the actor sees the thread.
@@ -95,7 +95,6 @@ impl Actor {
         thread.session = Session::Opening;
         let epoch = thread.epoch;
         let thread_id = thread_id.clone();
-        let enabled = self.settings.tools.is_some();
         let report_format = config.report_format.clone();
         let program = self.settings.program.clone();
         let env_set = self.settings.env_set.clone();
@@ -104,8 +103,8 @@ impl Actor {
                 Err(why) => Err(why),
                 Ok(()) => connect(
                     launch,
-                    hooks::initialize(enabled, report_format),
-                    move |control| permissions::startup(control, enabled),
+                    hooks::initialize(report_format),
+                    permissions::startup,
                 )
                 .await
                 .map_err(|error| error.to_string()),

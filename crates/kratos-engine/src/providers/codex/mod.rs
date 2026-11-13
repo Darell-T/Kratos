@@ -46,26 +46,8 @@ use crate::providers::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent};
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 
-use profiles::Profile;
 pub use profiles::ProtectedFolders;
 pub(crate) use profiles::sandbox_may_write;
-pub(crate) use wire::OUTPUT_BYTES as COMMAND_OUTPUT_BYTES;
-
-/// The isolated profile for a Claude command, or an explicitly approved escape.
-#[derive(Clone, Debug)]
-pub(crate) enum CommandProfile {
-    Claude(ThreadSettings),
-    ApprovedOutside,
-}
-
-impl CommandProfile {
-    fn id(&self) -> &'static str {
-        match self {
-            Self::Claude(settings) => Profile::for_settings(settings).id(),
-            Self::ApprovedOutside => Profile::FullAccess.id(),
-        }
-    }
-}
 
 /// How the provider starts Codex and how long it waits on it.
 #[derive(Clone, Debug)]
@@ -298,25 +280,6 @@ impl CodexProvider {
     ) -> Result<CommandResult, ProviderError> {
         self.ask(|reply| actor::Command::Run {
             thread_id,
-            command,
-            timeout,
-            reply,
-        })
-        .await
-    }
-
-    /// Runs another provider's command with its frozen turn settings and root, without creating
-    /// a Codex conversation. The caller owns the permission decision before invoking this runner.
-    pub(crate) async fn run_at(
-        &self,
-        folder: String,
-        profile: CommandProfile,
-        command: Vec<String>,
-        timeout: Duration,
-    ) -> Result<CommandResult, ProviderError> {
-        self.ask(|reply| actor::Command::RunAt {
-            folder,
-            profile: profile.id().to_owned(),
             command,
             timeout,
             reply,

@@ -13,11 +13,9 @@ use uuid::Uuid;
 
 use super::ProviderError;
 use super::actor::Actor;
-use super::tools::{self, CommandArgs};
 
 pub(super) enum Answer {
     Tool(Value),
-    Command { args: CommandArgs, id: Value },
     Elicitation,
 }
 
@@ -33,9 +31,6 @@ impl Pending {
         let body = match self.answer {
             Answer::Tool(_) => {
                 json!({ "behavior": "deny", "message": "The user declined this action" })
-            }
-            Answer::Command { id, .. } => {
-                tools::error(id, -32000, "The user declined this command")
             }
             Answer::Elicitation => json!({ "action": "cancel" }),
         };
@@ -99,22 +94,7 @@ impl Actor {
                     .control
                     .answer(json!({ "behavior": "allow", "updatedInput": input }));
             }
-            Answer::Command { args, id } => self.execute_command(pending, args, id),
             Answer::Elicitation => pending.deny(),
-        }
-    }
-
-    fn remember_command(&mut self, pending: &Pending) {
-        let kratos_claude_client::ControlRequest::CanUseTool(tool) = &pending.control.request
-        else {
-            return;
-        };
-        if let Some(args) = tools::callback_command(tool) {
-            self.threads
-                .get_mut(&pending.thread_id)
-                .expect("pending thread is loaded")
-                .command_grants
-                .push(args);
         }
     }
 
@@ -151,8 +131,7 @@ impl Actor {
             {
                 match decision {
                     ApprovalDecision::Accept | ApprovalDecision::AcceptForSession => {
-                        self.remember_command(&pending);
-                        self.allow_pending(pending)
+                        self.allow_pending(pending);
                     }
                     ApprovalDecision::Decline | ApprovalDecision::Cancel => pending.deny(),
                 }
@@ -216,9 +195,6 @@ impl Actor {
         control_id: Option<&str>,
         reason: &str,
     ) {
-        if let Some(thread) = self.threads.get_mut(thread_id) {
-            thread.cancel_commands(control_id);
-        }
         let selected = |pending: &Pending| {
             &pending.thread_id == thread_id && control_id.is_none_or(|id| pending.control.id == id)
         };
@@ -276,6 +252,5 @@ fn question_response(answer: Answer, answers: BTreeMap<String, Vec<String>>) -> 
         }
         Answer::Elicitation if answers.is_empty() => json!({ "action": "cancel" }),
         Answer::Elicitation => json!({ "action": "accept", "content": answers }),
-        Answer::Command { .. } => unreachable!("commands are approvals, never questions"),
     }
 }

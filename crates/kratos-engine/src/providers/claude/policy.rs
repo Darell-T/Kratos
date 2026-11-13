@@ -12,7 +12,10 @@ pub(super) enum Destination {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     File(Destination),
-    Command { flagged: bool, outside: bool },
+    /// A shell command the CLI runs as the user. `flagged` is the dangerous-command check's verdict.
+    Command {
+        flagged: bool,
+    },
     Read,
     ProtectedRead,
     ExternalTool,
@@ -34,12 +37,11 @@ pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
         (Action::Question, _, _) => Decision::Question,
         (Action::ProtectedRead, false, Permission::FullAccess) => Decision::Allow,
         (Action::Invalid | Action::ProtectedRead, _, _) => Decision::Deny,
-        (Action::ExitPlan | Action::Command { outside: true, .. }, true, _) => Decision::Deny,
+        (Action::ExitPlan, true, _) => Decision::Deny,
         (Action::File(Destination::Protected(path)), _, _) => {
             Decision::Ask(AskReason::ProtectedFolder { path })
         }
-        (Action::Command { flagged: true, .. }, _, _) => Decision::Ask(AskReason::Dangerous),
-        (Action::Command { outside: true, .. }, _, _) => Decision::Ask(AskReason::Escalation),
+        (Action::Command { flagged: true }, _, _) => Decision::Ask(AskReason::Dangerous),
         (Action::ExternalTool, _, _) => Decision::Ask(AskReason::Unchecked),
         (_, true, _) | (_, _, Permission::AskMe) => Decision::Ask(AskReason::AskEveryAction),
         (Action::File(Destination::Outside), false, Permission::ApproveForMe) => {
@@ -115,10 +117,7 @@ mod tests {
                 for action in [
                     Action::Read,
                     Action::File(Destination::Inside),
-                    Action::Command {
-                        flagged: false,
-                        outside: false,
-                    },
+                    Action::Command { flagged: false },
                 ] {
                     assert_eq!(
                         decide(&settings, action.clone()),
@@ -150,13 +149,7 @@ mod tests {
                     })
                 );
                 assert_eq!(
-                    decide(
-                        &settings,
-                        Action::Command {
-                            flagged: true,
-                            outside: false
-                        }
-                    ),
+                    decide(&settings, Action::Command { flagged: true }),
                     Decision::Ask(AskReason::Dangerous)
                 );
                 assert_eq!(
@@ -165,34 +158,6 @@ mod tests {
                         Decision::Deny
                     } else {
                         ordinary.clone()
-                    }
-                );
-                assert_eq!(
-                    decide(
-                        &settings,
-                        Action::Command {
-                            flagged: true,
-                            outside: true
-                        }
-                    ),
-                    if plan_mode {
-                        Decision::Deny
-                    } else {
-                        Decision::Ask(AskReason::Dangerous)
-                    }
-                );
-                assert_eq!(
-                    decide(
-                        &settings,
-                        Action::Command {
-                            flagged: false,
-                            outside: true
-                        }
-                    ),
-                    if plan_mode {
-                        Decision::Deny
-                    } else {
-                        Decision::Ask(AskReason::Escalation)
                     }
                 );
             }

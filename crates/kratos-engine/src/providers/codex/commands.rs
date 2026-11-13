@@ -106,15 +106,6 @@ impl Actor {
                 timeout,
                 reply,
             } => self.run_command(thread_id, command, timeout, reply).await,
-            Command::RunAt {
-                folder,
-                profile,
-                command,
-                timeout,
-                reply,
-            } => {
-                self.run_at(folder, profile, command, timeout, reply).await;
-            }
             Command::RefreshUsage { reply } => self.refresh_usage(reply),
             Command::Continue {
                 thread_id,
@@ -162,34 +153,14 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
-        let thread = &self.threads[&thread_id];
-        self.run_at(
-            thread.folder.clone(),
-            Profile::for_settings(&thread.settings).id().to_owned(),
-            command,
-            timeout,
-            reply,
-        )
-        .await;
-    }
-
-    async fn run_at(
-        &mut self,
-        folder: String,
-        profile: String,
-        command: Vec<String>,
-        timeout: Duration,
-        reply: Reply<CommandResult>,
-    ) {
         if reply.is_closed() {
             return;
         }
         let codex = match self.connection() {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::RunAt {
-                    folder,
-                    profile,
+                self.deferred.push(Command::Run {
+                    thread_id,
                     command,
                     timeout,
                     reply,
@@ -201,6 +172,9 @@ impl Actor {
                 return;
             }
         };
+        let thread = &self.threads[&thread_id];
+        let profile = Profile::for_settings(&thread.settings).id().to_owned();
+        let folder = thread.folder.clone();
         tokio::spawn(async move {
             let mut reply = reply;
             let process_id = uuid::Uuid::new_v4().to_string();

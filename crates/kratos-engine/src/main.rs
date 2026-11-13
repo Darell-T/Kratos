@@ -135,7 +135,7 @@ fn run_server(
         let port = listener.local_addr()?.port();
         let (limit_stops, stops) = mpsc::unbounded_channel();
         let codex = start_codex(config, port, &hub, &store, &usage, limit_stops.clone()).await?;
-        let claude = start_claude(config, &hub, &store, &codex, &usage, limit_stops).await?;
+        let claude = start_claude(config, &hub, &store, &usage, limit_stops).await?;
         let providers = Providers { codex, claude };
         let scheduler = if providers.none_running() {
             None
@@ -192,20 +192,11 @@ async fn start_claude(
     config: &Config,
     hub: &Hub,
     store: &StoreThread,
-    codex: &Result<CodexProvider, String>,
     usage: &UsageTracker,
     limit_stops: mpsc::UnboundedSender<LimitStop>,
 ) -> Result<Result<ClaudeProvider, String>, StoreError> {
     match claude_settings(config) {
-        Ok(mut settings) => {
-            settings.tools = codex.as_ref().ok().map(|codex| claude::ClaudeTools {
-                runner: codex.clone(),
-                protected: ProtectedFolders::new(
-                    config.home.clone(),
-                    config.codex_home.clone(),
-                    config.user_home.clone(),
-                ),
-            });
+        Ok(settings) => {
             let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
             Ok(Ok(
                 claude::start(settings, hub, store, usage, limit_stops).await?
@@ -225,7 +216,11 @@ fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
         .clone()
         .ok_or(ClaudeMissing::NoHomeFolder)?;
     Ok(ClaudeSettings {
-        tools: None,
+        protected: ProtectedFolders::new(
+            config.home.clone(),
+            config.codex_home.clone(),
+            config.user_home.clone(),
+        ),
         program,
         release_feed: CLAUDE_RELEASES.to_owned(),
         claude_home,

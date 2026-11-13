@@ -1,5 +1,5 @@
-//! Without a command service every request is refused, and a thread never launches in a mode
-//! that would skip Kratos's permission callbacks.
+//! Requests Kratos never registered are refused, and a thread never launches in a mode that would
+//! skip Kratos's permission callbacks.
 
 use kratos_protocol::{Permission, ThreadSettings};
 use serde_json::{Value, json};
@@ -38,43 +38,11 @@ async fn running(options: Options) -> (Harness, Launch) {
 }
 
 #[tokio::test]
-async fn every_tool_request_is_denied_with_the_reason() {
-    // Catches a tool allowed, or a request left unanswered with Claude waiting, when the provider
-    // has no command service.
+async fn a_hook_server_or_request_kratos_never_registered_runs_nothing() {
+    // Catches a hook id or MCP server Kratos never declared being accepted, and a request Kratos
+    // does not know hanging Claude.
     let (harness, launch) = running(Options::default()).await;
 
-    let answer = ask(
-        &harness,
-        &launch,
-        "tool-1",
-        json!({ "subtype": "can_use_tool", "tool_name": "Write",
-                "input": { "file_path": "outside.txt" }, "tool_use_id": "t1" }),
-    )
-    .await;
-
-    assert_eq!(answer["subtype"], "success");
-    assert_eq!(answer["response"]["behavior"], "deny");
-    assert!(
-        answer["response"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("command service")
-    );
-}
-
-#[tokio::test]
-async fn an_elicitation_is_declined_and_every_other_request_is_an_error() {
-    // Catches an MCP server's question that is answered or ignored, a hook or MCP request Kratos
-    // never registered that is accepted, and a request Kratos does not know that hangs Claude.
-    let (harness, launch) = running(Options::default()).await;
-
-    let elicitation = ask(
-        &harness,
-        &launch,
-        "elicit-1",
-        json!({ "subtype": "elicitation", "mcp_server_name": "files", "message": "Pick one" }),
-    )
-    .await;
     let hook = ask(
         &harness,
         &launch,
@@ -97,21 +65,22 @@ async fn an_elicitation_is_declined_and_every_other_request_is_an_error() {
     )
     .await;
 
-    assert_eq!(elicitation["response"], json!({ "action": "decline" }));
-    for answer in [&hook, &mcp, &unknown] {
+    assert_eq!(hook["response"]["continue"], false, "{hook}");
+    for answer in [&mcp, &unknown] {
         assert_eq!(answer["subtype"], "error", "{answer}");
     }
 }
 
 #[tokio::test]
-async fn the_session_registers_no_hooks_and_no_tool_servers() {
-    // Catches hooks or SDK MCP servers declared in the handshake before Kratos can answer them.
+async fn the_session_registers_kratos_hooks_and_no_tool_servers() {
+    // Catches the pre-tool hook missing, so the CLI runs read-only commands and allow-listed tools
+    // without Kratos's decision, or an SDK MCP server declared that Kratos does not serve.
     let (harness, launch) = running(Options::default()).await;
 
     let received = harness.received(&launch).await;
 
     let initialize = &received[0]["request"];
-    assert_eq!(initialize, &json!({ "subtype": "initialize" }));
+    assert_eq!(initialize, &crate::harness::initialize());
 }
 
 #[tokio::test]

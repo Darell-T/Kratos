@@ -1,5 +1,5 @@
-//! Claude tool requests at the trust boundary. Without the command service the provider refuses
-//! every request; with it, parsing precedes the pure permission table.
+//! Claude tool requests at the trust boundary. Parsing and filesystem resolution precede the pure
+//! permission table.
 
 use std::path::{Path, PathBuf};
 
@@ -11,53 +11,60 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::super::codex::sandbox_may_write;
+use super::super::codex::{ProtectedFolders, sandbox_may_write};
 use super::actor::Actor;
 use super::paths;
 use super::policy::{self, Action, Decision, Destination};
 use super::requests::{Answer, Pending};
-use super::tools;
+use super::shell::{self, Shell};
 
-const DENIED: &str = "Kratos's command service is unavailable, so it declines every tool request";
-
-pub(super) fn answer(control: IncomingControl) {
+/// Answers a control the CLI sends while no turn runs. Kratos's post-tool hooks only record, so
+/// they may go on; nothing may run a tool.
+pub(super) fn startup(control: IncomingControl) {
     let queued = match &control.request {
-        ControlRequest::CanUseTool(_) => {
-            control.answer(json!({ "behavior": "deny", "message": DENIED }))
-        }
-        ControlRequest::Elicitation(_) => control.answer(json!({ "action": "decline" })),
-        ControlRequest::HookCallback(_) => control.fail("Kratos registers no hooks"),
-        ControlRequest::McpMessage { .. } => control.fail("Kratos serves no MCP servers yet"),
-        ControlRequest::Unsupported { .. } => control.fail("Kratos does not answer this request"),
+        ControlRequest::HookCallback(_) => control.answer(
+            json!({ "continue": false, "stopReason": "No tool hook may run before a turn" }),
+        ),
+        _ => control.fail("No tool may run before a Claude turn starts"),
     };
     if !queued {
         eprintln!("claude: the request was withdrawn before Kratos refused it");
     }
 }
 
-pub(super) fn startup(control: IncomingControl, enabled: bool) {
-    if !enabled {
-        answer(control);
-        return;
+/// How Kratos judges a tool it knows by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rule {
+    File,
+    Question,
+    ExitPlan,
+    LocalRead,
+    Read,
+    Command(Shell),
+    External,
+}
+
+/// The rule for `tool_name`, or `None` for a tool Kratos's table does not cover.
+fn rule(tool_name: &str) -> Option<Rule> {
+    if let Some(shell) = Shell::of(tool_name) {
+        return Some(Rule::Command(shell));
     }
-    let body = match &control.request {
-        ControlRequest::McpMessage {
-            server_name,
-            message,
-        } if server_name == "kratos" => tools::metadata(message),
-        ControlRequest::HookCallback(_) => {
-            Some(json!({ "continue": false, "stopReason": "No tool hook may run before a turn" }))
-        }
-        _ => None,
-    };
-    match body {
-        Some(body) => {
-            let _ = control.answer(body);
-        }
-        None => {
-            let _ = control.fail("No tool may run before a Claude turn starts");
-        }
-    }
+    Some(match tool_name {
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => Rule::File,
+        "AskUserQuestion" => Rule::Question,
+        "ExitPlanMode" => Rule::ExitPlan,
+        "Read" | "Glob" | "Grep" => Rule::LocalRead,
+        "WebFetch" | "WebSearch" | "TodoWrite" | "EnterPlanMode" => Rule::Read,
+        name if name.starts_with("mcp__") => Rule::External,
+        _ => return None,
+    })
+}
+
+/// Whether Kratos's table decides `tool_name`. The pre-tool hook sends each such call to the
+/// permission callback, because the CLI on its own runs read-only commands, in-folder reads, and
+/// whatever the user's allow rules name without asking (measured with Claude Code 2.1.322).
+pub(super) fn decides(tool_name: &str) -> bool {
+    rule(tool_name).is_some()
 }
 
 pub(super) fn edit_path<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
@@ -71,33 +78,26 @@ pub(super) fn edit_path<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
         .filter(|path| !path.trim().is_empty() && !path.contains('\0'))
 }
 
-fn action(
-    tool: &CanUseTool,
-    folder: &str,
-    protected: &super::super::codex::ProtectedFolders,
-) -> Action {
+fn action(tool: &CanUseTool, folder: &str, protected: &ProtectedFolders) -> Action {
     if !tool.input.is_object() {
         return Action::Invalid;
     }
-    match tool.tool_name.as_str() {
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => file_action(tool, folder, protected),
-        "AskUserQuestion" => {
-            if question(
-                &tool.input,
-                kratos_protocol::TurnId::new("validation".into()),
-            )
-            .is_some()
-            {
+    match rule(&tool.tool_name) {
+        Some(Rule::File) => file_action(tool, folder, protected),
+        Some(Rule::Question) => {
+            let validation = kratos_protocol::TurnId::new("validation".into());
+            if question(&tool.input, validation).is_some() {
                 Action::Question
             } else {
                 Action::Invalid
             }
         }
-        "ExitPlanMode" => Action::ExitPlan,
-        "Read" | "Glob" | "Grep" => local_read_action(tool, folder, protected),
-        "WebFetch" | "WebSearch" | "TodoWrite" | "EnterPlanMode" => read_action(tool),
-        name if name.starts_with("mcp__") => tools::callback_action(tool),
-        _ => Action::Invalid,
+        Some(Rule::ExitPlan) => Action::ExitPlan,
+        Some(Rule::LocalRead) => local_read_action(tool, folder, protected),
+        Some(Rule::Read) => read_action(tool),
+        Some(Rule::Command(shell)) => shell::action(shell, &tool.input),
+        Some(Rule::External) => Action::ExternalTool,
+        None => Action::Invalid,
     }
 }
 
@@ -157,11 +157,7 @@ fn glob_prefix(pattern: &str) -> Option<&str> {
     (!escapes.iter().any(|part| dynamic.contains(part))).then_some(&pattern[..end])
 }
 
-fn local_read_action(
-    tool: &CanUseTool,
-    folder: &str,
-    protected: &super::super::codex::ProtectedFolders,
-) -> Action {
+fn local_read_action(tool: &CanUseTool, folder: &str, protected: &ProtectedFolders) -> Action {
     let Some(scope) = read_scope(tool, folder, protected.home()) else {
         return Action::Invalid;
     };
@@ -226,10 +222,6 @@ fn question(input: &Value, turn_id: kratos_protocol::TurnId) -> Option<Question>
 
 impl Actor {
     pub(super) async fn on_control(&mut self, thread_id: &ThreadId, control: IncomingControl) {
-        if self.settings.tools.is_none() {
-            answer(control);
-            return;
-        }
         if !control.is_pending() {
             return;
         }
@@ -242,10 +234,6 @@ impl Actor {
         }
         match control.request.clone() {
             ControlRequest::CanUseTool(tool) => self.on_tool(thread_id, control, tool).await,
-            ControlRequest::McpMessage {
-                server_name,
-                message,
-            } if server_name == "kratos" => self.on_mcp(thread_id, control, message).await,
             ControlRequest::HookCallback(hook) => self.on_hook(thread_id, control, hook),
             ControlRequest::Elicitation(request) => {
                 self.on_elicitation(thread_id, control, request).await
@@ -301,15 +289,9 @@ impl Actor {
                 .answer(json!({ "behavior": "deny", "message": "No Claude turn is running" }));
             return;
         };
-        let protected = &self
-            .settings
-            .tools
-            .as_ref()
-            .expect("checked by on_control")
-            .protected;
         let decision = policy::decide(
             thread.turn_settings(),
-            action(&tool, &thread.folder, protected),
+            action(&tool, &thread.folder, &self.settings.protected),
         );
         let pending = Pending {
             thread_id: thread_id.clone(),
@@ -332,29 +314,19 @@ impl Actor {
 }
 
 pub(super) fn shown(pending: &Pending, folder: &str) -> ApprovalRequest {
-    let command = match (&pending.answer, &pending.control.request) {
-        (Answer::Command { args, .. }, _) => Some(args.clone()),
-        (Answer::Tool(_), ControlRequest::CanUseTool(tool)) => tools::callback_command(tool),
-        _ => None,
+    let ControlRequest::CanUseTool(tool) = &pending.control.request else {
+        return ApprovalRequest::Permissions {
+            reason: Some("Claude tool permission".to_owned()),
+            access: ExtraAccess::default(),
+        };
     };
-    if let Some(command) = command {
-        return command.approval(folder);
-    }
-    let reason = match &pending.control.request {
-        ControlRequest::CanUseTool(tool) => format!("{} {}", tool.tool_name, tool.input),
-        _ => "Claude tool permission".to_owned(),
-    };
-    ApprovalRequest::Permissions {
-        reason: Some(reason),
+    shell::approval(tool, folder).unwrap_or_else(|| ApprovalRequest::Permissions {
+        reason: Some(format!("{} {}", tool.tool_name, tool.input)),
         access: ExtraAccess::default(),
-    }
+    })
 }
 
-fn file_action(
-    tool: &CanUseTool,
-    folder: &str,
-    protected: &super::super::codex::ProtectedFolders,
-) -> Action {
+fn file_action(tool: &CanUseTool, folder: &str, protected: &ProtectedFolders) -> Action {
     let Some(path) = edit_path(&tool.tool_name, &tool.input) else {
         return Action::Invalid;
     };

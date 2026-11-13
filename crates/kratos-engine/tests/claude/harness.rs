@@ -14,6 +14,7 @@ use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::providers::Providers;
 use kratos_engine::providers::Sent;
 use kratos_engine::providers::claude::{self, ClaudeProvider, ClaudeSettings};
+use kratos_engine::providers::codex::ProtectedFolders;
 use kratos_engine::scheduler::{self, SchedulerHandle};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::{LimitStop, UsageTracker};
@@ -37,6 +38,16 @@ pub const C: &str = "00000000-0000-4000-8000-00000000000c";
 pub const D: &str = "00000000-0000-4000-8000-00000000000d";
 pub const E: &str = "00000000-0000-4000-8000-00000000000e";
 
+/// The `initialize` every session sends: Kratos's three tool hooks and nothing else.
+pub fn initialize() -> Value {
+    let hook = |id: &str| json!([{ "hookCallbackIds": [id] }]);
+    json!({ "subtype": "initialize", "hooks": {
+        "PreToolUse": hook("kratos-pre"),
+        "PostToolUse": hook("kratos-post"),
+        "PostToolUseFailure": hook("kratos-failed"),
+    } })
+}
+
 /// The terminal result of a turn the user stopped.
 pub fn interrupted() -> Value {
     json!({
@@ -48,7 +59,6 @@ pub fn interrupted() -> Value {
 }
 
 pub struct Options {
-    pub tools: bool,
     pub stop_timeout: Duration,
     pub idle_close: Duration,
     pub control_timeout: Duration,
@@ -70,7 +80,6 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Options {
         Options {
-            tools: false,
             stop_timeout: Duration::from_secs(5),
             idle_close: Duration::from_secs(30 * 60),
             control_timeout: Duration::from_secs(10),
@@ -126,7 +135,6 @@ impl Launch {
 }
 
 pub struct Harness {
-    pub runner: Option<kratos_engine::providers::codex::CodexProvider>,
     /// Holds the store's data directory, the thread's folder, Claude's home, and the fake's log.
     pub root: TempDir,
     pub hub: Hub,
@@ -187,7 +195,11 @@ impl Harness {
             ),
         ];
         let settings = ClaudeSettings {
-            tools: None,
+            protected: ProtectedFolders::new(
+                root.path().join("kratos"),
+                Some(root.path().join("home/.codex")),
+                Some(root.path().join("home")),
+            ),
             program: fake_agents::executable("fake-claude"),
             release_feed: release_feed(root.path()),
             claude_home: root.path().join("home"),
@@ -198,51 +210,10 @@ impl Harness {
             restart_wait: options.restart_wait,
             max_restarts: options.max_restarts,
         };
-        let mut settings = settings;
         let usage = options
             .clock
             .map_or_else(UsageTracker::default, UsageTracker::with_clock);
         let (limit_stops, stops) = mpsc::unbounded_channel();
-        let runner = if options.tools {
-            use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
-            let server_folder = root.path().join("command-server");
-            std::fs::create_dir_all(&server_folder).unwrap();
-            let protected = ProtectedFolders::new(
-                root.path().join("kratos"),
-                Some(root.path().join("home/.codex")),
-                Some(root.path().join("home")),
-            );
-            let config = CodexSettings {
-                program: fake_agents::executable("fake-codex"),
-                extra_args: vec![
-                    "--control-file".into(),
-                    root.path().join("codex-control").into(),
-                ],
-                env_set: Vec::new(),
-                server_folder,
-                protected: protected.clone(),
-                stop_timeout: options.stop_timeout,
-                request_timeout: options.control_timeout,
-                platform: kratos_command_safety::DangerousCommandPlatform::host(),
-                mcp: None,
-            };
-            let runner = codex::start(
-                config,
-                hub.clone(),
-                store_thread.clone(),
-                UsageTracker::default(),
-                limit_stops.clone(),
-            )
-            .await
-            .unwrap();
-            settings.tools = Some(claude::ClaudeTools {
-                runner: runner.clone(),
-                protected,
-            });
-            Some(runner)
-        } else {
-            None
-        };
         let provider = claude::start(
             settings,
             hub.clone(),
@@ -257,7 +228,6 @@ impl Harness {
             .await
             .unwrap();
         Harness {
-            runner,
             root,
             hub,
             store: store_thread,
@@ -278,10 +248,7 @@ impl Harness {
     /// engine does after the providers.
     pub async fn start_scheduler(&mut self) -> SchedulerHandle {
         let providers = Providers {
-            codex: self
-                .runner
-                .clone()
-                .ok_or_else(|| "Codex is not running in this test".to_owned()),
+            codex: Err("Codex is not running in this test".to_owned()),
             claude: Ok(self.provider.clone()),
         };
         self.start_scheduler_with(providers).await
@@ -307,9 +274,6 @@ impl Harness {
     /// restart. The CLIs go without settling anything, as when the engine is killed.
     pub async fn stop(self) -> (TempDir, ThreadId) {
         self.provider.shutdown().await;
-        if let Some(runner) = &self.runner {
-            runner.shutdown().await;
-        }
         let Harness {
             root,
             hub,
@@ -335,35 +299,6 @@ impl Harness {
 
     pub fn folder(&self) -> PathBuf {
         self.root.path().join("project")
-    }
-
-    pub async fn command_control(&self, method: &str, params: Value) -> Value {
-        let path = self.root.path().join("codex-control");
-        let port = tokio::task::spawn_blocking(move || {
-            fake_agents::codex_control::wait_for_port(&path, WAIT)
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        let stream = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
-        let (reader, mut writer) = stream.into_split();
-        writer
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({ "id": 1, "method": method, "params": params })
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        let mut line = String::new();
-        tokio::time::timeout(WAIT, BufReader::new(reader).read_line(&mut line))
-            .await
-            .unwrap()
-            .unwrap();
-        let reply: Value = serde_json::from_str(&line).unwrap();
-        reply["result"].clone()
     }
 
     /// Claude's home folder, where its transcripts live.

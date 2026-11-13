@@ -13,9 +13,8 @@ use kratos_claude_client::{
     Claude, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError, UsageRead,
 };
 use kratos_protocol::{
-    AccessLimit, AgentItem, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message,
-    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadEventBody, ThreadId,
-    ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
+    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -151,12 +150,6 @@ pub(super) enum TranscriptWork {
 /// Finished work that changes actor state. Work for a session that has ended carries its `epoch`
 /// and is dropped.
 pub(super) enum Done {
-    CommandFinished {
-        thread_id: ThreadId,
-        epoch: u64,
-        control_id: String,
-        item: AgentItem,
-    },
     Opened {
         thread_id: ThreadId,
         epoch: u64,
@@ -287,28 +280,6 @@ impl Actor {
     // #lizard forgives: one arm per kind of completion, each a call.
     async fn on_done(&mut self, done: Done) {
         match done {
-            Done::CommandFinished {
-                thread_id,
-                epoch,
-                control_id,
-                item,
-            } => {
-                let Some(thread) = self.threads.get_mut(&thread_id) else {
-                    return;
-                };
-                if thread.epoch != epoch {
-                    return;
-                }
-                thread.commands.remove(&control_id);
-                if let Some(turn_id) = thread.run.clone() {
-                    let _ = self
-                        .write(&thread_id, move |write| {
-                            write.append(ThreadEventBody::ItemCompleted { turn_id, item })?;
-                            Ok(())
-                        })
-                        .await;
-                }
-            }
             Done::Opened {
                 thread_id,
                 epoch,
@@ -380,7 +351,6 @@ impl Actor {
             return;
         }
         for thread in self.threads.values_mut() {
-            thread.cancel_commands(None);
             thread.epoch += 1;
             thread.restarts.cancel_timer();
             if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {

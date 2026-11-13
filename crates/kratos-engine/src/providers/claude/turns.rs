@@ -101,7 +101,6 @@ impl Actor {
         }
         let thread = self.threads.get_mut(thread_id).expect("dispatch loaded it");
         thread.turn_settings = Some(thread.settings.clone());
-        thread.command_grants.clear();
         self.deliver(thread_id, &message);
     }
 
@@ -299,7 +298,6 @@ impl Actor {
             .pending
             .retain(|flight| !ended.contains(&flight.message_id));
         thread.run = None;
-        thread.command_grants.clear();
         thread.stopping = false;
         thread.stop_epoch += 1;
         for waiter in std::mem::take(&mut thread.stop_waiters) {
@@ -404,7 +402,6 @@ impl Actor {
         };
         let claude = open.claude.clone();
         thread.stopping = true;
-        thread.cancel_commands(None);
         thread.stop_epoch += 1;
         let (epoch, stop_epoch) = (thread.epoch, thread.stop_epoch);
         let (timeout, control_timeout) =

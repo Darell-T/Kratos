@@ -168,10 +168,8 @@ impl Restarts {
 }
 
 pub(super) struct ThreadState {
-    pub commands: std::collections::HashMap<String, AbortHandle>,
     pub turn_settings: Option<ThreadSettings>,
     pub changes: crate::providers::changes::ChangesRecorder,
-    pub command_grants: Vec<super::tools::CommandArgs>,
     pub folder: String,
     pub settings: ThreadSettings,
     /// The session Claude keeps the thread's history in: the stored one, or the thread's first
@@ -214,10 +212,8 @@ impl ThreadState {
         recorded: bool,
     ) -> ThreadState {
         ThreadState {
-            commands: std::collections::HashMap::new(),
             turn_settings: None,
             changes: crate::providers::changes::ChangesRecorder::default(),
-            command_grants: Vec::new(),
             folder,
             settings,
             recorded,
@@ -242,9 +238,9 @@ impl ThreadState {
         !self.pending.is_empty() || matches!(self.session, Session::Opening)
     }
 
-    /// The thread has a message in flight, a process starting, a stop, or a command running.
+    /// The thread has a message in flight, a process starting, or a stop.
     pub(super) fn is_working(&self) -> bool {
-        self.is_busy() || self.stopping || !self.commands.is_empty()
+        self.is_busy() || self.stopping
     }
 
     /// When the open process last did anything, if it has nothing to do.
@@ -255,21 +251,6 @@ impl ThreadState {
 
     pub(super) fn turn_settings(&self) -> &ThreadSettings {
         self.turn_settings.as_ref().unwrap_or(&self.settings)
-    }
-
-    pub(super) fn cancel_commands(&mut self, control_id: Option<&str>) {
-        match control_id {
-            Some(id) => {
-                if let Some(command) = self.commands.remove(id) {
-                    command.abort();
-                }
-            }
-            None => {
-                for (_, command) in self.commands.drain() {
-                    command.abort();
-                }
-            }
-        }
     }
 
     pub(super) fn open(&self) -> Option<&OpenSession> {

@@ -18,7 +18,6 @@ async fn protected_native_reads_are_denied_until_the_thread_has_unsandboxed_full
         (Permission::FullAccess, true, "deny"),
     ] {
         let harness = Harness::start(Options {
-            tools: true,
             settings: ThreadSettings {
                 permission,
                 plan_mode,
@@ -65,7 +64,6 @@ async fn protected_native_reads_are_denied_until_the_thread_has_unsandboxed_full
 async fn recursive_and_absolute_searches_cannot_reach_protected_data_from_an_allowed_folder() {
     // Catches Grep of a parent folder and Glob patterns escaping an otherwise safe search root.
     let harness = Harness::start(Options {
-        tools: true,
         settings: ThreadSettings {
             permission: Permission::ApproveForMe,
             ..ThreadSettings::default()

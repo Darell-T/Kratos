@@ -21,7 +21,6 @@ use tokio::sync::oneshot;
 pub const WAIT: Duration = Duration::from_secs(180);
 
 pub struct Harness {
-    claude: kratos_engine::providers::claude::ClaudeProvider,
     pub root: TempDir,
     pub model: Server,
     pub client: Client,
@@ -114,7 +113,7 @@ impl Harness {
             hub.clone(),
             store.clone(),
             usage.clone(),
-            limit_stops.clone(),
+            limit_stops,
         )
         .await
         .unwrap();
@@ -122,42 +121,12 @@ impl Harness {
             .await
             .unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let claude = kratos_engine::providers::claude::start(
-            kratos_engine::providers::claude::ClaudeSettings {
-                tools: Some(kratos_engine::providers::claude::ClaudeTools {
-                    runner: provider.clone(),
-                    protected: ProtectedFolders::new(
-                        home.clone(),
-                        None,
-                        Some(root.path().join("claude-home")),
-                    ),
-                }),
-                program: fake_agents::executable("fake-claude"),
-                release_feed: "file:///nowhere".to_owned(),
-                claude_home: root.path().join("claude-home"),
-                env_set: vec![(
-                    "FAKE_CLAUDE_LOG".into(),
-                    root.path().join("fake-claude.log").into(),
-                )],
-                idle_close: Duration::from_secs(30 * 60),
-                stop_timeout: Duration::from_secs(10),
-                control_timeout: Duration::from_secs(30),
-                restart_wait: Duration::from_secs(1),
-                max_restarts: 3,
-            },
-            hub.clone(),
-            store.clone(),
-            usage.clone(),
-            limit_stops.clone(),
-        )
-        .await
-        .unwrap();
         let state = ServerState {
             store,
             hub: hub.clone(),
             providers: kratos_engine::providers::Providers {
                 codex: Ok(provider.clone()),
-                claude: Ok(claude.clone()),
+                claude: Err("this suite runs no Claude".to_owned()),
             },
             scheduler: None,
             usage,
@@ -183,7 +152,6 @@ impl Harness {
             .await
             .unwrap();
         Self {
-            claude,
             root,
             model,
             client,
@@ -252,7 +220,6 @@ impl Harness {
     }
 
     pub async fn stop(mut self) {
-        self.claude.shutdown().await;
         self.provider.shutdown().await;
         let _ = self.shutdown.take().unwrap().send(());
         self.serving.await.unwrap().unwrap();

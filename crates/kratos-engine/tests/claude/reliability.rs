@@ -385,9 +385,9 @@ async fn rejects_unknown_threads_shares_duplicate_sends_and_closes_every_thread_
 }
 
 #[tokio::test]
-async fn starts_a_session_with_initialize_first_and_registers_no_hooks_or_tool_servers() {
+async fn starts_a_session_with_initialize_first_and_registers_only_kratos_hooks() {
     // Catches a prompt written before Claude is initialized, and an initialize that registers
-    // hooks or SDK MCP servers before Kratos can answer them. The plan recorded without the
+    // hooks Kratos does not answer or SDK MCP servers it does not serve. The plan recorded without the
     // account (D22, D24) is checked by `turns::records_the_plan_that_pays_for_the_session_and_never_the_account`.
     let harness = Harness::start(Options::default()).await;
     harness.send(A, "A").await;
@@ -397,7 +397,7 @@ async fn starts_a_session_with_initialize_first_and_registers_no_hooks_or_tool_s
     let received = harness.received(&launch).await;
 
     assert_eq!(received[0]["type"], "control_request");
-    assert_eq!(received[0]["request"], json!({ "subtype": "initialize" }));
+    assert_eq!(received[0]["request"], crate::harness::initialize());
     // The usage read and the message are written together once Claude is up, in either order.
     let mut after: Vec<_> = received[1..]
         .iter()
