@@ -1,4 +1,5 @@
-// Copied unchanged from openai/codex rust-v0.159.1, codex-rs/shell-command/src/command_safety/windows_dangerous_commands.rs.
+// Copied from openai/codex rust-v0.159.1, codex-rs/shell-command/src/command_safety/windows_dangerous_commands.rs.
+// Kratos changed `is_force_parameter`, so a `-Force` prefix such as `-Fo` and a typographic dash count.
 
 use once_cell::sync::Lazy;
 use regex::Regex;

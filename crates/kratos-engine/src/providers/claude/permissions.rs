@@ -5,7 +5,8 @@ use std::path::{Path, PathBuf};
 
 use kratos_claude_client::{CanUseTool, ControlRequest, IncomingControl};
 use kratos_protocol::{
-    ApprovalRequest, ExtraAccess, Question, QuestionId, QuestionItem, QuestionOption, ThreadId,
+    ApprovalRequest, CappedText, ExtraAccess, Question, QuestionId, QuestionItem, QuestionOption,
+    ThreadId,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -328,9 +329,24 @@ pub(super) fn shown(pending: &Pending, folder: &str) -> ApprovalRequest {
         };
     };
     shell::approval(tool, folder).unwrap_or_else(|| ApprovalRequest::Permissions {
-        reason: Some(format!("{} {}", tool.tool_name, tool.input)),
+        reason: Some(approval_text(&format!("{} {}", tool.tool_name, tool.input))),
         access: ExtraAccess::default(),
     })
+}
+
+/// The most of a tool's input an approval shows. A `Write` asks with the whole file it writes,
+/// and every approval is stored and sent to each client, so the text is cut and says so.
+const APPROVAL_TEXT_BYTES: usize = 16 * 1024;
+
+fn approval_text(text: &str) -> String {
+    let capped = CappedText::new(text, APPROVAL_TEXT_BYTES);
+    if capped.omitted_bytes == 0 {
+        return capped.text;
+    }
+    format!(
+        "{}... ({} more bytes not shown)",
+        capped.text, capped.omitted_bytes
+    )
 }
 
 fn file_action(tool: &CanUseTool, folder: &str, protected: &ProtectedFolders) -> Action {

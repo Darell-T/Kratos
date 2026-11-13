@@ -547,3 +547,42 @@ async fn a_tilde_form_claude_may_expand_to_another_user_is_refused() {
         );
     }
 }
+
+#[tokio::test]
+async fn an_approval_shows_a_large_tool_input_cut_and_says_so() {
+    // Catches a Write's whole file content copied into the stored approval and sent to every
+    // client, however large it is.
+    let mut harness = Harness::start(Options {
+        settings: ThreadSettings {
+            permission: Permission::AskMe,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    let content = "x".repeat(100 * 1024);
+    send(
+        &harness,
+        &launch,
+        "large",
+        "Write",
+        json!({ "file_path": "big.txt", "content": content }),
+    )
+    .await;
+    let asked = approval(&mut harness).await;
+    let ApprovalRequest::Permissions {
+        reason: Some(reason),
+        ..
+    } = &asked.request
+    else {
+        panic!("a write asks with its input: {:?}", asked.request);
+    };
+    assert!(reason.len() < 17 * 1024, "{} bytes", reason.len());
+    assert!(reason.contains("more bytes not shown"), "{reason}");
+    harness
+        .provider
+        .decide(asked.id, ApprovalDecision::Decline)
+        .await
+        .unwrap();
+}

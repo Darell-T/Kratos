@@ -114,6 +114,8 @@ impl Actor {
                     })
                     .collect(),
                 run: work.running,
+                // An earlier engine's process may have begun a turn, so a message its transcript
+                // does not hold is uncertain, even when there is no transcript at all.
                 started: true,
                 reason: RESTARTED.to_owned(),
             };
@@ -308,8 +310,7 @@ fn unfinished_claude_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfini
 
 /// The transcript of an unfinished thread. One that cannot be read, or does not parse as a
 /// session, is treated as cut off: nothing it holds is proof either way. A thread whose session
-/// the store never recorded reads its first session, and a missing transcript there means Claude
-/// took no message, since Claude writes it when it takes the first.
+/// the store never recorded reads its first session.
 async fn read_transcript(
     claude_home: &Path,
     thread_id: &ThreadId,
@@ -325,8 +326,5 @@ async fn read_transcript(
         None => wire::first_session(thread_id),
     };
     let path = transcript_path(claude_home, Path::new(&work.folder), session);
-    if work.session.is_none() && !tokio::fs::try_exists(&path).await.unwrap_or(true) {
-        return DeliveredMessages::default();
-    }
     delivered_message_ids(&path).await.unwrap_or(cut_off)
 }
