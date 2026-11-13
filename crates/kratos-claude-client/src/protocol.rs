@@ -264,6 +264,11 @@ pub enum StreamMessage {
     RateLimit(RateLimitEvent),
     /// The CLI's request failed and the CLI retries by itself.
     ApiRetry(ApiRetry),
+    /// How many background tasks, such as a shell command started with `run_in_background`, the
+    /// CLI runs now. Each frame gives the whole set, so the latest count is the current one.
+    BackgroundTasks {
+        running: usize,
+    },
     Unrecognized {
         kind: String,
         raw: Value,
@@ -307,6 +312,13 @@ impl StreamMessage {
                     kind: "system".to_owned(),
                     raw,
                 },
+            });
+        }
+        if raw["subtype"] == "background_tasks_changed"
+            && let Some(tasks) = raw["tasks"].as_array()
+        {
+            return Ok(Self::BackgroundTasks {
+                running: tasks.len(),
             });
         }
         if raw["subtype"] != "init" {

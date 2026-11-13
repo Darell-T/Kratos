@@ -83,6 +83,9 @@ pub(super) struct OpenSession {
     pub commands: Vec<kratos_claude_client::SlashCommand>,
     /// When the process last sent a frame or served a request.
     pub last_active: Instant,
+    /// Background tasks the CLI reports running. Closing the process would end them, so it is not
+    /// idle while any run.
+    pub background_tasks: usize,
 }
 
 pub(super) enum Session {
@@ -246,7 +249,7 @@ impl ThreadState {
     /// When the open process last did anything, if it has nothing to do.
     pub(super) fn idle_since(&self) -> Option<Instant> {
         let open = self.open()?;
-        (!self.is_working()).then_some(open.last_active)
+        (!self.is_working() && open.background_tasks == 0).then_some(open.last_active)
     }
 
     pub(super) fn turn_settings(&self) -> &ThreadSettings {

@@ -245,6 +245,7 @@ impl Actor {
                     plan,
                     commands,
                     last_active: Instant::now(),
+                    background_tasks: 0,
                 });
                 tokio::spawn(forward(
                     thread_id.clone(),

@@ -75,6 +75,15 @@ impl Actor {
                 );
                 self.provider_retrying(thread_id, message).await;
             }
+            StreamMessage::BackgroundTasks { running } => {
+                if let Some(open) = self
+                    .threads
+                    .get_mut(thread_id)
+                    .and_then(|thread| thread.open_mut())
+                {
+                    open.background_tasks = running;
+                }
+            }
             StreamMessage::Unrecognized { .. } => {}
         }
     }

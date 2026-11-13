@@ -482,6 +482,38 @@ async fn an_idle_session_closes_after_the_idle_window_and_the_next_message_resum
 }
 
 #[tokio::test]
+async fn a_session_with_a_background_task_running_is_not_closed_as_idle() {
+    // Catches the idle check closing a CLI whose shell command still runs in the background after
+    // its turn ended, which would end that command with the process.
+    let mut harness = Harness::start(Options {
+        idle_close: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    let tasks = |tasks: serde_json::Value| json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks });
+    harness
+        .emit(
+            &launch,
+            tasks(json!([{ "task_id": "t1", "task_type": "local_bash" }])),
+        )
+        .await;
+    harness.finish(&launch, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(
+        harness.is_running(&launch),
+        "a CLI with a background task runs on"
+    );
+
+    harness.emit(&launch, tasks(json!([]))).await;
+    harness.wait_ended(&launch).await;
+}
+
+#[tokio::test]
 async fn a_turn_that_runs_past_the_idle_window_keeps_its_process() {
     // Catches the idle check closing a CLI that is working on a turn.
     let mut harness = Harness::start(Options {
