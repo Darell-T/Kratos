@@ -166,9 +166,16 @@ fn local_read_action(tool: &CanUseTool, folder: &str, protected: &ProtectedFolde
         let Some(prefix) = tool.input["pattern"].as_str().and_then(glob_prefix) else {
             return Action::Invalid;
         };
-        // The CLI may or may not expand the pattern, so a protected reading of either counts.
-        searched.push(scope.join(prefix));
-        searched.extend(paths::expand(prefix, &scope, protected.home()));
+        // The CLI may or may not expand the pattern, so a protected reading of either counts, and
+        // a reading Kratos cannot name, such as a drive-relative one, makes the search invalid.
+        let joined = scope.join(prefix);
+        let Some(expanded) = paths::expand(prefix, &scope, protected.home()) else {
+            return Action::Invalid;
+        };
+        if !joined.is_absolute() {
+            return Action::Invalid;
+        }
+        searched.extend([joined, expanded]);
     }
     for path in &searched {
         match protected.overlaps(path) {

@@ -72,7 +72,7 @@ async fn recursive_and_absolute_searches_cannot_reach_protected_data_from_an_all
     })
     .await;
     let launch = harness.begin(A, 1).await;
-    for (id, tool, input) in [
+    let mut searches = vec![
         (
             "parent-grep",
             "Grep",
@@ -89,7 +89,23 @@ async fn recursive_and_absolute_searches_cannot_reach_protected_data_from_an_all
             json!({ "pattern": harness.root.path().join("kratos/*") }),
         ),
         ("relative-glob", "Glob", json!({ "pattern": "../kratos/*" })),
-    ] {
+    ];
+    // On Windows `C:..` names a folder relative to that drive's current folder, not the thread's.
+    if cfg!(windows) {
+        searches.extend([
+            (
+                "drive-relative-read",
+                "Read",
+                json!({ "file_path": r"C:..\kratos\client-token" }),
+            ),
+            (
+                "drive-relative-glob",
+                "Glob",
+                json!({ "pattern": r"C:..\kratos\*" }),
+            ),
+        ]);
+    }
+    for (id, tool, input) in searches {
         send(&harness, &launch, id, tool, input).await;
         assert_eq!(
             response(&harness, &launch, id).await["behavior"],
