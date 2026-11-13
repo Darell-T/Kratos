@@ -42,11 +42,10 @@ impl Actor {
             Incoming::Oversized { bytes } => {
                 let message =
                     format!("Claude sent a line of {bytes} bytes, more than Kratos reads");
-                self.provider_error(&thread_id, message, false).await;
+                self.provider_error(&thread_id, message).await;
             }
             Incoming::Unreadable(error) => {
-                self.provider_error(&thread_id, error.to_string(), false)
-                    .await;
+                self.provider_error(&thread_id, error.to_string()).await;
             }
             Incoming::Exited(exit) => self.on_exit(&thread_id, exit).await,
         }
@@ -74,7 +73,7 @@ impl Actor {
                      of {}",
                     retry.error, retry.retry_delay_ms, retry.attempt, retry.max_retries
                 );
-                self.provider_error(thread_id, message, true).await;
+                self.provider_retrying(thread_id, message).await;
             }
             StreamMessage::Unrecognized { .. } => {}
         }
@@ -154,9 +153,17 @@ impl Actor {
         }
     }
 
-    /// Records trouble Claude's output caused in the running turn, and whether Claude retries by
-    /// itself. Outside a turn it only logs.
-    pub(super) async fn provider_error(
+    /// Records trouble Claude's output caused in the running turn. Outside a turn it only logs.
+    pub(super) async fn provider_error(&mut self, thread_id: &ThreadId, message: String) {
+        self.append_provider_error(thread_id, message, false).await;
+    }
+
+    /// Records a failed request that Claude retries by itself.
+    async fn provider_retrying(&mut self, thread_id: &ThreadId, message: String) {
+        self.append_provider_error(thread_id, message, true).await;
+    }
+
+    async fn append_provider_error(
         &mut self,
         thread_id: &ThreadId,
         message: String,

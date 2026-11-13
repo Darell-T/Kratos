@@ -134,7 +134,7 @@ impl Actor {
                 "Claude reported the usage limit status {status:?}, which Kratos does not know, \
                  so Kratos will not continue this turn on its own"
             );
-            self.provider_error(thread_id, message, false).await;
+            self.provider_error(thread_id, message).await;
         }
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
