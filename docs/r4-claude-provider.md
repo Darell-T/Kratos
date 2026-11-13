@@ -64,6 +64,7 @@ These are the edits to look at hardest, because they touch Codex threads and sha
 - **Shared queue rules.** `providers/queue.rs` and `ProviderError` moved out of the Codex module, so both providers use them (`d96586c`).
 - **One scheduler for both providers.** `scheduler.rs` continues a limit-stopped turn for either provider (`063617a`).
 - **No turn deadline.** The 10-minute turn timer is gone for Codex and for Claude (`4d2bc05`). A live CLI is working, and each way it can die reports its own error. Zeron has no deadline either. One Codex test of the removed path was deleted, with the owner's approval. `PauseReason::TimedOut` stays readable, because an older engine may have stored it.
+- **Scheduler planning takes the current time.** `scheduler::plan` never schedules a resume at a reset already behind it, for either provider (`ee283ac`).
 - **Report formats on Codex.** A Codex turn sends `outputSchema` and now ends with an `AgentItem::Report`, the same item a Claude turn records.
 - **Live usage over the socket.** A client sends `watchUsage` and receives a `usage` message on each change (`bbe5398`).
 - **Command safety.** `-Force` written as a prefix such as `-Fo`, or with an en dash or em dash, now counts as a forced delete (`cfb68fc`). This change is security-sensitive.
@@ -86,7 +87,7 @@ These are the edits to look at hardest, because they touch Codex threads and sha
 These choices are not written in the plan. Each one is in its commit message.
 
 - **Old CLIs pause instead of failing.** An installed release older than 2.1.303 pauses the thread as unavailable and names both releases. Kratos offers the update instead of refusing. A release Kratos cannot read does not stop a start.
-- **Kratos updates only the native install.** An npm, Homebrew, or WinGet updater replaces files a running CLI still loads, so those installs get 400 naming their manager.
+- **Kratos updates only the native install, only when asked, and never under a session.** An npm, Homebrew, or WinGet updater replaces files a running CLI still loads, so those installs get 400 naming their manager. A native update is refused while a Claude thread works. Otherwise every idle session closes first, and queued messages wait until the updater ends.
 - **A thread's first session id comes from the thread id.** It is a UUID v5 of the thread id, so an engine that stops after Claude took the first message finds that session again (L7). This needed no migration.
 - **Only a failed turn after a `rejected` event is a limit stop.** A CLI that waits out the limit and resumes by itself gets nothing sent (D39).
 - **Claude processes close after 30 idle minutes,** as Zeron's do. The next message resumes the session.
@@ -101,8 +102,9 @@ These choices are not written in the plan. Each one is in its commit message.
 
 ### Can follow the merge
 
-- **Live lane 10, a real usage limit.** It closes only when a limit happens on its own, so it gates nothing. Condition: an unrecognized limit response must fail loudly, never hang or retry without end, with a test that proves it. Not done yet.
-- **Skills.** They wait on the unified skills design. Condition: nothing in R4 may fix how skills will work. `docs/unified-skills.md` records the open questions. The audit of what R4 commits to is not done yet.
+- **Live lane 10, a real usage limit.** It closes only when a limit happens on its own, so it gates nothing. Its condition is met: a limit response Kratos does not recognize fails where the user sees it and never loops (`ee283ac`, `tests/claude/limit_failures.rs`). A status Kratos does not know is written on the turn and never continued. A refusal for an unknown window waits for the user. Each CLI retry is written on the turn, so a CLI waiting out a limit does not look hung. Planning never schedules a resume at a reset already behind it.
+- **Skills.** They wait on the unified skills design. Its condition is met: nothing in R4 fixes how skills will work. `docs/unified-skills.md` lists each skills-related part of R4 and why it stays free to change. The `ThreadSkills` reply shape is the one choice to settle before a UI reads it.
+- **The update route against the real CLI.** Only the fake's updater has run. Running `claude update` on the owner's machine needs the owner's go-ahead. A failure reaches the user as a 503 with the updater's text.
 - **`kratos-client bench-post`.** Stage 2 deleted it. The owner decides whether it stays deleted.
 
 ### Update rule for every provider
