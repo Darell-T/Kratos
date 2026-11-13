@@ -386,7 +386,7 @@ impl Actor {
     }
 
     /// Asks Claude to stop the turn. The turn ends with its result, which settles every waiting
-    /// stop. A CLI that neither stops nor answers is closed after the stop timeout.
+    /// stop. A CLI whose turn still runs after the stop timeout is closed, whatever it answered.
     pub(super) fn interrupt(&mut self, thread_id: &ThreadId, waiters: Vec<Reply<()>>) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
@@ -443,24 +443,19 @@ impl Actor {
             return;
         }
         match result {
-            Ok(()) => {
-                for waiter in std::mem::take(&mut thread.stop_waiters) {
-                    let _ = waiter.send(Ok(()));
-                }
-            }
             // The CLI is ending, and its exit answers every waiting stop.
             Err(
                 kratos_claude_client::RequestError::Exited(_)
                 | kratos_claude_client::RequestError::Closing,
             ) => {}
-            Err(error) => {
-                // Another stop may try again.
-                thread.stopping = false;
-                thread.stop_epoch += 1;
+            // A refused or unanswered interrupt still ends the turn: the stop timer stays armed
+            // and closes the CLI if the turn runs on.
+            other => {
+                if let Err(error) = other {
+                    eprintln!("Claude did not answer the stop of thread {thread_id}: {error}");
+                }
                 for waiter in std::mem::take(&mut thread.stop_waiters) {
-                    let _ = waiter.send(Err(ProviderError::Unavailable(format!(
-                        "Claude did not stop the turn: {error}"
-                    ))));
+                    let _ = waiter.send(Ok(()));
                 }
             }
         }

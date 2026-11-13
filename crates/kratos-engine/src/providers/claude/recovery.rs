@@ -146,8 +146,9 @@ impl Actor {
         Ok(Actor::new(settings, hub, store, usage, limit_stops))
     }
 
-    /// A CLI ended. The turn it ran ends as failed and the queue behind it pauses. A message it was
-    /// sent is settled from its transcript, so none is sent again that Claude may have taken.
+    /// A CLI ended. The turn it ran ends as failed and the queue behind it pauses, or as interrupted
+    /// when the user had stopped it. A message it was sent is settled from its transcript, so none
+    /// is sent again that Claude may have taken.
     pub(super) async fn on_exit(&mut self, thread_id: &ThreadId, exit: Exit) {
         self.close_requests(thread_id, None, "Claude exited").await;
         let Some(thread) = self.threads.get_mut(thread_id) else {
@@ -158,7 +159,7 @@ impl Actor {
         };
         thread.epoch += 1;
         thread.stop_epoch += 1;
-        thread.stopping = false;
+        let stopped = std::mem::replace(&mut thread.stopping, false);
         let reason = thread
             .close_reason
             .take()
@@ -192,7 +193,14 @@ impl Actor {
         .finish();
         let ended = self
             .write(thread_id, move |write| match run {
-                Some(turn_id) => end_turn(write, turn_id, TurnEnd::failed(reason), changes),
+                Some(turn_id) => {
+                    let end = if stopped {
+                        TurnEnd::interrupted()
+                    } else {
+                        TurnEnd::failed(reason)
+                    };
+                    end_turn(write, turn_id, end, changes)
+                }
                 // No turn started, but messages were in flight, so the user must hear why the
                 // process ended.
                 None => write

@@ -44,6 +44,16 @@ impl TurnEnd {
         }
     }
 
+    /// A turn the user stopped whose process ended before it reported the stop.
+    pub(super) fn interrupted() -> TurnEnd {
+        TurnEnd {
+            outcome: TurnOutcome::Interrupted,
+            context: None,
+            stop: Stop::Ordinary,
+            report: None,
+        }
+    }
+
     /// The end a result reports. `rejection` is the refusal that can stop this turn, when the
     /// latest rate limit event made one, and `answering` the model that wrote the turn's last
     /// reply, which names the context window.

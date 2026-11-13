@@ -154,11 +154,11 @@ async fn records_the_plan_that_pays_for_the_session_and_never_the_account() {
 }
 
 #[tokio::test]
-async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_settles_stop_on_that_result_and_keeps_the_turn_after_a_failed_stop()
+async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_and_settles_stop_on_that_result()
  {
     // Catches a queued message started on a stop's acknowledgement instead of the stopped turn's
-    // result, a second stop that sends a second interrupt, a stop that outlives the result that
-    // ended it, and a failed stop after which Kratos stops or pauses the turn on its own.
+    // result, a second stop that sends a second interrupt, and a stop that outlives the result
+    // that ended it.
     let mut harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     harness.send(B, "B").await;
@@ -190,33 +190,49 @@ async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_settles
     harness.wait_written(&launch, &[A, B]).await;
     harness.accept(&launch, B).await;
     harness.message_becomes(B, |s| accepted_by(s, B)).await;
+}
+
+#[tokio::test]
+async fn a_stop_the_cli_rejects_still_ends_the_turn_interrupted() {
+    // Catches a rejected interrupt that cancels the stop timer, which left a CLI that refuses to
+    // stop running its turn until the engine restarted.
+    let mut harness = Harness::start(Options {
+        stop_timeout: Duration::from_millis(400),
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
 
     harness.interrupts(&launch, "reject").await;
-    let refused = harness.provider.stop(harness.thread_id.clone()).await;
-    assert!(
-        matches!(&refused, Err(error) if error.to_string().contains("Interrupt rejected")),
-        "{refused:?}"
-    );
-    harness.interrupts(&launch, "ack").await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    harness
+        .provider
+        .stop(harness.thread_id.clone())
+        .await
+        .unwrap();
+    harness.wait_ended(&launch).await;
 
-    assert_eq!(harness.details().await.paused, None);
-    assert!(harness.is_running(&launch), "the turn still runs");
-    assert_eq!(
-        harness.controls(&launch, "interrupt").await,
-        2,
-        "only the user stops a turn"
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+                ..
+            }
+        ),
+        "{ended:?}"
     );
-    harness.finish(&launch, &[B], json!({})).await;
-    harness.message_becomes(B, |s| accepted_by(s, B)).await;
+    assert_eq!(harness.details().await.paused, None);
 }
 
 #[tokio::test]
 async fn closes_a_session_that_never_acknowledges_a_stop_and_resumes_it_for_the_next_message() {
-    // Catches a stop that waits forever on a CLI that does not answer, a closed CLI whose end
-    // leaves no reason in the records, and a relaunch that starts a new session instead of
-    // resuming the thread's own.
-    let harness = Harness::start(Options {
+    // Catches a stop that waits forever on a CLI that does not answer, a stopped turn recorded as
+    // failed when Kratos had to close its CLI, and a relaunch that starts a new session instead
+    // of resuming the thread's own.
+    let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(400),
         ..Options::default()
     })
@@ -231,28 +247,21 @@ async fn closes_a_session_that_never_acknowledges_a_stop_and_resumes_it_for_the_
         .await
         .unwrap();
     harness.wait_ended(&first).await;
-    let message = "Claude did not stop the turn; its process was closed";
-    let paused = harness
-        .paused_for(|r| matches!(r, PauseReason::TurnFailed { .. }))
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
         .await;
 
     assert!(
-        matches!(&paused, PauseReason::TurnFailed { error, .. } if error.contains(message)),
-        "{paused:?}"
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+                ..
+            }
+        ),
+        "{ended:?}"
     );
-    let details = harness.details().await;
-    assert_eq!(
-        details.running_turn, None,
-        "no turn shows running without a process (L1)"
-    );
-    assert_eq!(details.queue.len(), 1);
-    assert_eq!(harness.message(B).await.status, MessageStatus::Queued);
-
-    harness
-        .provider
-        .resume(harness.thread_id.clone())
-        .await
-        .unwrap();
+    assert_eq!(harness.details().await.paused, None);
     let second = harness.launch(2).await;
     assert_eq!(
         second.value("--resume"),

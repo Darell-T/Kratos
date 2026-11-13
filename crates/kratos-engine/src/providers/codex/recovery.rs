@@ -51,6 +51,8 @@ pub(super) struct Unfinished {
 
 pub(super) struct EndingTurn {
     pub id: TurnId,
+    /// The user stopped the turn, so it ends interrupted however its process ended.
+    pub stopped: bool,
     pub changes: TurnChanges,
     pub context: Option<ContextUsage>,
 }
@@ -119,19 +121,22 @@ pub(super) fn settle(
     settle_closed(write, &work.requests, request_reason)?;
     if let Some(turn) = work.running_turn {
         let (outcome, pause) = match &reason {
-            EndReason::Restarted => (TurnOutcome::Interrupted, PauseReason::Interrupted),
+            _ if turn.stopped => (TurnOutcome::Interrupted, None),
+            EndReason::Restarted => (TurnOutcome::Interrupted, Some(PauseReason::Interrupted)),
             EndReason::Exited(error) => (
                 TurnOutcome::Failed {
                     error: error.clone(),
                 },
-                PauseReason::TurnFailed {
+                Some(PauseReason::TurnFailed {
                     turn_id: turn.id.clone(),
                     error: error.clone(),
-                },
+                }),
             ),
         };
         write.complete_turn(turn.id, outcome, turn.changes, turn.context)?;
-        queue::pause_if_waiting(write, pause)?;
+        if let Some(pause) = pause {
+            queue::pause_if_waiting(write, pause)?;
+        }
     }
     work.sending.into_iter().try_for_each(|message_id| {
         queue::mark_uncertain(write, message_id, uncertain_reason.to_owned())
@@ -145,6 +150,7 @@ fn unfinished_codex_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfinis
         let changes = recorded_changes(store, &thread_id, &turn_id)?;
         unfinished.entry(thread_id).or_default().running_turn = Some(EndingTurn {
             id: turn_id,
+            stopped: false,
             changes,
             context: None,
         });

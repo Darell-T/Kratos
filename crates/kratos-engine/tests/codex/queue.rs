@@ -362,9 +362,8 @@ async fn a_long_turn_is_never_stopped_by_kratos_and_the_queue_runs_after_it() {
     harness.held("turn/start", 2).await;
 }
 
-#[tokio::test]
-async fn a_turn_that_stops_on_request_but_never_ends_closes_codex() {
-    // Catches a turn stuck after an accepted stop, which would hold the queue forever.
+/// Starts a turn, asks to stop it, and lets `answer` decide what Codex says to the interrupt.
+async fn stop_a_turn_codex_does_not_end(answer: &str) -> ThreadEventBody {
     let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(300),
         ..Options::default()
@@ -381,22 +380,36 @@ async fn a_turn_that_stops_on_request_but_never_ends_closes_codex() {
     let thread_id = harness.thread_id.clone();
     let stop = tokio::spawn(async move { provider.stop(thread_id).await });
     harness.held("turn/interrupt", 1).await;
-    harness.settle("turn/interrupt", json!({})).await;
+    match answer {
+        "accept" => harness.settle("turn/interrupt", json!({})).await,
+        "refuse" => harness.refuse("turn/interrupt", -32603, "busy").await,
+        _ => {}
+    }
     stop.await.unwrap().unwrap();
 
-    let ended = harness
+    harness
         .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
-        .await;
-    assert!(
-        matches!(
-            ended,
-            ThreadEventBody::TurnCompleted {
-                outcome: TurnOutcome::Failed { .. },
-                ..
-            }
-        ),
-        "{ended:?}"
-    );
+        .await
+}
+
+#[tokio::test]
+async fn a_stopped_turn_codex_does_not_end_closes_codex_and_ends_interrupted() {
+    // Catches a stop that leaves the turn running when Codex accepts, refuses, or never answers
+    // the interrupt, which held the queue until the engine restarted, and a stopped turn recorded
+    // as failed.
+    for answer in ["accept", "refuse", "silent"] {
+        let ended = stop_a_turn_codex_does_not_end(answer).await;
+        assert!(
+            matches!(
+                ended,
+                ThreadEventBody::TurnCompleted {
+                    outcome: TurnOutcome::Interrupted,
+                    ..
+                }
+            ),
+            "{answer}: {ended:?}"
+        );
+    }
 }
 
 #[tokio::test]

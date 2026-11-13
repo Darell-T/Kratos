@@ -451,9 +451,11 @@ impl Actor {
                 requests: self.requests.close(thread_id, |_| true),
                 ..Unfinished::default()
             };
+            let stopped = matches!(thread.turn, Turn::Running { stopping: true, .. });
             if let Some((turn_id, work)) = thread.turn.end_running() {
                 unfinished.running_turn = Some(EndingTurn {
                     id: turn_id,
+                    stopped,
                     changes: work.changes.finish(),
                     context: work.context,
                 });

@@ -664,38 +664,23 @@ impl Actor {
             .get(&thread_id)
             .and_then(|thread| thread.turn.running_id())
             == Some(&turn_id);
-        match result {
-            Ok(()) => {
-                if still_running {
-                    let timeout = self.settings.stop_timeout;
-                    self.spawn(async move {
-                        tokio::time::sleep(timeout).await;
-                        Done::StopExpired { thread_id, turn_id }
-                    });
-                }
-                waiters.tell(|| Ok(()));
-            }
-            Err(error) => {
-                if still_running
-                    && let Some(Turn::Running { stopping, .. }) = self
-                        .threads
-                        .get_mut(&thread_id)
-                        .map(|thread| &mut thread.turn)
-                {
-                    // Another stop may try again; the queue stays where it is.
-                    *stopping = false;
-                }
-                waiters.tell(|| {
-                    Err(ProviderError::Unavailable(format!(
-                        "Codex did not stop the turn: {error}"
-                    )))
-                });
-            }
+        // A stop always ends the turn. Codex gets the grace period to end it, whether or not it
+        // answered the interrupt, and is closed if the turn still runs after that.
+        if let Err(error) = &result {
+            eprintln!("Codex did not answer the stop of turn {turn_id}: {error}");
         }
+        if still_running {
+            let timeout = self.settings.stop_timeout;
+            self.spawn(async move {
+                tokio::time::sleep(timeout).await;
+                Done::StopExpired { thread_id, turn_id }
+            });
+        }
+        waiters.tell(|| Ok(()));
     }
 
-    /// Codex accepted the stop but the turn did not end in time: Codex is closed, which ends the
-    /// turn as failed.
+    /// The user stopped the turn and it did not end in time: Codex is closed, which ends the turn
+    /// as interrupted.
     pub(super) async fn on_stop_expired(&mut self, thread_id: &ThreadId, turn_id: &TurnId) {
         let still_stopping = matches!(
             self.threads.get(thread_id).map(|thread| &thread.turn),
