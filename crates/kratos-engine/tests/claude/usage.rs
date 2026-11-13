@@ -21,7 +21,7 @@ fn measured(seconds: u64) -> String {
     format!("{}.000000+00:00", &stamp.as_str()[..19])
 }
 
-fn options(clock: &std::sync::Arc<ManualClock>) -> Options {
+pub(crate) fn options(clock: &std::sync::Arc<ManualClock>) -> Options {
     Options {
         clock: Some(clock.clone()),
         ..Options::default()
@@ -29,14 +29,14 @@ fn options(clock: &std::sync::Arc<ManualClock>) -> Options {
 }
 
 /// The frame the CLI sends when the server answers a request with its verdict on a limit.
-fn rate_limit_event(status: &str, kind: &str, resets_at: u64) -> Value {
+pub(crate) fn rate_limit_event(status: &str, kind: &str, resets_at: u64) -> Value {
     json!({ "type": "rate_limit_event", "uuid": "00000000-0000-4000-8000-0000000000e1",
             "session_id": "00000000-0000-4000-8000-0000000000e2",
             "rate_limit_info": { "status": status, "rateLimitType": kind, "resetsAt": resets_at } })
 }
 
 /// The result of a turn that stopped because the account ran out of usage.
-fn limit_failure() -> Value {
+pub(crate) fn limit_failure() -> Value {
     json!({ "subtype": "error_during_execution", "is_error": true,
             "errors": ["Claude usage limit reached"] })
 }
@@ -98,7 +98,7 @@ async fn read_says(harness: &Harness, launch: &Launch, five: u64, resets_at: u64
         .await;
 }
 
-async fn next_continuation(harness: &mut Harness) -> Continuation {
+pub(crate) async fn next_continuation(harness: &mut Harness) -> Continuation {
     let changed = harness
         .wait_for(|event| matches!(event, ThreadEventBody::ContinuationChanged { .. }))
         .await;
@@ -108,7 +108,7 @@ async fn next_continuation(harness: &mut Harness) -> Continuation {
     continuation
 }
 
-async fn open_continuations(harness: &Harness) -> Vec<Continuation> {
+pub(crate) async fn open_continuations(harness: &Harness) -> Vec<Continuation> {
     harness
         .store
         .call(|store| store.open_continuations())
@@ -169,7 +169,7 @@ fn is_continuation(text: &str) -> bool {
 /// Starts the turn of message A on the first process, lets the first usage read land, then has the
 /// server reject `kind` until `RESET` and the turn fail. The process still reads the lagging
 /// usage endpoint: five percent used.
-async fn stop_at_the_limit(harness: &mut Harness, kind: &str) -> Launch {
+pub(crate) async fn stop_at_the_limit(harness: &mut Harness, kind: &str) -> Launch {
     let launch = harness.begin(A, 1).await;
     wait_for_usage(harness, |usage| usage.allowance == Allowance::Allowed).await;
     read_says(harness, &launch, 5, RESET + 5 * HOUR).await;

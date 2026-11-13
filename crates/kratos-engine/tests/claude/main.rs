@@ -7,6 +7,7 @@ mod clock;
 mod context;
 mod guards;
 mod harness;
+mod limit_failures;
 mod perf;
 mod permissions;
 mod protected_reads;

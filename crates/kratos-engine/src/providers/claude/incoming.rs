@@ -42,10 +42,11 @@ impl Actor {
             Incoming::Oversized { bytes } => {
                 let message =
                     format!("Claude sent a line of {bytes} bytes, more than Kratos reads");
-                self.provider_error(&thread_id, message).await;
+                self.provider_error(&thread_id, message, false).await;
             }
             Incoming::Unreadable(error) => {
-                self.provider_error(&thread_id, error.to_string()).await;
+                self.provider_error(&thread_id, error.to_string(), false)
+                    .await;
             }
             Incoming::Exited(exit) => self.on_exit(&thread_id, exit).await,
         }
@@ -61,9 +62,21 @@ impl Actor {
             StreamMessage::Assistant(assistant) => self.on_assistant(thread_id, &assistant).await,
             StreamMessage::StreamEvent(stream) => self.on_stream(thread_id, &stream),
             StreamMessage::Result(result) => self.on_result(thread_id, result).await,
-            StreamMessage::RateLimit(event) => self.on_rate_limit(thread_id, event),
-            // The CLI is retrying by itself, so it is still working, and nothing is sent for it.
-            StreamMessage::ApiRetry(_) | StreamMessage::Unrecognized { .. } => {}
+            StreamMessage::RateLimit(event) => self.on_rate_limit(thread_id, event).await,
+            // The CLI retries by itself and Kratos sends nothing for it, but the user sees why the
+            // turn is waiting.
+            StreamMessage::ApiRetry(retry) => {
+                let status = retry
+                    .error_status
+                    .map_or_else(String::new, |status| format!(", status {status}"));
+                let message = format!(
+                    "Claude's request failed ({}{status}). Claude tries again in {} ms, attempt {} \
+                     of {}",
+                    retry.error, retry.retry_delay_ms, retry.attempt, retry.max_retries
+                );
+                self.provider_error(thread_id, message, true).await;
+            }
+            StreamMessage::Unrecognized { .. } => {}
         }
     }
 
@@ -141,8 +154,14 @@ impl Actor {
         }
     }
 
-    /// Records trouble Claude's output caused in the running turn. Outside a turn it only logs.
-    async fn provider_error(&mut self, thread_id: &ThreadId, message: String) {
+    /// Records trouble Claude's output caused in the running turn, and whether Claude retries by
+    /// itself. Outside a turn it only logs.
+    pub(super) async fn provider_error(
+        &mut self,
+        thread_id: &ThreadId,
+        message: String,
+        will_retry: bool,
+    ) {
         let run = self
             .threads
             .get(thread_id)
@@ -156,7 +175,7 @@ impl Actor {
                 write.append(ThreadEventBody::ProviderError {
                     turn_id,
                     message,
-                    will_retry: false,
+                    will_retry,
                 })?;
                 Ok(())
             })

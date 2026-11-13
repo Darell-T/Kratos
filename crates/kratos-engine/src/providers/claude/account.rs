@@ -124,10 +124,18 @@ impl Actor {
         Ok(())
     }
 
-    /// Records what a `rate_limit_event` states, and remembers it for the end of the turn. The event
-    /// changes nothing else: only the turn's result decides a stop (D39).
-    pub(super) fn on_rate_limit(&mut self, thread_id: &ThreadId, event: RateLimitEvent) {
+    /// Records what a `rate_limit_event` states, and remembers it for the end of the turn. The
+    /// event changes nothing else: only the turn's result decides a stop (D39). A status Kratos
+    /// does not know is written on the running turn, since Kratos never continues on it.
+    pub(super) async fn on_rate_limit(&mut self, thread_id: &ThreadId, event: RateLimitEvent) {
         let info = event.rate_limit_info;
+        if let RateLimitStatus::Unrecognized(status) = &info.status {
+            let message = format!(
+                "Claude reported the usage limit status {status:?}, which Kratos does not know, \
+                 so Kratos will not continue this turn on its own"
+            );
+            self.provider_error(thread_id, message, false).await;
+        }
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };

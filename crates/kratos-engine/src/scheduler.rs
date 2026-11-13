@@ -65,9 +65,9 @@ pub struct Plan {
 }
 
 /// Plans a continuation from the usage known at the stop (D41). Automatic only when every spent
-/// window is a five-hour window with a known reset; anything else waits for the user, who may let
-/// Kratos resume at the reset.
-pub fn plan(provider: Provider, account: Option<&AccountUsage>) -> Plan {
+/// window is a five-hour window whose reset is known and still ahead of `now`; anything else waits
+/// for the user, who may let Kratos resume at the reset.
+pub fn plan(provider: Provider, account: Option<&AccountUsage>, now: SystemTime) -> Plan {
     let spent = account.map(spent_windows).unwrap_or_default();
     let waits_on = UsageWait {
         provider,
@@ -79,19 +79,7 @@ pub fn plan(provider: Provider, account: Option<&AccountUsage>) -> Plan {
         .map(|(_, window)| window.resets_at.clone())
         .collect::<Option<Vec<Timestamp>>>()
         .and_then(|resets| resets.into_iter().max_by_key(Timestamp::instant));
-    let name = display(provider);
-    let why = if spent.is_empty() {
-        Some(format!("{name} did not say which limit stopped the turn"))
-    } else if resets_at.is_none() {
-        Some(format!("{name} did not say when the limit resets"))
-    } else if spent
-        .iter()
-        .any(|(_, window)| window.window_minutes != Some(AUTOMATIC_WINDOW_MINUTES))
-    {
-        Some("The wait is longer than the five-hour window".to_owned())
-    } else {
-        None
-    };
+    let why = why_the_user_decides(display(provider), &spent, resets_at.as_ref(), now);
     let state = match why {
         Some(why) => ContinuationState::AwaitingUser { why },
         None => ContinuationState::Scheduled,
@@ -101,6 +89,41 @@ pub fn plan(provider: Provider, account: Option<&AccountUsage>) -> Plan {
         resets_at,
         state,
     }
+}
+
+/// Why a stop waits for the user instead of resuming at its reset, or `None` when Kratos may
+/// resume on its own.
+fn why_the_user_decides(
+    name: &str,
+    spent: &[(String, UsageWindow)],
+    resets_at: Option<&Timestamp>,
+    now: SystemTime,
+) -> Option<String> {
+    let Some(resets_at) = resets_at else {
+        return Some(if spent.is_empty() {
+            format!("{name} did not say which limit stopped the turn")
+        } else {
+            format!("{name} did not say when the limit resets")
+        });
+    };
+    if let Some((limit, _)) = spent
+        .iter()
+        .find(|(_, window)| window.window_minutes.is_none())
+    {
+        return Some(format!(
+            "{name} reported the limit {limit}, whose window Kratos does not know"
+        ));
+    }
+    if spent
+        .iter()
+        .any(|(_, window)| window.window_minutes != Some(AUTOMATIC_WINDOW_MINUTES))
+    {
+        return Some("The wait is longer than the five-hour window".to_owned());
+    }
+    // The provider refused the turn for a window it says already reset. A continuation now would
+    // meet the same refusal, and its stop would plan the same again, without end.
+    (resets_at.instant() <= now)
+        .then(|| format!("{name} refused the turn for a limit it says already reset"))
 }
 
 /// The reset to record on a continuation: the plan's own. A stop recovered without evidence of its
@@ -321,7 +344,11 @@ impl Scheduler {
         // A fresh read, so the plan rests on what the provider says now. A failed read leaves the
         // last known usage, which the plan treats as no evidence where it lacks any.
         let _ = self.refresh(stop.provider, &stop.thread_id).await;
-        let planned = plan(stop.provider, self.usage.account(stop.provider).as_ref());
+        let planned = plan(
+            stop.provider,
+            self.usage.account(stop.provider).as_ref(),
+            self.clock.now(),
+        );
         let continuation = Continuation {
             id: ContinuationId::new(Uuid::new_v4().to_string()),
             turn_id: stop.turn_id.clone(),
@@ -491,7 +518,7 @@ impl Scheduler {
         continuation: &Continuation,
         account: Option<&AccountUsage>,
     ) -> Result<(), StoreError> {
-        let planned = plan(continuation.waits_on.provider, account);
+        let planned = plan(continuation.waits_on.provider, account, self.clock.now());
         let has_reset_passed = planned
             .resets_at
             .as_ref()
@@ -710,7 +737,7 @@ mod tests {
             )],
         );
 
-        let automatic = plan(Provider::Codex, Some(&five_hours));
+        let automatic = plan(Provider::Codex, Some(&five_hours), SystemTime::UNIX_EPOCH);
         assert_eq!(automatic.state, ContinuationState::Scheduled);
         assert_eq!(
             automatic.resets_at.as_ref().map(Timestamp::as_str),
@@ -722,18 +749,45 @@ mod tests {
             ("unknown reset", Some(&unknown_reset)),
             ("no read", None),
         ] {
-            let planned = plan(Provider::Codex, usage);
+            let planned = plan(Provider::Codex, usage, SystemTime::UNIX_EPOCH);
             assert!(
                 matches!(planned.state, ContinuationState::AwaitingUser { .. }),
                 "{asks}: {planned:?}"
             );
         }
         assert_eq!(
-            plan(Provider::Codex, Some(&weekly))
+            plan(Provider::Codex, Some(&weekly), SystemTime::UNIX_EPOCH)
                 .resets_at
                 .as_ref()
                 .map(Timestamp::as_str),
             Some(LATER)
+        );
+    }
+
+    #[test]
+    fn a_five_hour_stop_whose_reset_already_passed_waits_for_the_user() {
+        // Catches a continuation sent at once for a limit the provider says already reset: it
+        // meets the same refusal, and each stop plans another, without end.
+        let five_hours = account(
+            Allowance::Blocked,
+            vec![bucket("codex", Some(window(300, 100, SOON)), None)],
+        );
+        let reset = plan(Provider::Codex, Some(&five_hours), SystemTime::UNIX_EPOCH)
+            .resets_at
+            .expect("the window says when it resets")
+            .instant();
+
+        let before = plan(
+            Provider::Codex,
+            Some(&five_hours),
+            reset - Duration::from_secs(1),
+        );
+        let at_reset = plan(Provider::Codex, Some(&five_hours), reset);
+
+        assert_eq!(before.state, ContinuationState::Scheduled);
+        assert!(
+            matches!(&at_reset.state, ContinuationState::AwaitingUser { why } if why.contains("already reset")),
+            "{at_reset:?}"
         );
     }
 
@@ -751,7 +805,7 @@ mod tests {
             ],
         );
 
-        let planned = plan(Provider::Codex, Some(&two_spent));
+        let planned = plan(Provider::Codex, Some(&two_spent), SystemTime::UNIX_EPOCH);
         assert_eq!(
             planned.resets_at.as_ref().map(Timestamp::as_str),
             Some(later)
