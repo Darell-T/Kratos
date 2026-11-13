@@ -579,3 +579,34 @@ async fn close_returns_while_a_full_queue_waits_for_a_consumer_that_stopped_read
     assert!(!fake_agents::process_is_running(server));
     drop(unread);
 }
+
+#[tokio::test]
+async fn output_that_is_not_utf8_ends_the_server_and_reports_its_exit() {
+    // Catches a read error ending the reader as if the stream had closed, which left the server
+    // running with nobody hearing it: every request timed out and no exit was ever reported.
+    let (codex, mut incoming) = connect_fake().await;
+
+    let unanswered = {
+        let codex = codex.clone();
+        tokio::spawn(async move {
+            codex
+                .request_value("test/notUtf8", json!({}), REQUEST_TIMEOUT)
+                .await
+        })
+    };
+
+    loop {
+        if let Incoming::Exited(_) = next(&mut incoming).await {
+            break;
+        }
+    }
+    let later = codex
+        .request_value("test/echo", json!({}), REQUEST_TIMEOUT)
+        .await;
+    assert!(matches!(later, Err(RequestError::Exited(_))), "{later:?}");
+    let unanswered = unanswered.await.unwrap();
+    assert!(
+        matches!(unanswered, Err(RequestError::Exited(_))),
+        "{unanswered:?}"
+    );
+}

@@ -287,9 +287,13 @@ pub async fn connect(
     tokio::spawn(write_lines(stdin, writes));
     tokio::spawn(keep_stderr(stderr, stderr_lines.clone()));
     let (exited_sender, exited) = oneshot::channel();
+    let (unreadable_sender, unreadable) = oneshot::channel();
     tokio::spawn(keep(
         child,
-        close_requested,
+        Ending {
+            close_requested,
+            unreadable,
+        },
         tree_ended_sender,
         exited_sender,
     ));
@@ -300,7 +304,10 @@ pub async fn connect(
             stderr_lines,
         },
         stdout,
-        exited,
+        Stream {
+            unreadable: unreadable_sender,
+            exited,
+        },
     ));
 
     let codex = Codex {
@@ -456,16 +463,31 @@ async fn keep_stderr(stderr: ChildStderr, kept: Arc<Mutex<VecDeque<String>>>) {
     }
 }
 
-/// Owns the process. Ends the tree once the server exits on its own, or after a requested close
-/// once the server exits or the close timeout passes.
+/// What ends the server besides its own exit.
+struct Ending {
+    close_requested: oneshot::Receiver<Duration>,
+    /// The reader could not read the server's output, so nothing hears it any more.
+    unreadable: oneshot::Receiver<()>,
+}
+
+/// Owns the process. Ends the tree once the server exits on its own, at once when its output
+/// cannot be read, or after a requested close once the server exits or the close timeout passes.
 async fn keep(
     mut child: OwnedChild,
-    close_requested: oneshot::Receiver<Duration>,
+    ending: Ending,
     tree_ended: watch::Sender<bool>,
     exited: oneshot::Sender<Option<i32>>,
 ) {
+    let Ending {
+        close_requested,
+        unreadable,
+    } = ending;
     let status = tokio::select! {
         status = child.wait() => status,
+        Ok(()) = unreadable => {
+            let _ = child.end_tree();
+            child.wait().await
+        }
         requested = close_requested => {
             match requested {
                 Ok(timeout) => match tokio::time::timeout(timeout, child.wait()).await {
@@ -496,16 +518,33 @@ struct Reader {
     stderr_lines: Arc<Mutex<VecDeque<String>>>,
 }
 
-async fn read(reader: Reader, stdout: ChildStdout, exited: oneshot::Receiver<Option<i32>>) {
+/// The reader's ends of the channels to the process's keeper.
+struct Stream {
+    unreadable: oneshot::Sender<()>,
+    exited: oneshot::Receiver<Option<i32>>,
+}
+
+async fn read(reader: Reader, stdout: ChildStdout, stream: Stream) {
     let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        // The server logs to stderr, but a stray line on stdout must not end the connection.
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        reader.dispatch(message).await;
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                // The server logs to stderr, but a stray line on stdout must not end the connection.
+                if let Ok(message) = serde_json::from_str::<Value>(&line) {
+                    reader.dispatch(message).await;
+                }
+            }
+            Ok(None) => break,
+            // Output that is not UTF-8, or a failed read: no later message can be trusted, and a
+            // server left running would answer nothing, so its tree ends and its exit is reported.
+            Err(error) => {
+                eprintln!("codex: cannot read the server's output: {error}");
+                let _ = stream.unreadable.send(());
+                break;
+            }
+        }
     }
-    let code = exited.await.unwrap_or(None);
+    let code = stream.exited.await.unwrap_or(None);
     reader.finish(code).await;
 }
 

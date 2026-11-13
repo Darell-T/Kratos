@@ -464,6 +464,12 @@ impl Fake {
                 self.send(json!("this is not json"));
                 self.reply(id, json!("still alive"));
             }
+            // A line that is not UTF-8, after which the fake keeps running and answers nothing.
+            "test/notUtf8" => {
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(b"\xff\xfe not text\n");
+                let _ = stdout.flush();
+            }
             "test/pid" => self.reply(id, json!(std::process::id())),
             codex_control::ASK => {
                 let request_id = match &params["requestId"] {
