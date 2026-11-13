@@ -40,12 +40,12 @@ impl Actor {
                     .await
             }
             Incoming::Oversized { bytes } => {
-                let message =
-                    format!("Claude sent a line of {bytes} bytes, more than Kratos reads");
-                self.provider_error(&thread_id, message).await;
+                let why = format!("Claude sent a line of {bytes} bytes, more than Kratos reads");
+                self.close_unread(&thread_id, why).await;
             }
             Incoming::Unreadable(error) => {
-                self.provider_error(&thread_id, error.to_string()).await;
+                let why = format!("Claude sent a line Kratos cannot read: {error}");
+                self.close_unread(&thread_id, why).await;
             }
             Incoming::Exited(exit) => self.on_exit(&thread_id, exit).await,
         }
@@ -160,6 +160,14 @@ impl Actor {
             self.hub
                 .publish(thread_id, LiveUpdate::Context { turn_id, usage });
         }
+    }
+
+    /// Closes a CLI that wrote a line Kratos could not read. The line may have been a request the
+    /// CLI now waits on or the result that ends the turn, and with no turn deadline nothing else
+    /// would end the wait. The exit ends the turn, with `why` as its reason.
+    async fn close_unread(&mut self, thread_id: &ThreadId, why: String) {
+        self.provider_error(thread_id, why.clone()).await;
+        self.close_session(thread_id, &why);
     }
 
     /// Records trouble Claude's output caused in the running turn. Outside a turn it only logs.

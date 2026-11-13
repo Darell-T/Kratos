@@ -413,3 +413,31 @@ async fn starts_a_session_with_initialize_first_and_registers_only_kratos_hooks(
     let read = json!({ "subtype": "get_usage", "skip_behaviors": true }).to_string();
     assert_eq!(after, ["user".to_owned(), read], "nothing else was written");
 }
+
+#[tokio::test]
+async fn a_line_kratos_cannot_read_ends_the_turn_instead_of_leaving_claude_waiting() {
+    // Catches a permission request too large to read, or a result Kratos cannot parse, dropped
+    // with a note while the CLI waits for an answer and the turn runs forever.
+    let oversized = json!({ "type": "control_request", "request_id": "big", "request": {
+        "subtype": "can_use_tool", "tool_name": "Write",
+        "input": { "file_path": "big.txt", "content": "x".repeat(200 * 1024) } } });
+    let unparsable = json!({ "type": "result", "subtype": "success", "user_message_uuids": [A] });
+    for (label, line, reason) in [
+        ("oversized", oversized, "more than Kratos reads"),
+        ("unparsable", unparsable, "cannot read"),
+    ] {
+        let mut harness = Harness::start(Options::default()).await;
+        let launch = harness.begin(A, 1).await;
+
+        harness.emit(&launch, line).await;
+        harness.wait_ended(&launch).await;
+
+        let ended = harness
+            .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+            .await;
+        assert!(
+            matches!(&ended, ThreadEventBody::TurnCompleted { outcome: TurnOutcome::Failed { error }, .. } if error.contains(reason)),
+            "{label}: {ended:?}"
+        );
+    }
+}
