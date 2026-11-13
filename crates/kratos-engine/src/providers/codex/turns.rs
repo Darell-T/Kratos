@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use kratos_codex_client::{Codex, RequestError, methods, rejected_before_execution, types};
 use kratos_protocol::{
-    Message, MessageId, MessageStatus, PauseReason, ThreadId, ThreadSettings, TurnId, TurnOutcome,
+    Message, MessageId, MessageStatus, PauseReason, ThreadEventBody, ThreadId, ThreadSettings,
+    TurnId, TurnOutcome,
 };
 use serde_json::json;
 
@@ -14,7 +15,8 @@ use super::actor::{Actor, Done, MAX_STARTING, Reply};
 use super::approvals::settle_closed;
 use super::profiles::Profile;
 use super::threads::{Turn, TurnWork};
-use super::{ProviderError, policy, queue, wire};
+use super::{ProviderError, policy, wire};
+use crate::providers::{queue, report_item};
 
 /// How long `turn/interrupt` may take to answer.
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -34,20 +36,14 @@ pub(super) enum Delivery {
     Steer,
 }
 
-/// Who asked Codex to stop a turn, which decides what follows when Codex does not stop it.
-pub(super) enum Stopper {
-    /// The turn ran out of time. Nothing would ask again, so Codex is closed instead.
-    Deadline,
-    /// Users who asked. They hear whether Codex stopped the turn, and may ask again.
-    Users(Vec<Reply<()>>),
-}
+/// The users who asked Codex to stop a turn. They hear whether Codex stopped it, and may ask
+/// again.
+pub(super) struct StopWaiters(pub(super) Vec<Reply<()>>);
 
-impl Stopper {
+impl StopWaiters {
     pub(super) fn tell(self, result: impl Fn() -> Result<(), ProviderError>) {
-        if let Stopper::Users(waiters) = self {
-            for waiter in waiters {
-                let _ = waiter.send(result());
-            }
+        for waiter in self.0 {
+            let _ = waiter.send(result());
         }
     }
 }
@@ -453,7 +449,6 @@ impl Actor {
         thread.turn = Turn::Running {
             turn_id: turn_id.clone(),
             stopping: false,
-            deadline_epoch: 0,
             work,
         };
         if recorded.is_err() {
@@ -470,9 +465,8 @@ impl Actor {
             self.finish_turn(thread_id, finished).await;
             return;
         }
-        self.arm_deadline(thread_id);
         if !stop_waiters.is_empty() {
-            self.interrupt(thread_id, Stopper::Users(stop_waiters));
+            self.interrupt(thread_id, StopWaiters(stop_waiters));
         }
     }
 
@@ -542,7 +536,12 @@ impl Actor {
             return;
         }
         if at_limit {
-            self.report_limit_stop(thread_id, turn_id);
+            crate::usage::LimitStop {
+                thread_id: thread_id.clone(),
+                turn_id,
+                provider: kratos_protocol::Provider::Codex,
+            }
+            .report(&self.limit_stops);
         }
         self.dispatch(thread_id).await;
     }
@@ -557,13 +556,32 @@ impl Actor {
         work: TurnWork,
         after: After,
     ) -> Result<(), ProviderError> {
-        let TurnWork { changes, context } = work;
+        let TurnWork {
+            changes,
+            context,
+            last_reply,
+        } = work;
         let changes = changes.finish();
+        // Codex holds the final reply to the format, so a reply that is not JSON means the turn
+        // did not end on its report, and none is recorded.
+        let report: Option<serde_json::Value> = self
+            .threads
+            .get(thread_id)
+            .and_then(|thread| thread.turn_settings().turn_report_format())
+            .filter(|_| outcome == TurnOutcome::Completed)
+            .and(last_reply)
+            .and_then(|reply| serde_json::from_str(&reply).ok());
         let closed = self
             .requests
             .close(thread_id, |waiting_turn| *waiting_turn == turn_id);
         self.write(thread_id, move |write| {
             settle_closed(write, &closed, "The turn ended")?;
+            if let Some(report) = report {
+                write.append(ThreadEventBody::ItemCompleted {
+                    item: report_item(&turn_id, report),
+                    turn_id: turn_id.clone(),
+                })?;
+            }
             write.complete_turn(turn_id, outcome, changes, context)?;
             match after {
                 After::Continue => {}
@@ -581,56 +599,6 @@ impl Actor {
         Ok(())
     }
 
-    pub(super) fn arm_deadline(&mut self, thread_id: &ThreadId) {
-        let Some(Turn::Running {
-            turn_id,
-            deadline_epoch,
-            ..
-        }) = self
-            .threads
-            .get_mut(thread_id)
-            .map(|thread| &mut thread.turn)
-        else {
-            return;
-        };
-        *deadline_epoch += 1;
-        let (epoch, turn_id, thread_id) = (*deadline_epoch, turn_id.clone(), thread_id.clone());
-        let timeout = self.settings.turn_timeout;
-        self.spawn(async move {
-            tokio::time::sleep(timeout).await;
-            Done::Deadline {
-                thread_id,
-                turn_id,
-                epoch,
-            }
-        });
-    }
-
-    /// The turn ran out of time. One that waits on the user is not counted, and its deadline
-    /// starts again; any other is stopped, and the queue behind it pauses.
-    pub(super) async fn on_deadline(&mut self, thread_id: ThreadId, turn_id: TurnId, epoch: u64) {
-        let is_current = matches!(
-            self.threads.get(&thread_id).map(|thread| &thread.turn),
-            Some(Turn::Running { turn_id: running, stopping: false, deadline_epoch, .. })
-                if *running == turn_id && *deadline_epoch == epoch
-        );
-        if !is_current {
-            return;
-        }
-        if self.requests.blocks(&thread_id) {
-            self.arm_deadline(&thread_id);
-            return;
-        }
-        let paused = self
-            .write(&thread_id, move |write| {
-                write.pause(PauseReason::TimedOut { turn_id })
-            })
-            .await;
-        if paused.is_ok() {
-            self.interrupt(&thread_id, Stopper::Deadline);
-        }
-    }
-
     pub(super) async fn stop(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
         if let Err(error) = self.load(thread_id).await {
             let _ = reply.send(Err(error));
@@ -641,11 +609,11 @@ impl Actor {
             Turn::Idle => drop(reply.send(Ok(()))),
             // Stopped as soon as its id is known.
             Turn::Starting { stop_waiters, .. } => stop_waiters.push(reply),
-            Turn::Running { .. } => self.interrupt(thread_id, Stopper::Users(vec![reply])),
+            Turn::Running { .. } => self.interrupt(thread_id, StopWaiters(vec![reply])),
         }
     }
 
-    pub(super) fn interrupt(&mut self, thread_id: &ThreadId, stopper: Stopper) {
+    pub(super) fn interrupt(&mut self, thread_id: &ThreadId, waiters: StopWaiters) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
@@ -653,7 +621,7 @@ impl Actor {
             turn_id, stopping, ..
         } = &mut thread.turn
         else {
-            stopper.tell(|| Ok(()));
+            waiters.tell(|| Ok(()));
             return;
         };
         *stopping = true;
@@ -662,7 +630,7 @@ impl Actor {
             thread.native_id().map(str::to_owned),
             self.connection().ok().flatten(),
         ) else {
-            stopper.tell(|| Err(ProviderError::Unavailable("Codex is not running".into())));
+            waiters.tell(|| Err(ProviderError::Unavailable("Codex is not running".into())));
             return;
         };
         let thread_id = thread_id.clone();
@@ -679,7 +647,7 @@ impl Actor {
                 thread_id,
                 turn_id,
                 result,
-                stopper,
+                waiters,
             }
         });
     }
@@ -689,7 +657,7 @@ impl Actor {
         thread_id: ThreadId,
         turn_id: TurnId,
         result: Result<(), RequestError>,
-        stopper: Stopper,
+        waiters: StopWaiters,
     ) {
         let still_running = self
             .threads
@@ -705,11 +673,7 @@ impl Actor {
                         Done::StopExpired { thread_id, turn_id }
                     });
                 }
-                stopper.tell(|| Ok(()));
-            }
-            Err(error) if still_running && matches!(stopper, Stopper::Deadline) => {
-                self.stop_server(&format!("a timed-out turn did not stop: {error}"))
-                    .await;
+                waiters.tell(|| Ok(()));
             }
             Err(error) => {
                 if still_running
@@ -721,7 +685,7 @@ impl Actor {
                     // Another stop may try again; the queue stays where it is.
                     *stopping = false;
                 }
-                stopper.tell(|| {
+                waiters.tell(|| {
                     Err(ProviderError::Unavailable(format!(
                         "Codex did not stop the turn: {error}"
                     )))
@@ -761,6 +725,9 @@ fn turn_start_params(
     params.approval_policy = Some(policy::APPROVAL_POLICY);
     params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
     params.permissions = Some(Profile::for_settings(settings).id().to_owned());
+    params.output_schema = settings
+        .turn_report_format()
+        .map(|format| serde_json::Value::Object(format.schema().clone()));
     params.collaboration_mode = model.map(|model| types::CollaborationMode {
         mode: if settings.plan_mode {
             types::ModeKind::Plan

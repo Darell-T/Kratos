@@ -1,7 +1,7 @@
 //! The actor: its inputs, its state, and the loop that serves them one at a time.
 //!
 //! Three inputs: commands from handles, messages from Codex, and completions of the work the actor
-//! started (a request to Codex, a deadline). Each handler runs to its end before the next input,
+//! started (a request to Codex, a timer). Each handler runs to its end before the next input,
 //! so no two handlers see a thread half changed. A handler awaits only the store, never Codex.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -19,7 +19,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::approvals::Requests;
 use super::connection::StartError;
 use super::threads::ThreadState;
-use super::turns::{Delivery, Stopper};
+use super::turns::{Delivery, StopWaiters};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
@@ -101,6 +101,13 @@ pub(super) enum Command {
         timeout: Duration,
         reply: Reply<CommandResult>,
     },
+    RunAt {
+        folder: String,
+        profile: String,
+        command: Vec<String>,
+        timeout: Duration,
+        reply: Reply<CommandResult>,
+    },
     RefreshUsage {
         reply: Reply<()>,
     },
@@ -120,7 +127,9 @@ impl Command {
             Command::Discard { reply, .. } => drop(reply.send(Err(error))),
             Command::RefreshUsage { reply } => drop(reply.send(Err(error))),
             Command::Skills { reply, .. } => drop(reply.send(Err(error))),
-            Command::Run { reply, .. } => drop(reply.send(Err(error))),
+            Command::Run { reply, .. } | Command::RunAt { reply, .. } => {
+                drop(reply.send(Err(error)));
+            }
             _ => {
                 unreachable!("only discard, refresh usage, skills and run commands wait for Codex")
             }
@@ -165,16 +174,11 @@ pub(super) enum Done {
         thread_id: ThreadId,
         turn_id: kratos_protocol::TurnId,
         result: Result<(), RequestError>,
-        stopper: Stopper,
+        waiters: StopWaiters,
     },
     StopExpired {
         thread_id: ThreadId,
         turn_id: kratos_protocol::TurnId,
-    },
-    Deadline {
-        thread_id: ThreadId,
-        turn_id: kratos_protocol::TurnId,
-        epoch: u64,
     },
     HistoryForDiscard {
         thread_id: ThreadId,
@@ -218,7 +222,7 @@ impl Done {
             Done::UsageRead {
                 reply: Some(reply), ..
             } => drop(reply.send(Err(process_exited()))),
-            Done::Interrupted { stopper, .. } => stopper.tell(|| Ok(())),
+            Done::Interrupted { waiters, .. } => waiters.tell(|| Ok(())),
             Done::Connected { result: Err(_) }
             | Done::UsageRead { reply: None, .. }
             | Done::Account { .. }
@@ -226,8 +230,7 @@ impl Done {
             | Done::StartAnswered { .. }
             | Done::DeliveryChecked { .. }
             | Done::Steered { .. }
-            | Done::StopExpired { .. }
-            | Done::Deadline { .. } => {}
+            | Done::StopExpired { .. } => {}
         }
     }
 }
@@ -359,19 +362,14 @@ impl Actor {
                 thread_id,
                 turn_id,
                 result,
-                stopper,
+                waiters,
             } => {
-                self.on_interrupted(thread_id, turn_id, result, stopper)
+                self.on_interrupted(thread_id, turn_id, result, waiters)
                     .await
             }
             Done::StopExpired { thread_id, turn_id } => {
                 self.on_stop_expired(&thread_id, &turn_id).await
             }
-            Done::Deadline {
-                thread_id,
-                turn_id,
-                epoch,
-            } => self.on_deadline(thread_id, turn_id, epoch).await,
             Done::HistoryForDiscard {
                 thread_id,
                 message_id,

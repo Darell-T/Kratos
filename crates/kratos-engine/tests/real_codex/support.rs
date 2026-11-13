@@ -9,7 +9,7 @@ use kratos_api_client::Client;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
-use kratos_engine::server::{self, ClientToken, Codex, ServerState};
+use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread;
 use kratos_engine::usage::UsageTracker;
 use kratos_protocol::{Seq, Thread, ThreadEventBody, ThreadSettings, TurnOutcome};
@@ -21,6 +21,7 @@ use tokio::sync::oneshot;
 pub const WAIT: Duration = Duration::from_secs(180);
 
 pub struct Harness {
+    claude: kratos_engine::providers::claude::ClaudeProvider,
     pub root: TempDir,
     pub model: Server,
     pub client: Client,
@@ -102,27 +103,63 @@ impl Harness {
             env_set: vec![("CODEX_HOME".into(), codex_home.as_os_str().into())],
             server_folder,
             protected: ProtectedFolders::new(home.clone(), Some(codex_home), None),
-            turn_timeout: WAIT,
             stop_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
             platform: DangerousCommandPlatform::host(),
             mcp: None,
         };
-        let (provider, _stops) =
-            codex::start(codex_settings, hub.clone(), store.clone(), usage.clone())
-                .await
-                .unwrap();
+        let (limit_stops, _stops) = tokio::sync::mpsc::unbounded_channel();
+        let provider = codex::start(
+            codex_settings,
+            hub.clone(),
+            store.clone(),
+            usage.clone(),
+            limit_stops.clone(),
+        )
+        .await
+        .unwrap();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let claude = kratos_engine::providers::claude::start(
+            kratos_engine::providers::claude::ClaudeSettings {
+                tools: Some(kratos_engine::providers::claude::ClaudeTools {
+                    runner: provider.clone(),
+                    protected: ProtectedFolders::new(
+                        home.clone(),
+                        None,
+                        Some(root.path().join("claude-home")),
+                    ),
+                }),
+                program: fake_agents::executable("fake-claude"),
+                release_feed: "file:///nowhere".to_owned(),
+                claude_home: root.path().join("claude-home"),
+                env_set: vec![(
+                    "FAKE_CLAUDE_LOG".into(),
+                    root.path().join("fake-claude.log").into(),
+                )],
+                idle_close: Duration::from_secs(30 * 60),
+                stop_timeout: Duration::from_secs(10),
+                control_timeout: Duration::from_secs(30),
+                restart_wait: Duration::from_secs(1),
+                max_restarts: 3,
+            },
+            hub.clone(),
+            store.clone(),
+            usage.clone(),
+            limit_stops.clone(),
+        )
+        .await
+        .unwrap();
         let state = ServerState {
             store,
             hub: hub.clone(),
-            codex: Ok(Codex {
-                provider: provider.clone(),
-                scheduler: None,
-            }),
+            providers: kratos_engine::providers::Providers {
+                codex: Ok(provider.clone()),
+                claude: Ok(claude.clone()),
+            },
+            scheduler: None,
             usage,
             token,
         };
@@ -146,6 +183,7 @@ impl Harness {
             .await
             .unwrap();
         Self {
+            claude,
             root,
             model,
             client,
@@ -214,6 +252,7 @@ impl Harness {
     }
 
     pub async fn stop(mut self) {
+        self.claude.shutdown().await;
         self.provider.shutdown().await;
         let _ = self.shutdown.take().unwrap().send(());
         self.serving.await.unwrap().unwrap();

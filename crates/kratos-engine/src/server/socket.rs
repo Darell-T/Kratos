@@ -6,12 +6,14 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_
 use axum::response::{IntoResponse, Response};
 use kratos_protocol::{ClientMessage, LiveUpdate, Seq, ServerMessage, ThreadEvent, ThreadId};
 use kratos_store::StoreError;
+use tokio::sync::watch;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
 use super::follows::{FollowUpdate, Follows};
 use super::json::{JsonError, parse_json};
 use super::{ApiError, MAX_SOCKET_MESSAGE_BYTES, ServerState};
 use crate::hub::{FollowError, Hub};
+use crate::usage::UsageTracker;
 
 /// What the WebSocket library buffers for one message. Clients are held to
 /// [`MAX_SOCKET_MESSAGE_BYTES`], but a message between the two limits is read in full and then
@@ -30,21 +32,26 @@ pub(super) async fn events(
     upgrade
         .max_message_size(BUFFERED_MESSAGE_BYTES)
         .max_frame_size(BUFFERED_MESSAGE_BYTES)
-        .on_upgrade(move |socket| Connection::new(socket, state.hub).run())
+        .on_upgrade(move |socket| Connection::new(socket, state.hub, state.usage).run())
 }
 
 struct Connection {
     socket: WebSocket,
     hub: Hub,
     follows: Follows,
+    usage: UsageTracker,
+    /// Wakes on each usage change while the client watches usage.
+    usage_changes: Option<watch::Receiver<u64>>,
 }
 
 impl Connection {
-    fn new(socket: WebSocket, hub: Hub) -> Connection {
+    fn new(socket: WebSocket, hub: Hub, usage: UsageTracker) -> Connection {
         Connection {
             socket,
             hub,
             follows: Follows::default(),
+            usage,
+            usage_changes: None,
         }
     }
 
@@ -58,6 +65,7 @@ impl Connection {
                     FollowUpdate::Page(thread_id, page) => self.on_page(thread_id, page).await,
                     FollowUpdate::Live(thread_id, update) => self.on_live(thread_id, update).await,
                 },
+                () = usage_changed(&mut self.usage_changes) => self.send_usage().await,
             };
             if flow.is_break() {
                 return;
@@ -93,7 +101,22 @@ impl Connection {
                 self.follows.remove(&thread_id);
                 ControlFlow::Continue(())
             }
+            Ok(ClientMessage::WatchUsage) => {
+                let mut changes = self.usage.watch();
+                changes.mark_unchanged();
+                self.usage_changes = Some(changes);
+                self.send_usage().await
+            }
+            Ok(ClientMessage::UnwatchUsage) => {
+                self.usage_changes = None;
+                ControlFlow::Continue(())
+            }
         }
+    }
+
+    async fn send_usage(&mut self) -> ControlFlow<()> {
+        let report = self.usage.report();
+        self.send(&ServerMessage::Usage { report }).await
     }
 
     async fn subscribe(&mut self, thread_id: ThreadId, after: Seq) -> ControlFlow<()> {
@@ -189,5 +212,17 @@ fn follow_error_message(error: FollowError) -> String {
     match error {
         FollowError::Store(error) => ApiError::from(error).message().to_owned(),
         cursor_ahead @ FollowError::CursorAhead { .. } => cursor_ahead.to_string(),
+    }
+}
+
+/// Resolves at the next usage change the client watches, and never while it watches none. The
+/// tracker lives as long as the engine, so its changes never end.
+async fn usage_changed(changes: &mut Option<watch::Receiver<u64>>) {
+    let changed = match changes {
+        Some(changes) => changes.changed().await.is_ok(),
+        None => false,
+    };
+    if !changed {
+        std::future::pending::<()>().await;
     }
 }

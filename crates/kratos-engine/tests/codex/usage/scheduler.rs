@@ -6,7 +6,8 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use kratos_engine::scheduler::{self, Clock, SchedulerError, SchedulerHandle};
+use kratos_engine::clock::Clock;
+use kratos_engine::scheduler::{self, SchedulerError, SchedulerHandle};
 use kratos_engine::usage::LimitStop;
 use kratos_protocol::{
     AccessLimit, Continuation, ContinuationId, ContinuationState, MessageInput, MessageOrigin,
@@ -583,13 +584,13 @@ async fn start_with_reports(
     clock: Arc<ManualClock>,
 ) -> (SchedulerHandle, mpsc::UnboundedSender<LimitStop>) {
     drop(harness.stops.take());
+    harness.use_clock(clock);
     let (reports, stops) = mpsc::unbounded_channel();
     let scheduler = scheduler::start(
         harness.hub.clone(),
         harness.store.clone(),
         harness.usage.clone(),
-        harness.provider.clone(),
-        clock,
+        crate::harness::codex_only(harness.provider.clone()),
         stops,
     )
     .await

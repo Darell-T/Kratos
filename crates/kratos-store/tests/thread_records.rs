@@ -8,8 +8,8 @@ use kratos_protocol::{
     Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest, AskReason,
     ContextLimit, Continuation, ContinuationId, ContinuationState, CreateThread, CreateWorkspace,
     ExtraAccess, MessageId, MessageInput, MessageOrigin, MessageStatus, PauseReason, Permission,
-    Provider, Question, QuestionId, QuestionOutcome, RequiredText, Seq, ThreadEventBody, ThreadId,
-    ThreadSettings, TurnChanges, TurnId, TurnOutcome, UsageWait,
+    Provider, Question, QuestionId, QuestionOutcome, ReportFormat, RequiredText, Seq,
+    ThreadEventBody, ThreadId, ThreadSettings, TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
 use kratos_store::{Enqueued, QueuePlace, Settle, Store, StoreError, restore};
 use rusqlite::Connection;
@@ -621,6 +621,35 @@ fn a_thread_stored_with_a_blank_model_still_loads_with_the_default_model() {
 }
 
 #[test]
+fn the_largest_context_limit_is_stored_and_read_back_unchanged() {
+    // Catches a limit above what the column holds answering 500 on insert, and a stored limit
+    // that reads back changed or not at all. The API refuses this limit for every provider now,
+    // so only the store can prove the round trip of the largest legal value.
+    let home = home();
+    let store = Store::open(home.path()).unwrap();
+    let workspace: CreateWorkspace =
+        serde_json::from_value(json!({ "name": "repo", "path": "/work/repo" })).unwrap();
+    let workspace = store.create_workspace(&workspace).unwrap();
+    let mut request: CreateThread = serde_json::from_value(
+        json!({ "workspaceId": workspace.id, "title": "chat", "provider": "codex" }),
+    )
+    .unwrap();
+    let largest = ContextLimit::new(i64::MAX as u64);
+    request.settings = Some(ThreadSettings {
+        context_limit_tokens: largest,
+        ..ThreadSettings::default()
+    });
+
+    let created = store.create_thread(&request).unwrap();
+    drop(store);
+    let store = Store::open(home.path()).unwrap();
+    let read = store.provider_thread(&created.id).unwrap().settings;
+
+    assert!(largest.is_some());
+    assert_eq!(read.context_limit_tokens, largest);
+}
+
+#[test]
 fn settings_pauses_and_running_turns_survive_reopening() {
     // Catches state kept only in memory: after a restart the engine must know a turn was running
     // (L1), why the queue waits, and what the next turn runs with (D87).
@@ -631,6 +660,12 @@ fn settings_pauses_and_running_turns_survive_reopening() {
         permission: Permission::FullAccess,
         plan_mode: true,
         context_limit_tokens: ContextLimit::new(100_000),
+        report_format: Some(ReportFormat::new(
+            json!({ "type": "object", "required": ["verdict"] })
+                .as_object()
+                .unwrap()
+                .clone(),
+        )),
     };
     let reason = PauseReason::TimedOut {
         turn_id: TurnId::new("turn-0".into()),

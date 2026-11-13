@@ -35,6 +35,7 @@ macro_rules! string_id {
 
 mod api;
 mod approvals;
+mod cli;
 mod context_limit;
 mod events;
 mod messages;
@@ -56,18 +57,19 @@ pub use approvals::{
     AskReason, DecideApproval, ExtraAccess, NetworkAccess, PathAccess, PathAccessMode, Question,
     QuestionId, QuestionItem, QuestionOption, QuestionOutcome,
 };
+pub use cli::{CliRelease, CliUpdate};
 pub use context_limit::ContextLimit;
 pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody};
 pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
     PostMessage, QueueFull, SendMessage,
 };
-pub use skills::{Skill, ThreadSkills};
+pub use skills::{Skill, SlashCommand, ThreadSkills};
 pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};
 pub use text::{RequiredText, is_javascript_whitespace};
 pub use threads::{
     AccessLimit, CreateThread, ListEvents, ListThreads, OutsideWrites, Permission, Provider,
-    Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
+    ReportFormat, Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
 };
 pub use time::{Timestamp, TimestampError};
 pub use turns::{

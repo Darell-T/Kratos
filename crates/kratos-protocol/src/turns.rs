@@ -14,7 +14,7 @@ string_id! {
 )]
 pub enum TurnOutcome {
     Completed,
-    /// The user stopped it, or Kratos did at its deadline.
+    /// The user stopped it, or an earlier engine did at the turn deadline it no longer has.
     Interrupted,
     Failed {
         error: String,
@@ -100,6 +100,11 @@ pub enum AgentItem {
     Message { id: String, text: String },
     /// The plan a planning turn ends with.
     Plan { id: String, text: String },
+    /// The reply a turn under a report format ends with, already parsed.
+    Report {
+        id: String,
+        report: serde_json::Value,
+    },
     Command {
         id: String,
         command: String,

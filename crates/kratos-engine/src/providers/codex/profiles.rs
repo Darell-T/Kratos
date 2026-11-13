@@ -1,7 +1,7 @@
 //! The sandbox every Codex turn runs in. Plan, Ask me, and Approve for me select named permission
 //! profiles Kratos defines when it starts the app-server. Full access selects Codex's built-in
-//! `:danger-full-access`, which runs commands without a sandbox, as Zeron does. No profile writes
-//! outside the thread's workspaces and the temp folder: on Windows, Codex sets permissions on every
+//! `:danger-full-access`, which runs commands without a sandbox, as Zeron does. These profiles write
+//! only the thread's workspaces and the temp folder: on Windows, Codex sets permissions on every
 //! file below a write root before the thread starts, and for a home folder that never finished.
 //!
 //! Measured on Codex 0.159.1: a profile's `deny` entry hides a folder from reads and writes, a
@@ -10,6 +10,8 @@
 //! denies Kratos's data folder, so no sandboxed command can read the client token (D19). A Full
 //! access command runs as the user and can. An approved patch writes wherever it points, so
 //! [`super::policy`] checks patch paths against [`ProtectedFolders`] before accepting one.
+//! A Claude command runs in exactly the profile a Codex thread at the same level uses. Claude's own
+//! file tools run outside every sandbox, so [`sandbox_may_write`] gives them the same scope.
 
 use std::ffi::OsString;
 use std::io;
@@ -57,6 +59,7 @@ impl Profile {
 pub struct ProtectedFolders {
     kratos_home: PathBuf,
     read_only: Vec<PathBuf>,
+    home: Option<PathBuf>,
 }
 
 /// Credential folders under the user's home folder, besides Codex's and Claude's own.
@@ -73,7 +76,13 @@ impl ProtectedFolders {
         ProtectedFolders {
             kratos_home,
             read_only,
+            home,
         }
+    }
+
+    /// The user's home folder, which `~` names.
+    pub(crate) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
     }
 
     pub fn kratos_home(&self) -> &Path {
@@ -83,7 +92,7 @@ impl ProtectedFolders {
     /// Resolves existing links before checking a patch's destination, including new files below
     /// a linked directory. An unreadable or dangling link cannot establish a safe destination.
     /// Neither can a missing-parent climb or a new name the disk may interpret differently.
-    pub(super) fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
+    pub(crate) fn containing(&self, path: &Path) -> io::Result<Option<&Path>> {
         let path = resolve_destination(path)?;
         for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
             if is_within(&path, &resolve_destination(folder)?) {
@@ -91,6 +100,18 @@ impl ProtectedFolders {
             }
         }
         Ok(None)
+    }
+
+    /// Recursive searches must not start above a protected folder either.
+    pub(crate) fn overlaps(&self, path: &Path) -> io::Result<bool> {
+        let path = resolve_destination(path)?;
+        for folder in std::iter::once(&self.kratos_home).chain(&self.read_only) {
+            let folder = resolve_destination(folder)?;
+            if is_within(&path, &folder) || is_within(&folder, &path) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// The `-c` arguments that define Kratos's three profiles, for the app-server's command line.
@@ -133,6 +154,31 @@ impl ProtectedFolders {
         );
         arguments
     }
+}
+
+/// The temp folder Ask me and Approve for me let commands write besides the thread's workspace.
+pub(crate) fn temp_folder() -> PathBuf {
+    std::env::temp_dir()
+}
+
+/// Whether the Ask me and Approve for me sandboxes let a command write `path` for a thread in
+/// `folder`: the folder and the temp folder, judged where the paths resolve, not by their spelling.
+pub(crate) fn sandbox_may_write(path: &Path, folder: &Path) -> io::Result<bool> {
+    let path = resolve_destination(path)?;
+    for root in [folder, &temp_folder()] {
+        let root = resolve_destination(root)?;
+        // Only Windows folds case. Elsewhere `Proj` is another folder than `proj`, and a write there
+        // is outside the sandbox.
+        let inside = if cfg!(windows) {
+            is_within(&path, &root)
+        } else {
+            path.starts_with(&root)
+        };
+        if inside {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A TOML basic string, quoted and escaped, for a path used as a table key.
@@ -294,6 +340,20 @@ mod tests {
             .filter(|argument| argument.contains("network"))
             .collect();
         assert_eq!(network, ["permissions.kratos-approve.network.enabled=true"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_that_differs_only_in_case_is_not_the_sandbox_scope() {
+        // Catches case folding, which is right for protected folders, widening the writable scope.
+        let root = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(root.path()).unwrap();
+        let (folder, other) = (base.join("proj"), base.join("PROJ"));
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::create_dir(&other).unwrap();
+
+        assert!(sandbox_may_write(&folder.join("a.txt"), &folder).unwrap());
+        assert!(!sandbox_may_write(&other.join("a.txt"), &folder).unwrap());
     }
 
     #[test]

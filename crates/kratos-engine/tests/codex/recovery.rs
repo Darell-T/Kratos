@@ -1,7 +1,7 @@
 //! What an engine that starts again finds of the work the last one left (L1): no Codex process
 //! outlives the engine that started it.
 
-use kratos_engine::providers::codex::ProviderError;
+use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
     ApprovalOutcome, MessageStatus, PauseReason, ThreadEventBody, TurnChanges, TurnOutcome,
 };

@@ -333,13 +333,14 @@ fn a_thread_another_thread_lowered_cannot_create_its_way_back_to_full_access() {
 #[test]
 fn the_engine_acts_for_a_thread_only_on_another_thread_that_exists() {
     // Catches a label naming a thread that does not exist, a client that makes a thread queue work
-    // for itself or stop its own turn, and a message to a thread with no agent that drops its
-    // sender and logs it anyway.
+    // for itself or stop its own turn, and a message to a thread whose agent cannot run that is
+    // stored anyway, so its sender is told nothing.
     let home = tempfile::tempdir().unwrap();
-    let engine = RunningEngine::start(home.path());
+    let missing = home.path().join("no-claude-here");
+    let engine = RunningEngine::start_with_claude(home.path(), &missing);
     let workspace = workspace(&engine);
     let receiver = thread(&engine, &workspace, Provider::Codex, Permission::AskMe);
-    let log_only = thread(&engine, &workspace, Provider::Claude, Permission::AskMe);
+    let unavailable = engine.create_thread_of(Provider::Claude);
     let messages = |thread: &Thread| format!("/api/threads/{}/messages", thread.id);
 
     for (path, acting, status, reason) in [
@@ -350,7 +351,12 @@ fn the_engine_acts_for_a_thread_only_on_another_thread_that_exists() {
             "your own thread",
         ),
         (messages(&receiver), "nope", 400, "no such thread"),
-        (messages(&log_only), receiver.id.as_str(), 400, "no agent"),
+        (
+            messages(&unavailable),
+            receiver.id.as_str(),
+            503,
+            "CLAUDE_EXE",
+        ),
         (
             format!("/api/threads/{}/stop", receiver.id),
             receiver.id.as_str(),
@@ -371,7 +377,7 @@ fn the_engine_acts_for_a_thread_only_on_another_thread_that_exists() {
             reply.body
         );
     }
-    for thread in [&receiver, &log_only] {
+    for thread in [&receiver, &unavailable] {
         let events = engine
             .client()
             .get(&format!("/api/threads/{}/events", thread.id))

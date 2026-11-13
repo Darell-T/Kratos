@@ -42,13 +42,30 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::hub::Hub;
 use crate::mcp::McpServer;
+use crate::providers::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent};
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 
+use profiles::Profile;
 pub use profiles::ProtectedFolders;
+pub(crate) use profiles::sandbox_may_write;
+pub(crate) use wire::OUTPUT_BYTES as COMMAND_OUTPUT_BYTES;
 
-/// The most undelivered messages one thread holds (D85).
-pub(crate) const MAX_PENDING_MESSAGES: usize = 10;
+/// The isolated profile for a Claude command, or an explicitly approved escape.
+#[derive(Clone, Debug)]
+pub(crate) enum CommandProfile {
+    Claude(ThreadSettings),
+    ApprovedOutside,
+}
+
+impl CommandProfile {
+    fn id(&self) -> &'static str {
+        match self {
+            Self::Claude(settings) => Profile::for_settings(settings).id(),
+            Self::ApprovedOutside => Profile::FullAccess.id(),
+        }
+    }
+}
 
 /// How the provider starts Codex and how long it waits on it.
 #[derive(Clone, Debug)]
@@ -63,64 +80,12 @@ pub struct CodexSettings {
     /// server's folder writable exposes nothing.
     pub server_folder: PathBuf,
     pub protected: ProtectedFolders,
-    /// A turn that runs this long without waiting on the user is stopped (TypeScript: 10 minutes).
-    pub turn_timeout: Duration,
     /// How long a stopped turn may take to end before Kratos closes the app-server.
     pub stop_timeout: Duration,
     /// The deadline of an ordinary request to Codex.
     pub request_timeout: Duration,
     pub platform: DangerousCommandPlatform,
     pub mcp: Option<McpServer>,
-}
-
-/// What became of a continuation the scheduler sent (D39).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Continued {
-    Queued,
-    /// The continuation was cancelled or sent before; there is nothing to send.
-    NotOpen,
-    /// The thread cannot continue on its own, and the text says why: the user decides.
-    NeedsUser(String),
-}
-
-/// What became of a message sent to a thread.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Sent {
-    Queued(Message),
-    /// The client sent an id the thread already has; this is that message.
-    Existing(Message),
-    /// The thread's queue is full; nothing was stored.
-    Full {
-        pending: usize,
-    },
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ProviderError {
-    #[error("Unknown thread {0}")]
-    UnknownThread(ThreadId),
-    #[error("Unknown message {0}")]
-    UnknownMessage(MessageId),
-    #[error("Unknown approval {0}")]
-    UnknownApproval(ApprovalId),
-    #[error("Unknown question {0}")]
-    UnknownQuestion(QuestionId),
-    /// The request does not fit the thread's state, for example a retry of a message that did not
-    /// fail. The text says what would.
-    #[error("{0}")]
-    Conflict(String),
-    #[error("{0}")]
-    Forbidden(String),
-    /// The setting is not one the pinned Codex supports, or is out of its reported bounds (D76).
-    #[error("{0}")]
-    Unsupported(String),
-    /// Codex cannot run: it is missing, failed to start, or keeps exiting.
-    #[error("{0}")]
-    Unavailable(String),
-    #[error(transparent)]
-    Store(#[from] StoreError),
-    #[error("The Codex provider has stopped")]
-    Stopped,
 }
 
 /// The handle to the Codex actor. Clones share it.
@@ -138,21 +103,21 @@ const QUEUED_COMMANDS: usize = 64;
 /// questions close. Codex itself starts only when a thread needs it (L5), or in the background to
 /// let its history settle a message whose delivery the restart left uncertain.
 ///
-/// The receiver hands the scheduler every turn that stops at a usage limit.
+/// Every turn that stops at a usage limit goes to the scheduler through `limit_stops`. The channel
+/// is unbounded so the actor never waits on the scheduler, which waits on the actor. A turn stops
+/// at a limit at most once, so it holds at most one entry per turn.
 pub async fn start(
     settings: CodexSettings,
     hub: Hub,
     store: StoreThread,
     usage: UsageTracker,
-) -> Result<(CodexProvider, mpsc::UnboundedReceiver<LimitStop>), StoreError> {
+    limit_stops: mpsc::UnboundedSender<LimitStop>,
+) -> Result<CodexProvider, StoreError> {
     let (commands, inbox) = mpsc::channel(QUEUED_COMMANDS);
-    // Unbounded so the actor never waits on the scheduler, which waits on the actor. A turn stops
-    // at a limit at most once, so the channel holds at most one entry per turn.
-    let (limit_stops, stops) = mpsc::unbounded_channel();
     let (actor, uncertain) =
         actor::Actor::recover(settings, hub, store, usage, limit_stops).await?;
     tokio::spawn(actor.run(inbox, uncertain));
-    Ok((CodexProvider { commands }, stops))
+    Ok(CodexProvider { commands })
 }
 
 impl CodexProvider {
@@ -333,6 +298,25 @@ impl CodexProvider {
     ) -> Result<CommandResult, ProviderError> {
         self.ask(|reply| actor::Command::Run {
             thread_id,
+            command,
+            timeout,
+            reply,
+        })
+        .await
+    }
+
+    /// Runs another provider's command with its frozen turn settings and root, without creating
+    /// a Codex conversation. The caller owns the permission decision before invoking this runner.
+    pub(crate) async fn run_at(
+        &self,
+        folder: String,
+        profile: CommandProfile,
+        command: Vec<String>,
+        timeout: Duration,
+    ) -> Result<CommandResult, ProviderError> {
+        self.ask(|reply| actor::Command::RunAt {
+            folder,
+            profile: profile.id().to_owned(),
             command,
             timeout,
             reply,

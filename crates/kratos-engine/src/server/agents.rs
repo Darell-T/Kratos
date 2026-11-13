@@ -1,6 +1,6 @@
 //! The routes that drive a thread's agent: its messages, its turn, its settings, and what it waits
-//! on the user for. Codex is the only agent Kratos drives so far; a thread of another provider
-//! keeps R2's plain message log.
+//! on the user for. Each reaches the agent of the thread's own provider (see [`Agent`]); approvals
+//! and questions reach the provider of their recorded thread.
 
 use std::time::Duration;
 
@@ -11,8 +11,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
     AnswerQuestion, ApprovalId, ContinuationId, DecideApproval, MessageId, MessageOrigin,
-    PostMessage, Provider, QuestionId, QueueFull, SendMessage, ThreadEventBody, ThreadId,
-    ThreadSettings, ThreadSkills,
+    QuestionId, QueueFull, SendMessage, ThreadId, ThreadSettings,
 };
 use uuid::Uuid;
 
@@ -20,18 +19,16 @@ use super::acting::Acting;
 use super::json::read_json;
 use super::threads::details;
 use super::{ApiError, MessagePath, ServerState, ThreadPath, json_reply, path};
-use crate::providers::codex::{MAX_PENDING_MESSAGES, Sent};
+use crate::providers::claude::ClaudeProvider;
+use crate::providers::{Agent, MAX_PENDING_MESSAGES, Sent};
 
-/// How long `GET /api/usage` waits for Codex's fresh read before it answers with what it knows.
+/// How long `GET /api/usage` waits for each provider's fresh read before it answers with what it
+/// knows.
 const USAGE_REFRESH_WAIT: Duration = Duration::from_secs(10);
 
-const NO_SLASH_COMMANDS: &str =
-    "Codex's app-server protocol does not list its slash commands, so Kratos cannot offer them";
-
-/// `POST /api/threads/{id}/messages`. To a Codex thread: 201 with the queued message, 200 with the
-/// message the client sent before under the same `messageId` (D85), 409 when that id holds another
-/// message, or 429 when the queue is full, which a client may retry with the same `messageId`. To
-/// any other thread: 201 with the appended event, as R2 answers.
+/// `POST /api/threads/{id}/messages`: 201 with the queued message, 200 with the message the
+/// client sent before under the same `messageId` (D85), 409 when that id holds another message, or
+/// 429 when the queue is full, which a client may retry with the same `messageId`.
 ///
 /// The thread is checked before the body is read: a post to an unknown thread answers 404 without
 /// reading or size-checking its body.
@@ -42,25 +39,13 @@ pub(super) async fn post_message(
     body: Body,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    let lookup = thread_id.clone();
-    let provider = state
-        .store
-        .call(move |store| store.provider_thread(&lookup))
-        .await?
-        .thread
-        .provider;
+    let agent = state.agent(&thread_id).await?;
     let acting = Acting::of(&state, &headers).await?;
-    match (provider, acting) {
-        (Provider::Codex, acting) => send_to_codex(&state, acting, thread_id, body).await,
-        (_, None) => log_message(&state, thread_id, body).await,
-        (_, Some(_)) => Err(ApiError::bad_request(
-            "Kratos runs no agent in this thread yet, so it takes no messages from other threads",
-        )),
-    }
+    send_to_agent(&agent, acting, thread_id, body).await
 }
 
-async fn send_to_codex(
-    state: &ServerState,
+async fn send_to_agent(
+    agent: &Agent<'_>,
     acting: Option<Acting>,
     thread_id: ThreadId,
     body: Body,
@@ -72,26 +57,11 @@ async fn send_to_codex(
             acting.origin()
         }
     };
-    let codex = state.codex()?;
     let SendMessage { message_id, input } = read_json(body).await?;
     let message_id = message_id.unwrap_or_else(|| MessageId::new(Uuid::new_v4().to_string()));
     Ok(sent_reply(
-        codex.send(thread_id, message_id, input, origin).await?,
+        agent.send(thread_id, message_id, input, origin).await?,
     ))
-}
-
-/// R2's answer for a thread whose agent Kratos does not drive yet: the message only joins the log.
-async fn log_message(
-    state: &ServerState,
-    thread_id: ThreadId,
-    body: Body,
-) -> Result<Response, ApiError> {
-    let PostMessage { text } = read_json(body).await?;
-    let body = ThreadEventBody::UserMessage {
-        text: text.into_string(),
-    };
-    let event = state.hub.append(thread_id, body).await?;
-    Ok(json_reply(StatusCode::CREATED, &event))
 }
 
 fn sent_reply(sent: Sent) -> Response {
@@ -118,7 +88,11 @@ pub(super) async fn steer(
     ids: MessagePath,
 ) -> Result<Response, ApiError> {
     let (thread_id, message_id) = path(ids)?;
-    let message = state.codex()?.steer(thread_id, message_id).await?;
+    let message = state
+        .agent(&thread_id)
+        .await?
+        .steer(thread_id, message_id)
+        .await?;
     Ok(json_reply(StatusCode::OK, &message))
 }
 
@@ -128,7 +102,11 @@ pub(super) async fn remove_message(
     ids: MessagePath,
 ) -> Result<Response, ApiError> {
     let (thread_id, message_id) = path(ids)?;
-    let message = state.codex()?.remove(thread_id, message_id).await?;
+    let message = state
+        .agent(&thread_id)
+        .await?
+        .remove(thread_id, message_id)
+        .await?;
     Ok(json_reply(StatusCode::OK, &message))
 }
 
@@ -138,7 +116,11 @@ pub(super) async fn retry_message(
     ids: MessagePath,
 ) -> Result<Response, ApiError> {
     let (thread_id, message_id) = path(ids)?;
-    let message = state.codex()?.retry(thread_id, message_id).await?;
+    let message = state
+        .agent(&thread_id)
+        .await?
+        .retry(thread_id, message_id)
+        .await?;
     Ok(json_reply(StatusCode::OK, &message))
 }
 
@@ -149,7 +131,11 @@ pub(super) async fn discard_message(
     ids: MessagePath,
 ) -> Result<Response, ApiError> {
     let (thread_id, message_id) = path(ids)?;
-    let message = state.codex()?.discard(thread_id, message_id).await?;
+    let message = state
+        .agent(&thread_id)
+        .await?
+        .discard(thread_id, message_id)
+        .await?;
     Ok(json_reply(StatusCode::OK, &message))
 }
 
@@ -164,7 +150,11 @@ pub(super) async fn stop(
     if let Some(acting) = Acting::of(&state, &headers).await? {
         acting.not_on_itself(&thread_id)?;
     }
-    state.codex()?.stop(thread_id.clone()).await?;
+    state
+        .agent(&thread_id)
+        .await?
+        .stop(thread_id.clone())
+        .await?;
     details(&state, thread_id, None).await
 }
 
@@ -174,7 +164,11 @@ pub(super) async fn resume(
     id: ThreadPath,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    state.codex()?.resume(thread_id.clone()).await?;
+    state
+        .agent(&thread_id)
+        .await?
+        .resume(thread_id.clone())
+        .await?;
     details(&state, thread_id, None).await
 }
 
@@ -186,25 +180,22 @@ pub(super) async fn put_settings(
     body: Body,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    let codex = state.codex()?;
+    let agent = state.agent(&thread_id).await?;
     let settings: ThreadSettings = read_json(body).await?;
-    codex.set_settings(thread_id.clone(), settings).await?;
+    agent.set_settings(thread_id.clone(), settings).await?;
     details(&state, thread_id, None).await
 }
 
-/// `GET /api/threads/{id}/skills`: 200 with the skills Codex reports for the thread's folder, and
-/// why slash commands are missing (D97).
+/// `GET /api/threads/{id}/skills`: 200 with what the thread's agent reports for its folder. Codex
+/// lists skills and says why slash commands are missing. Claude lists the slash commands its
+/// session reports, which include its skills (D97).
 pub(super) async fn skills(
     State(state): State<ServerState>,
     id: ThreadPath,
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
-    let skills = state.codex()?.skills(thread_id).await?;
-    let reply = ThreadSkills {
-        skills,
-        slash_commands_gap: Some(NO_SLASH_COMMANDS.to_owned()),
-    };
-    Ok(json_reply(StatusCode::OK, &reply))
+    let skills = state.agent(&thread_id).await?.skills(thread_id).await?;
+    Ok(json_reply(StatusCode::OK, &skills))
 }
 
 /// `POST /api/approvals/{id}`: 200 with the approval's outcome. The first decision is recorded and
@@ -227,9 +218,9 @@ pub(super) async fn decide(
             acting.not_on_itself(&stored.thread_id)?;
         }
     }
-    let codex = state.codex()?;
+    let agent = state.approval_agent(&approval_id).await?;
     let DecideApproval { decision } = read_json(body).await?;
-    let outcome = codex.decide(approval_id, decision).await?;
+    let outcome = agent.decide(approval_id, decision).await?;
     Ok(json_reply(StatusCode::OK, &outcome))
 }
 
@@ -253,9 +244,9 @@ pub(super) async fn answer(
             acting.not_on_itself(&stored.thread_id)?;
         }
     }
-    let codex = state.codex()?;
+    let agent = state.question_agent(&question_id).await?;
     let AnswerQuestion { answers } = read_json(body).await?;
-    let outcome = codex
+    let outcome = agent
         .answer(question_id, answers, acting.map(|acting| acting.access))
         .await?;
     Ok(json_reply(StatusCode::OK, &outcome))
@@ -268,24 +259,52 @@ pub(super) async fn schedule(
     id: Result<Path<ContinuationId>, PathRejection>,
 ) -> Result<Response, ApiError> {
     let continuation_id = path(id)?;
-    let scheduler = state
-        .codex
-        .as_ref()
-        .ok()
-        .and_then(|codex| codex.scheduler.as_ref())
-        .ok_or_else(|| {
-            ApiError::unavailable("Kratos cannot schedule continuations without Codex".to_owned())
-        })?;
+    let scheduler = state.scheduler.as_ref().ok_or_else(|| {
+        ApiError::unavailable("Kratos cannot schedule continuations without Codex".to_owned())
+    })?;
     let continuation = scheduler.schedule(continuation_id).await?;
     Ok(json_reply(StatusCode::OK, &continuation))
 }
 
-/// `GET /api/usage`: 200 with each account's usage, read fresh from Codex when it answers in time
-/// (D38). Context use is a thread's, in its turn events, never this report (D76).
+/// `GET /api/usage`: 200 with each account's usage, read fresh from Codex, and from Claude through
+/// an open session, when they answer in time (D38). Context use is a thread's, in its turn events,
+/// never this report (D76).
 pub(super) async fn usage(State(state): State<ServerState>) -> Response {
-    if let Ok(codex) = state.codex() {
-        // A failed or slow read leaves the last snapshot, which says so in its allowance.
-        let _ = tokio::time::timeout(USAGE_REFRESH_WAIT, codex.refresh_usage()).await;
-    }
+    // A failed or slow read leaves the last snapshot, which says so in its allowance.
+    let codex = async {
+        if let Ok(codex) = state.codex() {
+            let _ = tokio::time::timeout(USAGE_REFRESH_WAIT, codex.refresh_usage()).await;
+        }
+    };
+    let claude = async {
+        if let Ok(claude) = &state.providers.claude {
+            let _ = tokio::time::timeout(USAGE_REFRESH_WAIT, claude.refresh_open_usage()).await;
+        }
+    };
+    tokio::join!(codex, claude);
     json_reply(StatusCode::OK, &state.usage.report())
+}
+
+/// `GET /api/agents/claude/cli`: 200 with the installed Claude Code release and whether a newer
+/// one is out, or 503 when Claude threads are unavailable.
+pub(super) async fn claude_cli(State(state): State<ServerState>) -> Result<Response, ApiError> {
+    let claude = claude(&state)?;
+    Ok(json_reply(StatusCode::OK, &claude.cli_release().await))
+}
+
+/// `POST /api/agents/claude/cli/update`: closes every idle Claude session, runs Claude Code's own
+/// updater, then 200 with the release now installed. 400 when another manager installed the CLI,
+/// 409 while a Claude thread works or another update runs, and 503 when the updater fails. Kratos
+/// never updates on its own: only the user calls this, and agents cannot reach a user route.
+pub(super) async fn update_claude_cli(
+    State(state): State<ServerState>,
+) -> Result<Response, ApiError> {
+    let claude = claude(&state)?;
+    Ok(json_reply(StatusCode::OK, &claude.update_cli().await?))
+}
+
+fn claude(state: &ServerState) -> Result<&ClaudeProvider, ApiError> {
+    state.providers.claude.as_ref().map_err(|missing| {
+        ApiError::unavailable(format!("Claude threads are unavailable: {missing}"))
+    })
 }

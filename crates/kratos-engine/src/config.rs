@@ -18,6 +18,7 @@ pub struct Config {
     pub port: u16,
     pub user_home: Option<PathBuf>,
     pub codex_exe: Option<OsString>,
+    pub claude_exe: Option<OsString>,
     pub path: Option<OsString>,
     /// Codex's data folder: `CODEX_HOME`, else `.codex` in the user's home folder, made absolute.
     pub codex_home: Option<PathBuf>,
@@ -26,7 +27,7 @@ pub struct Config {
 
 impl Config {
     /// Reads `KRATOS_HOME` (default `.kratos` in the user's home folder, made absolute against the
-    /// current directory), `KRATOS_PORT` (default 4200), Codex's variables, and the `mcp`
+    /// current directory), `KRATOS_PORT` (default 4200), Codex's and Claude's variables, and the `mcp`
     /// subcommand's thread. An empty value counts as unset.
     pub fn from_env() -> Result<Config, ConfigError> {
         let user_home = std::env::home_dir();
@@ -47,6 +48,7 @@ impl Config {
             home,
             port,
             codex_exe: std::env::var_os("CODEX_EXE"),
+            claude_exe: std::env::var_os("CLAUDE_EXE"),
             path: std::env::var_os("PATH"),
             codex_home: non_empty_var("CODEX_HOME")
                 .map(PathBuf::from)

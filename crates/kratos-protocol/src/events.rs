@@ -121,7 +121,8 @@ pub enum ThreadEventBody {
 pub enum PauseReason {
     /// The last turn failed, so the messages behind it may no longer make sense.
     TurnFailed { turn_id: TurnId, error: String },
-    /// Kratos stopped a turn at its deadline.
+    /// An earlier engine stopped a turn at its deadline. Turns no longer have one; the variant
+    /// stays so stored pauses still read.
     TimedOut { turn_id: TurnId },
     /// The last turn did not finish before Kratos or the provider stopped.
     Interrupted,

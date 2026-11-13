@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{AgentItem, ContextUsage, Seq, ThreadEvent, ThreadId, TurnId};
+use crate::{AgentItem, ContextUsage, Seq, ThreadEvent, ThreadId, TurnId, UsageReport};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -20,6 +20,10 @@ pub enum ClientMessage {
     Unsubscribe {
         thread_id: ThreadId,
     },
+    /// Sends the usage report now, then again each time an account's usage changes, such as
+    /// after each request an agent makes (D38).
+    WatchUsage,
+    UnwatchUsage,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +44,11 @@ pub enum ServerMessage {
     Live {
         thread_id: ThreadId,
         update: LiveUpdate,
+    },
+    /// Every account's usage, for a client that watches it. A burst of changes may arrive as one
+    /// report of the latest state.
+    Usage {
+        report: UsageReport,
     },
 }
 

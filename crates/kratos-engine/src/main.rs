@@ -7,17 +7,20 @@
 //! and its tokio runtime run on a second thread. So a panic in the store ends the process, and the
 //! database closes only after the server, and every socket its runtime ran, has stopped.
 //!
-//! Codex is found through `CODEX_EXE`, else `PATH` (D2). Without it the engine still serves, and
-//! a request that needs Codex answers 503 saying why.
+//! Codex is found through `CODEX_EXE`, else `PATH` (D2), and Claude through `CLAUDE_EXE`, else
+//! `PATH` (L8). Without one the engine still serves, and a request that needs it answers 503
+//! saying why.
 
 use std::ffi::OsString;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
+
 use kratos_api_client::{Client, ClientError};
+use kratos_claude_client::locate_claude;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
@@ -25,18 +28,28 @@ use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, St
 use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
 use kratos_engine::mcp::{self, McpServer};
-use kratos_engine::providers::codex::{self, CodexSettings, ProtectedFolders};
-use kratos_engine::scheduler::{self, SystemClock};
+use kratos_engine::providers::Providers;
+use kratos_engine::providers::claude::{self, ClaudeProvider, ClaudeSettings};
+use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
+use kratos_engine::scheduler;
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
-use kratos_engine::usage::UsageTracker;
+use kratos_engine::usage::{LimitStop, UsageTracker};
 
-/// The TypeScript provider's deadlines: a turn may run ten minutes without waiting on the user,
-/// and a request to Codex may take thirty seconds.
-const TURN_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long a request to Codex may take, from the TypeScript provider. A turn has no deadline: a
+/// live CLI is working, and every way it can die reports its own error.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a turn Codex agreed to stop may take to end before Kratos closes Codex.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a Claude process may sit unused before Kratos closes it, Zeron's 30 minutes. A warm
+/// process starts the next turn at once; past this, holding its memory costs more than a resume.
+const SESSION_IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
+/// The feed `claude update` reads for a native install: `{feed}/latest` names the newest release.
+const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
+/// The wait after a Claude process's first failure, doubled by each failure in a row (L4), and the
+/// failures after which only the user starts it again.
+const RESTART_WAIT: Duration = Duration::from_secs(1);
+const MAX_RESTARTS: u32 = 5;
 
 fn main() -> ExitCode {
     match run() {
@@ -120,43 +133,108 @@ fn run_server(
         let hub = Hub::new(store.clone());
         let usage = UsageTracker::default();
         let port = listener.local_addr()?.port();
-        let codex = match codex_settings(config, port) {
-            Ok(settings) => {
-                let (provider, stops) =
-                    codex::start(settings, hub.clone(), store.clone(), usage.clone()).await?;
-                let clock = Arc::new(SystemClock);
-                let scheduler = scheduler::start(
-                    hub.clone(),
-                    store.clone(),
-                    usage.clone(),
-                    provider.clone(),
-                    clock,
-                    stops,
-                )
-                .await?;
-                Ok(server::Codex {
-                    provider,
-                    scheduler: Some(scheduler),
-                })
-            }
-            Err(missing) => {
-                eprintln!("Codex threads are unavailable: {missing}");
-                Err(missing.to_string())
-            }
+        let (limit_stops, stops) = mpsc::unbounded_channel();
+        let codex = start_codex(config, port, &hub, &store, &usage, limit_stops.clone()).await?;
+        let claude = start_claude(config, &hub, &store, &codex, &usage, limit_stops).await?;
+        let providers = Providers { codex, claude };
+        let scheduler = if providers.none_running() {
+            None
+        } else {
+            let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
+            let providers = providers.clone();
+            Some(scheduler::start(hub, store, usage, providers, stops).await?)
         };
         let state = ServerState {
             hub,
             store,
-            codex,
+            providers,
+            scheduler,
             usage,
             token,
         };
         server::serve(listener, state.clone(), shutdown_signal()).await?;
-        // Codex ends before the store closes, so nothing it reports goes unrecorded (L2).
-        if let Ok(codex) = &state.codex {
-            codex.provider.shutdown().await;
+        // The agents end before the store closes, so nothing they report goes unrecorded (L2).
+        if let Ok(claude) = &state.providers.claude {
+            claude.shutdown().await;
+        }
+        if let Ok(codex) = &state.providers.codex {
+            codex.shutdown().await;
         }
         Ok(())
+    })
+}
+
+/// Codex, or why it cannot run, which the engine reports and serves on without.
+async fn start_codex(
+    config: &Config,
+    port: u16,
+    hub: &Hub,
+    store: &StoreThread,
+    usage: &UsageTracker,
+    limit_stops: mpsc::UnboundedSender<LimitStop>,
+) -> Result<Result<CodexProvider, String>, StoreError> {
+    match codex_settings(config, port) {
+        Ok(settings) => {
+            let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
+            Ok(Ok(
+                codex::start(settings, hub, store, usage, limit_stops).await?
+            ))
+        }
+        Err(missing) => {
+            eprintln!("Codex threads are unavailable: {missing}");
+            Ok(Err(missing.to_string()))
+        }
+    }
+}
+
+/// Claude, or why it cannot run, which the engine reports and serves on without.
+async fn start_claude(
+    config: &Config,
+    hub: &Hub,
+    store: &StoreThread,
+    codex: &Result<CodexProvider, String>,
+    usage: &UsageTracker,
+    limit_stops: mpsc::UnboundedSender<LimitStop>,
+) -> Result<Result<ClaudeProvider, String>, StoreError> {
+    match claude_settings(config) {
+        Ok(mut settings) => {
+            settings.tools = codex.as_ref().ok().map(|codex| claude::ClaudeTools {
+                runner: codex.clone(),
+                protected: ProtectedFolders::new(
+                    config.home.clone(),
+                    config.codex_home.clone(),
+                    config.user_home.clone(),
+                ),
+            });
+            let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
+            Ok(Ok(
+                claude::start(settings, hub, store, usage, limit_stops).await?
+            ))
+        }
+        Err(missing) => {
+            eprintln!("Claude threads are unavailable: {missing}");
+            Ok(Err(missing.to_string()))
+        }
+    }
+}
+
+fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
+    let program = locate_claude(config.claude_exe.as_deref(), config.path.as_deref())?;
+    let claude_home = config
+        .user_home
+        .clone()
+        .ok_or(ClaudeMissing::NoHomeFolder)?;
+    Ok(ClaudeSettings {
+        tools: None,
+        program,
+        release_feed: CLAUDE_RELEASES.to_owned(),
+        claude_home,
+        env_set: Vec::new(),
+        stop_timeout: STOP_TIMEOUT,
+        idle_close: SESSION_IDLE_CLOSE,
+        control_timeout: REQUEST_TIMEOUT,
+        restart_wait: RESTART_WAIT,
+        max_restarts: MAX_RESTARTS,
     })
 }
 
@@ -174,7 +252,6 @@ fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMiss
             config.codex_home.clone(),
             config.user_home.clone(),
         ),
-        turn_timeout: TURN_TIMEOUT,
         stop_timeout: STOP_TIMEOUT,
         request_timeout: REQUEST_TIMEOUT,
         platform: DangerousCommandPlatform::host(),
@@ -184,6 +261,14 @@ fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMiss
             port,
         }),
     })
+}
+
+#[derive(Debug, thiserror::Error)]
+enum ClaudeMissing {
+    #[error(transparent)]
+    Locate(#[from] kratos_claude_client::LocateError),
+    #[error("cannot find the user's home folder, where Claude keeps its history")]
+    NoHomeFolder,
 }
 
 #[derive(Debug, thiserror::Error)]

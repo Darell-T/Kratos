@@ -7,9 +7,7 @@ use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use kratos_protocol::{
-    ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, Provider, ThreadId, ThreadSettings,
-};
+use kratos_protocol::{ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings};
 use kratos_store::StoreError;
 
 use super::{ApiError, ServerState};
@@ -53,10 +51,10 @@ impl Acting {
                 }
                 error => error.into(),
             })?;
-        let access = match thread.thread.provider {
-            Provider::Codex => state.codex()?.access(thread.thread.id.clone()).await?,
-            _ => thread.settings.access(),
-        };
+        let access = state
+            .agent_of(thread.thread.provider)?
+            .access(thread.thread.id.clone())
+            .await?;
         Ok(Some(Acting {
             thread_id: thread.thread.id,
             access,

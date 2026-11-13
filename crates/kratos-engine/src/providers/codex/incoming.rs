@@ -2,7 +2,7 @@
 //! approvals and questions, or answers Kratos gives itself.
 
 use kratos_codex_client::{Incoming, Notification, RequestId, types};
-use kratos_protocol::{LiveUpdate, Provider, ThreadEventBody, ThreadId, TurnId};
+use kratos_protocol::{AgentItem, LiveUpdate, Provider, ThreadEventBody, ThreadId, TurnId};
 
 use super::actor::Actor;
 use super::wire;
@@ -104,6 +104,9 @@ impl Actor {
         let thread = self.threads.get_mut(&thread_id).expect("found above");
         if let Some(work) = thread.turn.work_mut() {
             work.changes.record(&item);
+            if let AgentItem::Message { text, .. } = &item {
+                work.last_reply = Some(text.clone());
+            }
         }
         let turn_id = TurnId::new(completed.turn_id);
         let _ = self

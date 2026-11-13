@@ -109,6 +109,27 @@ pub struct ThreadSettings {
     /// How many tokens of context the agent may fill before the provider compacts it (D76).
     /// `None` keeps the provider's own limit. Never above the window the provider reported.
     pub context_limit_tokens: Option<ContextLimit>,
+    /// The shape the agent's final reply must take, such as a Teams reviewer's report. Plan mode
+    /// ignores it, since the plan is that turn's reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_format: Option<ReportFormat>,
+}
+
+/// A JSON Schema object the agent's final reply must match. A completed turn under one ends with
+/// an [`AgentItem::Report`](crate::AgentItem::Report) holding the parsed reply, whichever provider
+/// ran it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ReportFormat(serde_json::Map<String, serde_json::Value>);
+
+impl ReportFormat {
+    pub fn new(schema: serde_json::Map<String, serde_json::Value>) -> ReportFormat {
+        ReportFormat(schema)
+    }
+
+    pub fn schema(&self) -> &serde_json::Map<String, serde_json::Value> {
+        &self.0
+    }
 }
 
 impl Default for ThreadSettings {
@@ -118,6 +139,7 @@ impl Default for ThreadSettings {
             permission: Permission::AskMe,
             plan_mode: false,
             context_limit_tokens: None,
+            report_format: None,
         }
     }
 }
@@ -128,6 +150,12 @@ impl ThreadSettings {
             permission: self.permission,
             plan_mode: self.plan_mode,
         }
+    }
+
+    /// The report format a turn under these settings follows. Plan mode has none, since the plan
+    /// is that turn's reply.
+    pub fn turn_report_format(&self) -> Option<&ReportFormat> {
+        self.report_format.as_ref().filter(|_| !self.plan_mode)
     }
 
     /// These settings with no more access than `limit`.

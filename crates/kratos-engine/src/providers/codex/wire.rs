@@ -3,8 +3,6 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use std::time::{Duration, SystemTime};
-
 use kratos_codex_client::{RequestError, ServerRequest, ServerResponse, types};
 use kratos_protocol::{
     AccessLimit, AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult,
@@ -18,7 +16,7 @@ use serde_json::Value;
 
 /// The most of a command's output a stored event keeps (L3). A proposal until measured on real
 /// sessions: Codex already shortens what it shows the model.
-pub(super) const OUTPUT_BYTES: usize = 16 * 1024;
+pub(crate) const OUTPUT_BYTES: usize = 16 * 1024;
 /// The most of one file's diff a stored event keeps (L3), also a proposal.
 pub(super) const DIFF_BYTES: usize = 32 * 1024;
 
@@ -469,8 +467,7 @@ fn usage_window(window: &types::RateLimitWindow) -> UsageWindow {
         resets_at: window
             .resets_at
             .and_then(|seconds| u64::try_from(seconds).ok())
-            .and_then(|seconds| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds)))
-            .and_then(|time| Timestamp::at(time).ok()),
+            .and_then(crate::usage::timestamp_of_unix),
     }
 }
 
@@ -502,6 +499,8 @@ pub(super) fn command_outcome(
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use serde_json::json;
 
     use super::*;

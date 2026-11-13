@@ -11,7 +11,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::providers::codex::{ProtectedFolders, queue};
+use crate::providers::codex::ProtectedFolders;
+use crate::providers::queue;
 use crate::store_thread;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -48,7 +49,6 @@ impl Harness {
             env_set: Vec::new(),
             server_folder: root.path().to_owned(),
             protected: ProtectedFolders::new(root.path().join("kratos"), None, None),
-            turn_timeout: Duration::from_secs(600),
             stop_timeout: Duration::from_secs(5),
             request_timeout: WAIT,
             platform: DangerousCommandPlatform::Posix,

@@ -1,4 +1,5 @@
 mod acting;
+mod agent;
 mod agents;
 mod auth;
 mod follows;
@@ -21,9 +22,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use kratos_protocol::routes::{
-    APPROVAL, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE, MESSAGE_DISCARD, MESSAGE_RETRY,
-    MESSAGE_STEER, QUESTION, THREAD, THREAD_EVENTS, THREAD_MESSAGES, THREAD_RESUME,
-    THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE, WORKSPACES,
+    APPROVAL, CLAUDE_CLI, CLAUDE_CLI_UPDATE, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE,
+    MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_EVENTS,
+    THREAD_MESSAGES, THREAD_RESUME, THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE,
+    WORKSPACES,
 };
 use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
 use kratos_store::{Refusal, StoreError};
@@ -32,7 +34,8 @@ use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 
 use crate::hub::Hub;
-use crate::providers::codex::{CodexProvider, ProviderError};
+use crate::providers::codex::CodexProvider;
+use crate::providers::{ProviderError, Providers};
 use crate::scheduler::{SchedulerError, SchedulerHandle};
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
@@ -51,24 +54,20 @@ const HTTP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ServerState {
     pub store: StoreThread,
     pub hub: Hub,
-    /// Codex and its scheduler, or why Codex cannot run, such as no Codex installed.
-    pub codex: Result<Codex, String>,
+    /// Each provider, or why it cannot run, such as no Codex installed.
+    pub providers: Providers,
+    /// The usage scheduler, which serves every provider that runs. `None` where no provider runs,
+    /// and where a test drives a provider without one.
+    pub scheduler: Option<SchedulerHandle>,
     pub usage: UsageTracker,
     pub token: ClientToken,
 }
 
-#[derive(Clone)]
-pub struct Codex {
-    pub provider: CodexProvider,
-    /// The usage scheduler. `None` only where a test drives Codex without one.
-    pub scheduler: Option<SchedulerHandle>,
-}
-
 impl ServerState {
     fn codex(&self) -> Result<&CodexProvider, ApiError> {
-        self.codex
+        self.providers
+            .codex
             .as_ref()
-            .map(|codex| &codex.provider)
             .map_err(|missing| ApiError::unavailable(missing.clone()))
     }
 }
@@ -191,6 +190,8 @@ fn user_routes() -> Router<ServerState> {
         .route(THREAD_SKILLS, get(agents::skills))
         .route(CONTINUATION_SCHEDULE, post(agents::schedule))
         .route(USAGE, get(agents::usage))
+        .route(CLAUDE_CLI, get(agents::claude_cli))
+        .route(CLAUDE_CLI_UPDATE, post(agents::update_claude_cli))
         .route(EVENTS, get(socket::events))
 }
 

@@ -10,8 +10,7 @@ rust-version.workspace = true
 [dependencies]
 humantime.workspace = true
 serde.workspace = true
-
-[dev-dependencies]
+# A report format is a JSON Schema object the engine passes through unread.
 serde_json.workspace = true
 
 [lints]

@@ -7,8 +7,7 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, AccessLimit, CreateThread, ListEvents, ListThreads, Provider, Seq,
-    ThreadId,
+    ACTING_THREAD_HEADER, AccessLimit, CreateThread, ListEvents, ListThreads, Seq, ThreadId,
 };
 
 use super::acting::Acting;
@@ -32,7 +31,8 @@ pub(super) async fn list_threads(
 }
 
 /// `POST /api/threads`: 201 with the thread. Body (413 or 400), then the acting thread's access
-/// (400 or 403), then a Codex thread's settings (400), then the workspace (404), then the insert.
+/// (400 or 403), then the settings the thread's provider supports (400), then the workspace (404),
+/// then the insert.
 pub(super) async fn create_thread(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -42,8 +42,9 @@ pub(super) async fn create_thread(
     if let Some(acting) = Acting::of(&state, &headers).await? {
         acting.may_create(&request.settings_or_default())?;
     }
-    if let (Provider::Codex, Some(settings)) = (request.provider, &request.settings) {
-        state.codex()?.check_settings(settings.clone()).await?;
+    if let Some(settings) = &request.settings {
+        let agent = state.agent_of(request.provider)?;
+        agent.check_settings(settings.clone()).await?;
     }
     let thread = state
         .store
