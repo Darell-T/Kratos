@@ -18,7 +18,8 @@ The user chose these access modes for Codex threads on 2026-10-29, so each mode 
 
 Every sandboxed mode denies Kratos's data folder, so its commands cannot read the client token. A Full access command
 runs as the user, so it can read the token and could use it to decide its own approvals. In every mode, an approved
-patch into a credential folder or Kratos's data folder asks first.
+patch into a credential folder or Kratos's data folder asks first. Under Approve for me, a patch outside the thread's
+workspace and temporary folders asks too, as a Claude write does.
 
 Claude Code threads have no sandbox. A Claude command runs as the user in every mode and on every system, so it can
 read the client token. Kratos's own decision on each tool request and the dangerous-command check are the only guards:

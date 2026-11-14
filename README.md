@@ -122,6 +122,11 @@ hook sends every command to Kratos's decision, including the ones Claude Code wo
 check misses many destructive commands, so an unflagged command can change or delete anything the user can, and can
 read Kratos's client token.
 
+The hook sends every Claude tool to that decision. `ToolSearch` and `Skill` run without asking. A tool outside Kratos's
+rule table, such as `Agent` or `EnterWorktree`, asks the user. Plan mode reads files without asking, under every
+permission, and asks before anything else. A write outside the thread's workspace and the temporary folder asks under
+Approve for me, for Claude and Codex alike. A thread's tools create and message threads only in its own workspace.
+
 ```sh
 cargo run -p kratos-client -- send <thread-id> "Explain this repository"
 cargo run -p kratos-client -- approve <approval-id> accept

@@ -100,6 +100,15 @@ Darell made these after the code review. They change the R4 design above.
 - **Claude's own shell tools are back.** `Bash` and `PowerShell` run in the CLI. Kratos's `run_command` tool for Claude, and the Codex command runner behind it, are gone. `Monitor` stays off until its use is decided.
 - **Kratos must work on Windows, macOS and Linux.** It is not Windows first.
 
+A second set of answers followed:
+
+- **Every Claude tool goes to Kratos's decision.** `ToolSearch` and `Skill` run without asking. Every other tool outside the rule table asks the user. `Monitor` stays off. Measured with Claude Code 2.1.322: `Agent` (the helper tool) and `EnterWorktree` reached the decision, plan mode loaded `ExitPlanMode` through `ToolSearch`, and a helper agent's own tool calls passed the pre-tool hook, tagged with its `agent_id`.
+- **Plan mode reads without asking,** under every permission. `WebFetch`, `WebSearch` and shell commands still ask in plan mode.
+- **Approve for me asks before a write outside the workspace** for both providers. This overrides the Codex wording of D93. The rule lives once, in `providers/writes.rs`.
+- **A thread's tools reach only its own workspace** when they create or message threads.
+- **Line limits come from measurement.** Claude: 256 MiB, because an `Edit` sends the whole old file (a 3,025,002-byte file sent a 3,082,014-byte line). Codex: 256 MiB, because `thread/read` sends a whole history (the largest measured was 3,195,219 bytes).
+- **Stop, Discard and shutdown.** A forced Codex restart says which other turns it ended. Discard cancels a message when Codex cannot load its thread. Engine shutdown cancels an update that has not begun installing and waits up to 30 min 40 s for one that has.
+
 A Claude command now runs as the user on every system. It can read anything the user can, including Kratos's client token, so plan D19 does not hold for Claude threads. Measured with Claude Code 2.1.322 on Haiku: in default and plan mode the CLI ran `echo`, `pwd`, `ls`, `cat` and `git status`, and `Read`, `Glob` and `Grep` inside the folder, without asking, and an allow rule in settings ran `mkdir` without asking. The pre-tool hook makes every one of those reach Kratos's decision.
 
 ## Still open
