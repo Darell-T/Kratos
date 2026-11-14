@@ -4,8 +4,8 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, ContextLimit, Message, PauseReason, Question, RequiredText, Seq, Timestamp, TurnId,
-    WorkspaceId,
+    Approval, ContextLimit, Message, PauseReason, Question, ReportFormat, RequiredText, Seq,
+    Timestamp, TurnId, WorkspaceId,
 };
 
 string_id! {
@@ -113,23 +113,6 @@ pub struct ThreadSettings {
     /// ignores it, since the plan is that turn's reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_format: Option<ReportFormat>,
-}
-
-/// A JSON Schema object the agent's final reply must match. A completed turn under one ends with
-/// an [`AgentItem::Report`](crate::AgentItem::Report) holding the parsed reply, whichever provider
-/// ran it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ReportFormat(serde_json::Map<String, serde_json::Value>);
-
-impl ReportFormat {
-    pub fn new(schema: serde_json::Map<String, serde_json::Value>) -> ReportFormat {
-        ReportFormat(schema)
-    }
-
-    pub fn schema(&self) -> &serde_json::Map<String, serde_json::Value> {
-        &self.0
-    }
 }
 
 impl Default for ThreadSettings {

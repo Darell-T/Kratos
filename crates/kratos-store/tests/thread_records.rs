@@ -660,12 +660,15 @@ fn settings_pauses_and_running_turns_survive_reopening() {
         permission: Permission::FullAccess,
         plan_mode: true,
         context_limit_tokens: ContextLimit::new(100_000),
-        report_format: Some(ReportFormat::new(
-            json!({ "type": "object", "required": ["verdict"] })
-                .as_object()
-                .unwrap()
-                .clone(),
-        )),
+        report_format: Some(
+            ReportFormat::new(
+                json!({ "type": "object", "required": ["verdict"] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            )
+            .unwrap(),
+        ),
     };
     let reason = PauseReason::TimedOut {
         turn_id: TurnId::new("turn-0".into()),
