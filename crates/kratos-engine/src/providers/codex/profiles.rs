@@ -1,6 +1,7 @@
 //! The sandbox every Codex turn runs in. Plan, Ask me, and Approve for me select named permission
 //! profiles Kratos defines when it starts the app-server. Full access selects Codex's built-in
-//! `:danger-full-access`, which runs commands without a sandbox, as Zeron does. These profiles write
+//! `:danger-full-access`, which runs commands without a sandbox, because a user who picks Full
+//! access asks for an agent that works on the whole machine. These profiles write
 //! only the thread's workspaces and the temp folder: on Windows, Codex sets permissions on every
 //! file below a write root before the thread starts, and for a home folder that never finished.
 //!
@@ -10,8 +11,8 @@
 //! denies Kratos's data folder, so no sandboxed command can read the client token (D19). A Full
 //! access command runs as the user and can. An approved patch writes wherever it points, so
 //! [`super::policy`] checks patch paths against [`ProtectedFolders`] before accepting one.
-//! A Claude command runs in exactly the profile a Codex thread at the same level uses. Claude's own
-//! file tools run outside every sandbox, so [`sandbox_may_write`] gives them the same scope.
+//! Claude's file tools run outside every sandbox, so [`sandbox_may_write`] gives an automatic
+//! Claude write the same scope as a Codex command at the same level.
 
 use std::ffi::OsString;
 use std::io;

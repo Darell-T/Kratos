@@ -41,8 +41,8 @@ use kratos_engine::usage::{LimitStop, UsageTracker};
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a turn Codex agreed to stop may take to end before Kratos closes Codex.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a Claude process may sit unused before Kratos closes it, Zeron's 30 minutes. A warm
-/// process starts the next turn at once; past this, holding its memory costs more than a resume.
+/// How long a Claude process may sit unused before Kratos closes it. A warm process starts the
+/// next turn at once; after half an hour unused, holding its memory costs more than a resume.
 const SESSION_IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
 /// The feed `claude update` reads for a native install: `{feed}/latest` names the newest release.
 const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";

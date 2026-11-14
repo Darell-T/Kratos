@@ -7,7 +7,7 @@ TypeScript engine remain separate migration steps.
 
 ## Permission scopes
 
-The user chose Zeron's access modes on 2026-10-29:
+The user chose these access modes for Codex threads on 2026-10-29, so each mode names what an agent may touch without asking:
 
 - Plan mode reads everything except Kratos's data folder and writes nothing.
 - **Ask me** writes the thread's workspace and temporary folders, and asks before every action.
@@ -19,6 +19,10 @@ The user chose Zeron's access modes on 2026-10-29:
 Every sandboxed mode denies Kratos's data folder, so its commands cannot read the client token. A Full access command
 runs as the user, so it can read the token and could use it to decide its own approvals. In every mode, an approved
 patch into a credential folder or Kratos's data folder asks first.
+
+Claude Code threads have no sandbox. A Claude command runs as the user in every mode and on every system, so it can
+read the client token. Kratos's own decision on each tool request and the dangerous-command check are the only guards:
+Ask me asks before every command, and Approve for me and Full access ask before flagged ones.
 
 The earlier Windows scope made the user's home folder writable. Codex sets permissions on every file below a write
 root before a thread starts, and it never removes them. On a home folder with hundreds of thousands of files, that
