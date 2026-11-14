@@ -251,6 +251,28 @@ pub struct RateLimitEvent {
     pub metadata: BTreeMap<String, Value>,
 }
 
+/// What the CLI reports of its background tasks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Background {
+    /// How many run now. Each report gives the whole set, so the latest count is the current one.
+    Running(usize),
+    /// One ended. The CLI then starts a turn of its own to report it, with no message of the
+    /// client's in it. `summary` is what the CLI said of the task.
+    Ended { summary: Option<String> },
+}
+
+impl Background {
+    fn of(raw: &Value) -> Option<Background> {
+        match raw["subtype"].as_str()? {
+            "background_tasks_changed" => Some(Background::Running(raw["tasks"].as_array()?.len())),
+            "task_notification" => Some(Background::Ended {
+                summary: raw["summary"].as_str().map(str::to_owned),
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Messages forwarded to the engine. Unknown kinds remain available as their original JSON.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamMessage {
@@ -264,11 +286,9 @@ pub enum StreamMessage {
     RateLimit(RateLimitEvent),
     /// The CLI's request failed and the CLI retries by itself.
     ApiRetry(ApiRetry),
-    /// How many background tasks, such as a shell command started with `run_in_background`, the
-    /// CLI runs now. Each frame gives the whole set, so the latest count is the current one.
-    BackgroundTasks {
-        running: usize,
-    },
+    /// News of the CLI's background tasks, such as a shell command started with
+    /// `run_in_background`.
+    Background(Background),
     Unrecognized {
         kind: String,
         raw: Value,
@@ -314,12 +334,8 @@ impl StreamMessage {
                 },
             });
         }
-        if raw["subtype"] == "background_tasks_changed"
-            && let Some(tasks) = raw["tasks"].as_array()
-        {
-            return Ok(Self::BackgroundTasks {
-                running: tasks.len(),
-            });
+        if let Some(background) = Background::of(&raw) {
+            return Ok(Self::Background(background));
         }
         if raw["subtype"] != "init" {
             return Ok(Self::Unrecognized {

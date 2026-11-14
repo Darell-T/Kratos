@@ -11,7 +11,7 @@ use kratos_protocol::{
     MessageInput, MessageOrigin, MessageStatus, NetworkAccess, PathAccess, PathAccessMode,
     PauseReason, Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption,
     ReplySoFar, RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId,
-    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOutcome, UsageWait,
+    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOrigin, TurnOutcome, UsageWait,
 };
 use std::fmt::Debug;
 
@@ -119,7 +119,10 @@ fn a_queued_message_reports_its_origin_and_status_beside_its_input() {
 #[test]
 fn turn_events_keep_their_stored_shape() {
     assert_wire(
-        ThreadEventBody::TurnStarted { turn_id: turn() },
+        ThreadEventBody::TurnStarted {
+            turn_id: turn(),
+            origin: TurnOrigin::Messages,
+        },
         r#"{"kind":"turn.started","turnId":"turn-1"}"#,
     );
     assert_wire(
@@ -584,4 +587,37 @@ fn narrowing_settings_keeps_what_both_sides_allow_and_nothing_more() {
             }
         }
     }
+}
+
+#[test]
+fn a_turn_started_by_messages_keeps_its_old_shape_and_one_after_a_background_task_names_it() {
+    // Catches older turn.started events unreadable, the wire shape of every message-started turn
+    // changing for clients, and a self-started turn indistinguishable from one the user started.
+    let older: ThreadEventBody =
+        serde_json::from_value(serde_json::json!({ "kind": "turn.started", "turnId": "t1" }))
+            .unwrap();
+    assert_eq!(
+        older,
+        ThreadEventBody::TurnStarted {
+            turn_id: TurnId::new("t1".into()),
+            origin: TurnOrigin::Messages,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&older).unwrap(),
+        serde_json::json!({ "kind": "turn.started", "turnId": "t1" })
+    );
+    let own = ThreadEventBody::TurnStarted {
+        turn_id: TurnId::new("t2".into()),
+        origin: TurnOrigin::BackgroundTask {
+            summary: Some("build finished".into()),
+        },
+    };
+    let wire = serde_json::json!({ "kind": "turn.started", "turnId": "t2",
+        "origin": { "kind": "backgroundTask", "summary": "build finished" } });
+    assert_eq!(serde_json::to_value(&own).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<ThreadEventBody>(wire).unwrap(),
+        own
+    );
 }

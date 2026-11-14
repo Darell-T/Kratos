@@ -86,6 +86,22 @@ pub(super) struct OpenSession {
     /// Background tasks the CLI reports running. Closing the process would end them, so it is not
     /// idle while any run.
     pub background_tasks: usize,
+    /// What the CLI said of the background tasks that ended since its last turn began. The turn it
+    /// then starts on its own names them.
+    pub finished_tasks: Vec<String>,
+}
+
+impl OpenSession {
+    /// Keeps what the CLI reports of its background tasks: how many run, which hold the process
+    /// open, and which ended, which name the turn the CLI then starts on its own.
+    pub(super) fn note(&mut self, background: kratos_claude_client::Background) {
+        match background {
+            kratos_claude_client::Background::Running(running) => self.background_tasks = running,
+            kratos_claude_client::Background::Ended { summary } => {
+                self.finished_tasks.extend(summary);
+            }
+        }
+    }
 }
 
 pub(super) enum Session {
@@ -237,8 +253,16 @@ impl ThreadState {
         }
     }
 
+    /// A message is in flight, a process starts, or a turn runs: one the CLI started on its own
+    /// runs with no message in flight.
     pub(super) fn is_busy(&self) -> bool {
-        !self.pending.is_empty() || matches!(self.session, Session::Opening)
+        !self.pending.is_empty() || self.run.is_some() || matches!(self.session, Session::Opening)
+    }
+
+    /// The running turn is one the CLI started on its own. A turn messages started keeps them in
+    /// flight until its result.
+    pub(super) fn runs_own_turn(&self) -> bool {
+        self.run.is_some() && self.pending.is_empty()
     }
 
     /// The thread has a message in flight, a process starting, or a stop.

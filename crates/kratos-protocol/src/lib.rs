@@ -60,7 +60,7 @@ pub use approvals::{
 };
 pub use cli::{CliRelease, CliUpdate};
 pub use context_limit::ContextLimit;
-pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody};
+pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody, TurnOrigin};
 pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
     PostMessage, QueueFull, SendMessage,

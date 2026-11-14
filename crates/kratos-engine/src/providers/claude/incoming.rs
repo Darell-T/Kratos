@@ -53,7 +53,11 @@ impl Actor {
 
     async fn on_message(&mut self, thread_id: &ThreadId, message: StreamMessage) {
         match message {
-            StreamMessage::Init(_) => self.mark_started(thread_id),
+            StreamMessage::Init(_) => {
+                self.mark_started(thread_id);
+                self.start_own_turn_if_idle(thread_id).await;
+            }
+
             StreamMessage::Replay { uuid } => {
                 self.mark_started(thread_id);
                 self.on_replay(thread_id, &uuid).await;
@@ -75,13 +79,13 @@ impl Actor {
                 );
                 self.provider_retrying(thread_id, message).await;
             }
-            StreamMessage::BackgroundTasks { running } => {
+            StreamMessage::Background(background) => {
                 if let Some(open) = self
                     .threads
                     .get_mut(thread_id)
                     .and_then(|thread| thread.open_mut())
                 {
-                    open.background_tasks = running;
+                    open.note(background);
                 }
             }
             StreamMessage::Unrecognized { .. } => {}
@@ -107,19 +111,26 @@ impl Actor {
             thread.answering_model = Some(model.to_owned());
         }
         let items = wire::assistant_items(assistant);
-        let Some(head) = self.threads.get(thread_id).and_then(|thread| {
+        let Some(thread) = self.threads.get(thread_id) else {
+            return;
+        };
+        let (run, head) = (
+            thread.run.clone(),
             thread
                 .pending
                 .first()
-                .map(|flight| flight.message_id.clone())
-        }) else {
-            return;
-        };
+                .map(|flight| flight.message_id.clone()),
+        );
         if items.is_empty() {
             return;
         }
-        let Ok(turn_id) = self.record_run(thread_id, vec![head], None).await else {
-            return;
+        let turn_id = match (run, head) {
+            (Some(run), _) => run,
+            (None, Some(head)) => match self.record_run(thread_id, vec![head], None).await {
+                Ok(turn_id) => turn_id,
+                Err(_) => return,
+            },
+            (None, None) => return,
         };
         let _ = self
             .write(thread_id, move |write| {

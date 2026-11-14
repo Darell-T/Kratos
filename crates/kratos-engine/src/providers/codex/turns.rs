@@ -432,7 +432,7 @@ impl Actor {
                             turn_id: turn_id.clone(),
                         },
                     )?;
-                    write.start_turn(turn_id)
+                    write.start_turn(turn_id, kratos_protocol::TurnOrigin::Messages)
                 }
             })
             .await;

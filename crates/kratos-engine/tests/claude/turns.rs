@@ -17,7 +17,11 @@ fn accepted_by(status: &MessageStatus, turn: &str) -> bool {
 fn turn_trail(log: &[ThreadEventBody]) -> Vec<String> {
     log.iter()
         .filter_map(|event| match event {
-            ThreadEventBody::TurnStarted { turn_id } => Some(format!("started {turn_id}")),
+            ThreadEventBody::TurnStarted { turn_id, origin } => Some(if origin.is_messages() {
+                format!("started {turn_id}")
+            } else {
+                format!("started {turn_id} on its own")
+            }),
             ThreadEventBody::TurnCompleted {
                 turn_id, outcome, ..
             } => Some(match outcome {

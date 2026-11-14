@@ -176,7 +176,8 @@ impl Actor {
         }
         let run = thread.run.take();
         let sent = std::mem::take(&mut thread.pending);
-        if sent.is_empty() {
+        // A turn the CLI started on its own has no message in flight, only its end to record.
+        if sent.is_empty() && run.is_none() {
             return;
         }
         let settling = Settling {
@@ -211,6 +212,15 @@ impl Actor {
             })
             .await;
         if ended.is_err() {
+            return;
+        }
+        self.settle_from_transcript(thread_id, settling);
+    }
+
+    /// Reads the transcript to settle the messages a CLI was sent before it ended. A turn the CLI
+    /// started on its own was sent none, and has nothing to settle.
+    fn settle_from_transcript(&mut self, thread_id: &ThreadId, settling: Settling) {
+        if settling.sent.is_empty() {
             return;
         }
         let path = self.transcript_of(thread_id);

@@ -6,7 +6,9 @@
 //! message still waiting for its result starts the next run when Claude takes it.
 
 use kratos_claude_client::{Control, TurnResult};
-use kratos_protocol::{LiveUpdate, Message, MessageId, MessageStatus, Provider, ThreadId, TurnId};
+use kratos_protocol::{
+    LiveUpdate, Message, MessageId, MessageStatus, Provider, ThreadId, TurnId, TurnOrigin,
+};
 use kratos_store::{StoreError, ThreadWrite};
 
 use super::actor::{Actor, Done, Reply};
@@ -248,7 +250,9 @@ impl Actor {
             .filter(|flight| result.message_ids.contains(&flight.native))
             .map(|flight| flight.message_id.clone())
             .collect();
-        if ended.is_empty() {
+        // A result that names no message ends the turn the CLI started on its own, and nothing
+        // else: measured, the CLI sends such a result only for that turn.
+        if ended.is_empty() && !thread.runs_own_turn() {
             return;
         }
         if let Some(open) = thread.open_mut() {
@@ -306,6 +310,36 @@ impl Actor {
         self.dispatch(thread_id).await;
     }
 
+    /// The CLI began a turn with no message of the user's in flight: after a background task
+    /// ended, it continues on its own (measured with Claude Code 2.1.322). The turn is recorded as
+    /// such, so its replies, approvals, and end are the thread's like any other turn's.
+    pub(super) async fn start_own_turn_if_idle(&mut self, thread_id: &ThreadId) {
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
+        if !thread.pending.is_empty() || thread.run.is_some() {
+            return;
+        }
+        let Some(open) = thread.open_mut() else {
+            return;
+        };
+        let finished = std::mem::take(&mut open.finished_tasks);
+        let origin = TurnOrigin::BackgroundTask {
+            summary: (!finished.is_empty()).then(|| finished.join("\n")),
+        };
+        thread.rejection = None;
+        thread.answering_model = None;
+        let turn_id = TurnId::new(uuid::Uuid::new_v4().to_string());
+        let recorded = turn_id.clone();
+        let started = self
+            .write(thread_id, move |write| write.start_turn(recorded, origin))
+            .await;
+        if started.is_ok() {
+            let thread = self.threads.get_mut(thread_id).expect("found above");
+            thread.run = Some(turn_id);
+        }
+    }
+
     /// Records that Claude took `accept` into the turn that runs, starting one when none does, and
     /// ends the turn with `end` when it has an outcome. The first write for a thread also records
     /// the session and the plan that pays for it (D24). One write, so the log never shows a message
@@ -345,7 +379,7 @@ impl Actor {
             }
             accept_submitted(write, &accept, &recorded_turn)?;
             if !started {
-                write.start_turn(recorded_turn.clone())?;
+                write.start_turn(recorded_turn.clone(), TurnOrigin::Messages)?;
             }
             end.map_or(Ok(()), |end| end_turn(write, recorded_turn, end, changes))
         })
@@ -377,7 +411,10 @@ impl Actor {
         let thread = self.threads.get_mut(thread_id).expect("loaded above");
         if !thread.is_busy() {
             let _ = reply.send(Ok(()));
-        } else if thread.stopping || thread.pending.is_empty() || thread.open().is_none() {
+        } else if thread.stopping
+            || (thread.pending.is_empty() && thread.run.is_none())
+            || thread.open().is_none()
+        {
             // Stopped when the interrupt is answered, or once the message is written.
             thread.stop_waiters.push(reply);
         } else {

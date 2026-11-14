@@ -680,7 +680,12 @@ fn settings_pauses_and_running_turns_survive_reopening() {
         !write.pause(reason.clone()).unwrap(),
         "the same pause again records nothing"
     );
-    write.start_turn(TurnId::new("turn-1".into())).unwrap();
+    write
+        .start_turn(
+            TurnId::new("turn-1".into()),
+            kratos_protocol::TurnOrigin::Messages,
+        )
+        .unwrap();
     write.commit().unwrap();
     drop(store);
 

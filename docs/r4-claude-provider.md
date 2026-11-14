@@ -106,6 +106,7 @@ A second set of answers followed:
 - **Plan mode reads without asking,** under every permission. `WebFetch`, `WebSearch` and shell commands still ask in plan mode.
 - **Approve for me asks before a write outside the workspace** for both providers. This overrides the Codex wording of D93. The rule lives once, in `providers/writes.rs`.
 - **A thread's tools reach only its own workspace** when they create or message threads.
+- **Turns Claude starts by itself are recorded.** After a background command ends, the CLI starts a turn with no message of the user's. Kratos records it as a turn whose `turn.started` event carries `origin: {kind: "backgroundTask", summary}`, keeps its replies, and shows its approvals like any other turn's. Turns started by messages keep their old event shape. No migration.
 - **Line limits come from measurement.** Claude: 256 MiB, because an `Edit` sends the whole old file (a 3,025,002-byte file sent a 3,082,014-byte line). Codex: 256 MiB, because `thread/read` sends a whole history (the largest measured was 3,195,219 bytes).
 - **Stop, Discard and shutdown.** A forced Codex restart says which other turns it ended. Discard cancels a message when Codex cannot load its thread. Engine shutdown cancels an update that has not begun installing and waits up to 30 min 40 s for one that has.
 

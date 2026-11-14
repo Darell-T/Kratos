@@ -195,7 +195,7 @@ async fn a_delivery_the_history_shows_is_recorded_as_accepted() {
         .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
         .await;
     assert!(
-        matches!(started, ThreadEventBody::TurnStarted { turn_id } if turn_id.as_str() == "turn-1")
+        matches!(started, ThreadEventBody::TurnStarted { turn_id, origin: kratos_protocol::TurnOrigin::Messages } if turn_id.as_str() == "turn-1")
     );
     assert!(matches!(
         harness.message("a").await.status,
