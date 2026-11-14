@@ -179,8 +179,21 @@ impl Actor {
         }
         let found = wire::turn_with_message(&history.turns, message_id.as_str())
             .map(|turn| kratos_protocol::TurnId::new(turn.id.clone()));
+        self.settle_discard(&thread_id, message_id, found, reply)
+            .await;
+    }
+
+    /// Records a discarded message as accepted into `found`, the turn Codex's history shows took
+    /// it, or as cancelled. Either way it is never sent again (D11).
+    pub(super) async fn settle_discard(
+        &mut self,
+        thread_id: &ThreadId,
+        message_id: MessageId,
+        found: Option<kratos_protocol::TurnId>,
+        reply: Reply<Message>,
+    ) {
         let settled = self
-            .write(&thread_id, move |write| {
+            .write(thread_id, move |write| {
                 // Discarding prevents a replay; it cannot undo work Codex may have done.
                 let status = match found {
                     Some(turn_id) => MessageStatus::Accepted { turn_id },
@@ -192,7 +205,7 @@ impl Actor {
             })
             .await;
         let _ = reply.send(settled);
-        self.dispatch(&thread_id).await;
+        self.dispatch(thread_id).await;
     }
 
     /// Lets a paused queue run again. See [`resume_queue`].

@@ -316,7 +316,16 @@ impl Actor {
             Err(error) => {
                 let message = format!("Codex could not load the thread: {error}");
                 thread.link = Link::Detached;
-                fail_discards(thread, &message);
+                // A refusal means Codex cannot show the history, now or later, so a message the
+                // user discards is cancelled unseen. A timeout or an exit may pass, and is retried.
+                if matches!(error, RequestError::Rpc { .. }) {
+                    for (message_id, reply) in std::mem::take(&mut thread.discards) {
+                        self.settle_discard(&thread_id, message_id, None, reply)
+                            .await;
+                    }
+                } else {
+                    fail_discards(thread, &message);
+                }
                 self.pause_unavailable_if_waiting(&thread_id, message).await;
             }
         }

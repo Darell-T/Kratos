@@ -1,7 +1,6 @@
 //! What an engine that starts again finds of the work the last one left (L1): no Codex process
 //! outlives the engine that started it.
 
-use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
     ApprovalOutcome, MessageStatus, PauseReason, ThreadEventBody, TurnChanges, TurnOutcome,
 };
@@ -227,8 +226,9 @@ async fn a_discard_sent_while_codex_loads_the_thread_settles_once_it_has() {
 }
 
 #[tokio::test]
-async fn a_discard_sent_while_codex_loads_the_thread_fails_when_the_load_fails() {
-    // Catches a discard left waiting for good when Codex cannot load the thread.
+async fn a_discard_settles_the_message_as_cancelled_when_codex_cannot_load_the_thread() {
+    // Catches a discard left waiting for good when Codex cannot load the thread, and one that
+    // answers 503 every time, so the uncertain message holds the queue for good (C8).
     let mut harness = Harness::start(Options::default()).await;
     harness.send("a", "first").await;
     harness.held("turn/start", 1).await;
@@ -238,7 +238,7 @@ async fn a_discard_sent_while_codex_loads_the_thread_fails_when_the_load_fails()
         ..Options::default()
     };
 
-    let harness = Harness::start_in(root, options, Some(thread_id)).await;
+    let mut harness = Harness::start_in(root, options, Some(thread_id)).await;
     let discarded = tokio::time::timeout(
         WAIT,
         harness
@@ -247,15 +247,13 @@ async fn a_discard_sent_while_codex_loads_the_thread_fails_when_the_load_fails()
     )
     .await;
 
-    let error = discarded.expect("the discard settles").unwrap_err();
+    let discarded = discarded.expect("the discard settles").unwrap();
+    assert_eq!(discarded.status, MessageStatus::Cancelled);
+    assert_eq!(harness.message("a").await.status, MessageStatus::Cancelled);
     assert!(
-        matches!(error, ProviderError::Unavailable(ref message) if message.contains("could not load the thread")),
-        "{error:?}"
+        harness.turn_requests().await.is_empty(),
+        "a cancelled message is never sent"
     );
-    assert!(matches!(
-        harness.message("a").await.status,
-        MessageStatus::Unknown { .. }
-    ));
 }
 
 #[tokio::test]
