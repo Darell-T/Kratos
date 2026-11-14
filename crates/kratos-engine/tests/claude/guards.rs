@@ -403,3 +403,43 @@ async fn the_pre_tool_hook_sends_every_tool_kratos_rules_on_to_the_permission_ca
     .await;
     assert_eq!(unruled, json!({ "continue": true }));
 }
+
+#[tokio::test]
+async fn in_plan_mode_the_cli_writes_its_own_plan_file_without_asking_the_user() {
+    // Catches the pre-tool hook sending Claude's plan file, under the protected `~/.claude`, to the
+    // user for approval on every plan, and a plan-file exemption that reaches any other file.
+    for plan_mode in [true, false] {
+        let harness = Harness::start(Options {
+            settings: ThreadSettings {
+                plan_mode,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+        let plans = harness.claude_home().join(".claude").join("plans");
+        for (index, path, exempt) in [
+            (0, plans.join("plan.md"), plan_mode),
+            (1, plans.join("..").join("settings.json"), false),
+            (2, plans.join("deeper").join("plan.md"), false),
+            (
+                3,
+                harness.claude_home().join(".claude").join("settings.json"),
+                false,
+            ),
+        ] {
+            let answer = hook(
+                &harness,
+                &launch,
+                &format!("plan-{index}"),
+                "PreToolUse",
+                "Write",
+                json!({ "file_path": path, "content": "plan" }),
+            )
+            .await;
+            let asked = answer["hookSpecificOutput"]["permissionDecision"] == "ask";
+            assert_eq!(asked, !exempt, "plan mode {plan_mode}, {path:?}: {answer}");
+        }
+    }
+}
