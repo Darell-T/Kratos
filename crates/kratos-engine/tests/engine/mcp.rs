@@ -968,3 +968,56 @@ fn a_question_answer_cannot_exceed_the_senders_or_the_receivers_turn_permission(
         );
     }
 }
+
+#[test]
+fn a_thread_creates_and_messages_threads_only_in_its_own_workspace() {
+    // Catches a thread confined to one workspace starting or driving a thread in another, which
+    // undoes the confinement: another workspace may hold a repository the user never put in its
+    // reach.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let own = workspace(&engine);
+    let other = workspace(&engine);
+    let sender = thread(&engine, &own, Provider::Codex, Permission::ApproveForMe);
+    let elsewhere = thread(&engine, &other, Provider::Codex, Permission::ApproveForMe);
+    let mut mcp = Mcp::start(&engine, &sender);
+
+    let (created, refused) = mcp.tool(
+        "create_thread",
+        json!({ "title": "elsewhere", "workspaceId": other.as_str() }),
+    );
+    assert!(
+        refused && created.to_string().contains("own workspace"),
+        "{created}"
+    );
+    let (sent, refused) = mcp.tool(
+        "send_message",
+        json!({ "threadId": elsewhere.id, "text": "Change this repository." }),
+    );
+    assert!(
+        refused && sent.to_string().contains("own workspace"),
+        "{sent}"
+    );
+    let events = engine
+        .client()
+        .get(&format!("/api/threads/{}/events", elsewhere.id))
+        .unwrap();
+    assert_eq!(
+        events.body,
+        json!([]),
+        "nothing reached the other workspace"
+    );
+    let threads = engine
+        .client()
+        .get(&format!("/api/threads?workspaceId={}", other.as_str()))
+        .unwrap();
+    assert_eq!(
+        threads.body.as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        threads.body
+    );
+
+    let (created, refused) = mcp.tool("create_thread", json!({ "title": "beside me" }));
+    assert!(!refused, "{created}");
+}

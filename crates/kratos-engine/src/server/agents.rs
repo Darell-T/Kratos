@@ -41,6 +41,16 @@ pub(super) async fn post_message(
     let thread_id = path(id)?;
     let agent = state.agent(&thread_id).await?;
     let acting = Acting::of(&state, &headers).await?;
+    if let Some(acting) = &acting {
+        let target = thread_id.clone();
+        let workspace_id = state
+            .store
+            .call(move |store| store.provider_thread(&target))
+            .await?
+            .thread
+            .workspace_id;
+        acting.in_workspace(&workspace_id)?;
+    }
     send_to_agent(&agent, acting, thread_id, body).await
 }
 

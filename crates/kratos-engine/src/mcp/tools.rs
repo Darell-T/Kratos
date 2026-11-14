@@ -44,7 +44,7 @@ const TOOLS: [Tool; 11] = [
     Tool { name: "read_thread", input: read_input, run: read_thread,
         description: "A thread's transcript as short lines, newest last. Pass the returned lastSeq as after to read only what is new." },
     Tool { name: "create_thread", input: create_input, run: create_thread,
-        description: "Start a new Codex thread, in your workspace unless you name one. It gets your permission unless you ask for less." },
+        description: "Start a new Codex thread in your own workspace. Naming another workspace is refused. It gets your permission unless you ask for less." },
     Tool { name: "send_message", input: send_input, run: send_message,
         description: "Send a message to another thread. It starts a turn when the thread is idle and queues otherwise. The message is labelled with your thread's id, and once its agent has it, that thread runs with no more than your permission until the user raises it." },
     Tool { name: "wait_for_turn", input: wait_input, run: wait_for_turn,

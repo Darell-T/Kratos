@@ -40,6 +40,7 @@ pub(super) async fn create_thread(
 ) -> Result<Response, ApiError> {
     let request: CreateThread = read_json(body).await?;
     if let Some(acting) = Acting::of(&state, &headers).await? {
+        acting.in_workspace(&request.workspace_id)?;
         acting.may_create(&request.settings_or_default())?;
     }
     if let Some(settings) = &request.settings {

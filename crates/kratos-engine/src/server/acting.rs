@@ -1,13 +1,15 @@
 //! Requests a thread's agent makes through Kratos's tools. The `Kratos-Thread` header names that
 //! thread, and a request without it comes from the user. Such a request reaches only the routes the
-//! tools call, may give no thread more access than the acting thread has, and may not act on the
-//! acting thread itself.
+//! tools call, may give no thread more access than the acting thread has, may not act on the
+//! acting thread itself, and creates or messages threads only in the acting thread's workspace.
 
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use kratos_protocol::{ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings};
+use kratos_protocol::{
+    ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings, WorkspaceId,
+};
 use kratos_store::StoreError;
 
 use super::{ApiError, ServerState};
@@ -23,6 +25,7 @@ pub(super) async fn refuse_agents(request: Request, next: Next) -> Response {
 
 pub(super) struct Acting {
     thread_id: ThreadId,
+    workspace_id: WorkspaceId,
     pub(super) access: AccessLimit,
 }
 
@@ -57,6 +60,7 @@ impl Acting {
             .await?;
         Ok(Some(Acting {
             thread_id: thread.thread.id,
+            workspace_id: thread.thread.workspace_id,
             access,
         }))
     }
@@ -65,6 +69,17 @@ impl Acting {
         if self.thread_id == *thread_id {
             return Err(forbidden(
                 "That is your own thread. Kratos's tools act on other threads.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// It creates or messages threads only in its own workspace. The thread's permission covers its
+    /// own folder, and another workspace may hold a repository the user never put in its reach.
+    pub(super) fn in_workspace(&self, workspace_id: &WorkspaceId) -> Result<(), ApiError> {
+        if self.workspace_id != *workspace_id {
+            return Err(forbidden(
+                "Kratos's tools reach only threads in your own workspace. Ask the user to work in another one.",
             ));
         }
         Ok(())
