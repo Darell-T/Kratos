@@ -12,12 +12,13 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use super::super::codex::{ProtectedFolders, sandbox_may_write};
+use super::super::codex::ProtectedFolders;
 use super::actor::Actor;
 use super::paths;
-use super::policy::{self, Action, Decision, Destination};
+use super::policy::{self, Action, Decision};
 use super::requests::{Answer, Pending};
 use super::shell::{self, Shell};
+use crate::providers::writes;
 
 /// Answers a control the CLI sends while no turn runs. Kratos's post-tool hooks only record, so
 /// they may go on; nothing may run a tool.
@@ -359,13 +360,8 @@ fn file_action(tool: &CanUseTool, folder: &str, protected: &ProtectedFolders) ->
     let Some(target) = paths::expand(path, Path::new(folder), protected.home()) else {
         return Action::Invalid;
     };
-    match protected.containing(&target) {
-        Ok(Some(path)) => Action::File(Destination::Protected(path.display().to_string())),
-        Ok(None) => match sandbox_may_write(&target, Path::new(folder)) {
-            Ok(true) => Action::File(Destination::Inside),
-            Ok(false) => Action::File(Destination::Outside),
-            Err(_) => Action::Invalid,
-        },
+    match writes::destination(&target, Path::new(folder), protected) {
+        Ok(destination) => Action::File(destination),
         Err(_) => Action::Invalid,
     }
 }

@@ -7,6 +7,7 @@ mod changes;
 pub mod claude;
 pub mod codex;
 pub(crate) mod queue;
+pub(crate) mod writes;
 
 pub(crate) use agent::Agent;
 pub use agent::Providers;
