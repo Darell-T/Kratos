@@ -248,10 +248,13 @@ async fn a_start_that_fails_pauses_the_thread_with_the_cli_s_own_error_and_keeps
 #[tokio::test]
 async fn a_resume_that_finds_no_saved_session_says_so_and_never_starts_a_new_one() {
     // Catches a thread whose history is gone that silently continues in a fresh session (L7).
-    let harness = Harness::start(Options::default()).await;
+    let mut harness = Harness::start(Options::default()).await;
     let first = harness.begin(A, 1).await;
     harness.finish(&first, &[A], json!({})).await;
-    harness.message_becomes(A, |s| accepted_by(s, A)).await;
+    // A settings change retires only an idle process, so the turn must have ended first.
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
     let path = transcript_path(&harness.claude_home(), &harness.folder(), first.session());
     std::fs::remove_file(path).unwrap();
     // Changing the model ends the idle process before the next message, which an exit would not.
