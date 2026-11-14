@@ -9,7 +9,8 @@
 //! `--version`, `doctor`, and `update` answer as the install `FAKE_CLAUDE_INSTALL` names does, the
 //! native one without it. The installed release is the text of the file `FAKE_CLAUDE_RELEASE`
 //! names, or 2.1.303 without one. `update` writes `FAKE_CLAUDE_UPDATE_TO` there. It fails when that
-//! is `fail`, or while a session it logged still runs.
+//! is `fail`, or while a session it logged still runs. It first writes the file `<release>.started`,
+//! then takes `FAKE_CLAUDE_UPDATE_DELAY_MS`, as a slow download does.
 
 mod scripted;
 
@@ -39,6 +40,15 @@ fn release(command: &str) -> bool {
                 std::process::exit(1);
             }
             let file = file.expect("an update test names FAKE_CLAUDE_RELEASE");
+            let mut started = file.clone();
+            started.push(".started");
+            std::fs::write(started, "").expect("the release folder is writable");
+            if let Some(delay) = std::env::var("FAKE_CLAUDE_UPDATE_DELAY_MS")
+                .ok()
+                .and_then(|delay| delay.parse().ok())
+            {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
             std::fs::write(file, &target).expect("the release file is writable");
             println!(
                 "Successfully updated from {} to version {target}",

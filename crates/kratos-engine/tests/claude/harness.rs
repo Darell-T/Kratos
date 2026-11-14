@@ -75,6 +75,8 @@ pub struct Options {
     pub update_to: &'static str,
     /// The method `claude doctor` says installed the CLI.
     pub install: &'static str,
+    /// How long the fake's updater takes once it starts, as a slow download does.
+    pub update_delay: Duration,
     /// How long a session process lives on after Kratos closes its input.
     pub exit_delay: Duration,
 }
@@ -92,6 +94,7 @@ impl Default for Options {
             clock: None,
             update_to: "2.1.400",
             install: "native",
+            update_delay: Duration::ZERO,
             exit_delay: Duration::ZERO,
         }
     }
@@ -192,6 +195,10 @@ impl Harness {
             ),
             ("FAKE_CLAUDE_UPDATE_TO".into(), options.update_to.into()),
             ("FAKE_CLAUDE_INSTALL".into(), options.install.into()),
+            (
+                "FAKE_CLAUDE_UPDATE_DELAY_MS".into(),
+                options.update_delay.as_millis().to_string().into(),
+            ),
             (
                 "FAKE_CLAUDE_EXIT_DELAY_MS".into(),
                 options.exit_delay.as_millis().to_string().into(),

@@ -3,11 +3,15 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use kratos_claude_client::{
-    Latest, ReleaseError, Version, check_native, installed_version, latest_version, update,
+    Latest, ReleaseError, UPDATE_LIMIT, Version, check_native, installed_version, latest_version,
+    update,
 };
 use kratos_protocol::{CliRelease, CliUpdate};
+use tokio::sync::watch;
+use tokio::task::AbortHandle;
 
 use crate::providers::ProviderError;
 
@@ -21,9 +25,104 @@ pub(super) struct Release {
     pub env_set: Vec<(OsString, OsString)>,
     /// Where the native install's updater reads the newest release on each channel.
     pub feed: String,
+    /// The update in flight, as engine shutdown sees it.
+    pub updating: Mutex<Updating>,
+}
+
+/// Where an update stands, which decides what engine shutdown does with it.
+#[derive(Default)]
+pub(super) enum Updating {
+    #[default]
+    Idle,
+    /// Checking the install or closing sessions. Nothing is replaced yet, so shutdown cancels it.
+    /// `task` is missing for the moment between recording the update and starting its task.
+    Preparing {
+        task: Option<AbortHandle>,
+        ended: watch::Receiver<()>,
+    },
+    /// The updater or the version check after it runs. Stopping it midway can leave a broken CLI,
+    /// so shutdown waits for it.
+    Installing { ended: watch::Receiver<()> },
+    /// The engine is stopping, and no update may start installing.
+    ShuttingDown,
 }
 
 impl Release {
+    fn updating(&self) -> MutexGuard<'_, Updating> {
+        self.updating.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records an update about to start, whose task drops the sender of `ended` when it ends.
+    ///
+    /// # Errors
+    /// Refuses while another update runs or the engine stops.
+    pub fn prepare(&self, ended: watch::Receiver<()>) -> Result<(), ProviderError> {
+        let mut updating = self.updating();
+        match *updating {
+            Updating::Idle => {
+                *updating = Updating::Preparing { task: None, ended };
+                Ok(())
+            }
+            Updating::ShuttingDown => Err(ProviderError::Stopped),
+            _ => Err(ProviderError::Conflict(
+                "Claude Code is already updating".to_owned(),
+            )),
+        }
+    }
+
+    /// Records the task that runs the update, so shutdown can cancel it while it prepares.
+    pub fn started(&self, task: AbortHandle) {
+        if let Updating::Preparing { task: slot, .. } = &mut *self.updating() {
+            *slot = Some(task);
+        }
+    }
+
+    /// Moves a preparing update to installing. False when the engine is stopping, and the update
+    /// must not begin replacing files.
+    pub fn begin_install(&self) -> bool {
+        let mut updating = self.updating();
+        let Updating::Preparing { ended, .. } = &*updating else {
+            return false;
+        };
+        let ended = ended.clone();
+        *updating = Updating::Installing { ended };
+        true
+    }
+
+    /// The update ended, unless shutdown already took it over.
+    pub fn finished(&self) {
+        let mut updating = self.updating();
+        if !matches!(*updating, Updating::ShuttingDown) {
+            *updating = Updating::Idle;
+        }
+    }
+
+    /// At engine shutdown: cancels an update that has not begun installing, and waits for one that
+    /// has, at most [`UPDATE_LIMIT`], the longest the updater and its checks may run before they
+    /// end on their own.
+    pub async fn settle_for_shutdown(&self) {
+        let taken = std::mem::replace(&mut *self.updating(), Updating::ShuttingDown);
+        match taken {
+            Updating::Preparing { task, mut ended } => {
+                if let Some(task) = task {
+                    task.abort();
+                }
+                // A task that had not started yet stops itself at `begin_install`.
+                let _ = ended.changed().await;
+            }
+            Updating::Installing { mut ended } => {
+                eprintln!("Kratos waits for the Claude Code update to finish before it stops");
+                if tokio::time::timeout(UPDATE_LIMIT, ended.changed())
+                    .await
+                    .is_err()
+                {
+                    eprintln!("the Claude Code update ran past {UPDATE_LIMIT:?}, and Kratos stops");
+                }
+            }
+            Updating::Idle | Updating::ShuttingDown => {}
+        }
+    }
+
     pub async fn status(&self) -> CliRelease {
         let installed = installed_version(&self.program, &self.env_set).await;
         let update = match &installed {

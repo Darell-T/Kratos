@@ -127,6 +127,7 @@ pub async fn start(
         program: settings.program.clone(),
         env_set: settings.env_set.clone(),
         feed: settings.release_feed.clone(),
+        updating: std::sync::Mutex::default(),
     });
     let actor = actor::Actor::recover(settings, hub, store, usage, limit_stops).await?;
     tokio::spawn(actor.run(inbox));
@@ -332,22 +333,31 @@ impl ClaudeProvider {
     /// on the new release.
     pub async fn update_cli(&self) -> Result<CliRelease, ProviderError> {
         // A task of its own, so a client that disconnects mid-update never stops the updater
-        // halfway through replacing the CLI.
+        // halfway through replacing the CLI. Engine shutdown cancels it only before it installs.
+        let (ended, watched) = tokio::sync::watch::channel(());
+        self.release.prepare(watched)?;
         let provider = self.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
+            let _ended = ended;
             provider.release.check_native().await?;
             provider
                 .ask(|reply| actor::Command::HoldForUpdate { reply })
                 .await?;
-            let updated = provider.release.update().await;
+            let updated = if provider.release.begin_install() {
+                provider.release.update().await
+            } else {
+                Err(ProviderError::Stopped)
+            };
             provider
                 .ask(|reply| actor::Command::EndUpdateHold { reply })
                 .await?;
             updated?;
             Ok(provider.release.status().await)
-        })
-        .await
-        .map_err(|_| ProviderError::Stopped)?
+        });
+        self.release.started(task.abort_handle());
+        let result = task.await.map_err(|_| ProviderError::Stopped);
+        self.release.finished();
+        result?
     }
 
     /// The slash commands the thread's session reports, opening one when none runs (D97).
@@ -368,8 +378,9 @@ impl ClaudeProvider {
             .await
     }
 
-    /// Closes every CLI and ends the actor.
+    /// Settles an update in flight, then closes every CLI and ends the actor.
     pub async fn shutdown(&self) {
+        self.release.settle_for_shutdown().await;
         let (reply, done) = oneshot::channel();
         if self
             .commands

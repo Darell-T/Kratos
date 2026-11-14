@@ -170,3 +170,71 @@ async fn a_cli_another_manager_installed_is_never_updated_under_its_running_sess
         after.update
     );
 }
+
+#[tokio::test]
+async fn engine_shutdown_cancels_an_update_that_has_not_started_installing() {
+    // Catches shutdown waiting on, or letting start, an update that has replaced nothing yet:
+    // one still closing the sessions whose files the updater would replace.
+    let mut harness = Harness::start(Options {
+        exit_delay: Duration::from_millis(3_000),
+        ..Options::default()
+    })
+    .await;
+    std::fs::write(harness.root.path().join("release"), "2.1.303").unwrap();
+    let first = harness.begin(A, 1).await;
+    harness.finish(&first, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    let provider = harness.provider.clone();
+    let update = tokio::spawn(async move { provider.update_cli().await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    harness.provider.shutdown().await;
+
+    let updated = update.await.unwrap();
+    assert!(
+        matches!(updated, Err(ProviderError::Stopped)),
+        "{updated:?}"
+    );
+    assert!(
+        !harness.root.path().join("release.started").exists(),
+        "the updater never started"
+    );
+    assert_eq!(
+        std::fs::read_to_string(harness.root.path().join("release")).unwrap(),
+        "2.1.303"
+    );
+}
+
+#[tokio::test]
+async fn engine_shutdown_waits_for_an_update_that_is_installing() {
+    // Catches shutdown ending the updater halfway through replacing the CLI, which can leave a
+    // broken install.
+    let harness = Harness::start(Options {
+        update_delay: Duration::from_millis(1_500),
+        ..Options::default()
+    })
+    .await;
+    std::fs::write(harness.root.path().join("release"), "2.1.303").unwrap();
+    let provider = harness.provider.clone();
+    let update = tokio::spawn(async move { provider.update_cli().await });
+    let started = harness.root.path().join("release.started");
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    while !started.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the updater never started"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    harness.provider.shutdown().await;
+
+    assert_eq!(
+        std::fs::read_to_string(harness.root.path().join("release")).unwrap(),
+        "2.1.400",
+        "the updater finished before shutdown returned"
+    );
+    update.await.unwrap().unwrap();
+}
