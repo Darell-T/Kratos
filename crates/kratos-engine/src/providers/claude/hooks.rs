@@ -10,7 +10,7 @@ use std::path::{Component, Path};
 use serde_json::{Value, json};
 
 use super::actor::Actor;
-use super::permissions::{decides, edit_path};
+use super::permissions::edit_path;
 use super::shell::{Shell, command_text};
 
 const PRE: &str = "kratos-pre";
@@ -41,13 +41,12 @@ pub(super) fn initialize(report_format: Option<ReportFormat>) -> Initialize {
     }
 }
 
-/// The pre-tool hook's answer. A tool Kratos's table decides goes to the permission callback even
-/// when the CLI or the user's allow rules would run it unasked. Any other tool is left to the CLI,
-/// and so is the CLI's own plan file in plan mode, which `plans` names: the CLI writes it unasked
-/// there, and routing it would ask the user about `~/.claude` for every plan.
+/// The pre-tool hook's answer. Every tool goes to the permission callback, where Kratos decides
+/// it, even when the CLI or the user's allow rules would run it unasked. The one exception is the
+/// CLI's own plan file in plan mode, which `plans` names: the CLI writes it unasked there, and
+/// routing it would ask the user about `~/.claude` for every plan.
 fn pre_tool(hook: &HookCallback, plans: Option<&Path>) -> Value {
-    let ruled = hook.input["tool_name"].as_str().is_some_and(decides);
-    if !ruled || plans.is_some_and(|plans| writes_plan_file(hook, plans)) {
+    if plans.is_some_and(|plans| writes_plan_file(hook, plans)) {
         return json!({ "continue": true });
     }
     json!({

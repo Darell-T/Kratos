@@ -33,39 +33,40 @@ pub(super) fn startup(control: IncomingControl) {
     }
 }
 
-/// How Kratos judges a tool it knows by name.
+/// How Kratos judges a tool, by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rule {
     File,
     Question,
     ExitPlan,
+    /// Reads a file or folder Kratos judges by path.
     LocalRead,
-    Read,
+    /// Changes nothing outside the session: the to-do list and entering plan mode.
+    Planning,
+    /// Reads from the network.
+    Web,
     Command(Shell),
-    External,
+    /// Loads instructions or tool schemas and needs no permission: `ToolSearch`, which the CLI
+    /// uses to load deferred tools such as `ExitPlanMode`, and `Skill`.
+    Free,
+    /// Any other tool, including MCP tools and tools a newer CLI adds. The user decides it.
+    Unchecked,
 }
 
-/// The rule for `tool_name`, or `None` for a tool Kratos's table does not cover.
-fn rule(tool_name: &str) -> Option<Rule> {
+fn rule(tool_name: &str) -> Rule {
     if let Some(shell) = Shell::of(tool_name) {
-        return Some(Rule::Command(shell));
+        return Rule::Command(shell);
     }
-    Some(match tool_name {
+    match tool_name {
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => Rule::File,
         "AskUserQuestion" => Rule::Question,
         "ExitPlanMode" => Rule::ExitPlan,
         "Read" | "Glob" | "Grep" => Rule::LocalRead,
-        "WebFetch" | "WebSearch" | "TodoWrite" | "EnterPlanMode" => Rule::Read,
-        name if name.starts_with("mcp__") => Rule::External,
-        _ => return None,
-    })
-}
-
-/// Whether Kratos's table decides `tool_name`. The pre-tool hook sends each such call to the
-/// permission callback, because the CLI on its own runs read-only commands, in-folder reads, and
-/// whatever the user's allow rules name without asking (measured with Claude Code 2.1.322).
-pub(super) fn decides(tool_name: &str) -> bool {
-    rule(tool_name).is_some()
+        "TodoWrite" | "EnterPlanMode" => Rule::Planning,
+        "WebFetch" | "WebSearch" => Rule::Web,
+        "ToolSearch" | "Skill" => Rule::Free,
+        _ => Rule::Unchecked,
+    }
 }
 
 pub(super) fn edit_path<'a>(tool: &str, input: &'a Value) -> Option<&'a str> {
@@ -84,8 +85,8 @@ fn action(tool: &CanUseTool, folder: &str, protected: &ProtectedFolders) -> Acti
         return Action::Invalid;
     }
     match rule(&tool.tool_name) {
-        Some(Rule::File) => file_action(tool, folder, protected),
-        Some(Rule::Question) => {
+        Rule::File => file_action(tool, folder, protected),
+        Rule::Question => {
             let validation = kratos_protocol::TurnId::new("validation".into());
             if question(&tool.input, validation).is_some() {
                 Action::Question
@@ -93,34 +94,36 @@ fn action(tool: &CanUseTool, folder: &str, protected: &ProtectedFolders) -> Acti
                 Action::Invalid
             }
         }
-        Some(Rule::ExitPlan) => Action::ExitPlan,
-        Some(Rule::LocalRead) => local_read_action(tool, folder, protected),
-        Some(Rule::Read) => read_action(tool),
-        Some(Rule::Command(shell)) => shell::action(shell, &tool.input),
-        Some(Rule::External) => Action::ExternalTool,
-        None => Action::Invalid,
+        Rule::ExitPlan => Action::ExitPlan,
+        Rule::LocalRead => local_read_action(tool, folder, protected),
+        Rule::Planning => planning_action(tool),
+        Rule::Web => web_action(tool),
+        Rule::Command(shell) => shell::action(shell, &tool.input),
+        Rule::Free => Action::Free,
+        Rule::Unchecked => Action::Unchecked,
     }
 }
 
-fn read_action(tool: &CanUseTool) -> Action {
-    let key = match tool.tool_name.as_str() {
-        "WebFetch" => "url",
-        "WebSearch" => "query",
-        "TodoWrite" => {
-            return if tool.input["todos"].is_array() {
-                Action::Read
-            } else {
-                Action::Invalid
-            };
-        }
-        "EnterPlanMode" => return Action::Read,
-        _ => return Action::Invalid,
+fn planning_action(tool: &CanUseTool) -> Action {
+    let readable = tool.tool_name == "EnterPlanMode" || tool.input["todos"].is_array();
+    if readable {
+        Action::Read
+    } else {
+        Action::Invalid
+    }
+}
+
+fn web_action(tool: &CanUseTool) -> Action {
+    let key = if tool.tool_name == "WebFetch" {
+        "url"
+    } else {
+        "query"
     };
     if tool.input[key]
         .as_str()
         .is_some_and(|value| !value.trim().is_empty())
     {
-        Action::Read
+        Action::Fetch
     } else {
         Action::Invalid
     }

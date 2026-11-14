@@ -151,8 +151,9 @@ async fn a_shell_command_runs_unasked_only_when_unflagged_and_the_permission_all
 
 #[tokio::test]
 async fn unknown_tools_and_bad_inputs_never_gain_automatic_permission() {
-    // Catches unknown tools allowed by Full access, unreadable inputs judged as ordinary ones, and
-    // an MCP tool named like the removed Kratos command tool running unasked.
+    // Catches unknown tools allowed by Full access instead of asking the user, unreadable inputs
+    // judged as ordinary ones, and an MCP tool named like the removed Kratos command tool running
+    // unasked.
     let mut harness = Harness::start(Options {
         settings: ThreadSettings {
             permission: Permission::FullAccess,
@@ -163,7 +164,6 @@ async fn unknown_tools_and_bad_inputs_never_gain_automatic_permission() {
     .await;
     let launch = harness.begin(A, 1).await;
     for (id, tool, input) in [
-        ("unknown", "NewUntrustedTool", json!({})),
         ("bad-write", "Write", json!({ "file_path": 42 })),
         (
             "bad-question",
@@ -174,6 +174,21 @@ async fn unknown_tools_and_bad_inputs_never_gain_automatic_permission() {
         ("no-shell-text", "PowerShell", json!({})),
     ] {
         send(&harness, &launch, id, tool, input).await;
+        assert_eq!(
+            response(&harness, &launch, id).await["behavior"],
+            "deny",
+            "{id}"
+        );
+    }
+    for (id, tool) in [("unknown", "NewUntrustedTool"), ("helper", "Agent")] {
+        send(&harness, &launch, id, tool, json!({})).await;
+        let asked = approval(&mut harness).await;
+        assert_eq!(asked.why, AskReason::Unchecked, "{id}");
+        harness
+            .provider
+            .decide(asked.id, ApprovalDecision::Decline)
+            .await
+            .unwrap();
         assert_eq!(
             response(&harness, &launch, id).await["behavior"],
             "deny",
@@ -585,4 +600,89 @@ async fn an_approval_shows_a_large_tool_input_cut_and_says_so() {
         .decide(asked.id, ApprovalDecision::Decline)
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn tool_search_and_skill_run_without_asking_even_under_ask_me() {
+    // Catches the CLI's own tool loader asking the user, which stalls plan mode: the CLI loads
+    // `ExitPlanMode` through `ToolSearch`.
+    let harness = Harness::start(Options {
+        settings: ThreadSettings {
+            permission: Permission::AskMe,
+            plan_mode: true,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    for (id, tool, input) in [
+        (
+            "search",
+            "ToolSearch",
+            json!({ "query": "select:ExitPlanMode" }),
+        ),
+        ("skill", "Skill", json!({ "skill": "review" })),
+    ] {
+        send(&harness, &launch, id, tool, input).await;
+        assert_eq!(
+            response(&harness, &launch, id).await["behavior"],
+            "allow",
+            "{id}"
+        );
+    }
+    assert!(harness.details().await.approvals.is_empty());
+}
+
+#[tokio::test]
+async fn plan_mode_reads_a_file_without_asking_and_a_write_still_does_not_run() {
+    // Catches plan mode asking the user before every Read, Glob, and Grep, and plan mode letting a
+    // write run on its own.
+    for permission in Permission::ALL {
+        let mut harness = Harness::start(Options {
+            settings: ThreadSettings {
+                permission,
+                plan_mode: true,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+        std::fs::write(harness.folder().join("notes.txt"), "notes").unwrap();
+        for (id, tool, input) in [
+            ("read", "Read", json!({ "file_path": "notes.txt" })),
+            ("glob", "Glob", json!({ "pattern": "*.txt" })),
+            ("grep", "Grep", json!({ "pattern": "notes" })),
+        ] {
+            send(&harness, &launch, id, tool, input).await;
+            assert_eq!(
+                response(&harness, &launch, id).await["behavior"],
+                "allow",
+                "{permission:?} {id}"
+            );
+        }
+        assert!(
+            harness.details().await.approvals.is_empty(),
+            "{permission:?}"
+        );
+
+        send(
+            &harness,
+            &launch,
+            "write",
+            "Write",
+            json!({ "file_path": "new.txt" }),
+        )
+        .await;
+        let asked = approval(&mut harness).await;
+        assert_eq!(asked.why, AskReason::AskEveryAction, "{permission:?}");
+        let frames = harness.received(&launch).await;
+        assert!(
+            !frames
+                .iter()
+                .any(|frame| frame["response"]["request_id"] == "write"),
+            "{permission:?}: a plan-mode write was answered before the user decided"
+        );
+    }
 }

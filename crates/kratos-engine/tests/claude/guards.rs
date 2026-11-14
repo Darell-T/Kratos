@@ -361,9 +361,10 @@ async fn reports_the_files_each_turn_edited_and_whether_one_changed_after_the_la
 }
 
 #[tokio::test]
-async fn the_pre_tool_hook_sends_every_tool_kratos_rules_on_to_the_permission_callback() {
-    // Catches a shell command, an in-folder read, or a write the user's allow rules name running
-    // without Kratos's decision, because the CLI runs those unasked unless a hook asks.
+async fn the_pre_tool_hook_sends_every_tool_to_the_permission_callback() {
+    // Catches a shell command, an in-folder read, a write the user's allow rules name, or a tool
+    // outside Kratos's table such as `Agent` running without Kratos's decision, because the CLI runs
+    // those unasked unless a hook asks.
     let harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     for (index, (name, input)) in [
@@ -373,6 +374,9 @@ async fn the_pre_tool_hook_sends_every_tool_kratos_rules_on_to_the_permission_ca
         ("Glob", json!({ "pattern": "*.txt" })),
         ("Write", json!({ "file_path": "new.txt" })),
         ("mcp__other__tool", json!({})),
+        ("Agent", json!({ "prompt": "go" })),
+        ("EnterWorktree", json!({})),
+        ("ToolSearch", json!({ "query": "select:ExitPlanMode" })),
     ]
     .into_iter()
     .enumerate()
@@ -392,16 +396,6 @@ async fn the_pre_tool_hook_sends_every_tool_kratos_rules_on_to_the_permission_ca
         );
         assert_eq!(answer["continue"], true, "{name}: {answer}");
     }
-    let unruled = hook(
-        &harness,
-        &launch,
-        "pre-unruled",
-        "PreToolUse",
-        "Agent",
-        json!({}),
-    )
-    .await;
-    assert_eq!(unruled, json!({ "continue": true }));
 }
 
 #[tokio::test]

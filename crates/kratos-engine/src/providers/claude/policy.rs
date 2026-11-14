@@ -16,9 +16,15 @@ pub(super) enum Action {
     Command {
         flagged: bool,
     },
+    /// Changes nothing on disk or on the network: a read of an unprotected path, the to-do list.
     Read,
+    /// A read from the network.
+    Fetch,
     ProtectedRead,
-    ExternalTool,
+    /// Needs no permission in any mode: loading a skill's or a tool's instructions.
+    Free,
+    /// A tool Kratos cannot judge, which the user decides.
+    Unchecked,
     Question,
     ExitPlan,
     Invalid,
@@ -35,6 +41,7 @@ pub(super) enum Decision {
 pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
     match (action, settings.plan_mode, settings.permission) {
         (Action::Question, _, _) => Decision::Question,
+        (Action::Free, _, _) => Decision::Allow,
         (Action::ProtectedRead, false, Permission::FullAccess) => Decision::Allow,
         (Action::Invalid | Action::ProtectedRead, _, _) => Decision::Deny,
         (Action::ExitPlan, true, _) => Decision::Deny,
@@ -42,7 +49,9 @@ pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
             Decision::Ask(AskReason::ProtectedFolder { path })
         }
         (Action::Command { flagged: true }, _, _) => Decision::Ask(AskReason::Dangerous),
-        (Action::ExternalTool, _, _) => Decision::Ask(AskReason::Unchecked),
+        (Action::Unchecked, _, _) => Decision::Ask(AskReason::Unchecked),
+        // Plan mode reads without asking under every permission; it only writes nothing.
+        (Action::Read, true, _) => Decision::Allow,
         (_, true, _) | (_, _, Permission::AskMe) => Decision::Ask(AskReason::AskEveryAction),
         (Action::File(Destination::Outside), false, Permission::ApproveForMe) => {
             Decision::Ask(AskReason::Escalation)
@@ -114,8 +123,20 @@ mod tests {
                 } else {
                     Decision::Allow
                 };
+                // Plan mode reads without asking; outside it, Ask me asks before every action.
+                let read = if plan_mode || permission != Permission::AskMe {
+                    Decision::Allow
+                } else {
+                    Decision::Ask(AskReason::AskEveryAction)
+                };
+                assert_eq!(
+                    decide(&settings, Action::Read),
+                    read,
+                    "{permission:?}, plan {plan_mode}"
+                );
+                assert_eq!(decide(&settings, Action::Free), Decision::Allow);
                 for action in [
-                    Action::Read,
+                    Action::Fetch,
                     Action::File(Destination::Inside),
                     Action::Command { flagged: false },
                 ] {
@@ -136,7 +157,7 @@ mod tests {
                     }
                 );
                 assert_eq!(
-                    decide(&settings, Action::ExternalTool),
+                    decide(&settings, Action::Unchecked),
                     Decision::Ask(AskReason::Unchecked)
                 );
                 assert_eq!(
