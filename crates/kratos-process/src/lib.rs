@@ -16,6 +16,8 @@
 //!   id can pass to an unrelated program. A process that leaves the group, or an engine killed with
 //!   SIGKILL, leaves processes behind. Proving macOS and Linux isolation is later work (D17).
 
+pub mod output;
+
 use std::io;
 use std::process::ExitStatus;
 

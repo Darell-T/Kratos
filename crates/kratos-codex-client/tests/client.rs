@@ -35,6 +35,7 @@ fn launch(args: &[&str]) -> Launch {
         },
         request_timeout: REQUEST_TIMEOUT,
         close_timeout: Duration::from_secs(5),
+        max_line_bytes: kratos_codex_client::MAX_LINE_BYTES,
     }
 }
 
@@ -609,4 +610,32 @@ async fn output_that_is_not_utf8_ends_the_server_and_reports_its_exit() {
         matches!(unanswered, Err(RequestError::Exited(_))),
         "{unanswered:?}"
     );
+}
+
+#[tokio::test]
+async fn a_line_over_the_limit_ends_the_server_and_reports_its_exit() {
+    // Catches a line of any length read whole into memory, and an oversized reply dropped while
+    // its request waits forever.
+    let mut bounded = launch(&[]);
+    bounded.max_line_bytes = 1024;
+    let (codex, mut incoming) = connect(bounded, capabilities()).await.unwrap();
+
+    let emit = codex_control::emit("test/large", json!({ "text": "x".repeat(4096) }));
+    let answered = codex
+        .request_value(emit.method, emit.params, REQUEST_TIMEOUT)
+        .await;
+    assert!(
+        matches!(answered, Err(RequestError::Exited(_))),
+        "the line before the answer ends the server: {answered:?}"
+    );
+
+    loop {
+        if let Incoming::Exited(_) = next(&mut incoming).await {
+            break;
+        }
+    }
+    let later = codex
+        .request_value("test/echo", json!({}), REQUEST_TIMEOUT)
+        .await;
+    assert!(matches!(later, Err(RequestError::Exited(_))), "{later:?}");
 }

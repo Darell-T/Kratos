@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use kratos_process::OwnedChild;
+use kratos_process::output::{self, Line};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -637,51 +638,10 @@ async fn keep(
     exited.send_replace(Some(exit));
 }
 
-enum Line {
-    Data(Vec<u8>),
-    Oversized(usize),
-    Eof,
-}
-
-async fn bounded_line(
-    reader: &mut (impl AsyncBufRead + Unpin),
-    max_line_bytes: usize,
-) -> io::Result<Line> {
-    let mut kept = Vec::new();
-    let mut bytes = 0usize;
-    loop {
-        let buffer = reader.fill_buf().await?;
-        if buffer.is_empty() {
-            break;
-        }
-        let newline = buffer.iter().position(|byte| *byte == b'\n');
-        let count = newline.unwrap_or(buffer.len());
-        bytes = bytes.saturating_add(count);
-        if bytes <= max_line_bytes {
-            kept.extend_from_slice(&buffer[..count]);
-        }
-        reader.consume(count + usize::from(newline.is_some()));
-        if newline.is_some() {
-            return if bytes > max_line_bytes {
-                Ok(Line::Oversized(bytes))
-            } else {
-                Ok(Line::Data(kept))
-            };
-        }
-    }
-    if bytes > max_line_bytes {
-        Ok(Line::Oversized(bytes))
-    } else if bytes == 0 {
-        Ok(Line::Eof)
-    } else {
-        Ok(Line::Data(kept))
-    }
-}
-
 async fn read(shared: Arc<Shared>, stdout: ChildStdout, incoming: mpsc::Sender<Incoming>) {
     let mut reader = BufReader::new(stdout);
     loop {
-        let event = match bounded_line(&mut reader, shared.max_line_bytes).await {
+        let event = match output::read_line(&mut reader, shared.max_line_bytes).await {
             Ok(Line::Eof) => break,
             Ok(Line::Oversized(bytes)) => Some(Incoming::Oversized { bytes }),
             Ok(Line::Data(line)) => match serde_json::from_slice::<Value>(&line) {

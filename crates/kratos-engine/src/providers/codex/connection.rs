@@ -131,6 +131,7 @@ fn launch(settings: &CodexSettings) -> Launch {
         },
         request_timeout: settings.request_timeout,
         close_timeout: CLOSE_TIMEOUT,
+        max_line_bytes: kratos_codex_client::MAX_LINE_BYTES,
     }
 }
 

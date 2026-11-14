@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use kratos_process::OwnedChild;
+use kratos_process::output::{self, Line};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -52,7 +53,16 @@ pub struct Launch {
     /// How long [`Codex::close`] waits for the server to exit once its input closes, before it ends
     /// the process tree.
     pub close_timeout: Duration,
+    /// The longest line Kratos reads from the server. A longer one ends the server, since the
+    /// reply or request it held would never be answered. [`MAX_LINE_BYTES`] by default.
+    pub max_line_bytes: usize,
 }
+
+/// The default limit on one line from the app-server. A thread's whole history arrives as one
+/// `thread/read` reply: measured with Codex 0.166, a thread whose session file held 13,658,700
+/// bytes came back as a 3,195,219-byte line. 256 MiB is about 80 times that, and one line still
+/// cannot take the machine's memory.
+pub const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 
 /// A JSON-RPC id. Kratos numbers its own requests; the server may use strings for its own.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -308,6 +318,7 @@ pub async fn connect(
             unreadable: unreadable_sender,
             exited,
         },
+        launch.max_line_bytes,
     ));
 
     let codex = Codex {
@@ -524,28 +535,46 @@ struct Stream {
     exited: oneshot::Receiver<Option<i32>>,
 }
 
-async fn read(reader: Reader, stdout: ChildStdout, stream: Stream) {
-    let mut lines = BufReader::new(stdout).lines();
+async fn read(reader: Reader, stdout: ChildStdout, stream: Stream, max_line_bytes: usize) {
+    let mut stdout = BufReader::new(stdout);
     loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                // The server logs to stderr, but a stray line on stdout must not end the connection.
-                if let Ok(message) = serde_json::from_str::<Value>(&line) {
-                    reader.dispatch(message).await;
-                }
-            }
-            Ok(None) => break,
-            // Output that is not UTF-8, or a failed read: no later message can be trusted, and a
-            // server left running would answer nothing, so its tree ends and its exit is reported.
-            Err(error) => {
-                eprintln!("codex: cannot read the server's output: {error}");
+        match next_message(output::read_line(&mut stdout, max_line_bytes).await) {
+            Ok(Some(message)) => reader.dispatch(message).await,
+            Ok(None) => {}
+            Err(Some(why)) => {
+                // No later message can be trusted, and a server left running would answer
+                // nothing, so its tree ends and its exit is reported.
+                eprintln!("codex: {why}");
                 let _ = stream.unreadable.send(());
                 break;
             }
+            Err(None) => break,
         }
     }
     let code = stream.exited.await.unwrap_or(None);
     reader.finish(code).await;
+}
+
+/// The message a line holds, `Ok(None)` for a line that is not JSON, `Err(None)` at the end of the
+/// output, and `Err(Some(why))` when the output can no longer be read. The server logs to stderr,
+/// but a stray line on stdout must not end the connection.
+fn next_message(line: io::Result<Line>) -> Result<Option<Value>, Option<String>> {
+    let line = match line {
+        Ok(Line::Data(line)) => line,
+        Ok(Line::Eof) => return Err(None),
+        Ok(Line::Oversized(bytes)) => {
+            return Err(Some(format!(
+                "the server wrote a line of {bytes} bytes, more than Kratos reads"
+            )));
+        }
+        Err(error) => return Err(Some(format!("cannot read the server's output: {error}"))),
+    };
+    let text = std::str::from_utf8(&line).map_err(|error| {
+        Some(format!(
+            "the server wrote a line that is not UTF-8: {error}"
+        ))
+    })?;
+    Ok(serde_json::from_str(text).ok())
 }
 
 impl Reader {
