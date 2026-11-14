@@ -121,6 +121,7 @@ A Claude command now runs as the user on every system. It can read anything the 
 
 ### Can follow the merge
 
+- **Finding C1, credential folders in a workspace.** Open, set aside by the owner. A Codex command under Approve for me can write a credential folder, such as `.ssh`, that sits inside the thread's workspace.
 - **Live lane 10, a real usage limit.** It closes only when a limit happens on its own, so it gates nothing. Its condition is met: a limit response Kratos does not recognize fails where the user sees it and never loops (`4d7c4a4`, `tests/claude/limit_failures.rs`). A status Kratos does not know is written on the turn and never continued. A refusal for an unknown window waits for the user. Each CLI retry is written on the turn, so a CLI waiting out a limit does not look hung. Planning never schedules a resume at a reset already behind it.
 - **Skills.** They wait on the unified skills design. Its condition is met: nothing in R4 fixes how skills will work. `docs/unified-skills.md` lists each skills-related part of R4 and why it stays free to change. The `ThreadSkills` reply shape is the one choice to settle before a UI reads it.
 - **The update route against the real CLI.** Only the fake's updater has run. Running `claude update` on the owner's machine needs the owner's go-ahead. A failure reaches the user as a 503 with the updater's text.
