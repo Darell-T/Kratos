@@ -2,7 +2,7 @@
 //! and what the thread waits on.
 
 use kratos_protocol::{
-    AgentItem, MessageInput, MessageOrigin, PauseReason, ThreadEventBody, TurnOutcome,
+    AgentItem, CappedText, MessageInput, MessageOrigin, PauseReason, ThreadEventBody, TurnOutcome,
 };
 
 pub(crate) const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
@@ -42,6 +42,8 @@ pub(super) fn line(event: &ThreadEventBody) -> Option<String> {
     }
 }
 
+/// The newest lines that fit in [`MAX_TRANSCRIPT_BYTES`]. When the newest line alone is longer,
+/// it is cut to fit, so a thread with lines never reads as empty.
 pub(super) fn newest(lines: &[String]) -> String {
     let mut used = 0;
     let kept = lines
@@ -52,8 +54,17 @@ pub(super) fn newest(lines: &[String]) -> String {
             used <= MAX_TRANSCRIPT_BYTES
         })
         .count();
-    lines[lines.len() - kept..].join("\n")
+    match (kept, lines.last()) {
+        (0, Some(newest)) => {
+            let cut = CappedText::new(newest, MAX_TRANSCRIPT_BYTES - CUT.len());
+            format!("{}{CUT}", cut.text)
+        }
+        _ => lines[lines.len() - kept..].join("\n"),
+    }
 }
+
+/// Ends a line `newest` cut short.
+const CUT: &str = " [cut]";
 
 fn item_line(item: &AgentItem) -> Option<String> {
     match item {
@@ -158,5 +169,21 @@ mod tests {
             line(&paused).as_deref(),
             Some("paused: usage limit until 2026-10-30T12:00:00.000Z")
         );
+    }
+
+    #[test]
+    fn a_newest_line_longer_than_the_budget_is_cut_instead_of_dropped() {
+        // Catches read_thread returning an empty transcript, older lines included, when the
+        // newest line alone is longer than the budget.
+        let lines = ["older".to_owned(), "x".repeat(20 * 1024)];
+        let transcript = newest(&lines);
+        assert!(
+            transcript.len() <= MAX_TRANSCRIPT_BYTES,
+            "{}",
+            transcript.len()
+        );
+        assert!(transcript.starts_with("xxx") && transcript.ends_with(CUT));
+        assert_eq!(newest(&["a".to_owned(), "b".to_owned()]), "a\nb");
+        assert_eq!(newest(&[]), "");
     }
 }
