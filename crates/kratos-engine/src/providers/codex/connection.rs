@@ -121,7 +121,7 @@ fn launch(settings: &CodexSettings) -> Launch {
         // Codex and the tools it runs get none of Kratos's own settings (L8).
         env_remove: std::env::vars_os()
             .map(|(name, _)| name)
-            .filter(|name| name.to_string_lossy().starts_with("KRATOS_"))
+            .filter(|name| is_kratos_variable(name))
             .collect(),
         env_set: settings.env_set.clone(),
         client_info: types::ClientInfo {
@@ -132,6 +132,14 @@ fn launch(settings: &CodexSettings) -> Launch {
         request_timeout: settings.request_timeout,
         close_timeout: CLOSE_TIMEOUT,
     }
+}
+
+/// One of Kratos's own variables. Windows ignores the case of a variable's name, so `kratos_x`
+/// is read as `KRATOS_X` there; the check folds case on every system, as Claude's launch does.
+fn is_kratos_variable(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy()
+        .to_ascii_uppercase()
+        .starts_with("KRATOS_")
 }
 
 impl Actor {
@@ -594,6 +602,23 @@ async fn open_thread(
                 turns: started.thread.turns,
                 is_new: true,
             })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kratos_variables_are_found_in_any_case() {
+        // Catches a lower-case `kratos_` variable, which Windows reads as Kratos's own, passed to
+        // Codex and the commands it runs (L8).
+        for name in ["KRATOS_HOME", "kratos_token", "Kratos_Port"] {
+            assert!(is_kratos_variable(std::ffi::OsStr::new(name)), "{name}");
+        }
+        for name in ["PATH", "KRATOSX", "MY_KRATOS_HOME"] {
+            assert!(!is_kratos_variable(std::ffi::OsStr::new(name)), "{name}");
         }
     }
 }
