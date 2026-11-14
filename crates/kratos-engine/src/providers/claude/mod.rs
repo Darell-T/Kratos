@@ -89,6 +89,8 @@ pub struct ClaudeSettings {
     pub idle_close: Duration,
     /// The deadline of a control request to the CLI, such as an interrupt.
     pub control_timeout: Duration,
+    /// The longest line Kratos reads from a CLI. A longer one ends that CLI's session.
+    pub max_line_bytes: usize,
     /// The wait after a CLI's first failure to run. Each failure in a row doubles it (L4).
     pub restart_wait: Duration,
     /// Failures in a row after which only the user may start the CLI again (L4).

@@ -384,6 +384,7 @@ fn launch(
     launch.disallowed_tools = DISALLOWED_TOOLS.map(str::to_owned).to_vec();
     launch.env_set = settings.env_set.clone();
     launch.control_timeout = settings.control_timeout;
+    launch.max_line_bytes = settings.max_line_bytes;
     Ok(launch)
 }
 

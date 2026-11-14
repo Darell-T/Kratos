@@ -62,6 +62,8 @@ pub struct Options {
     pub stop_timeout: Duration,
     pub idle_close: Duration,
     pub control_timeout: Duration,
+    /// The longest line the provider reads from the fake CLI.
+    pub max_line_bytes: usize,
     pub restart_wait: Duration,
     pub max_restarts: u32,
     pub settings: ThreadSettings,
@@ -83,6 +85,7 @@ impl Default for Options {
             stop_timeout: Duration::from_secs(5),
             idle_close: Duration::from_secs(30 * 60),
             control_timeout: Duration::from_secs(10),
+            max_line_bytes: kratos_claude_client::MAX_LINE_BYTES,
             restart_wait: Duration::from_millis(1),
             max_restarts: 5,
             settings: ThreadSettings::default(),
@@ -207,6 +210,7 @@ impl Harness {
             stop_timeout: options.stop_timeout,
             idle_close: options.idle_close,
             control_timeout: options.control_timeout,
+            max_line_bytes: options.max_line_bytes,
             restart_wait: options.restart_wait,
             max_restarts: options.max_restarts,
         };

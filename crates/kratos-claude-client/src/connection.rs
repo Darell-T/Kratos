@@ -19,9 +19,12 @@ use crate::{
     ControlRequest, Initialize, Initialized, Launch, ParseError, StreamMessage, UsageRead,
 };
 
-/// Largest of 1,089 messages in 34 spike recordings was 50,630 UTF-8 bytes without newline,
-/// s8-settings-isolation/b-user-project-local/wire.jsonl:6. 128 KiB gives 2.59 times headroom.
-pub const MAX_LINE_BYTES: usize = 128 * 1024;
+/// The default limit on one line from the CLI. An `Edit` or `Write` sends the whole file as it was
+/// before the change in its post-tool hook and its result, so a line grows with the file Claude
+/// edits: measured with 2.1.322, editing a 3,025,002-byte file sent a 3,082,014-byte line. 256 MiB
+/// lets Claude edit any file up to about 250 MB while one line still cannot take the machine's
+/// memory. The CLI itself refuses to edit a file over 1 GiB.
+pub const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 const QUEUE_CAPACITY: usize = 256;
 const STDERR_BYTES_KEPT: usize = 16 * 1024;
 const STDERR_LINES_KEPT: usize = 20;
@@ -236,6 +239,7 @@ struct Shared {
     exited: watch::Receiver<Option<Exit>>,
     control_timeout: Duration,
     close_timeout: Duration,
+    max_line_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -379,6 +383,7 @@ pub async fn connect(
         exited,
         control_timeout: launch.control_timeout,
         close_timeout: launch.close_timeout,
+        max_line_bytes: launch.max_line_bytes,
     });
     let claude = Claude {
         shared: shared.clone(),
@@ -638,7 +643,10 @@ enum Line {
     Eof,
 }
 
-async fn bounded_line(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<Line> {
+async fn bounded_line(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    max_line_bytes: usize,
+) -> io::Result<Line> {
     let mut kept = Vec::new();
     let mut bytes = 0usize;
     loop {
@@ -649,19 +657,19 @@ async fn bounded_line(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<Li
         let newline = buffer.iter().position(|byte| *byte == b'\n');
         let count = newline.unwrap_or(buffer.len());
         bytes = bytes.saturating_add(count);
-        if bytes <= MAX_LINE_BYTES {
+        if bytes <= max_line_bytes {
             kept.extend_from_slice(&buffer[..count]);
         }
         reader.consume(count + usize::from(newline.is_some()));
         if newline.is_some() {
-            return if bytes > MAX_LINE_BYTES {
+            return if bytes > max_line_bytes {
                 Ok(Line::Oversized(bytes))
             } else {
                 Ok(Line::Data(kept))
             };
         }
     }
-    if bytes > MAX_LINE_BYTES {
+    if bytes > max_line_bytes {
         Ok(Line::Oversized(bytes))
     } else if bytes == 0 {
         Ok(Line::Eof)
@@ -673,7 +681,7 @@ async fn bounded_line(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<Li
 async fn read(shared: Arc<Shared>, stdout: ChildStdout, incoming: mpsc::Sender<Incoming>) {
     let mut reader = BufReader::new(stdout);
     loop {
-        let event = match bounded_line(&mut reader).await {
+        let event = match bounded_line(&mut reader, shared.max_line_bytes).await {
             Ok(Line::Eof) => break,
             Ok(Line::Oversized(bytes)) => Some(Incoming::Oversized { bytes }),
             Ok(Line::Data(line)) => match serde_json::from_slice::<Value>(&line) {

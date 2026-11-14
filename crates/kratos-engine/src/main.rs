@@ -228,6 +228,7 @@ fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
         stop_timeout: STOP_TIMEOUT,
         idle_close: SESSION_IDLE_CLOSE,
         control_timeout: REQUEST_TIMEOUT,
+        max_line_bytes: kratos_claude_client::MAX_LINE_BYTES,
         restart_wait: RESTART_WAIT,
         max_restarts: MAX_RESTARTS,
     })

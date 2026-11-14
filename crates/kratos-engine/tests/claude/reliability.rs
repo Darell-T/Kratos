@@ -418,15 +418,20 @@ async fn starts_a_session_with_initialize_first_and_registers_only_kratos_hooks(
 async fn a_line_kratos_cannot_read_ends_the_turn_instead_of_leaving_claude_waiting() {
     // Catches a permission request too large to read, or a result Kratos cannot parse, dropped
     // with a note while the CLI waits for an answer and the turn runs forever.
+    let limit = 128 * 1024;
     let oversized = json!({ "type": "control_request", "request_id": "big", "request": {
         "subtype": "can_use_tool", "tool_name": "Write",
-        "input": { "file_path": "big.txt", "content": "x".repeat(200 * 1024) } } });
+        "input": { "file_path": "big.txt", "content": "x".repeat(2 * limit) } } });
     let unparsable = json!({ "type": "result", "subtype": "success", "user_message_uuids": [A] });
     for (label, line, reason) in [
         ("oversized", oversized, "more than Kratos reads"),
         ("unparsable", unparsable, "cannot read"),
     ] {
-        let mut harness = Harness::start(Options::default()).await;
+        let mut harness = Harness::start(Options {
+            max_line_bytes: limit,
+            ..Options::default()
+        })
+        .await;
         let launch = harness.begin(A, 1).await;
 
         harness.emit(&launch, line).await;
@@ -475,4 +480,54 @@ async fn a_transcript_with_a_bad_line_in_the_middle_still_lets_the_user_discard(
         .unwrap();
 
     assert_eq!(discarded.status, MessageStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn editing_a_large_file_does_not_end_the_session() {
+    // Catches a line limit below what an edit sends: the CLI puts the whole file as it was before
+    // the change in the post-tool hook, so editing a 3 MB file (measured) ended the session.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    let original = "x".repeat(3 * 1024 * 1024);
+    harness
+        .call(
+            &launch,
+            "test/ask",
+            json!({ "requestId": "edited", "request": {
+        "subtype": "hook_callback", "callback_id": "kratos-post",
+        "input": { "hook_event_name": "PostToolUse", "tool_name": "Edit",
+            "tool_input": { "file_path": "big.txt", "old_string": "a", "new_string": "b" },
+            "tool_response": { "originalFile": original } } } }),
+        )
+        .await;
+
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    loop {
+        let answered = harness.received(&launch).await.into_iter().any(|frame| {
+            frame["response"]["request_id"] == "edited"
+                && frame["response"]["response"]["continue"] == true
+        });
+        if answered {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the edit hook was never answered"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    harness.finish(&launch, &[A], json!({})).await;
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+                ..
+            }
+        ),
+        "{ended:?}"
+    );
 }
