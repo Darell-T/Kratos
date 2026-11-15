@@ -37,6 +37,7 @@ methods! {
     ThreadFork = "thread/fork": types::ThreadForkParams => types::ThreadForkResponse;
     ThreadRead = "thread/read": types::ThreadReadParams => types::ThreadReadResponse;
     ThreadUnsubscribe = "thread/unsubscribe": types::ThreadUnsubscribeParams => types::ThreadUnsubscribeResponse;
+    ThreadBackgroundTerminalsList = "thread/backgroundTerminals/list": types::ThreadBackgroundTerminalsListParams => types::ThreadBackgroundTerminalsListResponse;
     TurnStart = "turn/start": types::TurnStartParams => types::TurnStartResponse;
     TurnSteer = "turn/steer": types::TurnSteerParams => types::TurnSteerResponse;
     TurnInterrupt = "turn/interrupt": types::TurnInterruptParams => types::TurnInterruptResponse;

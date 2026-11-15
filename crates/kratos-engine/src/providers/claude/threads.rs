@@ -265,8 +265,7 @@ impl ThreadState {
         self.run.is_some() && self.pending.is_empty()
     }
 
-    /// The thread has a message in flight, a process starting, a turn running, or a stop.
-    pub(super) fn is_working(&self) -> bool {
+    pub(super) fn is_busy_or_stopping(&self) -> bool {
         self.is_busy() || self.stopping
     }
 
@@ -278,7 +277,7 @@ impl ThreadState {
     /// When the open process last did anything, if it has nothing to do.
     pub(super) fn idle_since(&self) -> Option<Instant> {
         let open = self.open()?;
-        (!self.is_working() && !self.runs_background_task()).then_some(open.last_active)
+        (!self.is_busy_or_stopping() && !self.runs_background_task()).then_some(open.last_active)
     }
 
     pub(super) fn turn_settings(&self) -> &ThreadSettings {

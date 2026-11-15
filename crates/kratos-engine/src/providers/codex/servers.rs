@@ -98,11 +98,10 @@ impl Servers {
         self.slots.get(key).map_or(0, |slot| slot.generation)
     }
 
-    pub(super) fn advance(&mut self, key: &ServerKey) -> u64 {
+    pub(super) fn advance_generation(&mut self, key: &ServerKey) {
         self.issued += 1;
         let generation = self.issued;
         self.slot(key).generation = generation;
-        generation
     }
 
     pub(super) fn codex(&self, key: &ServerKey) -> Option<Codex> {
@@ -155,7 +154,7 @@ impl Servers {
         let unused = self.slots.get(key).is_some_and(|slot| {
             matches!(slot.server, Server::Down)
                 && slot.deferred.is_empty()
-                && !slot.restarts.waits()
+                && !slot.restarts.in_backoff()
         });
         if unused {
             self.slots.remove(key);

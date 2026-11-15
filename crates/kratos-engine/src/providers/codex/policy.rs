@@ -82,7 +82,7 @@ pub fn decide_patch(
         match writes::destination(&folder.join(path), folder, protected) {
             Ok(Destination::Inside) => {}
             Ok(Destination::Outside) => lands = Destination::Outside,
-            Ok(protected) => lands = protected,
+            Ok(guarded @ Destination::Protected(_)) => lands = guarded,
             Err(_) => return Verdict::Ask(AskReason::Unchecked),
         }
         if matches!(lands, Destination::Protected(_)) {

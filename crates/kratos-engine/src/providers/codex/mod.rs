@@ -2,10 +2,11 @@
 //!
 //! One actor task owns every Codex thread's turn state and the `codex app-server` connections:
 //! one per thread, so a stuck turn's process ends no other thread's turn, and one for account work
-//! when no thread's runs ([`servers`]). Handles send it commands and wait for the reply. A request to Codex runs in a task of its own
-//! and comes back to the actor as a completion, so the actor keeps reading Codex's notifications
-//! while a request is out, and a completion that arrives after its thread moved on is recognized
-//! and dropped. Nothing outside the actor changes a Codex thread's state.
+//! when no thread's runs ([`servers`]). Handles send it commands and wait for the reply. A request
+//! to Codex runs in a task of its own and comes back to the actor as a completion, so the actor
+//! keeps reading Codex's notifications while a request is out, and a completion that arrives
+//! after its thread moved on is recognized and dropped. Nothing outside the actor changes a Codex
+//! thread's state.
 //!
 //! The two delivery rules of the TypeScript provider hold here (D11). A queued message starts only
 //! once the turn before it is confirmed finished, and a message whose delivery is uncertain is

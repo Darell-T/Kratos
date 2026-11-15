@@ -3,8 +3,8 @@
 //!
 //! A server starts on demand, never on a timer (L4, L5). Each failure in a row doubles the wait
 //! before that server's next start, up to a minute, so a Codex that keeps dying costs one start a
-//! minute at most. A thread Codex cannot resume stays unavailable and says why; Kratos never starts a fresh
-//! Codex thread in its place (L7).
+//! minute at most. A thread Codex cannot resume stays unavailable and says why; Kratos never
+//! starts a fresh Codex thread in its place (L7).
 
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
@@ -56,8 +56,7 @@ impl Restarts {
         self.started_at = Some(Instant::now() - SETTLED_AFTER);
     }
 
-    /// A failure's backoff still runs.
-    pub(super) fn waits(&self) -> bool {
+    pub(super) fn in_backoff(&self) -> bool {
         self.may_start().is_err()
     }
 
@@ -178,7 +177,7 @@ impl Actor {
     }
 
     fn start_server(&mut self, key: &ServerKey) {
-        self.servers.advance(key);
+        self.servers.advance_generation(key);
         let slot = self.servers.slot(key);
         slot.server = Server::Starting;
         slot.last_used = Instant::now();
@@ -284,7 +283,7 @@ impl Actor {
                 && thread.steering.is_empty()
                 && thread.discards.is_empty()
         });
-        quiet_slot && thread_idle && !self.requests.waits_on(thread_id)
+        quiet_slot && thread_idle && !self.requests.awaits_user(thread_id)
     }
 
     /// Closes an idle server once Codex reports it holds no background terminal, which closing it
@@ -311,7 +310,7 @@ impl Actor {
                         limit: None,
                     };
                     codex
-                        .request::<BackgroundTerminals>(&params)
+                        .request::<methods::ThreadBackgroundTerminalsList>(&params)
                         .await
                         .map(|listed| listed.data.is_empty())
                         .map_err(|error| error.to_string())
@@ -678,7 +677,7 @@ impl Actor {
     /// Waiting stops and requests are answered, and untouched queued work requests a replacement,
     /// respecting the restart backoff. Room it frees goes to what waits for a server.
     pub(super) async fn on_exit(&mut self, key: ServerKey, exit: Exit) {
-        self.servers.advance(&key);
+        self.servers.advance_generation(&key);
         let slot = self.servers.slot(&key);
         slot.server = Server::Down;
         slot.terminals = TerminalCheck::NotAsked;
@@ -831,15 +830,6 @@ async fn forward(
             return;
         }
     }
-}
-
-// The pinned schema exposes this operation; the shared client does not name it yet.
-struct BackgroundTerminals;
-
-impl kratos_codex_client::Method for BackgroundTerminals {
-    const NAME: &'static str = "thread/backgroundTerminals/list";
-    type Params = types::ThreadBackgroundTerminalsListParams;
-    type Response = types::ThreadBackgroundTerminalsListResponse;
 }
 
 #[cfg(test)]

@@ -16,7 +16,8 @@ use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState, Wa
 use super::{ClaudeSettings, ProviderError, hooks, permissions, release, wire};
 
 /// Tools the CLI may not offer. `Monitor` streams a long-running command's output back into the
-/// turn, and whether a Claude thread may use it is not decided.
+/// turn.
+// TODO: decide whether a Claude thread may use `Monitor`.
 const DISALLOWED_TOOLS: [&str; 1] = ["Monitor"];
 
 impl Actor {
@@ -301,7 +302,7 @@ impl Actor {
             )));
             return;
         }
-        if self.threads.values().any(ThreadState::is_working) {
+        if self.threads.values().any(ThreadState::is_busy_or_stopping) {
             let _ = reply.send(Err(ProviderError::Conflict(
                 "Claude Code cannot update while a Claude thread is working. Update once its turn ends"
                     .to_owned(),

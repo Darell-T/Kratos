@@ -2,10 +2,10 @@
 //!
 //! One actor task owns every Claude thread's state, as the Codex actor does, and each thread has a
 //! `claude` process of its own, as each Codex thread has an app-server of its own. Handles send
-//! the actor commands and wait for the reply. Work that waits on a process, such as starting it or writing a message,
-//! runs in a task of its own and comes back to the actor as a completion, so the actor keeps
-//! reading frames while it is out, and a completion for a process that has ended is recognized and
-//! dropped. Nothing outside the actor changes a Claude thread's state.
+//! the actor commands and wait for the reply. Work that waits on a process, such as starting it
+//! or writing a message, runs in a task of its own and comes back to the actor as a completion,
+//! so the actor keeps reading frames while it is out, and a completion for a process that has
+//! ended is recognized and dropped. Nothing outside the actor changes a Claude thread's state.
 //!
 //! The two delivery rules hold here (D11). A queued message is written to Claude only once every
 //! message before it has a result, and a message whose delivery is uncertain is never sent again:
