@@ -251,10 +251,16 @@ async fn relaunches_an_idle_session_when_its_settings_change_and_never_launches_
     // Catches a changed model that runs in the old process, a settings change that restarts a
     // turn that is running (D87), a launch that bypasses permissions before Kratos's own rules
     // exist, and a plan setting that does not reach the process.
-    let harness = Harness::start(Options::default()).await;
+    let mut harness = Harness::start(Options::default()).await;
     let first = harness.begin(A, 1).await;
     harness.finish(&first, &[A], json!({})).await;
     harness.message_becomes(A, |s| accepted_by(s, A)).await;
+    // The message is accepted when the turn begins, so only the turn's end shows the thread idle.
+    // A settings change before it keeps the process until the next message, as one during a turn
+    // must.
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
     let settings = |model: &str, permission, plan_mode| ThreadSettings {
         model: kratos_protocol::RequiredText::new(model),
         permission,
