@@ -160,6 +160,8 @@ struct Fake {
     held: Vec<Held>,
     /// What `thread/backgroundTerminals/list` reports, set by `test/backgroundTerminals`.
     background_terminals: Vec<Value>,
+    /// How many `thread/backgroundTerminals/list` requests arrived, for `test/backgroundTerminalLists`.
+    background_terminal_lists: u64,
     /// Every `thread/start`, `thread/resume`, and `thread/unsubscribe`, for `test/threadRequests`.
     thread_log: Vec<Value>,
     threads: BTreeMap<String, Value>,
@@ -283,6 +285,7 @@ impl Fake {
                 self.reply(&id, json!({ "status": "unsubscribed" }));
             }
             "thread/backgroundTerminals/list" => {
+                self.background_terminal_lists += 1;
                 let data = Value::Array(self.background_terminals.clone());
                 self.reply(&id, json!({ "data": data }));
             }
@@ -487,6 +490,9 @@ impl Fake {
                     })
                     .collect();
                 self.reply(id, Value::Array(held));
+            }
+            "test/backgroundTerminalLists" => {
+                self.reply(id, json!(self.background_terminal_lists));
             }
             "test/backgroundTerminals" => {
                 self.background_terminals =

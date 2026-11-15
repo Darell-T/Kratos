@@ -8,7 +8,7 @@ use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
     AccessLimit, MessageOrigin, MessageStatus, PauseReason, Permission, Seq, ThreadEventBody,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::harness::{Harness, Options, WAIT, message_id, text_input};
 
@@ -399,6 +399,105 @@ async fn at_the_server_limit_a_thread_waits_with_a_note_until_a_working_thread_f
             .is_object(),
         "only the finished thread's idle server closed"
     );
+}
+
+#[tokio::test]
+async fn a_waiting_thread_asks_an_idle_server_with_a_background_terminal_once_per_change() {
+    // Catches an idle server found holding a background terminal asked again at once, without
+    // end, while a thread waits for a server.
+    let mut harness = Harness::start(Options::default()).await;
+    let mut threads = vec![harness.thread_id.clone()];
+    for n in 2..=9 {
+        threads.push(harness.another_thread(&format!("project-{n}")).await);
+    }
+    for (n, thread_id) in threads.iter().take(8).enumerate() {
+        harness
+            .provider
+            .send(
+                thread_id.clone(),
+                message_id(&format!("m{n}")),
+                text_input("work"),
+                MessageOrigin::User,
+            )
+            .await
+            .unwrap();
+        harness.held("turn/start", n + 1).await;
+        harness
+            .settle_start_everywhere(&format!("turn-{n}"), "inProgress")
+            .await;
+    }
+    let dev_server = harness.fake_of("m0").await;
+    let ask = |method: &'static str, params: Value| fake_agents::codex_control::ControlRequest {
+        method,
+        params,
+    };
+    harness
+        .control_at(
+            dev_server,
+            ask(
+                "test/backgroundTerminals",
+                json!({ "terminals": [{
+                    "command": "npm run dev",
+                    "cwd": "/project",
+                    "itemId": "item-1",
+                    "processId": "process-1",
+                }] }),
+            ),
+        )
+        .await;
+    harness
+        .control_at(
+            dev_server,
+            fake_agents::codex_control::complete("thread-A", "turn-0", "completed"),
+        )
+        .await;
+    harness
+        .provider
+        .send(
+            threads[8].clone(),
+            message_id("m8"),
+            text_input("waits"),
+            MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while harness
+        .control_at(dev_server, ask("test/backgroundTerminalLists", json!({})))
+        .await
+        == json!(0)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the waiting thread never asked the idle server"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let asked = harness
+        .control_at(dev_server, ask("test/backgroundTerminalLists", json!({})))
+        .await;
+    assert_eq!(
+        asked,
+        json!(1),
+        "the server with a dev server running was asked again with nothing changed"
+    );
+    assert_eq!(
+        harness.turn_requests().await.len(),
+        8,
+        "the waiting thread starts no ninth server"
+    );
+
+    // Another thread finishing is a change: its idle server closes for the waiting thread.
+    let second = harness.fake_of("m1").await;
+    harness
+        .control_at(
+            second,
+            fake_agents::codex_control::complete("thread-A", "turn-1", "completed"),
+        )
+        .await;
+    harness.fake_of("m8").await;
 }
 
 #[tokio::test]

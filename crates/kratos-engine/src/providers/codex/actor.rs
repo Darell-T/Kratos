@@ -139,9 +139,10 @@ pub(super) enum Done {
     Account {
         plan: Option<String>,
     },
-    /// Whether an idle server holds no background terminal, so closing it ends no work.
+    /// Whether an idle server holds no background terminal, so closing it ends no work, or why
+    /// Codex did not say.
     Quiet {
-        quiet: bool,
+        quiet: Result<bool, String>,
     },
     Attached {
         thread_id: ThreadId,

@@ -19,7 +19,9 @@ use tokio::sync::mpsc;
 use super::actor::{Actor, Done, Frame, Opened};
 use super::profiles::{Profile, temp_folder};
 use super::recovery::{self, EndReason, EndingTurn, Unfinished};
-use super::servers::{ACCOUNT_IDLE_CLOSE, MAX_SERVERS, Server, ServerKey, THREAD_IDLE_CLOSE};
+use super::servers::{
+    ACCOUNT_IDLE_CLOSE, MAX_SERVERS, Server, ServerKey, THREAD_IDLE_CLOSE, TerminalCheck,
+};
 use super::threads::{Link, ThreadState, Turn};
 use super::{CodexSettings, ProviderError, policy, wire};
 use crate::mcp::{self, McpServer};
@@ -196,6 +198,7 @@ impl Actor {
         if !self.waiting_for_server.contains(key) {
             self.waiting_for_server.push_back(key.clone());
         }
+        self.servers.recheck_busy();
         if self.retire_one_idle() {
             return;
         }
@@ -222,14 +225,14 @@ impl Actor {
                 self.start_server(&key);
             }
         }
-        if !self.waiting_for_server.is_empty() {
-            self.retire_one_idle();
-        }
+        self.make_room_if_waited_for();
     }
 
-    /// A thread finished its work. When something waits for a server, an idle one may now close.
+    /// Something changed. When something waits for a server, an idle one may now close, including
+    /// one found busy before.
     pub(super) fn make_room_if_waited_for(&mut self) {
         if !self.waiting_for_server.is_empty() {
+            self.servers.recheck_busy();
             self.retire_one_idle();
         }
     }
@@ -248,8 +251,10 @@ impl Actor {
         true
     }
 
-    /// Closes each server nobody used for its idle time, once it is idle and quiet.
+    /// Closes each server nobody used for its idle time, once it is idle and quiet. A background
+    /// terminal can end without a word from Codex, so a thread waiting for a server asks again.
     pub(super) fn retire_idle(&mut self, now: Instant) {
+        self.make_room_if_waited_for();
         for key in self.servers.up_by_age() {
             let idle_close = match key {
                 ServerKey::Thread(_) => THREAD_IDLE_CLOSE,
@@ -296,10 +301,10 @@ impl Actor {
         let Some(codex) = self.servers.codex(key) else {
             return;
         };
-        self.servers.slot(key).retiring = true;
+        self.servers.slot(key).terminals = TerminalCheck::Asking;
         self.spawn(key, async move {
             let quiet = match native_id {
-                None => true,
+                None => Ok(true),
                 Some(thread_id) => {
                     let params = types::ThreadBackgroundTerminalsListParams {
                         thread_id,
@@ -309,7 +314,8 @@ impl Actor {
                     codex
                         .request::<BackgroundTerminals>(&params)
                         .await
-                        .is_ok_and(|listed| listed.data.is_empty())
+                        .map(|listed| listed.data.is_empty())
+                        .map_err(|error| error.to_string())
                 }
             };
             Done::Quiet { quiet }
@@ -317,16 +323,26 @@ impl Actor {
     }
 
     /// The answer to [`Actor::retire_if_quiet`]'s question. A server found busy counts as used
-    /// now, so it is asked again only after another idle time.
-    pub(super) async fn on_quiet(&mut self, key: ServerKey, quiet: bool) {
-        let slot = self.servers.slot(&key);
-        slot.retiring = false;
+    /// now, so the idle sweep asks again only after another idle time. A server Codex would not
+    /// answer for counts as busy: closing it could end a terminal Kratos cannot see.
+    pub(super) async fn on_quiet(&mut self, key: ServerKey, quiet: Result<bool, String>) {
+        let quiet = quiet.unwrap_or_else(|error| {
+            eprintln!("Codex did not list the background terminals of {key:?}: {error}");
+            false
+        });
         if quiet && self.is_idle(&key) {
+            self.servers.slot(&key).terminals = TerminalCheck::NotAsked;
             self.stop_server(&key, "nobody used it, and its thread is idle")
                 .await;
             return;
         }
-        self.servers.slot(&key).last_used = Instant::now();
+        let slot = self.servers.slot(&key);
+        slot.terminals = if quiet {
+            TerminalCheck::NotAsked
+        } else {
+            TerminalCheck::Busy
+        };
+        slot.last_used = Instant::now();
         if !self.waiting_for_server.is_empty() {
             self.retire_one_idle();
         }
@@ -666,7 +682,7 @@ impl Actor {
         self.servers.advance(&key);
         let slot = self.servers.slot(&key);
         slot.server = Server::Down;
-        slot.retiring = false;
+        slot.terminals = TerminalCheck::NotAsked;
         slot.restarts.exited();
         if let ServerKey::Thread(thread_id) = &key {
             self.detach(thread_id, &exit.to_string()).await;

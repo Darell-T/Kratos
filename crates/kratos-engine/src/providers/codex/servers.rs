@@ -47,8 +47,18 @@ pub(super) struct Slot {
     /// Commands waiting for this server to start.
     pub deferred: Vec<Command>,
     pub last_used: Instant,
-    /// A check that the server holds no background terminal is out, so it is not asked twice.
-    pub retiring: bool,
+    pub terminals: TerminalCheck,
+}
+
+/// Where the check that an idle server holds no background terminal stands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum TerminalCheck {
+    NotAsked,
+    /// The question is out, so the server is not asked twice.
+    Asking,
+    /// Codex reported a background terminal, or would not say. Making room skips the server until
+    /// something changes, so a waiting thread does not ask it again and again.
+    Busy,
 }
 
 impl Slot {
@@ -59,7 +69,7 @@ impl Slot {
             restarts: Restarts::default(),
             deferred: Vec::new(),
             last_used: Instant::now(),
-            retiring: false,
+            terminals: TerminalCheck::NotAsked,
         }
     }
 
@@ -117,12 +127,23 @@ impl Servers {
         self.slots.keys().cloned().collect()
     }
 
-    /// The servers that are up and not already being retired, least recently used first.
+    /// Something changed, so the servers found busy may be asked again.
+    pub(super) fn recheck_busy(&mut self) {
+        for slot in self.slots.values_mut() {
+            if slot.terminals == TerminalCheck::Busy {
+                slot.terminals = TerminalCheck::NotAsked;
+            }
+        }
+    }
+
+    /// The servers that are up and not asked or found busy, least recently used first.
     pub(super) fn up_by_age(&self) -> Vec<ServerKey> {
         let mut up: Vec<(&ServerKey, Instant)> = self
             .slots
             .iter()
-            .filter(|(_, slot)| matches!(slot.server, Server::Up(_)) && !slot.retiring)
+            .filter(|(_, slot)| {
+                matches!(slot.server, Server::Up(_)) && slot.terminals == TerminalCheck::NotAsked
+            })
             .map(|(key, slot)| (key, slot.last_used))
             .collect();
         up.sort_by_key(|(_, used)| *used);
