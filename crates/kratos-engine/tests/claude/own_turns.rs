@@ -123,3 +123,55 @@ async fn an_approval_in_a_turn_claude_started_reaches_the_user_and_the_answer_is
         "allow"
     );
 }
+
+#[tokio::test]
+async fn a_turn_claude_starts_itself_runs_under_the_thread_s_current_permission() {
+    // Catches the self-started turn deciding tools under the permission of the last turn a message
+    // started: lowered from Full access to Ask me in between, its command ran unasked.
+    let mut harness = Harness::start(Options {
+        settings: kratos_protocol::ThreadSettings {
+            permission: kratos_protocol::Permission::FullAccess,
+            ..kratos_protocol::ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = after_a_finished_turn(&mut harness).await;
+    harness
+        .provider
+        .set_settings(
+            harness.thread_id.clone(),
+            kratos_protocol::ThreadSettings::default(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        harness.is_running(&launch),
+        "a permission change keeps the CLI"
+    );
+
+    background_task_ends(&harness, &launch).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
+        .await;
+    send(
+        &harness,
+        &launch,
+        "command",
+        "Bash",
+        json!({ "command": "ls" }),
+    )
+    .await;
+
+    let asked = approval(&mut harness).await;
+    assert_eq!(asked.why, AskReason::AskEveryAction);
+    harness
+        .provider
+        .decide(asked.id, ApprovalDecision::Decline)
+        .await
+        .unwrap();
+    assert_eq!(
+        response(&harness, &launch, "command").await["behavior"],
+        "deny"
+    );
+}

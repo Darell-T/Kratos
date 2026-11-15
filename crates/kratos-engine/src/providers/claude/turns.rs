@@ -329,6 +329,9 @@ impl Actor {
         };
         thread.rejection = None;
         thread.answering_model = None;
+        // It decides tools under the thread's settings now, not those of the last turn a message
+        // started: the user may have lowered them since.
+        thread.turn_settings = Some(thread.settings.clone());
         let turn_id = TurnId::new(uuid::Uuid::new_v4().to_string());
         let recorded = turn_id.clone();
         let started = self
