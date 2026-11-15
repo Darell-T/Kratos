@@ -1,8 +1,11 @@
 //! Turns Claude Code starts by itself after a background command ends, with no message of the
 //! user's in them.
 
+use std::time::Duration;
+
 use kratos_protocol::{
-    AgentItem, ApprovalDecision, AskReason, ThreadEventBody, TurnOrigin, TurnOutcome,
+    AgentItem, ApprovalDecision, AskReason, LiveUpdate, RequiredText, ThreadEventBody,
+    ThreadSettings, TurnOrigin, TurnOutcome,
 };
 use serde_json::json;
 
@@ -174,4 +177,131 @@ async fn a_turn_claude_starts_itself_runs_under_the_thread_s_current_permission(
         response(&harness, &launch, "command").await["behavior"],
         "deny"
     );
+}
+
+/// Finishes the thread's first turn with a background command still running.
+async fn a_command_runs_on_after_the_turn(harness: &mut Harness) -> Launch {
+    let launch = harness.begin(A, 1).await;
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "system", "subtype": "background_tasks_changed",
+                    "tasks": [{ "task_id": "t1", "task_type": "local_bash" }] }),
+        )
+        .await;
+    harness.finish(&launch, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    launch
+}
+
+async fn change_model(harness: &Harness, model: &str) {
+    let settings = ThreadSettings {
+        model: RequiredText::new(model),
+        ..ThreadSettings::default()
+    };
+    harness
+        .provider
+        .set_settings(harness.thread_id.clone(), settings)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_model_change_waits_for_a_background_command_and_the_turn_that_reports_it() {
+    // Catches a settings change closing a CLI whose background command still runs, a message
+    // that needs the new launch cutting the command or the turn that reports it short, and a
+    // thread not told why its message waits.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = a_command_runs_on_after_the_turn(&mut harness).await;
+
+    change_model(&harness, "claude-opus-test").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        harness.is_running(&launch),
+        "the CLI and its command run on"
+    );
+
+    let (_, mut live) = harness.hub.watch_live(&harness.thread_id);
+    harness.send(B, "B").await;
+    let note = tokio::time::timeout(crate::harness::WAIT, async {
+        loop {
+            if let LiveUpdate::Waiting { reason } = live.recv().await.unwrap() {
+                return reason;
+            }
+        }
+    })
+    .await
+    .expect("the thread is told why its message waits");
+    assert!(note.contains("background command"), "{note}");
+    assert_eq!(harness.launches().len(), 1, "no new launch yet");
+
+    background_task_ends(&harness, &launch).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        harness.is_running(&launch),
+        "the turn that reports the command runs to its end"
+    );
+    harness.finish(&launch, &[], json!({})).await;
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(
+            &ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+                ..
+            }
+        ),
+        "{ended:?}"
+    );
+
+    let second = harness.launch(2).await;
+    harness.wait_ended(&launch).await;
+    assert_eq!(second.value("--model"), Some("claude-opus-test"));
+    harness.wait_written(&second, &[B]).await;
+}
+
+#[tokio::test]
+async fn a_message_waiting_for_a_background_command_goes_ahead_when_no_report_turn_follows() {
+    // Catches a message that waits forever when the CLI reports its command ended but starts no
+    // turn to report it.
+    let mut harness = Harness::start(Options {
+        report_turn_wait: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    let launch = a_command_runs_on_after_the_turn(&mut harness).await;
+    change_model(&harness, "claude-opus-test").await;
+    harness.send(B, "B").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        harness.is_running(&launch),
+        "the CLI and its command run on"
+    );
+    assert_eq!(harness.launches().len(), 1, "no new launch yet");
+
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "t1",
+                    "status": "completed", "summary": SUMMARY }),
+        )
+        .await;
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] }),
+        )
+        .await;
+
+    let second = harness.launch(2).await;
+    harness.wait_ended(&launch).await;
+    assert_eq!(second.value("--model"), Some("claude-opus-test"));
+    harness.wait_written(&second, &[B]).await;
 }

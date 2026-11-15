@@ -27,6 +27,7 @@
 
 mod account;
 mod actor;
+mod background;
 mod commands;
 mod ends;
 mod hooks;
@@ -87,6 +88,9 @@ pub struct ClaudeSettings {
     pub stop_timeout: Duration,
     /// A session nobody used for this long is closed, and the thread's next message resumes it.
     pub idle_close: Duration,
+    /// How long after a background command ends Kratos waits for the turn the CLI starts to
+    /// report it, before closing the CLI for a message that needs it started again.
+    pub report_turn_wait: Duration,
     /// The deadline of a control request to the CLI, such as an interrupt.
     pub control_timeout: Duration,
     /// The longest line Kratos reads from a CLI. A longer one ends that CLI's session.

@@ -48,6 +48,9 @@ impl Actor {
         let wanted = SessionConfig::of(&effective(thread, &next));
         match thread.open() {
             Some(open) if open.config == wanted => self.start_turn(thread_id, next).await,
+            Some(open) if open.holds_background_work() => {
+                self.tell_waiting_for_background(thread_id);
+            }
             Some(_) => {
                 self.retire_session(thread_id);
                 let _ = self.open_session(thread_id, wanted).await;

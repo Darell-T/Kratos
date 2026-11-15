@@ -175,6 +175,12 @@ pub(super) enum Done {
     },
     /// The wait after a CLI failure ended.
     RestartDue { thread_id: ThreadId },
+    /// The wait for the turn that reports `ended` background tasks ended.
+    ReportOverdue {
+        thread_id: ThreadId,
+        epoch: u64,
+        ended: u64,
+    },
     Transcript {
         thread_id: ThreadId,
         work: TranscriptWork,
@@ -306,6 +312,11 @@ impl Actor {
                 stop_epoch,
             } => self.on_stop_expired(&thread_id, stop_epoch),
             Done::RestartDue { thread_id } => self.on_restart_due(thread_id).await,
+            Done::ReportOverdue {
+                thread_id,
+                epoch,
+                ended,
+            } => self.on_report_overdue(&thread_id, epoch, ended).await,
             Done::Transcript {
                 thread_id,
                 work,

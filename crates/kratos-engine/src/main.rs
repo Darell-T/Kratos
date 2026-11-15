@@ -44,6 +44,9 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a Claude process may sit unused before Kratos closes it. A warm process starts the
 /// next turn at once; after half an hour unused, holding its memory costs more than a resume.
 const SESSION_IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
+/// How long Kratos waits, after a background command ends, for the turn Claude Code then starts to
+/// report it. The CLI starts that turn right after it reports the task list empty.
+const REPORT_TURN_WAIT: Duration = Duration::from_secs(10);
 /// The feed `claude update` reads for a native install: `{feed}/latest` names the newest release.
 const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
 /// The wait after a Claude process's first failure, doubled by each failure in a row (L4), and the
@@ -227,6 +230,7 @@ fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
         env_set: Vec::new(),
         stop_timeout: STOP_TIMEOUT,
         idle_close: SESSION_IDLE_CLOSE,
+        report_turn_wait: REPORT_TURN_WAIT,
         control_timeout: REQUEST_TIMEOUT,
         max_line_bytes: kratos_claude_client::MAX_LINE_BYTES,
         restart_wait: RESTART_WAIT,

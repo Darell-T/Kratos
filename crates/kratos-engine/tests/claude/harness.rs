@@ -78,6 +78,7 @@ pub struct Options {
     pub update_delay: Duration,
     /// How long a session process lives on after Kratos closes its input.
     pub exit_delay: Duration,
+    pub report_turn_wait: Duration,
 }
 
 impl Default for Options {
@@ -95,6 +96,7 @@ impl Default for Options {
             install: "native",
             update_delay: Duration::ZERO,
             exit_delay: Duration::ZERO,
+            report_turn_wait: Duration::from_secs(10),
         }
     }
 }
@@ -215,6 +217,7 @@ impl Harness {
             env_set,
             stop_timeout: options.stop_timeout,
             idle_close: options.idle_close,
+            report_turn_wait: options.report_turn_wait,
             control_timeout: options.control_timeout,
             max_line_bytes: options.max_line_bytes,
             restart_wait: options.restart_wait,

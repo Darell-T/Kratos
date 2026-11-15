@@ -248,6 +248,8 @@ impl Actor {
                     last_active: Instant::now(),
                     background_tasks: 0,
                     finished_tasks: Vec::new(),
+                    tasks_ended: 0,
+                    report_overdue: false,
                 });
                 tokio::spawn(forward(
                     thread_id.clone(),
@@ -292,7 +294,8 @@ impl Actor {
 
     /// Clears the way for Claude Code's updater, which must not replace files a running CLI
     /// loads. It refuses while any thread works, since its turn would be cut off, or runs a
-    /// background command, which closing its CLI would end. Otherwise it closes every session,
+    /// background command, which closing its CLI would end, or owes the turn that reports one.
+    /// Otherwise it closes every session,
     /// holds new ones off, and answers once the processes have exited. The threads lose nothing:
     /// their next messages resume their sessions after the update.
     pub(super) fn hold_for_update(&mut self, reply: Reply<()>) {
