@@ -19,9 +19,7 @@ use tokio::sync::mpsc;
 use super::actor::{Actor, Done, Frame, Opened};
 use super::profiles::{Profile, temp_folder};
 use super::recovery::{self, EndReason, EndingTurn, Unfinished};
-use super::servers::{
-    ACCOUNT_IDLE_CLOSE, MAX_SERVERS, Server, ServerKey, THREAD_IDLE_CLOSE, TerminalCheck,
-};
+use super::servers::{MAX_SERVERS, Server, ServerKey, TerminalCheck};
 use super::threads::{Link, ThreadState, Turn};
 use super::{CodexSettings, ProviderError, policy, wire};
 use crate::mcp::{self, McpServer};
@@ -250,19 +248,17 @@ impl Actor {
     }
 
     /// Closes each server nobody used for its idle time, once it is idle and quiet. A background
-    /// terminal can end without a word from Codex, so a thread waiting for a server asks again.
+    /// terminal can end without a word from Codex, so a thread waiting for a server asks again,
+    /// and a server found busy is asked again after another idle time.
     pub(super) fn retire_idle(&mut self, now: Instant) {
         self.make_room_if_waited_for();
+        self.servers.recheck_busy_unused(now);
         for key in self.servers.up_by_age() {
-            let idle_close = match key {
-                ServerKey::Thread(_) => THREAD_IDLE_CLOSE,
-                ServerKey::Account => ACCOUNT_IDLE_CLOSE,
-            };
             let unused_for = self
                 .servers
                 .get(&key)
                 .map_or(Duration::ZERO, |slot| now.duration_since(slot.last_used));
-            if unused_for >= idle_close && self.is_idle(&key) {
+            if unused_for >= key.idle_close() && self.is_idle(&key) {
                 self.retire_if_quiet(&key);
             }
         }

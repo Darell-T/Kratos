@@ -879,3 +879,76 @@ async fn a_late_discard_cannot_cancel_an_uncertain_message() {
         message.status
     );
 }
+
+#[tokio::test]
+async fn the_idle_check_asks_a_server_found_busy_again_after_another_idle_time() {
+    // Catches a server found holding a background terminal never asked again by the idle check,
+    // so it stays open after the terminal ends, and one asked again with nothing changed.
+    use crate::providers::codex::servers::{THREAD_IDLE_CLOSE, TerminalCheck};
+
+    let mut harness = Harness::start().await;
+    harness
+        .attached_reply()
+        .await
+        .apply(&mut harness.actor)
+        .await;
+    let key = harness.key();
+    let terminal = json!({ "command": "npm run dev", "cwd": "/project", "itemId": "item-1",
+                           "processId": "process-1" });
+    harness
+        .control(
+            "test/backgroundTerminals",
+            json!({ "terminals": [terminal] }),
+        )
+        .await;
+    let past_idle = || Instant::now() + THREAD_IDLE_CLOSE + Duration::from_secs(1);
+    let check = |harness: &Harness| harness.actor.servers.get(&key).map(|slot| slot.terminals);
+
+    harness.actor.retire_idle(past_idle());
+    harness
+        .completion(|done| matches!(done, Done::Quiet { .. }))
+        .await
+        .apply(&mut harness.actor)
+        .await;
+    assert_eq!(check(&harness), Some(TerminalCheck::Busy));
+
+    harness
+        .actor
+        .retire_idle(Instant::now() + Duration::from_secs(60));
+    assert_eq!(
+        check(&harness),
+        Some(TerminalCheck::Busy),
+        "asked again before another idle time"
+    );
+
+    harness
+        .control("test/backgroundTerminals", json!({ "terminals": [] }))
+        .await;
+    harness.actor.retire_idle(past_idle());
+    assert_eq!(
+        check(&harness),
+        Some(TerminalCheck::Asking),
+        "not asked again after another idle time"
+    );
+    harness
+        .completion(|done| matches!(done, Done::Quiet { .. }))
+        .await
+        .apply(&mut harness.actor)
+        .await;
+    assert_eq!(
+        harness
+            .control("test/backgroundTerminalLists", json!({}))
+            .await,
+        json!(2)
+    );
+    loop {
+        let frame = tokio::time::timeout(WAIT, harness.actor.frames.recv())
+            .await
+            .expect("the quiet server closes")
+            .expect("the actor holds a sender");
+        if frame.key == key && matches!(frame.incoming, Incoming::Exited(_)) {
+            break;
+        }
+    }
+    harness.close().await;
+}

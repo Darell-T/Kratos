@@ -31,6 +31,16 @@ pub(super) enum ServerKey {
     Account,
 }
 
+impl ServerKey {
+    /// How long nobody may use the server before it closes.
+    pub(super) fn idle_close(&self) -> Duration {
+        match self {
+            ServerKey::Thread(_) => THREAD_IDLE_CLOSE,
+            ServerKey::Account => ACCOUNT_IDLE_CLOSE,
+        }
+    }
+}
+
 pub(super) enum Server {
     Down,
     Starting,
@@ -51,7 +61,7 @@ pub(super) struct Slot {
 }
 
 /// Where the check that an idle server holds no background terminal stands.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TerminalCheck {
     NotAsked,
     /// The question is out, so the server is not asked twice.
@@ -129,6 +139,17 @@ impl Servers {
     pub(super) fn recheck_busy(&mut self) {
         for slot in self.slots.values_mut() {
             if slot.terminals == TerminalCheck::Busy {
+                slot.terminals = TerminalCheck::NotAsked;
+            }
+        }
+    }
+
+    /// Servers found busy that nobody used for another idle time may be asked again: a terminal
+    /// can end without a word from Codex.
+    pub(super) fn recheck_busy_unused(&mut self, now: Instant) {
+        for (key, slot) in &mut self.slots {
+            let unused_for = now.duration_since(slot.last_used);
+            if slot.terminals == TerminalCheck::Busy && unused_for >= key.idle_close() {
                 slot.terminals = TerminalCheck::NotAsked;
             }
         }
