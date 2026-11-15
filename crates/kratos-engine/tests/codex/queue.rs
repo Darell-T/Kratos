@@ -459,3 +459,96 @@ async fn a_thread_codex_closes_mid_turn_ends_its_turn_as_failed() {
         "{ended:?}"
     );
 }
+
+#[tokio::test]
+async fn a_stop_codex_ignores_ends_only_its_own_thread_s_turn() {
+    // Catches the shared Codex process, where closing the server to end one stuck turn ended
+    // every other thread's turn too. Each thread now runs a server of its own.
+    let mut harness = Harness::start(Options {
+        stop_timeout: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    let other = harness.another_thread("other").await;
+    harness.send("a", "stuck").await;
+    harness.held("turn/start", 1).await;
+    harness
+        .settle_start_everywhere("turn-1", "inProgress")
+        .await;
+    harness
+        .provider
+        .send(
+            other.clone(),
+            message_id("b"),
+            crate::harness::text_input("finishes"),
+            kratos_protocol::MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+    harness.held("turn/start", 2).await;
+    harness
+        .settle_start_everywhere("turn-2", "inProgress")
+        .await;
+    let (stuck, finishing) = (harness.fake_of("a").await, harness.fake_of("b").await);
+    assert_ne!(stuck, finishing, "each thread runs a server of its own");
+
+    let provider = harness.provider.clone();
+    let thread_id = harness.thread_id.clone();
+    let stop = tokio::spawn(async move { provider.stop(thread_id).await });
+    harness.held("turn/interrupt", 1).await;
+    harness
+        .control_at(
+            stuck,
+            fake_agents::codex_control::settle("turn/interrupt", json!({}), None),
+        )
+        .await;
+    stop.await.unwrap().unwrap();
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+                ..
+            }
+        ),
+        "{ended:?}"
+    );
+
+    harness
+        .control_at(
+            finishing,
+            fake_agents::codex_control::complete(THREAD, "turn-2", "completed"),
+        )
+        .await;
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    let finished = loop {
+        let other = other.clone();
+        let events = harness
+            .store
+            .call(move |store| {
+                store.events_after(&other, kratos_protocol::Seq::BEFORE_FIRST, usize::MAX)
+            })
+            .await
+            .unwrap();
+        let finished = events.into_iter().find_map(|event| match event.event {
+            ThreadEventBody::TurnCompleted { outcome, .. } => Some(outcome),
+            _ => None,
+        });
+        if let Some(finished) = finished {
+            break finished;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the other thread's turn never ended"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        finished,
+        TurnOutcome::Completed,
+        "the other thread's turn finishes normally, untouched by the stop"
+    );
+}

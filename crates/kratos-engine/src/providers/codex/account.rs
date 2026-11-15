@@ -5,13 +5,15 @@ use kratos_codex_client::{Codex, RequestError, methods, types};
 use kratos_protocol::Provider;
 
 use super::actor::{Actor, Command, Done, Reply};
+use super::servers::ServerKey;
 use super::{ProviderError, wire};
 
 impl Actor {
-    /// Reads the plan that pays for the account (D24) and the account's usage (D38).
-    pub(super) fn read_account(&self, codex: Codex) {
+    /// Reads, through `key`'s server, the plan that pays for the account (D24) and the account's
+    /// usage (D38). Every server runs under the same account.
+    pub(super) fn read_account(&self, key: &ServerKey, codex: Codex) {
         let reader = codex.clone();
-        self.spawn(async move {
+        self.spawn(key, async move {
             let plan = match reader
                 .request::<methods::AccountRead>(&types::GetAccountParams::default())
                 .await
@@ -21,21 +23,31 @@ impl Actor {
             };
             Done::Account { plan }
         });
-        self.read_usage(codex, None);
+        self.read_usage(key, codex, None);
     }
 
+    /// Reads the usage through any server that is up, or starts the account's own server.
     pub(super) fn refresh_usage(&mut self, reply: Reply<()>) {
-        match self.connection() {
-            Ok(Some(codex)) => self.read_usage(codex, Some(reply)),
-            Ok(None) => self.deferred.push(Command::RefreshUsage { reply }),
+        if let Some((key, codex)) = self.servers.any_up() {
+            self.servers.slot(&key).last_used = std::time::Instant::now();
+            self.read_usage(&key, codex, Some(reply));
+            return;
+        }
+        match self.connection(&ServerKey::Account) {
+            Ok(Some(codex)) => self.read_usage(&ServerKey::Account, codex, Some(reply)),
+            Ok(None) => self
+                .servers
+                .slot(&ServerKey::Account)
+                .deferred
+                .push(Command::RefreshUsage { reply }),
             Err(error) => drop(reply.send(Err(error))),
         }
     }
 
     /// Reads the account's usage; a read finished after the account changed is dropped (D38).
-    pub(super) fn read_usage(&self, codex: Codex, reply: Option<Reply<()>>) {
+    pub(super) fn read_usage(&self, key: &ServerKey, codex: Codex, reply: Option<Reply<()>>) {
         let tracker_generation = self.usage.generation(Provider::Codex);
-        self.spawn(async move {
+        self.spawn(key, async move {
             let result = codex
                 .request::<methods::RateLimitsRead>(&None)
                 .await

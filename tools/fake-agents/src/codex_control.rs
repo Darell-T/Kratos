@@ -96,6 +96,35 @@ pub fn write_port(control_file: &Path, port: u16) -> io::Result<()> {
     std::fs::rename(&partial, control_file)
 }
 
+/// Where a fake also writes its port: `control_file` with its process id after a dot, so several
+/// fakes started with one control file can each be found.
+pub fn own_control_file(control_file: &Path) -> std::path::PathBuf {
+    let mut own = control_file.as_os_str().to_owned();
+    own.push(format!(".{}", std::process::id()));
+    own.into()
+}
+
+/// The ports of every fake started with `control_file` that has published one, in no order. A
+/// fake that has since ended may still be listed; connecting to it fails.
+pub fn every_port(control_file: &Path) -> Vec<u16> {
+    let (Some(folder), Some(name)) = (control_file.parent(), control_file.file_name()) else {
+        return Vec::new();
+    };
+    let prefix = format!("{}.", name.to_string_lossy());
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.strip_prefix(&prefix)
+                .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+        .filter_map(|entry| read_port(&entry.path()).ok())
+        .collect()
+}
+
 /// The port the fake wrote to `control_file`. Fails with `NotFound` until the fake has started.
 pub fn read_port(control_file: &Path) -> io::Result<u16> {
     let text = std::fs::read_to_string(control_file)?;

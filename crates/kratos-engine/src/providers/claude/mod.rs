@@ -1,8 +1,8 @@
 //! Claude threads.
 //!
-//! One actor task owns every Claude thread's state, as the Codex actor does, but each thread has a
-//! `claude` process of its own instead of sharing one server. Handles send the actor commands and
-//! wait for the reply. Work that waits on a process, such as starting it or writing a message,
+//! One actor task owns every Claude thread's state, as the Codex actor does, and each thread has a
+//! `claude` process of its own, as each Codex thread has an app-server of its own. Handles send
+//! the actor commands and wait for the reply. Work that waits on a process, such as starting it or writing a message,
 //! runs in a task of its own and comes back to the actor as a completion, so the actor keeps
 //! reading frames while it is out, and a completion for a process that has ended is recognized and
 //! dropped. Nothing outside the actor changes a Claude thread's state.

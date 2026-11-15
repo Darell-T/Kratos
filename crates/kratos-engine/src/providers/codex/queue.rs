@@ -11,6 +11,7 @@ use kratos_protocol::{
 use kratos_store::{Enqueued, QueuePlace};
 
 use super::actor::{Actor, Command, Done, Reply};
+use super::servers::ServerKey;
 use super::threads::{Link, Turn};
 use super::turns::read_history;
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
@@ -105,11 +106,13 @@ impl Actor {
                 if matches!(thread.link, Link::Attaching) {
                     thread.discards.push((message_id, reply));
                 } else {
-                    self.deferred.push(Command::Discard {
+                    let key = ServerKey::Thread(thread_id.clone());
+                    let deferred = Command::Discard {
                         thread_id,
                         message_id,
                         reply,
-                    });
+                    };
+                    self.servers.slot(&key).deferred.push(deferred);
                 }
                 return;
             }
@@ -118,12 +121,12 @@ impl Actor {
                 return;
             }
         };
+        let key = ServerKey::Thread(thread_id.clone());
         let codex = self
-            .connection()
-            .ok()
-            .flatten()
-            .expect("attached implies connected");
-        self.spawn(async move {
+            .servers
+            .codex(&key)
+            .expect("an attached thread's server is up");
+        self.spawn(&key, async move {
             let result = read_history(&codex, &native_id).await.map(Box::new);
             Done::HistoryForDiscard {
                 thread_id,

@@ -116,17 +116,31 @@ impl Harness {
         }
     }
 
+    /// The main thread's server.
+    fn key(&self) -> ServerKey {
+        ServerKey::Thread(self.thread_id.clone())
+    }
+
+    fn codex(&self, key: &ServerKey) -> Codex {
+        self.actor
+            .servers
+            .codex(key)
+            .expect("the fake is connected")
+    }
+
+    /// Closes the main thread's server and hands the actor everything it sent, its exit last.
     async fn exit(&mut self) {
-        let Server::Up { codex, .. } = &self.actor.server else {
-            panic!("the fake is connected");
-        };
-        codex.close().await;
+        let key = self.key();
+        self.codex(&key).close().await;
         loop {
-            let incoming = tokio::time::timeout(WAIT, next_incoming(&mut self.actor.server))
+            let frame = tokio::time::timeout(WAIT, self.actor.frames.recv())
                 .await
-                .unwrap();
-            let exited = matches!(incoming, Incoming::Exited(_));
-            self.actor.on_incoming(incoming).await;
+                .unwrap()
+                .expect("the actor holds a sender");
+            let exited = frame.key == key && matches!(frame.incoming, Incoming::Exited(_));
+            if frame.generation == self.actor.servers.generation(&frame.key) {
+                self.actor.on_incoming(frame.key, frame.incoming).await;
+            }
             if exited {
                 return;
             }
@@ -134,10 +148,37 @@ impl Harness {
     }
 
     async fn control(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        let Server::Up { codex, .. } = &self.actor.server else {
-            panic!("the fake is connected");
-        };
-        codex.request_value(method, params, WAIT).await.unwrap()
+        self.control_on(&self.key(), method, params).await
+    }
+
+    async fn control_on(
+        &self,
+        key: &ServerKey,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        self.codex(key)
+            .request_value(method, params, WAIT)
+            .await
+            .unwrap()
+    }
+
+    /// How many `turn/start` requests every server holds.
+    async fn starts_held(&self) -> usize {
+        let mut held = 0;
+        for key in self.actor.servers.keys() {
+            if self.actor.servers.codex(&key).is_some() {
+                held += self
+                    .control_on(&key, "test/turnRequests", json!({}))
+                    .await
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request["method"] == "turn/start")
+                    .count();
+            }
+        }
+        held
     }
 
     async fn held(&self, method: &str) {
@@ -250,19 +291,7 @@ async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
         harness.actor.dispatch(thread_id).await;
     }
     tokio::time::timeout(WAIT, async {
-        loop {
-            let requests = harness.control("test/turnRequests", json!({})).await;
-            if requests
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|request| request["method"] == "turn/start")
-                .count()
-                == MAX_STARTING
-            {
-                break;
-            }
-        }
+        while harness.starts_held().await != MAX_STARTING {}
     })
     .await
     .unwrap();
@@ -276,7 +305,8 @@ async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
             .status,
         MessageStatus::Queued
     );
-    harness.actor.restarts.settled_start();
+    let key = harness.key();
+    harness.actor.servers.slot(&key).restarts.settled_start();
 
     harness.exit().await;
 
@@ -298,12 +328,29 @@ async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
     })
     .await;
     if started.is_ok() {
-        harness.held("turn/start").await;
+        let waiting = ServerKey::Thread(waiting_thread.clone());
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let held = harness
+                    .control_on(&waiting, "test/turnRequests", json!({}))
+                    .await;
+                if held
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|request| request["method"] == "turn/start")
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("the waiting thread's own Codex holds its start");
     }
     harness.close().await;
     assert!(
         started.is_ok(),
-        "the extra queued thread never reached the replacement Codex"
+        "the extra queued thread never started once a start slot freed"
     );
 }
 
@@ -328,9 +375,12 @@ async fn an_unavailable_connection_keeps_an_existing_usage_pause() {
 
     harness
         .actor
-        .on_connected(Err(StartError::Connect(
-            kratos_codex_client::ConnectError::NotFound("missing-codex".into()),
-        )))
+        .on_connected(
+            ServerKey::Thread(thread_id.clone()),
+            Err(StartError::Connect(
+                kratos_codex_client::ConnectError::NotFound("missing-codex".into()),
+            )),
+        )
         .await;
 
     let paused = harness
@@ -370,7 +420,8 @@ async fn an_old_attach_reply_does_not_detach_a_replacement_process() {
     let mut harness = Harness::start().await;
     let old_reply = harness.attached_reply().await;
     harness.exit().await;
-    harness.actor.restarts = Default::default();
+    let key = harness.key();
+    harness.actor.servers.slot(&key).restarts = Default::default();
     let new_reply = harness.attached_reply().await;
     new_reply.apply(&mut harness.actor).await;
     let native_id = harness.actor.threads[&harness.thread_id]
@@ -464,7 +515,8 @@ async fn exit_settles_a_pending_start_and_its_stop_without_waiting_for_a_reply()
         })
         .await
         .unwrap();
-    harness.actor.restarts = Default::default();
+    let key = harness.key();
+    harness.actor.servers.slot(&key).restarts = Default::default();
     let replacement = MessageId::new("after-exit".into());
     harness.send(&harness.thread_id.clone(), &replacement).await;
     let attached = harness.attached_reply().await;
@@ -665,7 +717,8 @@ async fn a_late_steer_cannot_close_a_replacement_process() {
         .completion(|done| matches!(done, Done::Steered { .. }))
         .await;
     harness.exit().await;
-    harness.actor.restarts = Default::default();
+    let key = harness.key();
+    harness.actor.servers.slot(&key).restarts = Default::default();
     let settled = message_id.clone();
     harness
         .actor

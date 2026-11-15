@@ -230,7 +230,8 @@ async fn removing_a_refused_message_lets_the_next_one_run() {
 #[tokio::test]
 async fn at_most_four_threads_wait_on_codex_to_start_a_turn() {
     // Catches a burst of messages to many threads flooding Codex with starts (D85), and a waiting
-    // thread that never gets the slot a finished start frees.
+    // thread that never gets the slot a finished start frees. Each thread runs its own Codex, so
+    // the count is across all of them.
     let mut harness = Harness::start(Options::default()).await;
     let mut threads = vec![harness.thread_id.clone()];
     for n in 2..=5 {
@@ -253,7 +254,9 @@ async fn at_most_four_threads_wait_on_codex_to_start_a_turn() {
     harness.held("turn/start", 4).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(harness.turn_requests().await.len(), 4);
-    harness.settle_start("turn-1", "inProgress").await;
+    harness
+        .settle_start_everywhere("turn-1", "inProgress")
+        .await;
     harness.held("turn/start", 5).await;
 }
 
@@ -302,7 +305,7 @@ async fn waiting_threads_take_freed_start_slots_in_order() {
 
     for count in 5..=7 {
         harness
-            .settle_start(&format!("turn-{count}"), "inProgress")
+            .settle_start_everywhere(&format!("turn-{count}"), "inProgress")
             .await;
         harness.held("turn/start", count).await;
     }
@@ -314,4 +317,118 @@ async fn waiting_threads_take_freed_start_slots_in_order() {
         .map(|request| request["params"]["clientUserMessageId"].as_str().unwrap())
         .collect();
     assert_eq!(order, ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]);
+}
+
+#[tokio::test]
+async fn at_the_server_limit_a_thread_waits_with_a_note_until_a_working_thread_finishes() {
+    // Catches a ninth Codex server started past the limit, a waiting thread told nothing, and one
+    // that never gets the server a finished thread's idle process frees.
+    let mut harness = Harness::start(Options::default()).await;
+    let mut threads = vec![harness.thread_id.clone()];
+    for n in 2..=9 {
+        threads.push(harness.another_thread(&format!("project-{n}")).await);
+    }
+    for (n, thread_id) in threads.iter().take(8).enumerate() {
+        harness
+            .provider
+            .send(
+                thread_id.clone(),
+                message_id(&format!("m{n}")),
+                text_input("work"),
+                MessageOrigin::User,
+            )
+            .await
+            .unwrap();
+        harness.held("turn/start", n + 1).await;
+        harness
+            .settle_start_everywhere(&format!("turn-{n}"), "inProgress")
+            .await;
+    }
+    let waiting = threads[8].clone();
+    let (_, mut live) = harness.hub.watch_live(&waiting);
+
+    harness
+        .provider
+        .send(
+            waiting.clone(),
+            message_id("m8"),
+            text_input("waits"),
+            MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+
+    let note = tokio::time::timeout(WAIT, async {
+        loop {
+            if let kratos_protocol::LiveUpdate::Waiting { reason } = live.recv().await.unwrap() {
+                return reason;
+            }
+        }
+    })
+    .await
+    .expect("the waiting thread is told why");
+    assert!(note.contains("8 threads"), "{note}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        harness.turn_requests().await.len(),
+        8,
+        "no ninth server runs while all eight work"
+    );
+
+    let first = harness.fake_of("m0").await;
+    let second = harness.fake_of("m1").await;
+    harness
+        .control_at(
+            first,
+            fake_agents::codex_control::complete("thread-A", "turn-0", "completed"),
+        )
+        .await;
+
+    // The finished thread's server closed, so its requests left the count with it.
+    harness.fake_of("m8").await;
+    assert!(
+        harness
+            .control_at(
+                second,
+                fake_agents::codex_control::ControlRequest {
+                    method: "test/echo",
+                    params: json!({}),
+                },
+            )
+            .await
+            .is_object(),
+        "only the finished thread's idle server closed"
+    );
+}
+
+#[tokio::test]
+async fn a_usage_read_with_no_thread_running_uses_an_account_only_server() {
+    // Catches account work that has no thread to run on failing, and an account server that loads
+    // a thread or stands in for the thread's own server.
+    let harness = Harness::start(Options::default()).await;
+
+    // The fake reports no rate limits until a test sets some, so its answer is an error, but one
+    // a running Codex gave.
+    let read = harness.provider.refresh_usage().await;
+    assert!(
+        matches!(&read, Err(ProviderError::Unavailable(error)) if error.contains("Codex did not report")),
+        "{read:?}"
+    );
+
+    let account = fake_agents::codex_control::every_port(&harness.control_file);
+    assert_eq!(account.len(), 1, "one account-only server answered");
+    let loaded = harness
+        .control_at(
+            account[0],
+            fake_agents::codex_control::ControlRequest {
+                method: "test/threadRequests",
+                params: json!({}),
+            },
+        )
+        .await;
+    assert_eq!(loaded, json!([]), "the account's server loads no thread");
+
+    harness.send("a", "work").await;
+    let own = harness.fake_of("a").await;
+    assert_ne!(own, account[0], "the thread runs on a server of its own");
 }

@@ -84,6 +84,9 @@ fn serve_control(fake: Arc<Mutex<Fake>>, path: &str) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a localhost port is free");
     let port = listener.local_addr().expect("the port is known").port();
     codex_control::write_port(Path::new(path), port).expect("the control file is writable");
+    // Each fake also publishes its port under its own name, for a test that runs one per thread.
+    codex_control::write_port(&codex_control::own_control_file(Path::new(path)), port)
+        .expect("the control folder is writable");
     lock(&fake).control_file = Some(path.into());
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -155,6 +158,8 @@ struct Fake {
     held_log: Vec<Value>,
     /// Requests not yet settled, in arrival order.
     held: Vec<Held>,
+    /// What `thread/backgroundTerminals/list` reports, set by `test/backgroundTerminals`.
+    background_terminals: Vec<Value>,
     /// Every `thread/start`, `thread/resume`, and `thread/unsubscribe`, for `test/threadRequests`.
     thread_log: Vec<Value>,
     threads: BTreeMap<String, Value>,
@@ -177,6 +182,7 @@ struct Held {
     id: Value,
     method: String,
     params: Value,
+    received_at: String,
 }
 
 /// Requests the fake keeps until `test/settleTurn` answers them.
@@ -239,12 +245,19 @@ impl Fake {
                 )
                 .expect("the benchmark observer stays connected");
             }
-            self.held_log
-                .push(json!({ "method": method, "params": params }));
+            // When it arrived, so a test that runs a fake per thread can put every fake's
+            // requests in one order.
+            let received_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos());
+            self.held_log.push(
+                json!({ "method": method, "params": params, "receivedAt": received_at.to_string() }),
+            );
             self.held.push(Held {
                 id,
                 method: method.to_owned(),
                 params: params.clone(),
+                received_at: received_at.to_string(),
             });
             return;
         }
@@ -268,6 +281,10 @@ impl Fake {
                 self.thread_log
                     .push(json!({ "method": "thread/unsubscribe", "params": params }));
                 self.reply(&id, json!({ "status": "unsubscribed" }));
+            }
+            "thread/backgroundTerminals/list" => {
+                let data = Value::Array(self.background_terminals.clone());
+                self.reply(&id, json!({ "data": data }));
             }
             "model/list" => self.models(&id, params),
             "skills/list" => {
@@ -460,6 +477,22 @@ impl Fake {
                 self.send(json!({ "method": "test/notified", "params": params }));
                 self.reply(id, Value::Null);
             }
+            // The requests not settled yet, oldest first, with when each arrived.
+            "test/heldNow" => {
+                let held: Vec<Value> = self
+                    .held
+                    .iter()
+                    .map(|held| {
+                        json!({ "method": held.method, "params": held.params, "receivedAt": held.received_at })
+                    })
+                    .collect();
+                self.reply(id, Value::Array(held));
+            }
+            "test/backgroundTerminals" => {
+                self.background_terminals =
+                    params["terminals"].as_array().cloned().unwrap_or_default();
+                self.reply(id, Value::Null);
+            }
             "test/noise" => {
                 self.send(json!("this is not json"));
                 self.reply(id, json!("still alive"));
@@ -496,6 +529,7 @@ impl Fake {
     fn exit(&self, code: i32) -> ! {
         if let Some(path) = &self.control_file {
             let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(codex_control::own_control_file(path));
         }
         std::process::exit(code)
     }

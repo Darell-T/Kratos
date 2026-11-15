@@ -188,15 +188,17 @@ impl RunningEngine {
         let control = self.fake_codex_control_file();
         let port = codex_control::wait_for_port(&control, WAIT)
             .expect("the engine never started fake-codex");
-        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        stream.set_read_timeout(Some(WAIT)).unwrap();
-        let request = json!({ "id": 1, "method": method, "params": params });
-        std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).unwrap();
-        let mut answer = String::new();
-        BufReader::new(stream).read_line(&mut answer).unwrap();
-        let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        let answer = fake_codex_at(port, method, params).expect("the fake answers");
         assert!(answer.get("error").is_none(), "{method} failed: {answer}");
         answer["result"].clone()
+    }
+
+    /// Each thread runs a fake Codex of its own: the answers of every one the engine started.
+    fn every_fake_codex(&self, method: &str) -> Vec<serde_json::Value> {
+        codex_control::every_port(&self.fake_codex_control_file())
+            .into_iter()
+            .filter_map(|port| fake_codex_at(port, method, json!({})))
+            .collect()
     }
 
     pub fn fake_codex_request(&self, request: ControlRequest) {
@@ -208,12 +210,11 @@ impl RunningEngine {
         let deadline = Instant::now() + WAIT;
         loop {
             let held: Vec<serde_json::Value> = self
-                .fake_codex("test/turnRequests", json!({}))
-                .as_array()
-                .unwrap()
-                .iter()
+                .every_fake_codex("test/turnRequests")
+                .into_iter()
+                .filter_map(|answer| answer["result"].as_array().cloned())
+                .flatten()
                 .filter(|request| request["method"] == method)
-                .cloned()
                 .collect();
             if held.len() >= count {
                 return held;
@@ -227,9 +228,15 @@ impl RunningEngine {
         }
     }
 
+    /// Starts the turn whose `turn/start` a fake holds, on whichever thread's fake holds it.
     pub fn start_turn(&self) {
         self.fake_codex_held("turn/start", 1);
-        self.fake_codex_request(codex_control::settle_start("turn-1", "inProgress", None));
+        let settle = codex_control::settle_start("turn-1", "inProgress", None);
+        let settled = codex_control::every_port(&self.fake_codex_control_file())
+            .into_iter()
+            .filter_map(|port| fake_codex_at(port, settle.method, settle.params.clone()))
+            .any(|answer| answer.get("error").is_none());
+        assert!(settled, "no fake held a turn/start to settle");
     }
 
     /// Waits until the engine answered `count` of the requests the fake Codex sent it, and returns
@@ -499,4 +506,15 @@ fn console_helper_preparation_does_not_use_the_engine_startup_deadline() {
     let mut engine = RunningEngine::from_child(home.path(), child);
     assert_eq!(engine.client().get("/api/health").unwrap().status, 200);
     engine.shutdown();
+}
+
+/// One `test/*` request to the fake Codex listening on `port`, or `None` when it is gone.
+fn fake_codex_at(port: u16, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    stream.set_read_timeout(Some(WAIT)).ok()?;
+    let request = json!({ "id": 1, "method": method, "params": params });
+    std::io::Write::write_all(&mut stream, format!("{request}\n").as_bytes()).ok()?;
+    let mut answer = String::new();
+    BufReader::new(stream).read_line(&mut answer).ok()?;
+    serde_json::from_str(&answer).ok()
 }

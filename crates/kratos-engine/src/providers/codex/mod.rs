@@ -1,7 +1,8 @@
 //! Codex threads.
 //!
-//! One actor task owns the `codex app-server` connection and every Codex thread's turn state.
-//! Handles send it commands and wait for the reply. A request to Codex runs in a task of its own
+//! One actor task owns every Codex thread's turn state and the `codex app-server` connections:
+//! one per thread, so a stuck turn's process ends no other thread's turn, and one for account work
+//! when no thread's runs ([`servers`]). Handles send it commands and wait for the reply. A request to Codex runs in a task of its own
 //! and comes back to the actor as a completion, so the actor keeps reading Codex's notifications
 //! while a request is out, and a completion that arrives after its thread moved on is recognized
 //! and dropped. Nothing outside the actor changes a Codex thread's state.
@@ -22,6 +23,7 @@ mod queue;
 mod recovery;
 #[cfg(windows)]
 mod sandbox;
+mod servers;
 mod settings;
 mod threads;
 mod turns;
@@ -62,7 +64,7 @@ pub struct CodexSettings {
     /// server's folder writable exposes nothing.
     pub server_folder: PathBuf,
     pub protected: ProtectedFolders,
-    /// How long a stopped turn may take to end before Kratos closes the app-server.
+    /// How long a stopped turn may take to end before Kratos closes its thread's app-server.
     pub stop_timeout: Duration,
     /// The deadline of an ordinary request to Codex.
     pub request_timeout: Duration,

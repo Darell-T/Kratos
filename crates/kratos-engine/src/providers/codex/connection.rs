@@ -1,9 +1,9 @@
-//! Starting the app-server when a thread needs it, loading threads into it, and what its exit
-//! ends.
+//! Starting a thread's app-server when the thread needs it, loading the thread into it, closing
+//! idle servers, and what an exit ends.
 //!
-//! Codex starts on demand, never on a timer (L4, L5). Each failure in a row doubles the wait
-//! before the next start, up to a minute, so a Codex that keeps dying costs one start a minute at
-//! most. A thread Codex cannot resume stays unavailable and says why; Kratos never starts a fresh
+//! A server starts on demand, never on a timer (L4, L5). Each failure in a row doubles the wait
+//! before that server's next start, up to a minute, so a Codex that keeps dying costs one start a
+//! minute at most. A thread Codex cannot resume stays unavailable and says why; Kratos never starts a fresh
 //! Codex thread in its place (L7).
 
 use std::ffi::OsString;
@@ -16,9 +16,10 @@ use kratos_protocol::{ContextLimit, MessageStatus, Provider, RequiredText, Threa
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::actor::{Actor, Done, Opened, Server};
+use super::actor::{Actor, Done, Frame, Opened};
 use super::profiles::{Profile, temp_folder};
 use super::recovery::{self, EndReason, EndingTurn, Unfinished};
+use super::servers::{ACCOUNT_IDLE_CLOSE, MAX_SERVERS, Server, ServerKey, THREAD_IDLE_CLOSE};
 use super::threads::{Link, ThreadState, Turn};
 use super::{CodexSettings, ProviderError, policy, wire};
 use crate::mcp::{self, McpServer};
@@ -51,6 +52,11 @@ impl Restarts {
     #[cfg(test)]
     pub(super) fn settled_start(&mut self) {
         self.started_at = Some(Instant::now() - SETTLED_AFTER);
+    }
+
+    /// A failure's backoff still runs.
+    pub(super) fn waits(&self) -> bool {
+        self.may_start().is_err()
     }
 
     /// `Err` with the wait left while the last failure's backoff runs.
@@ -144,66 +150,227 @@ fn is_kratos_variable(name: &std::ffi::OsStr) -> bool {
 }
 
 impl Actor {
-    /// The running connection, or `None` while it starts. Starts Codex when it is down, unless the
-    /// last failure's backoff still runs.
-    pub(super) fn connection(&mut self) -> Result<Option<Codex>, ProviderError> {
-        match &self.server {
-            Server::Up { codex, .. } => return Ok(Some(codex.clone())),
-            Server::Starting => return Ok(None),
-            Server::Down => {}
+    /// The connection to `key`'s server, or `None` while it starts or waits for room. Starts the
+    /// server when it is down, unless its last failure's backoff still runs.
+    pub(super) fn connection(&mut self, key: &ServerKey) -> Result<Option<Codex>, ProviderError> {
+        if let Some(codex) = self.servers.codex(key) {
+            self.servers.slot(key).last_used = Instant::now();
+            return Ok(Some(codex));
         }
-        if let Err(wait) = self.restarts.may_start() {
+        let slot = self.servers.slot(key);
+        if slot.is_live() {
+            return Ok(None);
+        }
+        if let Err(wait) = slot.restarts.may_start() {
             return Err(ProviderError::Unavailable(format!(
                 "Codex keeps failing to start; Kratos tries again in {} s",
                 wait.as_secs().max(1)
             )));
         }
-        self.generation += 1;
-        self.server = Server::Starting;
+        if self.servers.live() >= MAX_SERVERS {
+            self.wait_for_room(key);
+        } else {
+            self.start_server(key);
+        }
+        Ok(None)
+    }
+
+    fn start_server(&mut self, key: &ServerKey) {
+        self.servers.advance(key);
+        let slot = self.servers.slot(key);
+        slot.server = Server::Starting;
+        slot.last_used = Instant::now();
         let launch = launch(&self.settings);
-        self.spawn(async move {
+        self.spawn(key, async move {
             let capabilities = serde_json::from_value(json!({ "experimentalApi": true }))
                 .expect("the capabilities match the generated type");
             Done::Connected {
                 result: connect_ready(launch, capabilities).await,
             }
         });
-        Ok(None)
+    }
+
+    /// Queues `key` for a server while [`MAX_SERVERS`] run, and asks the least recently used idle
+    /// one to close. When every server works, the thread's message waits, and the thread is told.
+    fn wait_for_room(&mut self, key: &ServerKey) {
+        if !self.waiting_for_server.contains(key) {
+            self.waiting_for_server.push_back(key.clone());
+        }
+        if self.retire_one_idle() {
+            return;
+        }
+        if let ServerKey::Thread(thread_id) = key {
+            self.hub.publish(
+                thread_id,
+                kratos_protocol::LiveUpdate::Waiting {
+                    reason: format!(
+                        "Codex is running {MAX_SERVERS} threads, the most Kratos runs at once. \
+                         This thread's message waits and starts when one of them finishes"
+                    ),
+                },
+            );
+        }
+    }
+
+    /// Starts servers for what waits on one, while there is room.
+    pub(super) fn admit_waiting(&mut self) {
+        while self.servers.live() < MAX_SERVERS {
+            let Some(key) = self.waiting_for_server.pop_front() else {
+                return;
+            };
+            if !self.servers.get(&key).is_some_and(|slot| slot.is_live()) {
+                self.start_server(&key);
+            }
+        }
+        if !self.waiting_for_server.is_empty() {
+            self.retire_one_idle();
+        }
+    }
+
+    /// A thread finished its work. When something waits for a server, an idle one may now close.
+    pub(super) fn make_room_if_waited_for(&mut self) {
+        if !self.waiting_for_server.is_empty() {
+            self.retire_one_idle();
+        }
+    }
+
+    /// Asks the least recently used idle server to close. False when none is idle.
+    fn retire_one_idle(&mut self) -> bool {
+        let candidate = self
+            .servers
+            .up_by_age()
+            .into_iter()
+            .find(|key| self.is_idle(key) && !self.waiting_for_server.contains(key));
+        let Some(key) = candidate else {
+            return false;
+        };
+        self.retire_if_quiet(&key);
+        true
+    }
+
+    /// Closes each server nobody used for its idle time, once it is idle and quiet.
+    pub(super) fn retire_idle(&mut self, now: Instant) {
+        for key in self.servers.up_by_age() {
+            let idle_close = match key {
+                ServerKey::Thread(_) => THREAD_IDLE_CLOSE,
+                ServerKey::Account => ACCOUNT_IDLE_CLOSE,
+            };
+            let unused_for = self
+                .servers
+                .get(&key)
+                .map_or(Duration::ZERO, |slot| now.duration_since(slot.last_used));
+            if unused_for >= idle_close && self.is_idle(&key) {
+                self.retire_if_quiet(&key);
+            }
+        }
+    }
+
+    /// Nothing runs or waits on the server: its thread runs no turn, sends nothing, and waits on
+    /// no answer, and no command waits for the server. The account's server is idle between reads.
+    fn is_idle(&self, key: &ServerKey) -> bool {
+        let quiet_slot = self
+            .servers
+            .get(key)
+            .is_some_and(|slot| slot.deferred.is_empty());
+        let ServerKey::Thread(thread_id) = key else {
+            return quiet_slot;
+        };
+        let thread_idle = self.threads.get(thread_id).is_none_or(|thread| {
+            matches!(thread.turn, Turn::Idle)
+                && thread.steering.is_empty()
+                && thread.discards.is_empty()
+        });
+        quiet_slot && thread_idle && !self.requests.waits_on(thread_id)
+    }
+
+    /// Closes an idle server once Codex reports it holds no background terminal, which closing it
+    /// would end. The account's server holds none.
+    fn retire_if_quiet(&mut self, key: &ServerKey) {
+        let native_id = match key {
+            ServerKey::Thread(thread_id) => self
+                .threads
+                .get(thread_id)
+                .and_then(|thread| thread.native_id().map(str::to_owned)),
+            ServerKey::Account => None,
+        };
+        let Some(codex) = self.servers.codex(key) else {
+            return;
+        };
+        self.servers.slot(key).retiring = true;
+        self.spawn(key, async move {
+            let quiet = match native_id {
+                None => true,
+                Some(thread_id) => {
+                    let params = types::ThreadBackgroundTerminalsListParams {
+                        thread_id,
+                        cursor: None,
+                        limit: None,
+                    };
+                    codex
+                        .request::<BackgroundTerminals>(&params)
+                        .await
+                        .is_ok_and(|listed| listed.data.is_empty())
+                }
+            };
+            Done::Quiet { quiet }
+        });
+    }
+
+    /// The answer to [`Actor::retire_if_quiet`]'s question. A server found busy counts as used
+    /// now, so it is asked again only after another idle time.
+    pub(super) async fn on_quiet(&mut self, key: ServerKey, quiet: bool) {
+        let slot = self.servers.slot(&key);
+        slot.retiring = false;
+        if quiet && self.is_idle(&key) {
+            self.stop_server(&key, "nobody used it, and its thread is idle")
+                .await;
+            return;
+        }
+        self.servers.slot(&key).last_used = Instant::now();
+        if !self.waiting_for_server.is_empty() {
+            self.retire_one_idle();
+        }
     }
 
     pub(super) async fn on_connected(
         &mut self,
+        key: ServerKey,
         result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     ) {
         match result {
             Ok((codex, incoming)) => {
-                self.restarts.started();
-                self.server = Server::Up {
-                    codex: codex.clone(),
+                let generation = self.servers.generation(&key);
+                let slot = self.servers.slot(&key);
+                slot.restarts.started();
+                slot.server = Server::Up(codex.clone());
+                let deferred = std::mem::take(&mut slot.deferred);
+                tokio::spawn(forward(
+                    key.clone(),
+                    generation,
                     incoming,
-                };
-                self.read_account(codex);
-                for deferred in std::mem::take(&mut self.deferred) {
+                    self.frame_sender.clone(),
+                ));
+                self.read_account(&key, codex);
+                for deferred in deferred {
                     self.on_command(deferred).await;
                 }
                 self.reconcile_waiting().await;
-                let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
-                for thread_id in threads {
-                    self.dispatch(&thread_id).await;
+                if let ServerKey::Thread(thread_id) = &key {
+                    self.dispatch(thread_id).await;
                 }
             }
             Err(error) => {
-                self.restarts.failed();
-                self.server = Server::Down;
+                let slot = self.servers.slot(&key);
+                slot.restarts.failed();
+                slot.server = Server::Down;
                 let message = error.to_string();
-                for deferred in std::mem::take(&mut self.deferred) {
+                for deferred in std::mem::take(&mut slot.deferred) {
                     deferred.fail_deferred(ProviderError::Unavailable(message.clone()));
                 }
-                let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
-                for thread_id in threads {
-                    self.pause_unavailable_if_waiting(&thread_id, message.clone())
-                        .await;
+                if let ServerKey::Thread(thread_id) = &key {
+                    self.pause_unavailable_if_waiting(thread_id, message).await;
                 }
+                self.admit_waiting();
             }
         }
     }
@@ -232,7 +399,8 @@ impl Actor {
             Link::Attaching => return Ok(None),
             Link::Detached => (None, thread.turn_settings().access()),
         };
-        let Some(codex) = self.connection()? else {
+        let key = ServerKey::Thread(thread_id.clone());
+        let Some(codex) = self.connection(&key)? else {
             return Ok(None);
         };
         let native_id = self
@@ -255,7 +423,7 @@ impl Actor {
             .as_ref()
             .map(|model| model.as_str().to_owned());
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&key, async move {
             if let Some(native_id) = reload {
                 let params = types::ThreadUnsubscribeParams {
                     thread_id: native_id,
@@ -368,12 +536,13 @@ impl Actor {
             .and_then(|config| config.as_object().cloned());
         let native_id = native_id.clone();
         thread.link = Link::Attaching;
-        let Server::Up { codex, .. } = &self.server else {
-            unreachable!("the attached server has connected");
-        };
-        let codex = codex.clone();
+        let key = ServerKey::Thread(thread_id.clone());
+        let codex = self
+            .servers
+            .codex(&key)
+            .expect("an attached thread's server is up");
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&key, async move {
             let result = codex
                 .request::<methods::ThreadFork>(&params)
                 .await
@@ -406,8 +575,13 @@ impl Actor {
     /// keeps its place while Codex starts; a start that fails leaves it for the user to settle.
     pub(super) async fn reconcile_waiting(&mut self) {
         for thread_id in std::mem::take(&mut self.reconcile) {
+            let key = ServerKey::Thread(thread_id.clone());
             let waits_for_codex = matches!(self.attached(&thread_id).await, Ok(None))
-                && matches!(self.server, Server::Starting);
+                && (self
+                    .servers
+                    .get(&key)
+                    .is_some_and(|slot| matches!(slot.server, Server::Starting))
+                    || self.waiting_for_server.contains(&key));
             if waits_for_codex {
                 self.reconcile.push(thread_id);
             }
@@ -483,30 +657,40 @@ impl Actor {
             .await;
     }
 
-    /// Ends the generation first, so replies still in flight from this process are dropped. Then
-    /// every thread detaches and its running turn ends. A start or steer Codex never answered is
-    /// uncertain, since the process may have taken it. Waiting stops and requests are answered, and
-    /// untouched queued work requests a replacement process, respecting the restart backoff.
-    pub(super) async fn on_exit(&mut self, exit: Exit) {
-        self.generation += 1;
-        self.server = Server::Down;
-        self.restarts.exited();
-        let error = exit.to_string();
-        let thread_ids: Vec<ThreadId> = self.threads.keys().cloned().collect();
-        for thread_id in &thread_ids {
-            self.detach(thread_id, &error).await;
-        }
-        self.ready.clear();
-        for thread_id in &thread_ids {
+    /// `key`'s server ended. Its generation ends first, so replies still in flight from it are
+    /// dropped. Its thread detaches and the thread's running turn ends; no other thread's does. A
+    /// start or steer Codex never answered is uncertain, since the process may have taken it.
+    /// Waiting stops and requests are answered, and untouched queued work requests a replacement,
+    /// respecting the restart backoff. Room it frees goes to what waits for a server.
+    pub(super) async fn on_exit(&mut self, key: ServerKey, exit: Exit) {
+        self.servers.advance(&key);
+        let slot = self.servers.slot(&key);
+        slot.server = Server::Down;
+        slot.retiring = false;
+        slot.restarts.exited();
+        if let ServerKey::Thread(thread_id) = &key {
+            self.detach(thread_id, &exit.to_string()).await;
+            self.ready.retain(|waiting| waiting != thread_id);
             self.dispatch(thread_id).await;
+        }
+        self.servers.forget_if_unused(&key);
+        self.admit_waiting();
+    }
+
+    /// Asks `key`'s server to close; its exit arrives as usual.
+    pub(super) async fn stop_server(&mut self, key: &ServerKey, reason: &str) {
+        if let Some(codex) = self.servers.codex(key) {
+            eprintln!("closing Codex for {key:?}: {reason}");
+            tokio::spawn(async move { codex.close().await });
         }
     }
 
-    /// Closes the app-server and waits for it to end; its exit arrives as usual.
-    pub(super) async fn stop_server(&mut self, reason: &str) {
-        if let Server::Up { codex, .. } = &self.server {
-            eprintln!("closing Codex: {reason}");
-            codex.close().await;
+    /// Closes every server and waits until each has ended.
+    pub(super) async fn close_all(&mut self) {
+        for key in self.servers.keys() {
+            if let Some(codex) = self.servers.codex(&key) {
+                codex.close().await;
+            }
         }
     }
 
@@ -614,6 +798,34 @@ async fn open_thread(
             })
         }
     }
+}
+
+/// Hands the actor each message `key`'s server sends, tagged with its generation.
+async fn forward(
+    key: ServerKey,
+    generation: u64,
+    mut incoming: mpsc::Receiver<Incoming>,
+    frames: mpsc::Sender<Frame>,
+) {
+    while let Some(incoming) = incoming.recv().await {
+        let frame = Frame {
+            key: key.clone(),
+            generation,
+            incoming,
+        };
+        if frames.send(frame).await.is_err() {
+            return;
+        }
+    }
+}
+
+// The pinned schema exposes this operation; the shared client does not name it yet.
+struct BackgroundTerminals;
+
+impl kratos_codex_client::Method for BackgroundTerminals {
+    const NAME: &'static str = "thread/backgroundTerminals/list";
+    type Params = types::ThreadBackgroundTerminalsListParams;
+    type Response = types::ThreadBackgroundTerminalsListResponse;
 }
 
 #[cfg(test)]

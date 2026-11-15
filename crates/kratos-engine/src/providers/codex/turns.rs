@@ -14,6 +14,7 @@ use serde_json::json;
 use super::actor::{Actor, Done, MAX_STARTING, Reply};
 use super::approvals::settle_closed;
 use super::profiles::Profile;
+use super::servers::ServerKey;
 use super::threads::{Turn, TurnWork};
 use super::{ProviderError, policy, wire};
 use crate::providers::{queue, report_item};
@@ -120,7 +121,11 @@ impl Actor {
     }
 
     async fn start_turn(&mut self, thread_id: &ThreadId, native_id: String, message: Message) {
-        let Some(codex) = self.connection().ok().flatten() else {
+        let Some(codex) = self
+            .connection(&ServerKey::Thread(thread_id.clone()))
+            .ok()
+            .flatten()
+        else {
             return;
         };
         let message_id = message.id.clone();
@@ -164,7 +169,7 @@ impl Actor {
         let mut params = turn_start_params(native_id, &message, thread.model(), &thread.settings);
         params.runtime_workspace_roots = Some(vec![types::AbsolutePathBuf(thread.folder.clone())]);
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
             let result = match codex.request::<methods::TurnStart>(&params).await {
                 // Refused before it ran, so a second try cannot run it twice.
                 Err(RequestError::Rpc { code, .. }) if rejected_before_execution(code) => {
@@ -251,7 +256,7 @@ impl Actor {
             ));
         }
         let codex = self
-            .connection()?
+            .connection(&ServerKey::Thread(thread_id.clone()))?
             .ok_or_else(|| ProviderError::Unavailable("Codex is starting".into()))?;
         let submitting = self
             .set_message_status(thread_id, &message_id, MessageStatus::Submitting)
@@ -270,7 +275,7 @@ impl Actor {
             thread_id: native_id,
         };
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
             let result = codex
                 .request::<methods::TurnSteer>(&params)
                 .await
@@ -331,15 +336,12 @@ impl Actor {
         error: String,
     ) {
         let (thread_id, message_id) = (thread_id.clone(), message_id.clone());
-        let codex = match &self.server {
-            super::actor::Server::Up { codex, .. } => Some(codex.clone()),
-            _ => None,
-        };
+        let codex = self.servers.codex(&ServerKey::Thread(thread_id.clone()));
         let native_id = self
             .threads
             .get(&thread_id)
             .and_then(|thread| thread.native_id().map(str::to_owned));
-        self.spawn(async move {
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
             let found = match (codex, native_id) {
                 (Some(codex), Some(native_id)) => read_history(&codex, &native_id)
                     .await
@@ -628,13 +630,15 @@ impl Actor {
         let turn_id = turn_id.clone();
         let (Some(native_id), Some(codex)) = (
             thread.native_id().map(str::to_owned),
-            self.connection().ok().flatten(),
+            self.connection(&ServerKey::Thread(thread_id.clone()))
+                .ok()
+                .flatten(),
         ) else {
             waiters.tell(|| Err(ProviderError::Unavailable("Codex is not running".into())));
             return;
         };
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
             let params = types::TurnInterruptParams {
                 thread_id: native_id,
                 turn_id: turn_id.as_str().to_owned(),
@@ -671,7 +675,7 @@ impl Actor {
         }
         if still_running {
             let timeout = self.settings.stop_timeout;
-            self.spawn(async move {
+            self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
                 tokio::time::sleep(timeout).await;
                 Done::StopExpired { thread_id, turn_id }
             });
@@ -687,7 +691,11 @@ impl Actor {
             Some(Turn::Running { turn_id: running, stopping: true, .. }) if running == turn_id
         );
         if still_stopping {
-            self.stop_server("a stopped turn did not end").await;
+            self.stop_server(
+                &ServerKey::Thread(thread_id.clone()),
+                "a stopped turn did not end",
+            )
+            .await;
         }
     }
 }

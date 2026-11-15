@@ -14,7 +14,7 @@ use kratos_store::{Store, StoreError, ThreadWrite};
 use tokio::sync::mpsc;
 
 use super::CodexSettings;
-use super::actor::{Actor, Server};
+use super::actor::Actor;
 use super::approvals::{Closed, Requests, settle_closed};
 use crate::hub::{Hub, PAGE_BYTES};
 use crate::providers::changes::ChangesRecorder;
@@ -48,6 +48,10 @@ pub(super) struct Unfinished {
     pub sending: Vec<MessageId>,
     pub requests: Closed,
 }
+
+/// Messages from the app-servers that may wait for the actor. A burst pushes back on the servers
+/// instead of growing without bound.
+const FRAMES: usize = 256;
 
 pub(super) struct EndingTurn {
     pub id: TurnId,
@@ -84,20 +88,21 @@ impl Actor {
             .await?;
         }
         let (done, completions) = mpsc::unbounded_channel();
+        let (frame_sender, frames) = mpsc::channel(FRAMES);
         let actor = Actor {
             settings,
             hub,
             store,
             usage,
-            server: Server::Down,
-            generation: 0,
-            restarts: Default::default(),
+            servers: Default::default(),
+            frames,
+            frame_sender,
             windows: HashMap::new(),
             plan: None,
             threads: HashMap::new(),
             requests: Requests::default(),
             ready: Default::default(),
-            deferred: Vec::new(),
+            waiting_for_server: Default::default(),
             reconcile: Vec::new(),
             done,
             completions,

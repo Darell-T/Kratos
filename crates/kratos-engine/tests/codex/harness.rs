@@ -72,7 +72,7 @@ pub struct Harness {
     /// Events read from the log and not yet taken by a test.
     seen: Vec<ThreadEvent>,
     control: Option<Control>,
-    control_file: PathBuf,
+    pub control_file: PathBuf,
     next_control_id: u64,
 }
 
@@ -341,13 +341,45 @@ impl Harness {
         self.control.as_mut().expect("connected above")
     }
 
-    /// The held requests the fake received, oldest first, as `{method, params}`.
-    pub async fn turn_requests(&mut self) -> Vec<Value> {
-        let requests = self.control("test/turnRequests", json!({})).await;
-        requests.as_array().unwrap().clone()
+    /// Each thread has a fake Codex of its own. These read and steer every fake the engine has
+    /// started, through each one's own control port.
+    async fn on_fake(port: u16, method: &str, params: Value) -> Option<Value> {
+        let stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        let (reader, mut writer) = stream.into_split();
+        let line = format!(
+            "{}\n",
+            json!({ "id": 1, "method": method, "params": params })
+        );
+        writer.write_all(line.as_bytes()).await.ok()?;
+        let mut answer = String::new();
+        tokio::time::timeout(WAIT, BufReader::new(reader).read_line(&mut answer))
+            .await
+            .ok()?
+            .ok()?;
+        let answer: Value = serde_json::from_str(&answer).ok()?;
+        Some(answer["result"].clone())
     }
 
-    /// Waits until the fake holds `count` requests of `method`, and returns them.
+    /// The held requests every fake received, oldest first, as `{method, params, receivedAt}`.
+    pub async fn turn_requests(&mut self) -> Vec<Value> {
+        let mut requests = Vec::new();
+        for port in codex_control::every_port(&self.control_file) {
+            if let Some(Value::Array(held)) =
+                Self::on_fake(port, "test/turnRequests", json!({})).await
+            {
+                requests.extend(held);
+            }
+        }
+        requests.sort_by_key(|request| {
+            request["receivedAt"]
+                .as_str()
+                .and_then(|at| at.parse::<u128>().ok())
+                .unwrap_or_default()
+        });
+        requests
+    }
+
+    /// Waits until the fakes together hold `count` requests of `method`, and returns them.
     pub async fn held(&mut self, method: &str, count: usize) -> Vec<Value> {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
@@ -362,11 +394,71 @@ impl Harness {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the fake holds {} {method} requests, not {count}",
+                "the fakes hold {} {method} requests, not {count}",
                 matching.len()
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    /// The control port of the fake that holds the `turn/start` of message `message_id`: the
+    /// fake of that message's thread.
+    pub async fn fake_of(&self, message_id: &str) -> u16 {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            for port in codex_control::every_port(&self.control_file) {
+                let held = Self::on_fake(port, "test/turnRequests", json!({})).await;
+                let started = held.as_ref().and_then(Value::as_array).is_some_and(|held| {
+                    held.iter().any(|request| {
+                        request["method"] == "turn/start"
+                            && request["params"]["clientUserMessageId"] == message_id
+                    })
+                });
+                if started {
+                    return port;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no fake holds the start of {message_id}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// A control request to the fake at `port`. Panics on an error answer.
+    pub async fn control_at(&self, port: u16, request: ControlRequest) -> Value {
+        Self::on_fake(port, request.method, request.params)
+            .await
+            .expect("the fake answers")
+    }
+
+    /// Answers the oldest `turn/start` any fake still holds with a turn in `status`.
+    pub async fn settle_start_everywhere(&mut self, turn_id: &str, status: &str) {
+        let arrived = |request: &Value| {
+            request["receivedAt"]
+                .as_str()
+                .and_then(|at| at.parse::<u128>().ok())
+                .unwrap_or_default()
+        };
+        let mut oldest: Option<(u128, u16)> = None;
+        for port in codex_control::every_port(&self.control_file) {
+            let held = Self::on_fake(port, "test/heldNow", json!({})).await;
+            let first = held.as_ref().and_then(Value::as_array).and_then(|held| {
+                held.iter()
+                    .filter(|request| request["method"] == "turn/start")
+                    .map(arrived)
+                    .min()
+            });
+            if let Some(at) = first
+                && oldest.is_none_or(|(oldest_at, _)| at < oldest_at)
+            {
+                oldest = Some((at, port));
+            }
+        }
+        let (_, port) = oldest.expect("a fake still holds a turn/start");
+        let request = codex_control::settle_start(turn_id, status, None);
+        Self::on_fake(port, request.method, request.params).await;
     }
 
     /// Answers the oldest held `turn/start` with a turn in `status`.

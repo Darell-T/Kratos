@@ -11,14 +11,14 @@ use crate::running_engine::{
 };
 
 #[test]
-fn turn_benchmark_observes_200_completed_turns_across_ten_threads() {
+fn turn_benchmark_observes_200_completed_turns_across_eight_threads() {
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
 
     let report = bench_turns(&engine.client(), &engine.fake_codex_control_file()).unwrap();
 
-    assert_eq!(report.threads, 10);
-    assert_eq!(report.warmup_turns, 10);
+    assert_eq!(report.threads, 8);
+    assert_eq!(report.warmup_turns, 8);
     assert_eq!(report.dispatch.messages, 200);
     assert_eq!(report.completion.messages, 200);
     assert!(report.dispatch.p95_ms > 0.0);

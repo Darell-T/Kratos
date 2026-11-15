@@ -10,6 +10,7 @@ use serde_json::json;
 
 use super::actor::{Actor, Command, Reply};
 use super::profiles::Profile;
+use super::servers::ServerKey;
 use super::{ProviderError, wire};
 
 impl Actor {
@@ -125,10 +126,12 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
-        let codex = match self.connection() {
+        let key = ServerKey::Thread(thread_id.clone());
+        let codex = match self.connection(&key) {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::Skills { thread_id, reply });
+                let deferred = Command::Skills { thread_id, reply };
+                self.servers.slot(&key).deferred.push(deferred);
                 return;
             }
             Err(error) => {
@@ -156,15 +159,17 @@ impl Actor {
         if reply.is_closed() {
             return;
         }
-        let codex = match self.connection() {
+        let key = ServerKey::Thread(thread_id.clone());
+        let codex = match self.connection(&key) {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::Run {
+                let deferred = Command::Run {
                     thread_id,
                     command,
                     timeout,
                     reply,
-                });
+                };
+                self.servers.slot(&key).deferred.push(deferred);
                 return;
             }
             Err(error) => {

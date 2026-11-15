@@ -1,11 +1,13 @@
 //! The actor: its inputs, its state, and the loop that serves them one at a time.
 //!
-//! Three inputs: commands from handles, messages from Codex, and completions of the work the actor
-//! started (a request to Codex, a timer). Each handler runs to its end before the next input,
-//! so no two handlers see a thread half changed. A handler awaits only the store, never Codex.
+//! Three inputs: commands from handles, messages from the Codex app-servers, and completions of the
+//! work the actor started (a request to Codex, a timer). Each handler runs to its end before the
+//! next input, so no two handlers see a thread half changed. A handler awaits only the store, never
+//! Codex. Each thread has an app-server of its own ([`super::servers`]); their messages arrive on
+//! one channel, tagged with the server they came from.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
@@ -18,6 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::approvals::Requests;
 use super::connection::StartError;
+use super::servers::{ServerKey, Servers};
 use super::threads::ThreadState;
 use super::turns::{Delivery, StopWaiters};
 use super::{CodexSettings, Continued, ProviderError, Sent};
@@ -136,6 +139,10 @@ pub(super) enum Done {
     Account {
         plan: Option<String>,
     },
+    /// Whether an idle server holds no background terminal, so closing it ends no work.
+    Quiet {
+        quiet: bool,
+    },
     Attached {
         thread_id: ThreadId,
         /// The context limit the thread was loaded with (D76).
@@ -185,18 +192,26 @@ pub(super) enum Done {
 }
 
 pub(super) struct Completion {
+    key: ServerKey,
     generation: u64,
     done: Done,
 }
 
 impl Completion {
     async fn apply(self, actor: &mut Actor) {
-        if self.generation == actor.generation {
-            actor.on_done(self.done).await;
+        if self.generation == actor.servers.generation(&self.key) {
+            actor.on_done(self.key, self.done).await;
         } else {
             self.done.discard_stale().await;
         }
     }
+}
+
+/// What one app-server sent, tagged with the server and the generation it ran as.
+pub(super) struct Frame {
+    pub key: ServerKey,
+    pub generation: u64,
+    pub incoming: Incoming,
 }
 
 fn process_exited() -> ProviderError {
@@ -217,6 +232,7 @@ impl Done {
             Done::Connected { result: Err(_) }
             | Done::UsageRead { reply: None, .. }
             | Done::Account { .. }
+            | Done::Quiet { .. }
             | Done::Attached { .. }
             | Done::StartAnswered { .. }
             | Done::DeliveryChecked { .. }
@@ -233,25 +249,15 @@ pub(super) struct Opened {
     pub is_new: bool,
 }
 
-pub(super) enum Server {
-    Down,
-    Starting,
-    Up {
-        codex: Codex,
-        incoming: mpsc::Receiver<Incoming>,
-    },
-}
-
 pub(crate) struct Actor {
     pub(super) settings: CodexSettings,
     pub(super) hub: Hub,
     pub(super) store: StoreThread,
     pub(super) usage: UsageTracker,
-    pub(super) server: Server,
-    /// Advances on each app-server start and exit; `Completion::apply` drops work from an older
-    /// generation, because the process that was to answer it is gone.
-    pub(super) generation: u64,
-    pub(super) restarts: super::connection::Restarts,
+    pub(super) servers: Servers,
+    /// Every server's messages, forwarded by a task per server.
+    pub(super) frames: mpsc::Receiver<Frame>,
+    pub(super) frame_sender: mpsc::Sender<Frame>,
     /// Each model's own context window, as Codex reported it with no setting of Kratos's in force
     /// (D76).
     pub(super) windows: HashMap<String, u64>,
@@ -261,8 +267,10 @@ pub(crate) struct Actor {
     pub(super) requests: Requests,
     /// Threads waiting for a start slot, oldest first.
     pub(super) ready: VecDeque<ThreadId>,
-    pub(super) deferred: Vec<Command>,
-    /// Threads to load once the app-server is up, so its history settles their uncertain messages.
+    /// Servers waiting to start while [`super::servers::MAX_SERVERS`] run, oldest first.
+    pub(super) waiting_for_server: VecDeque<ServerKey>,
+    /// Threads to load once their app-servers are up, so their history settles their uncertain
+    /// messages.
     pub(super) reconcile: Vec<ThreadId>,
     pub(super) done: mpsc::UnboundedSender<Completion>,
     pub(super) completions: mpsc::UnboundedReceiver<Completion>,
@@ -282,6 +290,7 @@ impl Actor {
             }
         }
         self.reconcile_waiting().await;
+        let mut idle_check = tokio::time::interval(IDLE_CHECK);
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -297,31 +306,41 @@ impl Actor {
                     }
                 },
                 Some(done) = self.completions.recv() => done.apply(&mut self).await,
-                incoming = next_incoming(&mut self.server) => self.on_incoming(incoming).await,
+                Some(frame) = self.frames.recv() => {
+                    if frame.generation == self.servers.generation(&frame.key) {
+                        self.on_incoming(frame.key, frame.incoming).await;
+                    }
+                }
+                _ = idle_check.tick() => self.retire_idle(Instant::now()),
             }
         }
     }
 
-    /// Starts `work` in a task of its own and hands its result back as a completion.
-    pub(super) fn spawn<F>(&self, work: F)
+    /// Starts `work` against the server `key` names, in a task of its own, and hands its result
+    /// back as a completion, dropped if that server has since ended.
+    pub(super) fn spawn<F>(&self, key: &ServerKey, work: F)
     where
         F: Future<Output = Done> + Send + 'static,
     {
         let done = self.done.clone();
-        let generation = self.generation;
+        let key = key.clone();
+        let generation = self.servers.generation(&key);
         tokio::spawn(async move {
             // The actor holds the receiver for as long as it runs.
             let _ = done.send(Completion {
+                key,
                 generation,
                 done: work.await,
             });
         });
     }
 
-    async fn on_done(&mut self, done: Done) {
+    // #lizard forgives: one arm per kind of completion, each a call.
+    async fn on_done(&mut self, key: ServerKey, done: Done) {
         match done {
-            Done::Connected { result } => self.on_connected(result).await,
+            Done::Connected { result } => self.on_connected(key, result).await,
             Done::Account { plan } => self.plan = plan,
+            Done::Quiet { quiet } => self.on_quiet(key, quiet).await,
             Done::Attached {
                 thread_id,
                 context_limit,
@@ -406,30 +425,25 @@ impl Actor {
             Ok(written) => Ok(written.value),
             Err(error) if error.is_refusal() => Err(ProviderError::Store(error)),
             Err(error) => {
-                eprintln!("cannot record Codex work, so Codex stops: {error}");
-                self.stop_server(&format!("Kratos could not record Codex's work: {error}"))
-                    .await;
+                eprintln!("cannot record Codex work, so the thread's Codex stops: {error}");
+                let key = ServerKey::Thread(thread_id.clone());
+                self.stop_server(
+                    &key,
+                    &format!("Kratos could not record Codex's work: {error}"),
+                )
+                .await;
                 Err(ProviderError::Store(error))
             }
         }
     }
 
     async fn shutdown(&mut self) {
-        self.stop_server("Kratos is shutting down").await;
+        self.close_all().await;
     }
 }
 
-async fn next_incoming(server: &mut Server) -> Incoming {
-    match server {
-        Server::Up { incoming, .. } => match incoming.recv().await {
-            Some(incoming) => incoming,
-            // The connection reports its exit before it closes the channel, so this only follows
-            // an exit already handled.
-            None => std::future::pending().await,
-        },
-        Server::Down | Server::Starting => std::future::pending().await,
-    }
-}
+/// How often idle servers are looked for.
+const IDLE_CHECK: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod tests;
