@@ -3,7 +3,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use kratos_claude_client::{
     Latest, ReleaseError, UPDATE_LIMIT, Version, check_native, installed_version, latest_version,
@@ -47,21 +47,50 @@ pub(super) enum Updating {
     ShuttingDown,
 }
 
+/// An update in flight. Dropping it ends the update, then wakes a shutdown waiting for it.
+pub(super) struct Running {
+    release: Arc<Release>,
+    ended: watch::Receiver<()>,
+    _sender: watch::Sender<()>,
+}
+
+impl Running {
+    /// What tells this update apart from any later one.
+    pub fn id(&self) -> watch::Receiver<()> {
+        self.ended.clone()
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.release.finished();
+    }
+}
+
 impl Release {
     fn updating(&self) -> MutexGuard<'_, Updating> {
         self.updating.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Records an update about to start, whose task drops the sender of `ended` when it ends.
+    /// Records an update about to start. The update's task owns the returned [`Running`], so the
+    /// update ends however the task does, even when nobody awaits it.
     ///
     /// # Errors
     /// Refuses while another update runs or the engine stops.
-    pub fn prepare(&self, ended: watch::Receiver<()>) -> Result<(), ProviderError> {
+    pub fn prepare(self: &Arc<Self>) -> Result<Running, ProviderError> {
         let mut updating = self.updating();
         match *updating {
             Updating::Idle => {
-                *updating = Updating::Preparing { task: None, ended };
-                Ok(())
+                let (sender, ended) = watch::channel(());
+                *updating = Updating::Preparing {
+                    task: None,
+                    ended: ended.clone(),
+                };
+                Ok(Running {
+                    release: Arc::clone(self),
+                    ended,
+                    _sender: sender,
+                })
             }
             Updating::ShuttingDown => Err(ProviderError::Stopped),
             _ => Err(ProviderError::Conflict(
@@ -70,9 +99,12 @@ impl Release {
         }
     }
 
-    /// Records the task that runs the update, so shutdown can cancel it while it prepares.
-    pub fn started(&self, task: AbortHandle) {
-        if let Updating::Preparing { task: slot, .. } = &mut *self.updating() {
+    /// Records the task that runs `update`, so shutdown can cancel it while it prepares. Does
+    /// nothing when that update already ended, and another may have started since.
+    pub fn started(&self, update: &watch::Receiver<()>, task: AbortHandle) {
+        if let Updating::Preparing { task: slot, ended } = &mut *self.updating()
+            && ended.same_channel(update)
+        {
             *slot = Some(task);
         }
     }
@@ -90,7 +122,7 @@ impl Release {
     }
 
     /// The update ended, unless shutdown already took it over.
-    pub fn finished(&self) {
+    fn finished(&self) {
         let mut updating = self.updating();
         if !matches!(*updating, Updating::ShuttingDown) {
             *updating = Updating::Idle;

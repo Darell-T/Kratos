@@ -238,3 +238,64 @@ async fn engine_shutdown_waits_for_an_update_that_is_installing() {
     );
     update.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn a_caller_that_goes_away_mid_update_does_not_block_the_next_update() {
+    // Catches the update's state reset only in the caller, which a disconnected client's dropped
+    // request never reaches, so every later update answered "already updating".
+    let harness = Harness::start(Options {
+        update_delay: Duration::from_millis(800),
+        ..Options::default()
+    })
+    .await;
+    std::fs::write(harness.root.path().join("release"), "2.1.303").unwrap();
+    let provider = harness.provider.clone();
+    let caller = tokio::spawn(async move { provider.update_cli().await });
+    let started = harness.root.path().join("release.started");
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    while !started.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the updater never started"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    caller.abort();
+    let updated = harness.root.path().join("release");
+    while std::fs::read_to_string(&updated).unwrap() != "2.1.400" {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the updater never finished"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    // Under load each CLI the updates run takes seconds, so reaching the updater and finishing
+    // each get their own wait.
+    std::fs::remove_file(&started).unwrap();
+    let provider = harness.provider.clone();
+    let again = tokio::spawn(async move {
+        loop {
+            match provider.update_cli().await {
+                Err(ProviderError::Conflict(_)) => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                other => return other,
+            }
+        }
+    });
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    while !started.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a later update still answers that one runs"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let again = tokio::time::timeout(crate::harness::WAIT, again).await;
+    assert!(
+        matches!(again, Ok(Ok(Ok(_)))),
+        "the later update did not finish: {again:?}"
+    );
+}
