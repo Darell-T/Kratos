@@ -314,7 +314,7 @@ pub async fn connect(
             stderr_lines,
         },
         stdout,
-        Stream {
+        Keeper {
             unreadable: unreadable_sender,
             exited,
         },
@@ -530,51 +530,61 @@ struct Reader {
 }
 
 /// The reader's ends of the channels to the process's keeper.
-struct Stream {
+struct Keeper {
     unreadable: oneshot::Sender<()>,
     exited: oneshot::Receiver<Option<i32>>,
 }
 
-async fn read(reader: Reader, stdout: ChildStdout, stream: Stream, max_line_bytes: usize) {
+async fn read(reader: Reader, stdout: ChildStdout, keeper: Keeper, max_line_bytes: usize) {
     let mut stdout = BufReader::new(stdout);
     loop {
-        match next_message(output::read_line(&mut stdout, max_line_bytes).await) {
-            Ok(Some(message)) => reader.dispatch(message).await,
-            Ok(None) => {}
-            Err(Some(why)) => {
+        match Next::of(output::read_line(&mut stdout, max_line_bytes).await) {
+            Next::Message(message) => reader.dispatch(message).await,
+            Next::NotJson => {}
+            Next::Unreadable(why) => {
                 // No later message can be trusted, and a server left running would answer
                 // nothing, so its tree ends and its exit is reported.
                 eprintln!("codex: {why}");
-                let _ = stream.unreadable.send(());
+                let _ = keeper.unreadable.send(());
                 break;
             }
-            Err(None) => break,
+            Next::End => break,
         }
     }
-    let code = stream.exited.await.unwrap_or(None);
+    let code = keeper.exited.await.unwrap_or(None);
     reader.finish(code).await;
 }
 
-/// The message a line holds, `Ok(None)` for a line that is not JSON, `Err(None)` at the end of the
-/// output, and `Err(Some(why))` when the output can no longer be read. The server logs to stderr,
-/// but a stray line on stdout must not end the connection.
-fn next_message(line: io::Result<Line>) -> Result<Option<Value>, Option<String>> {
-    let line = match line {
-        Ok(Line::Data(line)) => line,
-        Ok(Line::Eof) => return Err(None),
-        Ok(Line::Oversized(bytes)) => {
-            return Err(Some(format!(
-                "the server wrote a line of {bytes} bytes, more than Kratos reads"
-            )));
+/// What the next line of the server's output holds.
+enum Next {
+    Message(Value),
+    /// The server logs to stderr, but a stray line on stdout must not end the connection.
+    NotJson,
+    End,
+    Unreadable(String),
+}
+
+impl Next {
+    fn of(line: io::Result<Line>) -> Next {
+        let line = match line {
+            Ok(Line::Data(line)) => line,
+            Ok(Line::Eof) => return Next::End,
+            Ok(Line::Oversized(bytes)) => {
+                return Next::Unreadable(format!(
+                    "the server wrote a line of {bytes} bytes, more than Kratos reads"
+                ));
+            }
+            Err(error) => {
+                return Next::Unreadable(format!("cannot read the server's output: {error}"));
+            }
+        };
+        match std::str::from_utf8(&line) {
+            Err(error) => Next::Unreadable(format!(
+                "the server wrote a line that is not UTF-8: {error}"
+            )),
+            Ok(text) => serde_json::from_str(text).map_or(Next::NotJson, Next::Message),
         }
-        Err(error) => return Err(Some(format!("cannot read the server's output: {error}"))),
-    };
-    let text = std::str::from_utf8(&line).map_err(|error| {
-        Some(format!(
-            "the server wrote a line that is not UTF-8: {error}"
-        ))
-    })?;
-    Ok(serde_json::from_str(text).ok())
+    }
 }
 
 impl Reader {
