@@ -270,10 +270,15 @@ impl ThreadState {
         self.is_busy() || self.stopping
     }
 
+    /// The open process runs a command in the background, which closing the process would end.
+    pub(super) fn runs_background_task(&self) -> bool {
+        self.open().is_some_and(|open| open.background_tasks > 0)
+    }
+
     /// When the open process last did anything, if it has nothing to do.
     pub(super) fn idle_since(&self) -> Option<Instant> {
         let open = self.open()?;
-        (!self.is_working() && open.background_tasks == 0).then_some(open.last_active)
+        (!self.is_working() && !self.runs_background_task()).then_some(open.last_active)
     }
 
     pub(super) fn turn_settings(&self) -> &ThreadSettings {

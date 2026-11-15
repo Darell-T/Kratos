@@ -141,6 +141,53 @@ async fn an_update_waits_for_the_user_while_a_thread_works() {
 }
 
 #[tokio::test]
+async fn an_update_waits_while_a_thread_runs_a_background_command() {
+    // Catches an update closing a CLI whose shell command still runs in the background after its
+    // turn ended, which ends that command with no word in the thread.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    let tasks = |tasks: serde_json::Value| json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks });
+    harness
+        .emit(
+            &launch,
+            tasks(json!([{ "task_id": "t1", "task_type": "local_bash" }])),
+        )
+        .await;
+    harness.finish(&launch, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+
+    let error = harness.provider.update_cli().await.unwrap_err();
+
+    assert!(
+        matches!(&error, ProviderError::Conflict(why) if why.contains("background")),
+        "{error}"
+    );
+    assert!(
+        harness.is_running(&launch),
+        "the CLI and its background command still run"
+    );
+    let after = harness.provider.cli_release().await;
+    assert_eq!(
+        after.installed.as_deref(),
+        Some("2.1.303"),
+        "no updater ran"
+    );
+
+    harness.emit(&launch, tasks(json!([]))).await;
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    loop {
+        match harness.provider.update_cli().await {
+            Err(ProviderError::Conflict(_)) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            updated => break assert!(updated.is_ok(), "{updated:?}"),
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_cli_another_manager_installed_is_never_updated_under_its_running_sessions() {
     // Catches Kratos running npm's or WinGet's updater, which replaces files a running CLI still
     // loads, and a refusal that hides which manager to update with.

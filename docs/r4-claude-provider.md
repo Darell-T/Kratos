@@ -131,7 +131,7 @@ A Claude command now runs as the user on every system. It can read anything the 
 
 ### Update rule for every provider
 
-Kratos never updates a CLI on its own and never under a running session. When an update is available, Kratos tells the user, and the user decides. For Claude Code, `GET /api/agents/claude/cli` reports the newest release, `POST /api/agents/claude/cli/update` runs only when the user asks, it refuses while a Claude thread works, and every session starts with `DISABLE_AUTOUPDATER=1`. Codex has no update route yet, and Kratos never updates it.
+Kratos never updates a CLI on its own and never under a running session. When an update is available, Kratos tells the user, and the user decides. For Claude Code, `GET /api/agents/claude/cli` reports the newest release, `POST /api/agents/claude/cli/update` runs only when the user asks, it refuses while a Claude thread works or runs a background command, and every session starts with `DISABLE_AUTOUPDATER=1`. Codex has no update route yet, and Kratos never updates it.
 
 ## How it was checked
 

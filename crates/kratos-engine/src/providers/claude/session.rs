@@ -290,9 +290,10 @@ impl Actor {
     }
 
     /// Clears the way for Claude Code's updater, which must not replace files a running CLI
-    /// loads. It refuses while any thread works, since its turn would be cut off. Otherwise it
-    /// closes every session, holds new ones off, and answers once the processes have exited. The
-    /// threads lose nothing: their next messages resume their sessions after the update.
+    /// loads. It refuses while any thread works, since its turn would be cut off, or runs a
+    /// background command, which closing its CLI would end. Otherwise it closes every session,
+    /// holds new ones off, and answers once the processes have exited. The threads lose nothing:
+    /// their next messages resume their sessions after the update.
     pub(super) fn hold_for_update(&mut self, reply: Reply<()>) {
         if self.updating {
             let _ = reply.send(Err(ProviderError::Conflict(
@@ -303,6 +304,14 @@ impl Actor {
         if self.threads.values().any(ThreadState::is_working) {
             let _ = reply.send(Err(ProviderError::Conflict(
                 "Claude Code cannot update while a Claude thread is working. Update once its turn ends"
+                    .to_owned(),
+            )));
+            return;
+        }
+        if self.threads.values().any(ThreadState::runs_background_task) {
+            let _ = reply.send(Err(ProviderError::Conflict(
+                "Claude Code cannot update while a Claude thread runs a background command, which \
+                 closing its CLI would end. Update once the command ends"
                     .to_owned(),
             )));
             return;
