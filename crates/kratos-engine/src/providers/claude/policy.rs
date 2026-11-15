@@ -72,7 +72,6 @@ mod tests {
                 } else {
                     Decision::Allow
                 };
-                // Plan mode reads without asking; outside it, Ask me asks before every action.
                 let read = if plan_mode || permission != Permission::AskMe {
                     Decision::Allow
                 } else {

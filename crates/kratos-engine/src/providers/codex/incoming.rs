@@ -10,7 +10,6 @@ use super::threads::{Link, Turn};
 use super::wire;
 
 impl Actor {
-    /// What `key`'s server sent.
     pub(super) async fn on_incoming(&mut self, key: ServerKey, incoming: Incoming) {
         match incoming {
             Incoming::Notification(notification) => {
@@ -84,7 +83,6 @@ impl Actor {
         self.dispatch(thread_id).await;
     }
 
-    /// The Kratos thread a Codex thread id belongs to, among the threads loaded in this server.
     /// The Kratos thread `native_id` names among those `key`'s server runs. A thread's server runs
     /// only that thread, so another server's thread is never named, even when two servers give
     /// their threads the same id. The account's server runs none.

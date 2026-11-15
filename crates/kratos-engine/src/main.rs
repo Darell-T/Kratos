@@ -39,7 +39,7 @@ use kratos_engine::usage::{LimitStop, UsageTracker};
 /// How long a request to Codex may take, from the TypeScript provider. A turn has no deadline: a
 /// live CLI is working, and every way it can die reports its own error.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a turn Codex agreed to stop may take to end before Kratos closes Codex.
+/// How long a stopped Claude or Codex turn may take to end before Kratos closes its process.
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a Claude process may sit unused before Kratos closes it. A warm process starts the
 /// next turn at once; after half an hour unused, holding its memory costs more than a resume.

@@ -215,7 +215,6 @@ impl Actor {
         }
     }
 
-    /// Starts servers for what waits on one, while there is room.
     pub(super) fn admit_waiting(&mut self) {
         while self.servers.live() < MAX_SERVERS {
             let Some(key) = self.waiting_for_server.pop_front() else {
@@ -816,7 +815,6 @@ async fn open_thread(
     }
 }
 
-/// Hands the actor each message `key`'s server sends, tagged with its generation.
 async fn forward(
     key: ServerKey,
     generation: u64,

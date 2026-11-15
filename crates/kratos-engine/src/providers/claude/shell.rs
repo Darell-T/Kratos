@@ -10,7 +10,6 @@ use serde_json::Value;
 
 use super::policy::Action;
 
-/// The shell a Claude tool runs its command text in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Shell {
     /// `Bash`: a POSIX shell script, run by Git Bash on Windows.
@@ -73,7 +72,6 @@ pub(super) fn action(shell: Shell, input: &Value) -> Action {
     }
 }
 
-/// What the user is asked to approve for a shell tool request.
 pub(super) fn approval(tool: &CanUseTool, folder: &str) -> Option<ApprovalRequest> {
     Shell::of(&tool.tool_name)?;
     Some(ApprovalRequest::Command {

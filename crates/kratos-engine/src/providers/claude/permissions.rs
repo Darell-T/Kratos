@@ -20,8 +20,7 @@ use super::requests::{Answer, Pending};
 use super::shell::{self, Shell};
 use crate::providers::writes;
 
-/// Answers a control the CLI sends while no turn runs. Kratos's post-tool hooks only record, so
-/// they may go on; nothing may run a tool.
+/// Answers a control the CLI sends while no turn runs: no hook may go on, and no tool may run.
 pub(super) fn startup(control: IncomingControl) {
     let queued = match &control.request {
         ControlRequest::HookCallback(_) => control.answer(
@@ -44,7 +43,6 @@ enum Rule {
     LocalRead,
     /// Changes nothing outside the session: the to-do list and entering plan mode.
     Planning,
-    /// Reads from the network.
     Web,
     Command(Shell),
     /// Loads instructions or tool schemas and needs no permission: `ToolSearch`, which the CLI

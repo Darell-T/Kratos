@@ -98,7 +98,6 @@ impl Servers {
         self.slots.get(key).map_or(0, |slot| slot.generation)
     }
 
-    /// Moves `key` to a new generation and returns it.
     pub(super) fn advance(&mut self, key: &ServerKey) -> u64 {
         self.issued += 1;
         let generation = self.issued;

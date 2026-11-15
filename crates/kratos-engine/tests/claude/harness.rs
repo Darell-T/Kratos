@@ -62,7 +62,6 @@ pub struct Options {
     pub stop_timeout: Duration,
     pub idle_close: Duration,
     pub control_timeout: Duration,
-    /// The longest line the provider reads from the fake CLI.
     pub max_line_bytes: usize,
     pub restart_wait: Duration,
     pub max_restarts: u32,

@@ -208,7 +208,6 @@ impl Completion {
     }
 }
 
-/// What one app-server sent, tagged with the server and the generation it ran as.
 pub(super) struct Frame {
     pub key: ServerKey,
     pub generation: u64,

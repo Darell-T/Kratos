@@ -265,7 +265,7 @@ impl ThreadState {
         self.run.is_some() && self.pending.is_empty()
     }
 
-    /// The thread has a message in flight, a process starting, or a stop.
+    /// The thread has a message in flight, a process starting, a turn running, or a stop.
     pub(super) fn is_working(&self) -> bool {
         self.is_busy() || self.stopping
     }

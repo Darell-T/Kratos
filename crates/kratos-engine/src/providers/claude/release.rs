@@ -25,7 +25,6 @@ pub(super) struct Release {
     pub env_set: Vec<(OsString, OsString)>,
     /// Where the native install's updater reads the newest release on each channel.
     pub feed: String,
-    /// The update in flight, as engine shutdown sees it.
     pub updating: Mutex<Updating>,
 }
 

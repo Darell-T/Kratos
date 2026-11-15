@@ -341,8 +341,8 @@ impl Harness {
         self.control.as_mut().expect("connected above")
     }
 
-    /// Each thread has a fake Codex of its own. These read and steer every fake the engine has
-    /// started, through each one's own control port.
+    /// The result of one control request to the fake at `port`, or `None` when the fake does not
+    /// answer. Each thread has a fake Codex of its own, with a control port of its own.
     async fn on_fake(port: u16, method: &str, params: Value) -> Option<Value> {
         let stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
         let (reader, mut writer) = stream.into_split();
@@ -426,7 +426,7 @@ impl Harness {
         }
     }
 
-    /// A control request to the fake at `port`. Panics on an error answer.
+    /// A control request to the fake at `port`. Panics when the fake does not answer.
     pub async fn control_at(&self, port: u16, request: ControlRequest) -> Value {
         Self::on_fake(port, request.method, request.params)
             .await
