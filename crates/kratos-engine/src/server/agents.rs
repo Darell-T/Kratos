@@ -42,14 +42,7 @@ pub(super) async fn post_message(
     let agent = state.agent(&thread_id).await?;
     let acting = Acting::of(&state, &headers).await?;
     if let Some(acting) = &acting {
-        let target = thread_id.clone();
-        let workspace_id = state
-            .store
-            .call(move |store| store.provider_thread(&target))
-            .await?
-            .thread
-            .workspace_id;
-        acting.in_workspace(&workspace_id)?;
+        acting.reaches(&state, &thread_id).await?;
     }
     send_to_agent(&agent, acting, thread_id, body).await
 }
@@ -159,6 +152,7 @@ pub(super) async fn stop(
     let thread_id = path(id)?;
     if let Some(acting) = Acting::of(&state, &headers).await? {
         acting.not_on_itself(&thread_id)?;
+        acting.reaches(&state, &thread_id).await?;
     }
     state
         .agent(&thread_id)
@@ -252,6 +246,7 @@ pub(super) async fn answer(
             .await?;
         if let Some(stored) = stored {
             acting.not_on_itself(&stored.thread_id)?;
+            acting.reaches(&state, &stored.thread_id).await?;
         }
     }
     let agent = state.question_agent(&question_id).await?;

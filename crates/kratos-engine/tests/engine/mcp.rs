@@ -970,7 +970,7 @@ fn a_question_answer_cannot_exceed_the_senders_or_the_receivers_turn_permission(
 }
 
 #[test]
-fn a_thread_creates_and_messages_threads_only_in_its_own_workspace() {
+fn a_thread_below_full_access_creates_and_messages_threads_only_in_its_own_workspace() {
     // Catches a thread confined to one workspace starting or driving a thread in another, which
     // undoes the confinement: another workspace may hold a repository the user never put in its
     // reach.
@@ -1020,4 +1020,95 @@ fn a_thread_creates_and_messages_threads_only_in_its_own_workspace() {
 
     let (created, refused) = mcp.tool("create_thread", json!({ "title": "beside me" }));
     assert!(!refused, "{created}");
+}
+
+#[test]
+fn a_full_access_thread_creates_and_messages_threads_in_any_workspace() {
+    // Catches the workspace rule holding back a Full access thread, which may already change any
+    // folder on the computer.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let own = workspace(&engine);
+    let other = workspace(&engine);
+    let sender = thread(&engine, &own, Provider::Codex, Permission::FullAccess);
+    let elsewhere = thread(&engine, &other, Provider::Codex, Permission::AskMe);
+    let mut mcp = Mcp::start(&engine, &sender);
+
+    let (created, refused) = mcp.tool(
+        "create_thread",
+        json!({ "title": "elsewhere", "workspaceId": other.as_str() }),
+    );
+    assert!(!refused, "{created}");
+    assert!(created.to_string().contains(other.as_str()), "{created}");
+    let (sent, refused) = mcp.tool(
+        "send_message",
+        json!({ "threadId": elsewhere.id, "text": "Change this repository." }),
+    );
+    assert!(!refused, "{sent}");
+    engine.fake_codex_held("turn/start", 1);
+}
+
+#[test]
+fn a_thread_below_full_access_stops_and_answers_threads_only_in_its_own_workspace() {
+    // Catches stop_thread and answer_question reaching a thread in another workspace, which
+    // steers a thread whose repository the user never put in the acting thread's reach.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let own = workspace(&engine);
+    let other = workspace(&engine);
+    let receiver = thread(&engine, &other, Provider::Codex, Permission::AskMe);
+    let sender = thread(&engine, &own, Provider::Codex, Permission::ApproveForMe);
+    let path = format!("/api/threads/{}", receiver.id);
+    engine
+        .client()
+        .post(&format!("{path}/messages"), &json!({ "text": "work" }))
+        .unwrap();
+    engine.start_turn();
+    engine.fake_codex_request(codex_control::ask(
+        Some("question-1".into()),
+        "item/tool/requestUserInput",
+        json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "q1", "isBlocking": false,
+                "questions": [{ "id": "color", "header": "Color", "question": "Which color?",
+                                "options": [{ "label": "Red", "description": "Red" }] }] }),
+    ));
+    let deadline = Instant::now() + WAIT;
+    let question = loop {
+        let details = engine.client().get(&path).unwrap();
+        if let Some(id) = details.body["questions"][0]["id"].as_str() {
+            break id.to_owned();
+        }
+        assert!(Instant::now() < deadline, "the question did not arrive");
+        std::thread::yield_now();
+    };
+    let mut mcp = Mcp::start(&engine, &sender);
+
+    let (answered, refused) = mcp.tool(
+        "answer_question",
+        json!({ "questionId": question, "answers": { "color": ["Red"] } }),
+    );
+    assert!(
+        refused && answered.to_string().contains("own workspace"),
+        "{answered}"
+    );
+    let (stopped, refused) = mcp.tool("stop_thread", json!({ "threadId": receiver.id }));
+    assert!(
+        refused && stopped.to_string().contains("own workspace"),
+        "{stopped}"
+    );
+
+    let details = engine.client().get(&path).unwrap();
+    assert_eq!(
+        details.body["questions"][0]["id"], question,
+        "the question still waits on the user"
+    );
+    let stop = engine
+        .client()
+        .post(&format!("{path}/stop"), &json!({}))
+        .unwrap();
+    assert_eq!(stop.status, 200, "{}", stop.body);
+    assert_eq!(
+        engine.fake_codex_held("turn/interrupt", 1).len(),
+        1,
+        "only the user's stop reached Codex"
+    );
 }
