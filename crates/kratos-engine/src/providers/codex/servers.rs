@@ -7,7 +7,7 @@
 //! near 620 MB. At the limit the least recently used idle server closes first. A server is idle
 //! when its thread runs no turn and nothing waits on it, and Codex reports no background terminal.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
 use kratos_codex_client::Codex;
@@ -93,9 +93,30 @@ pub(super) struct Servers {
     slots: HashMap<ServerKey, Slot>,
     /// Generations are unique across servers, so a slot made again never reuses an old one.
     issued: u64,
+    /// Servers waiting to start while [`MAX_SERVERS`] run, oldest first.
+    waiting: VecDeque<ServerKey>,
 }
 
 impl Servers {
+    /// Queues `key` for room, once.
+    pub(super) fn wait(&mut self, key: &ServerKey) {
+        if !self.waiting.contains(key) {
+            self.waiting.push_back(key.clone());
+        }
+    }
+
+    pub(super) fn next_waiting(&mut self) -> Option<ServerKey> {
+        self.waiting.pop_front()
+    }
+
+    pub(super) fn anyone_waits(&self) -> bool {
+        !self.waiting.is_empty()
+    }
+
+    pub(super) fn waits(&self, key: &ServerKey) -> bool {
+        self.waiting.contains(key)
+    }
+
     pub(super) fn slot(&mut self, key: &ServerKey) -> &mut Slot {
         self.slots.entry(key.clone()).or_insert_with(Slot::new)
     }

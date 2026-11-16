@@ -267,8 +267,6 @@ pub(crate) struct Actor {
     pub(super) requests: Requests,
     /// Threads waiting for a start slot, oldest first.
     pub(super) ready: VecDeque<ThreadId>,
-    /// Servers waiting to start while [`super::servers::MAX_SERVERS`] run, oldest first.
-    pub(super) waiting_for_server: VecDeque<ServerKey>,
     /// Threads to load once their app-servers are up, so their history settles their uncertain
     /// messages.
     pub(super) reconcile: Vec<ThreadId>,

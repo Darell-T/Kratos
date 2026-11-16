@@ -22,6 +22,7 @@ pub mod policy;
 mod profiles;
 mod queue;
 mod recovery;
+mod room;
 #[cfg(windows)]
 mod sandbox;
 mod servers;

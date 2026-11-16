@@ -102,7 +102,6 @@ impl Actor {
             threads: HashMap::new(),
             requests: Requests::default(),
             ready: Default::default(),
-            waiting_for_server: Default::default(),
             reconcile: Vec::new(),
             done,
             completions,
