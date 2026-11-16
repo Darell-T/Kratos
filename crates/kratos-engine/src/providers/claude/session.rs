@@ -249,7 +249,7 @@ impl Actor {
                     background_tasks: 0,
                     finished_tasks: Vec::new(),
                     tasks_ended: 0,
-                    report_overdue: false,
+                    report_owed: None,
                 });
                 tokio::spawn(forward(
                     thread_id.clone(),
@@ -312,7 +312,11 @@ impl Actor {
             )));
             return;
         }
-        if self.threads.values().any(ThreadState::runs_background_task) {
+        if self
+            .threads
+            .values()
+            .any(ThreadState::holds_background_work)
+        {
             let _ = reply.send(Err(ProviderError::Conflict(
                 "Claude Code cannot update while a Claude thread runs a background command, which \
                  closing its CLI would end. Update once the command ends"

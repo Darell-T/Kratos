@@ -179,7 +179,7 @@ pub(super) enum Done {
     ReportOverdue {
         thread_id: ThreadId,
         epoch: u64,
-        ended: u64,
+        ended: std::num::NonZeroU64,
     },
     Transcript {
         thread_id: ThreadId,

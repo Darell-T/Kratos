@@ -1,6 +1,7 @@
 //! What the actor knows about one Claude thread between store reads: its CLI process, the messages
 //! written to it, and the turn they make.
 
+use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use kratos_claude_client::{Claude, PermissionMode, SessionId};
@@ -89,11 +90,11 @@ pub(super) struct OpenSession {
     /// What the CLI said of the background tasks that ended since its last turn began. The turn it
     /// then starts on its own names them.
     pub finished_tasks: Vec<String>,
-    /// How many background tasks the CLI said ended, so a wait for an older one's report is told
-    /// apart from the newest.
+    /// How many background tasks the CLI said ended.
     pub tasks_ended: u64,
-    /// The CLI started no turn to report the tasks that ended, in the time Kratos waits for one.
-    pub report_overdue: bool,
+    /// A task ended and the turn the CLI starts to report it has not begun: the count of tasks
+    /// ended then, so the wait for an older one's report is told apart from the newest.
+    pub report_owed: Option<NonZeroU64>,
 }
 
 impl OpenSession {
@@ -105,20 +106,15 @@ impl OpenSession {
             kratos_claude_client::Background::Ended { summary } => {
                 self.finished_tasks.extend(summary);
                 self.tasks_ended += 1;
-                self.report_overdue = false;
+                self.report_owed = NonZeroU64::new(self.tasks_ended);
             }
         }
     }
 
-    /// No command runs, but one ended and the turn the CLI starts to report it has not begun.
-    pub(super) fn report_due(&self) -> bool {
-        self.background_tasks == 0 && !self.finished_tasks.is_empty() && !self.report_overdue
-    }
-
-    /// A command runs in the background, or the turn that reports one that ended is due. Closing
+    /// A command runs in the background, or the turn that reports one that ended is owed. Closing
     /// the process would end the command or cut that turn off.
     pub(super) fn holds_background_work(&self) -> bool {
-        self.background_tasks > 0 || self.report_due()
+        self.background_tasks > 0 || self.report_owed.is_some()
     }
 }
 
@@ -288,14 +284,14 @@ impl ThreadState {
     }
 
     /// The open process runs a command in the background, or owes the turn that reports one.
-    pub(super) fn runs_background_task(&self) -> bool {
+    pub(super) fn holds_background_work(&self) -> bool {
         self.open().is_some_and(OpenSession::holds_background_work)
     }
 
     /// When the open process last did anything, if it has nothing to do.
     pub(super) fn idle_since(&self) -> Option<Instant> {
         let open = self.open()?;
-        (!self.is_busy_or_stopping() && !self.runs_background_task()).then_some(open.last_active)
+        (!self.is_busy_or_stopping() && !self.holds_background_work()).then_some(open.last_active)
     }
 
     pub(super) fn turn_settings(&self) -> &ThreadSettings {

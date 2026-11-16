@@ -327,6 +327,7 @@ impl Actor {
             return;
         };
         let finished = std::mem::take(&mut open.finished_tasks);
+        open.report_owed = None;
         let origin = TurnOrigin::BackgroundTask {
             summary: (!finished.is_empty()).then(|| finished.join("\n")),
         };

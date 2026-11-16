@@ -305,3 +305,43 @@ async fn a_message_waiting_for_a_background_command_goes_ahead_when_no_report_tu
     assert_eq!(second.value("--model"), Some("claude-opus-test"));
     harness.wait_written(&second, &[B]).await;
 }
+
+#[tokio::test]
+async fn a_command_that_ends_without_a_summary_still_holds_a_waiting_message_for_its_report() {
+    // Catches the wait for the report turn keyed on the summary text, so a command that ends with
+    // none lets a waiting message close the CLI under the turn that reports it.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = a_command_runs_on_after_the_turn(&mut harness).await;
+    change_model(&harness, "claude-opus-test").await;
+    harness.send(B, "B").await;
+
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "t1",
+                    "status": "completed" }),
+        )
+        .await;
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] }),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        harness.is_running(&launch),
+        "the CLI waits for the turn that reports the command"
+    );
+    assert_eq!(harness.launches().len(), 1, "no new launch yet");
+
+    harness.init(&launch).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
+        .await;
+    harness.finish(&launch, &[], json!({})).await;
+    let second = harness.launch(2).await;
+    harness.wait_ended(&launch).await;
+    assert_eq!(second.value("--model"), Some("claude-opus-test"));
+    harness.wait_written(&second, &[B]).await;
+}

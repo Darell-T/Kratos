@@ -2,6 +2,8 @@
 //! that needs the CLI started again waits for them, and for the turn the CLI then starts to report
 //! them, before the thread's next message closes it.
 
+use std::num::NonZeroU64;
+
 use kratos_claude_client::Background;
 use kratos_protocol::{LiveUpdate, ThreadId};
 
@@ -25,8 +27,8 @@ impl Actor {
             return;
         };
         open.note(background);
-        if open.report_due() {
-            let (thread_id, ended) = (thread_id.clone(), open.tasks_ended);
+        if let (0, Some(ended)) = (open.background_tasks, open.report_owed) {
+            let thread_id = thread_id.clone();
             self.spawn(async move {
                 tokio::time::sleep(wait).await;
                 Done::ReportOverdue {
@@ -41,7 +43,12 @@ impl Actor {
 
     /// The CLI started no turn to report the commands that ended, so a message waiting on them
     /// goes ahead.
-    pub(super) async fn on_report_overdue(&mut self, thread_id: &ThreadId, epoch: u64, ended: u64) {
+    pub(super) async fn on_report_overdue(
+        &mut self,
+        thread_id: &ThreadId,
+        epoch: u64,
+        ended: NonZeroU64,
+    ) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
@@ -49,9 +56,9 @@ impl Actor {
             return;
         }
         if let Some(open) = thread.open_mut()
-            && open.tasks_ended == ended
+            && open.report_owed == Some(ended)
         {
-            open.report_overdue = true;
+            open.report_owed = None;
         }
         self.dispatch(thread_id).await;
     }
