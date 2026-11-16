@@ -338,11 +338,8 @@ impl ClaudeProvider {
     pub async fn update_cli(&self) -> Result<CliRelease, ProviderError> {
         // A task of its own, so a client that disconnects mid-update never stops the updater
         // halfway through replacing the CLI. Engine shutdown cancels it only before it installs.
-        let running = self.release.prepare()?;
-        let update = running.id();
         let provider = self.clone();
-        let task = tokio::spawn(async move {
-            let _running = running;
+        let task = self.release.start(async move {
             provider.release.check_native().await?;
             provider
                 .ask(|reply| actor::Command::HoldForUpdate { reply })
@@ -357,8 +354,7 @@ impl ClaudeProvider {
                 .await?;
             updated?;
             Ok(provider.release.status().await)
-        });
-        self.release.started(&update, task.abort_handle());
+        })?;
         task.await.map_err(|_| ProviderError::Stopped)?
     }
 

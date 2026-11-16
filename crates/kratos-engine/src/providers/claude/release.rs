@@ -11,7 +11,7 @@ use kratos_claude_client::{
 };
 use kratos_protocol::{CliRelease, CliUpdate};
 use tokio::sync::watch;
-use tokio::task::AbortHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::providers::ProviderError;
 
@@ -34,9 +34,8 @@ pub(super) enum Updating {
     #[default]
     Idle,
     /// Checking the install or closing sessions. Nothing is replaced yet, so shutdown cancels it.
-    /// `task` is missing for the moment between recording the update and starting its task.
     Preparing {
-        task: Option<AbortHandle>,
+        task: AbortHandle,
         ended: watch::Receiver<()>,
     },
     /// The updater or the version check after it runs. Stopping it midway can leave a broken CLI,
@@ -47,17 +46,9 @@ pub(super) enum Updating {
 }
 
 /// An update in flight. Dropping it ends the update, then wakes a shutdown waiting for it.
-pub(super) struct Running {
+struct Running {
     release: Arc<Release>,
-    ended: watch::Receiver<()>,
     _sender: watch::Sender<()>,
-}
-
-impl Running {
-    /// What tells this update apart from any later one.
-    pub fn id(&self) -> watch::Receiver<()> {
-        self.ended.clone()
-    }
 }
 
 impl Drop for Running {
@@ -71,41 +62,40 @@ impl Release {
         self.updating.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Records an update about to start. The update's task owns the returned [`Running`], so the
-    /// update ends however the task does, even when nobody awaits it.
+    /// Runs `update` as the update, in a task of its own that ends the update however the task
+    /// ends, even when nobody awaits it. The task starts under the lock, so shutdown finds the task
+    /// of any update it sees preparing; one that ends at once waits for the lock to end.
     ///
     /// # Errors
     /// Refuses while another update runs or the engine stops.
-    pub fn prepare(self: &Arc<Self>) -> Result<Running, ProviderError> {
+    pub fn start<T: Send + 'static>(
+        self: &Arc<Self>,
+        update: impl Future<Output = T> + Send + 'static,
+    ) -> Result<JoinHandle<T>, ProviderError> {
         let mut updating = self.updating();
         match *updating {
-            Updating::Idle => {
-                let (sender, ended) = watch::channel(());
-                *updating = Updating::Preparing {
-                    task: None,
-                    ended: ended.clone(),
-                };
-                Ok(Running {
-                    release: Arc::clone(self),
-                    ended,
-                    _sender: sender,
-                })
+            Updating::Idle => {}
+            Updating::ShuttingDown => return Err(ProviderError::Stopped),
+            _ => {
+                return Err(ProviderError::Conflict(
+                    "Claude Code is already updating".to_owned(),
+                ));
             }
-            Updating::ShuttingDown => Err(ProviderError::Stopped),
-            _ => Err(ProviderError::Conflict(
-                "Claude Code is already updating".to_owned(),
-            )),
         }
-    }
-
-    /// Records the task that runs `update`, so shutdown can cancel it while it prepares. Does
-    /// nothing when that update already ended, and another may have started since.
-    pub fn started(&self, update: &watch::Receiver<()>, task: AbortHandle) {
-        if let Updating::Preparing { task: slot, ended } = &mut *self.updating()
-            && ended.same_channel(update)
-        {
-            *slot = Some(task);
-        }
+        let (sender, ended) = watch::channel(());
+        let running = Running {
+            release: Arc::clone(self),
+            _sender: sender,
+        };
+        let task = tokio::spawn(async move {
+            let _running = running;
+            update.await
+        });
+        *updating = Updating::Preparing {
+            task: task.abort_handle(),
+            ended,
+        };
+        Ok(task)
     }
 
     /// Moves a preparing update to installing. False when the engine is stopping, and the update
@@ -135,10 +125,7 @@ impl Release {
         let taken = std::mem::replace(&mut *self.updating(), Updating::ShuttingDown);
         match taken {
             Updating::Preparing { task, mut ended } => {
-                if let Some(task) = task {
-                    task.abort();
-                }
-                // A task that had not started yet stops itself at `begin_install`.
+                task.abort();
                 let _ = ended.changed().await;
             }
             Updating::Installing { mut ended } => {
