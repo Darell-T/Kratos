@@ -101,19 +101,18 @@ impl Actor {
 
     /// Saves each reply and tool call of a completed assistant message (D88).
     async fn on_assistant(&mut self, thread_id: &ThreadId, assistant: &Assistant) {
+        let ids = assistant.user_message_uuids.as_deref().unwrap_or_default();
+        let turn = self.assistant_turn(thread_id, ids).await;
         if let Some(thread) = self.threads.get_mut(thread_id)
             && let Some(model) = assistant.message["model"].as_str()
         {
             thread.answering_model = Some(model.to_owned());
         }
+        let Some(turn_id) = turn else { return };
         let items = wire::assistant_items(assistant);
         if items.is_empty() {
             return;
         }
-        let ids = assistant.user_message_uuids.as_deref().unwrap_or_default();
-        let Some(turn_id) = self.assistant_turn(thread_id, ids).await else {
-            return;
-        };
         let _ = self
             .write(thread_id, move |write| {
                 for item in items {

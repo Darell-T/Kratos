@@ -81,7 +81,7 @@ fn path<T>(path: Result<Path<T>, PathRejection>) -> Result<T, ApiError> {
 }
 
 /// Serves the API on `listener` until `shutdown` completes, then stops accepting and lets the HTTP
-/// requests in flight finish for at most [`HTTP_DRAIN_TIMEOUT`]. The caller drops the runtime
+/// requests in flight finish within the server's shutdown timeout. The caller drops the runtime
 /// after this returns, cancelling remaining requests and sockets before the store closes.
 pub async fn serve(
     listener: TcpListener,

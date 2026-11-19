@@ -39,7 +39,9 @@ use kratos_engine::usage::{LimitStop, UsageTracker};
 /// How long a request to Codex may take, from the TypeScript provider. A turn has no deadline: a
 /// live CLI is working, and every way it can die reports its own error.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const CLAUDE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Leaves one second of the five-second Stop budget for process exit and recording the turn.
+const CODEX_INTERRUPT_GRACE: Duration = Duration::from_secs(4);
 const SESSION_IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
 /// Claude Code 2.1.322 can start a report turn after its background task list empties.
 const REPORT_TURN_WAIT: Duration = Duration::from_secs(10);
@@ -224,7 +226,7 @@ fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
         release_feed: CLAUDE_RELEASES.to_owned(),
         claude_home,
         env_set: Vec::new(),
-        stop_timeout: STOP_TIMEOUT,
+        stop_timeout: CLAUDE_STOP_TIMEOUT,
         idle_close: SESSION_IDLE_CLOSE,
         report_turn_wait: REPORT_TURN_WAIT,
         control_timeout: REQUEST_TIMEOUT,
@@ -248,7 +250,7 @@ fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMiss
             config.codex_home.clone(),
             config.user_home.clone(),
         ),
-        stop_timeout: Duration::from_secs(4),
+        stop_timeout: CODEX_INTERRUPT_GRACE,
         request_timeout: REQUEST_TIMEOUT,
         platform: DangerousCommandPlatform::host(),
         mcp: Some(McpServer {

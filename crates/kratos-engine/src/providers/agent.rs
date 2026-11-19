@@ -15,9 +15,7 @@ const NO_CODEX_SLASH_COMMANDS: &str =
 /// CLI's list.
 const CLAUDE_COMMANDS_FROM_USER_SETTINGS: &str = "Kratos loads only your Claude settings, so a project's own slash commands and skills are not listed";
 
-/// The providers the engine drives, each running or with the reason it cannot, such as no CLI
-/// installed. The one place that maps a [`Provider`] to its [`Agent`], for the routes and the
-/// scheduler alike.
+/// Each configured provider or the reason its CLI is unavailable.
 #[derive(Clone)]
 pub struct Providers {
     pub codex: Result<CodexProvider, String>,

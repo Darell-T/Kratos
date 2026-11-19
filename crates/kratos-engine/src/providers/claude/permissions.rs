@@ -323,12 +323,18 @@ pub(super) fn shown(pending: &Pending, folder: &str) -> ApprovalRequest {
         };
     };
     shell::approval(tool, folder).unwrap_or_else(|| {
-        let preview = match edit_path(&tool.tool_name, &tool.input) {
-            Some(path) => format!("{} {}\n{}", tool.tool_name, json!(path), tool.input),
-            None => format!("{} {}", tool.tool_name, tool.input),
+        let reason = match edit_path(&tool.tool_name, &tool.input) {
+            Some(path) => {
+                let excerpt = match (tool.tool_name.as_str(), tool.input["content"].as_str()) {
+                    ("Write", Some(content)) => approval_text(content),
+                    _ => approval_text(&tool.input.to_string()),
+                };
+                format!("{} {}\n{excerpt}", tool.tool_name, json!(path))
+            }
+            None => approval_text(&format!("{} {}", tool.tool_name, tool.input)),
         };
         ApprovalRequest::Permissions {
-            reason: Some(approval_text(&preview)),
+            reason: Some(reason),
             access: ExtraAccess::default(),
         }
     })
