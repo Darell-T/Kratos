@@ -227,8 +227,6 @@ async fn a_discard_sent_while_codex_loads_the_thread_settles_once_it_has() {
 
 #[tokio::test]
 async fn a_discard_settles_the_message_as_cancelled_when_codex_cannot_load_the_thread() {
-    // Catches a discard left waiting for good when Codex cannot load the thread, and one that
-    // answers 503 every time, so the uncertain message holds the queue for good (C8).
     let mut harness = Harness::start(Options::default()).await;
     harness.send("a", "first").await;
     harness.held("turn/start", 1).await;

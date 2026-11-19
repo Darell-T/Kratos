@@ -25,7 +25,6 @@ impl Actor {
         let outdated = thread
             .open()
             .is_some_and(|open| open.config != SessionConfig::of(&thread.settings));
-        // A background command would end with the CLI, so the next message waits for it.
         if outdated && !thread.is_busy() && !thread.holds_background_work() {
             self.retire_session(thread_id);
         }

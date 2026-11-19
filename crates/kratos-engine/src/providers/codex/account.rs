@@ -9,8 +9,6 @@ use super::servers::ServerKey;
 use super::{ProviderError, wire};
 
 impl Actor {
-    /// Reads, through `key`'s server, the plan that pays for the account (D24) and the account's
-    /// usage (D38). Every server runs under the same account.
     pub(super) fn read_account(&self, key: &ServerKey, codex: Codex) {
         let reader = codex.clone();
         self.spawn(key, async move {
@@ -26,7 +24,6 @@ impl Actor {
         self.read_usage(key, codex, None);
     }
 
-    /// Reads the usage through any server that is up, or starts the account's own server.
     pub(super) fn refresh_usage(&mut self, reply: Reply<()>) {
         if let Some((key, codex)) = self.servers.any_up() {
             self.servers.slot(&key).last_used = std::time::Instant::now();

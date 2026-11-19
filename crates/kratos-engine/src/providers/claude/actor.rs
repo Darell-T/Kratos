@@ -175,7 +175,6 @@ pub(super) enum Done {
     },
     /// The wait after a CLI failure ended.
     RestartDue { thread_id: ThreadId },
-    /// The wait for the turn that reports `ended` background tasks ended.
     ReportOverdue {
         thread_id: ThreadId,
         epoch: u64,

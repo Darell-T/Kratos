@@ -49,7 +49,6 @@ async fn launches_claude_lazily_and_delivers_queued_messages_one_turn_at_a_time_
         panic!("the message is queued");
     };
     let launch = harness.launch(1).await;
-    // The fake reports its working folder as the system does: the physical path on macOS.
     assert_eq!(
         std::fs::canonicalize(&launch.cwd).unwrap(),
         std::fs::canonicalize(harness.folder()).unwrap()
@@ -164,9 +163,6 @@ async fn records_the_plan_that_pays_for_the_session_and_never_the_account() {
 #[tokio::test]
 async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_and_settles_stop_on_that_result()
  {
-    // Catches a queued message started on a stop's acknowledgement instead of the stopped turn's
-    // result, a second stop that sends a second interrupt, and a stop that outlives the result
-    // that ended it.
     let mut harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     harness.send(B, "B").await;
@@ -202,8 +198,6 @@ async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_and_set
 
 #[tokio::test]
 async fn a_stop_the_cli_rejects_still_ends_the_turn_interrupted() {
-    // Catches a rejected interrupt that cancels the stop timer, which left a CLI that refuses to
-    // stop running its turn until the engine restarted.
     let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(400),
         ..Options::default()
@@ -237,9 +231,6 @@ async fn a_stop_the_cli_rejects_still_ends_the_turn_interrupted() {
 
 #[tokio::test]
 async fn closes_a_session_that_never_acknowledges_a_stop_and_resumes_it_for_the_next_message() {
-    // Catches a stop that waits forever on a CLI that does not answer, a stopped turn recorded as
-    // failed when Kratos had to close its CLI, and a relaunch that starts a new session instead
-    // of resuming the thread's own.
     let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(400),
         ..Options::default()
@@ -500,8 +491,6 @@ async fn an_idle_session_closes_after_the_idle_window_and_the_next_message_resum
 
 #[tokio::test]
 async fn a_session_with_a_background_task_running_is_not_closed_as_idle() {
-    // Catches the idle check closing a CLI whose shell command still runs in the background after
-    // its turn ended, which would end that command with the process.
     let mut harness = Harness::start(Options {
         idle_close: Duration::from_millis(300),
         ..Options::default()

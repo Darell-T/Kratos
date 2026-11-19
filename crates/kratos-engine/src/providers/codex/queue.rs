@@ -186,8 +186,6 @@ impl Actor {
             .await;
     }
 
-    /// Records a discarded message as accepted into `found`, the turn Codex's history shows took
-    /// it, or as cancelled. Either way it is never sent again (D11).
     pub(super) async fn settle_discard(
         &mut self,
         thread_id: &ThreadId,

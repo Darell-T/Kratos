@@ -270,8 +270,6 @@ mod tests {
 
     #[test]
     fn under_approve_for_me_a_patch_outside_the_workspace_asks_as_a_claude_write_does() {
-        // Catches a Codex patch outside the workspace accepted under Approve for me, where a
-        // Claude write to the same file asks (C3): both follow `writes::asks`.
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
         std::fs::create_dir_all(&target).unwrap();
         let root = tempfile::Builder::new()

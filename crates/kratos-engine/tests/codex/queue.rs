@@ -362,7 +362,6 @@ async fn a_long_turn_is_never_stopped_by_kratos_and_the_queue_runs_after_it() {
     harness.held("turn/start", 2).await;
 }
 
-/// Starts a turn, asks to stop it, and lets `answer` decide what Codex says to the interrupt.
 async fn stop_a_turn_codex_does_not_end(answer: &str) -> ThreadEventBody {
     let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(300),
@@ -394,9 +393,6 @@ async fn stop_a_turn_codex_does_not_end(answer: &str) -> ThreadEventBody {
 
 #[tokio::test]
 async fn a_stopped_turn_codex_does_not_end_closes_codex_and_ends_interrupted() {
-    // Catches a stop that leaves the turn running when Codex accepts, refuses, or never answers
-    // the interrupt, which held the queue until the engine restarted, and a stopped turn recorded
-    // as failed.
     for answer in ["accept", "refuse", "silent"] {
         let ended = stop_a_turn_codex_does_not_end(answer).await;
         assert!(
@@ -437,8 +433,6 @@ async fn codex_exiting_mid_start_leaves_the_message_uncertain() {
 
 #[tokio::test]
 async fn a_thread_codex_closes_mid_turn_ends_its_turn_as_failed() {
-    // Catches a closed thread whose turn stayed running, which Stop could not end because the
-    // thread had no Codex id left, holding the queue until the engine restarted.
     let mut harness = Harness::start(Options::default()).await;
     harness.send("a", "first").await;
     harness.held("turn/start", 1).await;
@@ -462,8 +456,6 @@ async fn a_thread_codex_closes_mid_turn_ends_its_turn_as_failed() {
 
 #[tokio::test]
 async fn a_stop_codex_ignores_ends_only_its_own_thread_s_turn() {
-    // Catches the shared Codex process, where closing the server to end one stuck turn ended
-    // every other thread's turn too. Each thread now runs a server of its own.
     let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(300),
         ..Options::default()

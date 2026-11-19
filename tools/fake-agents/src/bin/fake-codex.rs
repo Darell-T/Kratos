@@ -84,7 +84,6 @@ fn serve_control(fake: Arc<Mutex<Fake>>, path: &str) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a localhost port is free");
     let port = listener.local_addr().expect("the port is known").port();
     codex_control::write_port(Path::new(path), port).expect("the control file is writable");
-    // Each fake also publishes its port under its own name, for a test that runs one per thread.
     codex_control::write_port(&codex_control::own_control_file(Path::new(path)), port)
         .expect("the control folder is writable");
     lock(&fake).control_file = Some(path.into());
@@ -158,9 +157,7 @@ struct Fake {
     held_log: Vec<Value>,
     /// Requests not yet settled, in arrival order.
     held: Vec<Held>,
-    /// What `thread/backgroundTerminals/list` reports, set by `test/backgroundTerminals`.
     background_terminals: Vec<Value>,
-    /// How many `thread/backgroundTerminals/list` requests arrived, for `test/backgroundTerminalLists`.
     background_terminal_lists: u64,
     /// Every `thread/start`, `thread/resume`, and `thread/unsubscribe`, for `test/threadRequests`.
     thread_log: Vec<Value>,
@@ -247,8 +244,6 @@ impl Fake {
                 )
                 .expect("the benchmark observer stays connected");
             }
-            // When it arrived, so a test that runs a fake per thread can put every fake's
-            // requests in one order.
             let received_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |since| since.as_nanos());
@@ -480,7 +475,6 @@ impl Fake {
                 self.send(json!({ "method": "test/notified", "params": params }));
                 self.reply(id, Value::Null);
             }
-            // The requests not settled yet, oldest first, with when each arrived.
             "test/heldNow" => {
                 let held: Vec<Value> = self
                     .held
@@ -503,7 +497,6 @@ impl Fake {
                 self.send(json!("this is not json"));
                 self.reply(id, json!("still alive"));
             }
-            // A line that is not UTF-8, after which the fake keeps running and answers nothing.
             "test/notUtf8" => {
                 let mut stdout = std::io::stdout().lock();
                 let _ = stdout.write_all(b"\xff\xfe not text\n");

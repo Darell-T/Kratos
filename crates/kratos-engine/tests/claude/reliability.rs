@@ -255,9 +255,6 @@ async fn relaunches_an_idle_session_when_its_settings_change_and_never_launches_
     let first = harness.begin(A, 1).await;
     harness.finish(&first, &[A], json!({})).await;
     harness.message_becomes(A, |s| accepted_by(s, A)).await;
-    // The message is accepted when the turn begins, so only the turn's end shows the thread idle.
-    // A settings change before it keeps the process until the next message, as one during a turn
-    // must.
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
         .await;
@@ -392,9 +389,6 @@ async fn rejects_unknown_threads_shares_duplicate_sends_and_closes_every_thread_
 
 #[tokio::test]
 async fn starts_a_session_with_initialize_first_and_registers_only_kratos_hooks() {
-    // Catches a prompt written before Claude is initialized, and an initialize that registers
-    // hooks Kratos does not answer or SDK MCP servers it does not serve. The plan recorded without the
-    // account (D22, D24) is checked by `turns::records_the_plan_that_pays_for_the_session_and_never_the_account`.
     let harness = Harness::start(Options::default()).await;
     harness.send(A, "A").await;
     let launch = harness.launch(1).await;
@@ -422,8 +416,6 @@ async fn starts_a_session_with_initialize_first_and_registers_only_kratos_hooks(
 
 #[tokio::test]
 async fn a_line_kratos_cannot_read_ends_the_turn_instead_of_leaving_claude_waiting() {
-    // Catches a permission request too large to read, or a result Kratos cannot parse, dropped
-    // with a note while the CLI waits for an answer and the turn runs forever.
     let limit = 128 * 1024;
     let oversized = json!({ "type": "control_request", "request_id": "big", "request": {
         "subtype": "can_use_tool", "tool_name": "Write",
@@ -455,8 +447,6 @@ async fn a_line_kratos_cannot_read_ends_the_turn_instead_of_leaving_claude_waiti
 
 #[tokio::test]
 async fn a_transcript_with_a_bad_line_in_the_middle_still_lets_the_user_discard() {
-    // Catches a hard error on a line torn by a crash and followed by later rows, which answered
-    // every discard with 503 and left the uncertain message holding the queue for good.
     let harness = Harness::start(Options::default()).await;
     let first = harness.begin(A, 1).await;
     harness.send(E, "E").await;
@@ -490,8 +480,6 @@ async fn a_transcript_with_a_bad_line_in_the_middle_still_lets_the_user_discard(
 
 #[tokio::test]
 async fn editing_a_large_file_does_not_end_the_session() {
-    // Catches a line limit below what an edit sends: the CLI puts the whole file as it was before
-    // the change in the post-tool hook, so editing a 3 MB file (measured) ended the session.
     let mut harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     let original = "x".repeat(3 * 1024 * 1024);

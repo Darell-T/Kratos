@@ -1,29 +1,5 @@
-//! Claude threads.
-//!
-//! One actor task owns every Claude thread's state, as the Codex actor does, and each thread has a
-//! `claude` process of its own, as each Codex thread has an app-server of its own. Handles send
-//! the actor commands and wait for the reply. Work that waits on a process, such as starting it
-//! or writing a message, runs in a task of its own and comes back to the actor as a completion,
-//! so the actor keeps reading frames while it is out, and a completion for a process that has
-//! ended is recognized and dropped. Nothing outside the actor changes a Claude thread's state.
-//!
-//! The two delivery rules hold here (D11). A queued message is written to Claude only once every
-//! message before it has a result, and a message whose delivery is uncertain is never sent again:
-//! only Claude's transcript or the user settles it. Claude accepts a message only when it echoes
-//! it back, and a turn ends only on its result.
-//!
-//! A CLI starts when a message needs one, or when the usage scheduler or the skills route (D97)
-//! asks a thread's session something.
-//!
-//! The account's usage reaches the shared tracker (D38) from the CLI's rate limit events and from
-//! a `get_usage` read after each session starts and whenever the scheduler asks. Only a turn's
-//! result decides a stop at the usage limit (D39): a failed result after a rejected event pauses
-//! the thread and reports the stop, and anything else, including a turn the CLI waited out,
-//! sends nothing.
-//!
-//! Kratos decides each tool request and records approvals and questions through the shared Hub.
-//! Claude runs its own shell commands, as the user and with no sandbox. A pre-tool hook sends each
-//! one to Kratos's decision, and no thread launches in a mode that skips the ask.
+//! Each Claude thread owns one CLI. Queued messages wait for the preceding result. Uncertain delivery is reconciled against the transcript.
+//! Claude runs native shell tools as the user, without a sandbox.
 
 mod account;
 mod actor;
@@ -336,8 +312,6 @@ impl ClaudeProvider {
     /// thread works, and every idle session closes first. Messages sent meanwhile wait, then start
     /// on the new release.
     pub async fn update_cli(&self) -> Result<CliRelease, ProviderError> {
-        // A task of its own, so a client that disconnects mid-update never stops the updater
-        // halfway through replacing the CLI. Engine shutdown cancels it only before it installs.
         let provider = self.clone();
         let task = self.release.start(async move {
             provider.release.check_native().await?;

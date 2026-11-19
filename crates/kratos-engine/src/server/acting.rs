@@ -1,9 +1,4 @@
-//! Requests a thread's agent makes through Kratos's tools. The `Kratos-Thread` header names that
-//! thread, and a request without it comes from the user. Such a request reaches only the routes the
-//! tools call, may give no thread more access than the acting thread has, and may not act on the
-//! acting thread itself. A Full access thread creates, messages, stops, and answers threads in any
-//! workspace; a thread below Full access does so only in its own. Any thread reads every
-//! workspace.
+//! Only Full access permits thread tools to act across workspaces. All threads may read across workspaces.
 
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
@@ -76,9 +71,6 @@ impl Acting {
         Ok(())
     }
 
-    /// A thread below Full access acts only in its own workspace. Its permission covers its own
-    /// folder, and another workspace may hold a repository the user never put in its reach. A Full
-    /// access thread may already change any folder.
     pub(super) fn in_workspace(&self, workspace_id: &WorkspaceId) -> Result<(), ApiError> {
         if self.access != AccessLimit::FULL && self.workspace_id != *workspace_id {
             return Err(forbidden(
@@ -88,7 +80,6 @@ impl Acting {
         Ok(())
     }
 
-    /// [`Acting::in_workspace`] for the workspace `thread_id` belongs to.
     pub(super) async fn reaches(
         &self,
         state: &ServerState,

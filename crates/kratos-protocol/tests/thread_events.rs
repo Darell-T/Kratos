@@ -591,8 +591,6 @@ fn narrowing_settings_keeps_what_both_sides_allow_and_nothing_more() {
 
 #[test]
 fn a_turn_started_by_messages_keeps_its_old_shape_and_one_after_a_background_task_names_it() {
-    // Catches older turn.started events unreadable, the wire shape of every message-started turn
-    // changing for clients, and a self-started turn indistinguishable from one the user started.
     let older: ThreadEventBody =
         serde_json::from_value(serde_json::json!({ "kind": "turn.started", "turnId": "t1" }))
             .unwrap();

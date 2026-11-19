@@ -1,18 +1,5 @@
-//! The sandbox every Codex turn runs in. Plan, Ask me, and Approve for me select named permission
-//! profiles Kratos defines when it starts the app-server. Full access selects Codex's built-in
-//! `:danger-full-access`, which runs commands without a sandbox, because a user who picks Full
-//! access asks for an agent that works on the whole machine. These profiles write
-//! only the thread's workspaces and the temp folder: on Windows, Codex sets permissions on every
-//! file below a write root before the thread starts, and for a home folder that never finished.
-//!
-//! Measured on Codex 0.159.1: a profile's `deny` entry hides a folder from reads and writes, a
-//! `read` entry makes it read-only, and Codex keeps a command inside the sandbox even after the
-//! user approves running it outside whenever the profile denies any read. Every Kratos profile
-//! denies Kratos's data folder, so no sandboxed command can read the client token (D19). A Full
-//! access command runs as the user and can. An approved patch writes wherever it points, so
-//! [`super::policy`] checks patch paths against [`ProtectedFolders`] before accepting one.
-//! Claude's file tools run outside every sandbox, so [`sandbox_may_write`] gives an automatic
-//! Claude write the same scope as a Codex command at the same level.
+//! Windows grants access throughout each writable root during startup, so workspace profiles limit writes to workspace and temporary folders.
+//! On Codex 0.159.1 a deny entry blocks sandbox reads and writes. Full access runs commands as the user. Approved patches require their own path check.
 
 use std::ffi::OsString;
 use std::io;
@@ -346,8 +333,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_folder_that_differs_only_in_case_is_not_the_sandbox_scope() {
-        // Catches case folding, which is right for protected folders, widening the writable scope.
-        // The folders sit outside the temp folder, which the sandbox lets every command write.
         let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
         std::fs::create_dir_all(&target).unwrap();
         let root = tempfile::Builder::new()

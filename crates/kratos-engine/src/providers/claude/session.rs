@@ -15,9 +15,6 @@ use super::actor::{Actor, Connected, Done, Reply, SessionEvent};
 use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState, Waiter};
 use super::{ClaudeSettings, ProviderError, hooks, permissions, release, wire};
 
-/// Tools the CLI may not offer. `Monitor` streams a long-running command's output back into the
-/// turn.
-// TODO: decide whether a Claude thread may use `Monitor`.
 const DISALLOWED_TOOLS: [&str; 1] = ["Monitor"];
 
 impl Actor {
@@ -292,12 +289,7 @@ impl Actor {
         }
     }
 
-    /// Clears the way for Claude Code's updater, which must not replace files a running CLI
-    /// loads. It refuses while any thread works, since its turn would be cut off, or runs a
-    /// background command, which closing its CLI would end, or owes the turn that reports one.
-    /// Otherwise it closes every session,
-    /// holds new ones off, and answers once the processes have exited. The threads lose nothing:
-    /// their next messages resume their sessions after the update.
+    /// The native updater replaces files the CLI may still have open.
     pub(super) fn hold_for_update(&mut self, reply: Reply<()>) {
         if self.updating {
             let _ = reply.send(Err(ProviderError::Conflict(
@@ -338,9 +330,6 @@ impl Actor {
         });
     }
 
-    /// Closes every session with no turn running that nobody has used for `idle_for`. Its thread
-    /// loses nothing: the next message resumes the session, so a process nobody comes back to
-    /// stops holding memory at the cost of one resume.
     pub(super) fn close_sessions_idle_for(&mut self, idle_for: Duration) {
         let now = Instant::now();
         let idle: Vec<ThreadId> = self

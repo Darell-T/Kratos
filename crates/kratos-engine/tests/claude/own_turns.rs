@@ -1,6 +1,3 @@
-//! Turns Claude Code starts by itself after a background command ends, with no message of the
-//! user's in them.
-
 use std::time::Duration;
 
 use kratos_protocol::{
@@ -14,8 +11,6 @@ use crate::requests::{approval, response, send};
 
 const SUMMARY: &str = "Background command \"cargo build\" completed (exit code 0)";
 
-/// Plays what the real CLI sent (measured with 2.1.322) when a background command ended after its
-/// turn: the task's notification, then a turn of its own.
 async fn background_task_ends(harness: &Harness, launch: &Launch) {
     harness
         .emit(
@@ -44,8 +39,6 @@ async fn after_a_finished_turn(harness: &mut Harness) -> Launch {
 
 #[tokio::test]
 async fn a_turn_claude_starts_after_a_background_command_is_recorded_with_its_replies() {
-    // Catches the turn the CLI starts by itself dropped: its replies lost, and its result ignored,
-    // so the user never sees that Claude went on working.
     let mut harness = Harness::start(Options::default()).await;
     let launch = after_a_finished_turn(&mut harness).await;
 
@@ -96,8 +89,6 @@ async fn a_turn_claude_starts_after_a_background_command_is_recorded_with_its_re
 
 #[tokio::test]
 async fn an_approval_in_a_turn_claude_started_reaches_the_user_and_the_answer_is_honored() {
-    // Catches a tool request in that turn refused as "No Claude turn is running" instead of
-    // reaching the user, and an answer the turn never receives.
     let mut harness = Harness::start(Options::default()).await;
     let launch = after_a_finished_turn(&mut harness).await;
     background_task_ends(&harness, &launch).await;
@@ -129,8 +120,6 @@ async fn an_approval_in_a_turn_claude_started_reaches_the_user_and_the_answer_is
 
 #[tokio::test]
 async fn a_turn_claude_starts_itself_runs_under_the_thread_s_current_permission() {
-    // Catches the self-started turn deciding tools under the permission of the last turn a message
-    // started: lowered from Full access to Ask me in between, its command ran unasked.
     let mut harness = Harness::start(Options {
         settings: kratos_protocol::ThreadSettings {
             permission: kratos_protocol::Permission::FullAccess,
@@ -179,7 +168,6 @@ async fn a_turn_claude_starts_itself_runs_under_the_thread_s_current_permission(
     );
 }
 
-/// Finishes the thread's first turn with a background command still running.
 async fn a_command_runs_on_after_the_turn(harness: &mut Harness) -> Launch {
     let launch = harness.begin(A, 1).await;
     harness
@@ -210,9 +198,6 @@ async fn change_model(harness: &Harness, model: &str) {
 
 #[tokio::test]
 async fn a_model_change_waits_for_a_background_command_and_the_turn_that_reports_it() {
-    // Catches a settings change closing a CLI whose background command still runs, a message
-    // that needs the new launch cutting the command or the turn that reports it short, and a
-    // thread not told why its message waits.
     let mut harness = Harness::start(Options::default()).await;
     let launch = a_command_runs_on_after_the_turn(&mut harness).await;
 
@@ -269,8 +254,6 @@ async fn a_model_change_waits_for_a_background_command_and_the_turn_that_reports
 
 #[tokio::test]
 async fn a_message_waiting_for_a_background_command_goes_ahead_when_no_report_turn_follows() {
-    // Catches a message that waits forever when the CLI reports its command ended but starts no
-    // turn to report it.
     let mut harness = Harness::start(Options {
         report_turn_wait: Duration::from_millis(300),
         ..Options::default()
@@ -308,8 +291,6 @@ async fn a_message_waiting_for_a_background_command_goes_ahead_when_no_report_tu
 
 #[tokio::test]
 async fn a_command_that_ends_without_a_summary_still_holds_a_waiting_message_for_its_report() {
-    // Catches the wait for the report turn keyed on the summary text, so a command that ends with
-    // none lets a waiting message close the CLI under the turn that reports it.
     let mut harness = Harness::start(Options::default()).await;
     let launch = a_command_runs_on_after_the_turn(&mut harness).await;
     change_model(&harness, "claude-opus-test").await;

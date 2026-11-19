@@ -1,6 +1,3 @@
-//! Kratos's tool hooks. The pre-tool hook only sends a tool to the permission callback, where
-//! Kratos decides it. The post-tool hooks count changes; they never grant a tool permission.
-
 use kratos_claude_client::{HookCallback, HookMatcher, IncomingControl, Initialize};
 use kratos_protocol::{
     AgentItem, CappedText, FileChange, FileChangeKind, ItemStatus, ReportFormat, ThreadId,
@@ -17,8 +14,6 @@ const PRE: &str = "kratos-pre";
 const POST: &str = "kratos-post";
 const FAILED: &str = "kratos-failed";
 
-/// The session's `initialize`: Kratos's hooks, and the report format the turns' final replies must
-/// match.
 pub(super) fn initialize(report_format: Option<ReportFormat>) -> Initialize {
     Initialize {
         json_schema: report_format.map(|format| Value::Object(format.schema().clone())),
@@ -41,10 +36,7 @@ pub(super) fn initialize(report_format: Option<ReportFormat>) -> Initialize {
     }
 }
 
-/// The pre-tool hook's answer. Every tool goes to the permission callback, where Kratos decides
-/// it, even when the CLI or the user's allow rules would run it unasked. The one exception is the
-/// CLI's own plan file in plan mode, which `plans` names: the CLI writes it unasked there, and
-/// routing it would ask the user about `~/.claude` for every plan.
+/// Asking here routes CLI allow rules through Kratos. In plan mode the CLI decides direct edits in its plans directory.
 fn pre_tool(hook: &HookCallback, plans: Option<&Path>) -> Value {
     if plans.is_some_and(|plans| writes_plan_file(hook, plans)) {
         return json!({ "continue": true });
@@ -59,7 +51,6 @@ fn pre_tool(hook: &HookCallback, plans: Option<&Path>) -> Value {
     })
 }
 
-/// Whether `hook` writes a file directly inside `plans`, named with no `..`.
 fn writes_plan_file(hook: &HookCallback, plans: &Path) -> bool {
     let Some(name) = hook.input["tool_name"].as_str() else {
         return false;

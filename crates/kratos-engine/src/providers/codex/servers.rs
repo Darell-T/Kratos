@@ -1,11 +1,4 @@
-//! The Codex app-servers. Each Kratos thread that needs Codex gets one of its own, so a Stop Codex
-//! ignores closes only that thread's process and ends no other turn. Work that belongs to no
-//! thread, such as the account's usage, uses any server that is up, or an account-only server.
-//!
-//! At most [`MAX_SERVERS`] run at once. Measured with Codex 0.166 on Windows, an idle app-server
-//! with no thread loaded holds a 78 MB working set (46 MB private), so the limit bounds idle memory
-//! near 620 MB. At the limit the least recently used idle server closes first. A server is idle
-//! when its thread runs no turn and nothing waits on it, and Codex reports no background terminal.
+//! One unloaded Codex 0.166 app-server on Windows used a 78 MB working set. Loaded threads can use more.
 
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -16,15 +9,10 @@ use kratos_protocol::ThreadId;
 use super::actor::Command;
 use super::connection::Restarts;
 
-/// The most app-servers Kratos runs at once.
 pub(super) const MAX_SERVERS: usize = 8;
-/// A thread's server nobody used for this long closes; the thread's next work starts another,
-/// which resumes the thread's Codex session. As Claude's sessions do.
 pub(super) const THREAD_IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
-/// The account-only server closes this soon after its last request.
 pub(super) const ACCOUNT_IDLE_CLOSE: Duration = Duration::from_secs(60);
 
-/// Which app-server: a thread's own, or the one for work that belongs to no thread.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum ServerKey {
     Thread(ThreadId),
@@ -32,7 +20,6 @@ pub(super) enum ServerKey {
 }
 
 impl ServerKey {
-    /// How long nobody may use the server before it closes.
     pub(super) fn idle_close(&self) -> Duration {
         match self {
             ServerKey::Thread(_) => THREAD_IDLE_CLOSE,
@@ -47,27 +34,19 @@ pub(super) enum Server {
     Up(Codex),
 }
 
-/// One app-server and what waits on it.
 pub(super) struct Slot {
     pub server: Server,
-    /// Advances on each start and exit of this server; work fenced by an older value is dropped,
-    /// because the process that was to answer it is gone.
     pub generation: u64,
     pub restarts: Restarts,
-    /// Commands waiting for this server to start.
     pub deferred: Vec<Command>,
     pub last_used: Instant,
     pub terminals: TerminalCheck,
 }
 
-/// Where the check that an idle server holds no background terminal stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TerminalCheck {
     NotAsked,
-    /// The question is out, so the server is not asked twice.
     Asking,
-    /// Codex reported a background terminal, or would not say. Making room skips the server until
-    /// something changes, so a waiting thread does not ask it again and again.
     Busy,
 }
 
@@ -91,14 +70,11 @@ impl Slot {
 #[derive(Default)]
 pub(super) struct Servers {
     slots: HashMap<ServerKey, Slot>,
-    /// Generations are unique across servers, so a slot made again never reuses an old one.
     issued: u64,
-    /// Servers waiting to start while [`MAX_SERVERS`] run, oldest first.
     waiting: VecDeque<ServerKey>,
 }
 
 impl Servers {
-    /// Queues `key` for room, once.
     pub(super) fn wait(&mut self, key: &ServerKey) {
         if !self.waiting.contains(key) {
             self.waiting.push_back(key.clone());
@@ -142,7 +118,6 @@ impl Servers {
         }
     }
 
-    /// Any server that is up, the account's first, for work that belongs to no thread.
     pub(super) fn any_up(&self) -> Option<(ServerKey, Codex)> {
         let up = |key: &ServerKey| self.codex(key).map(|codex| (key.clone(), codex));
         up(&ServerKey::Account).or_else(|| self.slots.keys().find_map(up))
@@ -156,7 +131,6 @@ impl Servers {
         self.slots.keys().cloned().collect()
     }
 
-    /// Something changed, so the servers found busy may be asked again.
     pub(super) fn recheck_busy(&mut self) {
         for slot in self.slots.values_mut() {
             if slot.terminals == TerminalCheck::Busy {
@@ -165,8 +139,6 @@ impl Servers {
         }
     }
 
-    /// Servers found busy that nobody used for another idle time may be asked again: a terminal
-    /// can end without a word from Codex.
     pub(super) fn recheck_busy_unused(&mut self, now: Instant) {
         for (key, slot) in &mut self.slots {
             let unused_for = now.duration_since(slot.last_used);
@@ -176,7 +148,6 @@ impl Servers {
         }
     }
 
-    /// The servers that are up and not asked or found busy, least recently used first.
     pub(super) fn up_by_age(&self) -> Vec<ServerKey> {
         let mut up: Vec<(&ServerKey, Instant)> = self
             .slots
@@ -190,8 +161,6 @@ impl Servers {
         up.into_iter().map(|(key, _)| key.clone()).collect()
     }
 
-    /// Drops the slot of a server that is down and has nothing waiting, so the map holds only
-    /// servers that matter.
     pub(super) fn forget_if_unused(&mut self, key: &ServerKey) {
         let unused = self.slots.get(key).is_some_and(|slot| {
             matches!(slot.server, Server::Down)

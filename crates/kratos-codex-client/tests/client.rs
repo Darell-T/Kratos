@@ -583,8 +583,6 @@ async fn close_returns_while_a_full_queue_waits_for_a_consumer_that_stopped_read
 
 #[tokio::test]
 async fn output_that_is_not_utf8_ends_the_server_and_reports_its_exit() {
-    // Catches a read error ending the reader as if the stream had closed, which left the server
-    // running with nobody hearing it: every request timed out and no exit was ever reported.
     let (codex, mut incoming) = connect_fake().await;
 
     let unanswered = {
@@ -614,8 +612,6 @@ async fn output_that_is_not_utf8_ends_the_server_and_reports_its_exit() {
 
 #[tokio::test]
 async fn a_line_over_the_limit_ends_the_server_and_reports_its_exit() {
-    // Catches a line of any length read whole into memory, and an oversized reply dropped while
-    // its request waits forever.
     let mut bounded = launch(&[]);
     bounded.max_line_bytes = 1024;
     let (codex, mut incoming) = connect(bounded, capabilities()).await.unwrap();

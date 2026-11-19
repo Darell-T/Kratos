@@ -116,7 +116,6 @@ impl Harness {
         }
     }
 
-    /// The main thread's server.
     fn key(&self) -> ServerKey {
         ServerKey::Thread(self.thread_id.clone())
     }
@@ -128,7 +127,6 @@ impl Harness {
             .expect("the fake is connected")
     }
 
-    /// Closes the main thread's server and hands the actor everything it sent, its exit last.
     async fn exit(&mut self) {
         let key = self.key();
         self.codex(&key).close().await;
@@ -163,7 +161,6 @@ impl Harness {
             .unwrap()
     }
 
-    /// How many `turn/start` requests every server holds.
     async fn starts_held(&self) -> usize {
         let mut held = 0;
         for key in self.actor.servers.keys() {
@@ -882,8 +879,6 @@ async fn a_late_discard_cannot_cancel_an_uncertain_message() {
 
 #[tokio::test]
 async fn the_idle_check_asks_a_server_found_busy_again_after_another_idle_time() {
-    // Catches a server found holding a background terminal never asked again by the idle check,
-    // so it stays open after the terminal ends, and one asked again with nothing changed.
     use crate::providers::codex::servers::{THREAD_IDLE_CLOSE, TerminalCheck};
 
     let mut harness = Harness::start().await;

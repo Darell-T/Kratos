@@ -1,16 +1,4 @@
-//! Codex threads.
-//!
-//! One actor task owns every Codex thread's turn state and the `codex app-server` connections:
-//! one per thread, so a stuck turn's process ends no other thread's turn, and one for account work
-//! when no thread's runs ([`servers`]). Handles send it commands and wait for the reply. A request
-//! to Codex runs in a task of its own and comes back to the actor as a completion, so the actor
-//! keeps reading Codex's notifications while a request is out, and a completion that arrives
-//! after its thread moved on is recognized and dropped. Nothing outside the actor changes a Codex
-//! thread's state.
-//!
-//! The two delivery rules of the TypeScript provider hold here (D11). A queued message starts only
-//! once the turn before it is confirmed finished, and a message whose delivery is uncertain is
-//! never sent again: only the provider's history or the user settles it.
+//! Each thread has its own Codex process. An uncertain delivery waits for history or an explicit user decision.
 
 mod account;
 mod actor;
@@ -66,7 +54,6 @@ pub struct CodexSettings {
     /// server's folder writable exposes nothing.
     pub server_folder: PathBuf,
     pub protected: ProtectedFolders,
-    /// How long a stopped turn may take to end before Kratos closes its thread's app-server.
     pub stop_timeout: Duration,
     /// The deadline of an ordinary request to Codex.
     pub request_timeout: Duration,

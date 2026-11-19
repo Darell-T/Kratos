@@ -28,12 +28,10 @@ pub(super) struct Release {
     pub updating: Mutex<Updating>,
 }
 
-/// Where an update stands, which decides what engine shutdown does with it.
 #[derive(Default)]
 pub(super) enum Updating {
     #[default]
     Idle,
-    /// Checking the install or closing sessions. Nothing is replaced yet, so shutdown cancels it.
     Preparing {
         task: AbortHandle,
         ended: watch::Receiver<()>,
@@ -41,11 +39,9 @@ pub(super) enum Updating {
     /// The updater or the version check after it runs. Stopping it midway can leave a broken CLI,
     /// so shutdown waits for it.
     Installing { ended: watch::Receiver<()> },
-    /// The engine is stopping, and no update may start installing.
     ShuttingDown,
 }
 
-/// An update in flight. Dropping it ends the update, then wakes a shutdown waiting for it.
 struct Running {
     release: Arc<Release>,
     _sender: watch::Sender<()>,
@@ -62,12 +58,6 @@ impl Release {
         self.updating.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs `update` as the update, in a task of its own that ends the update however the task
-    /// ends, even when nobody awaits it. The task starts under the lock, so shutdown finds the task
-    /// of any update it sees preparing; one that ends at once waits for the lock to end.
-    ///
-    /// # Errors
-    /// Refuses while another update runs or the engine stops.
     pub fn start<T: Send + 'static>(
         self: &Arc<Self>,
         update: impl Future<Output = T> + Send + 'static,
@@ -98,8 +88,6 @@ impl Release {
         Ok(task)
     }
 
-    /// Moves a preparing update to installing. False when the engine is stopping, and the update
-    /// must not begin replacing files.
     pub fn begin_install(&self) -> bool {
         let mut updating = self.updating();
         let Updating::Preparing { ended, .. } = &*updating else {
@@ -110,7 +98,6 @@ impl Release {
         true
     }
 
-    /// The update ended, unless shutdown already took it over.
     fn finished(&self) {
         let mut updating = self.updating();
         if !matches!(*updating, Updating::ShuttingDown) {
@@ -118,9 +105,6 @@ impl Release {
         }
     }
 
-    /// At engine shutdown: cancels an update that has not begun installing, and waits for one that
-    /// has, at most [`UPDATE_LIMIT`], the longest the updater and its checks may run before they
-    /// end on their own.
     pub async fn settle_for_shutdown(&self) {
         let taken = std::mem::replace(&mut *self.updating(), Updating::ShuttingDown);
         match taken {

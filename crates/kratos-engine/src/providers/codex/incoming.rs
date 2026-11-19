@@ -68,8 +68,6 @@ impl Actor {
         }
     }
 
-    /// Codex closed the thread. Work that runs in it can never finish, so it ends as it would if
-    /// Codex had exited. An idle thread only detaches and is loaded again for its next turn.
     async fn on_thread_closed(&mut self, thread_id: &ThreadId) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
@@ -83,9 +81,6 @@ impl Actor {
         self.dispatch(thread_id).await;
     }
 
-    /// The Kratos thread `native_id` names among those `key`'s server runs. A thread's server runs
-    /// only that thread, so another server's thread is never named, even when two servers give
-    /// their threads the same id. The account's server runs none.
     pub(super) fn thread_of(&self, key: &ServerKey, native_id: &str) -> Option<ThreadId> {
         let ServerKey::Thread(thread_id) = key else {
             return None;

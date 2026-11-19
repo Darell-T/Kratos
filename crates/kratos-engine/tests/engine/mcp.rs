@@ -971,9 +971,6 @@ fn a_question_answer_cannot_exceed_the_senders_or_the_receivers_turn_permission(
 
 #[test]
 fn a_thread_below_full_access_creates_and_messages_threads_only_in_its_own_workspace() {
-    // Catches a thread confined to one workspace starting or driving a thread in another, which
-    // undoes the confinement: another workspace may hold a repository the user never put in its
-    // reach.
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let own = workspace(&engine);
@@ -1024,8 +1021,6 @@ fn a_thread_below_full_access_creates_and_messages_threads_only_in_its_own_works
 
 #[test]
 fn a_full_access_thread_creates_and_messages_threads_in_any_workspace() {
-    // Catches the workspace rule holding back a Full access thread, which may already change any
-    // folder on the computer.
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let own = workspace(&engine);
@@ -1050,8 +1045,6 @@ fn a_full_access_thread_creates_and_messages_threads_in_any_workspace() {
 
 #[test]
 fn a_thread_below_full_access_stops_and_answers_threads_only_in_its_own_workspace() {
-    // Catches stop_thread and answer_question reaching a thread in another workspace, which
-    // steers a thread whose repository the user never put in the acting thread's reach.
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let own = workspace(&engine);

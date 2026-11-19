@@ -1,6 +1,3 @@
-//! Which thread's app-server may start, which waits for room while [`MAX_SERVERS`] run, and
-//! which idle server closes.
-
 use std::time::{Duration, Instant};
 
 use kratos_codex_client::{Codex, methods, types};
@@ -13,8 +10,6 @@ use super::servers::{MAX_SERVERS, Server, ServerKey, TerminalCheck};
 use super::threads::Turn;
 
 impl Actor {
-    /// The connection to `key`'s server, or `None` while it starts or waits for room. Starts the
-    /// server when it is down, unless its last failure's backoff still runs.
     pub(super) fn connection(&mut self, key: &ServerKey) -> Result<Option<Codex>, ProviderError> {
         if let Some(codex) = self.servers.codex(key) {
             self.servers.slot(key).last_used = Instant::now();
@@ -53,8 +48,6 @@ impl Actor {
         });
     }
 
-    /// Queues `key` for a server while [`MAX_SERVERS`] run, and asks the least recently used idle
-    /// one to close. When every server works, the thread's message waits, and the thread is told.
     fn wait_for_room(&mut self, key: &ServerKey) {
         self.servers.wait(key);
         self.servers.recheck_busy();
@@ -86,8 +79,6 @@ impl Actor {
         self.make_room_if_waited_for();
     }
 
-    /// Something changed. When something waits for a server, an idle one may now close, including
-    /// one found busy before.
     pub(super) fn make_room_if_waited_for(&mut self) {
         if self.servers.anyone_waits() {
             self.servers.recheck_busy();
@@ -95,7 +86,6 @@ impl Actor {
         }
     }
 
-    /// Asks the least recently used idle server to close. False when none is idle.
     fn retire_one_idle(&mut self) -> bool {
         let candidate = self
             .servers
@@ -109,9 +99,7 @@ impl Actor {
         true
     }
 
-    /// Closes each server nobody used for its idle time, once it is idle and quiet. A background
-    /// terminal can end without a word from Codex, so a thread waiting for a server asks again,
-    /// and a server found busy is asked again after another idle time.
+    /// Codex can finish a background terminal without notifying the engine.
     pub(super) fn retire_idle(&mut self, now: Instant) {
         self.make_room_if_waited_for();
         self.servers.recheck_busy_unused(now);
@@ -126,8 +114,6 @@ impl Actor {
         }
     }
 
-    /// Nothing runs or waits on the server: its thread runs no turn, sends nothing, and waits on
-    /// no answer, and no command waits for the server. The account's server is idle between reads.
     fn is_idle(&self, key: &ServerKey) -> bool {
         let quiet_slot = self
             .servers
@@ -144,8 +130,6 @@ impl Actor {
         quiet_slot && thread_idle && !self.requests.awaits_user(thread_id)
     }
 
-    /// Closes an idle server once Codex reports it holds no background terminal, which closing it
-    /// would end. The account's server holds none.
     fn retire_if_quiet(&mut self, key: &ServerKey) {
         let native_id = match key {
             ServerKey::Thread(thread_id) => self

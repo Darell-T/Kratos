@@ -84,22 +84,13 @@ pub(super) struct OpenSession {
     pub commands: Vec<kratos_claude_client::SlashCommand>,
     /// When the process last sent a frame or served a request.
     pub last_active: Instant,
-    /// Background tasks the CLI reports running. Closing the process would end them, so it is not
-    /// idle while any run.
     pub background_tasks: usize,
-    /// What the CLI said of the background tasks that ended since its last turn began. The turn it
-    /// then starts on its own names them.
     pub finished_tasks: Vec<String>,
-    /// How many background tasks the CLI said ended.
     pub tasks_ended: u64,
-    /// A task ended and the turn the CLI starts to report it has not begun: the count of tasks
-    /// ended then, so the wait for an older one's report is told apart from the newest.
     pub report_owed: Option<NonZeroU64>,
 }
 
 impl OpenSession {
-    /// Keeps what the CLI reports of its background tasks: how many run, which hold the process
-    /// open, and which ended, which name the turn the CLI then starts on its own.
     pub(super) fn note(&mut self, background: kratos_claude_client::Background) {
         match background {
             kratos_claude_client::Background::Running(running) => self.background_tasks = running,
@@ -111,8 +102,6 @@ impl OpenSession {
         }
     }
 
-    /// A command runs in the background, or the turn that reports one that ended is owed. Closing
-    /// the process would end the command or cut that turn off.
     pub(super) fn holds_background_work(&self) -> bool {
         self.background_tasks > 0 || self.report_owed.is_some()
     }
@@ -267,14 +256,10 @@ impl ThreadState {
         }
     }
 
-    /// A message is in flight, a process starts, or a turn runs: one the CLI started on its own
-    /// runs with no message in flight.
     pub(super) fn is_busy(&self) -> bool {
         !self.pending.is_empty() || self.run.is_some() || matches!(self.session, Session::Opening)
     }
 
-    /// The running turn is one the CLI started on its own. A turn messages started keeps them in
-    /// flight until its result.
     pub(super) fn runs_own_turn(&self) -> bool {
         self.run.is_some() && self.pending.is_empty()
     }
@@ -283,7 +268,6 @@ impl ThreadState {
         self.is_busy() || self.stopping
     }
 
-    /// The open process runs a command in the background, or owes the turn that reports one.
     pub(super) fn holds_background_work(&self) -> bool {
         self.open().is_some_and(OpenSession::holds_background_work)
     }

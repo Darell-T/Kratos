@@ -251,7 +251,6 @@ async fn a_resume_that_finds_no_saved_session_says_so_and_never_starts_a_new_one
     let mut harness = Harness::start(Options::default()).await;
     let first = harness.begin(A, 1).await;
     harness.finish(&first, &[A], json!({})).await;
-    // A settings change retires only an idle process, so the turn must have ended first.
     harness
         .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
         .await;

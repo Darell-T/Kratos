@@ -1,5 +1,3 @@
-//! Claude's tool requests: its own shell tools, file writes, and fail-closed classification.
-
 use kratos_protocol::{
     ApprovalDecision, ApprovalRequest, AskReason, ExtraAccess, Permission, ThreadSettings,
 };
@@ -35,8 +33,6 @@ async fn approval_before_answer(
 
 #[tokio::test]
 async fn powershell_quoting_cannot_hide_a_forced_delete_from_the_check() {
-    // Catches a PowerShell body reaching the destructive-command check in a form it cannot lower,
-    // so a quoted or commented forced delete runs unasked.
     for permission in Permission::ALL {
         let harness = Harness::start(Options {
             settings: ThreadSettings {
@@ -78,8 +74,6 @@ async fn powershell_quoting_cannot_hide_a_forced_delete_from_the_check() {
 
 #[tokio::test]
 async fn a_shell_command_runs_unasked_only_when_unflagged_and_the_permission_allows_it() {
-    // Catches Approve for me or Full access letting a forced delete run unasked, Ask me letting any
-    // command run unasked, or an ordinary command asking where D84 lets it run.
     for permission in Permission::ALL {
         for (shell, ordinary, flagged) in [
             ("Bash", "ls -la", "rm -rf keep"),
@@ -151,9 +145,6 @@ async fn a_shell_command_runs_unasked_only_when_unflagged_and_the_permission_all
 
 #[tokio::test]
 async fn unknown_tools_and_bad_inputs_never_gain_automatic_permission() {
-    // Catches unknown tools allowed by Full access instead of asking the user, unreadable inputs
-    // judged as ordinary ones, and an MCP tool named like the removed Kratos command tool running
-    // unasked.
     let mut harness = Harness::start(Options {
         settings: ThreadSettings {
             permission: Permission::FullAccess,
@@ -334,8 +325,6 @@ async fn native_file_writes_ask_outside_the_workspace_and_temp_under_approve_for
 
 #[tokio::test]
 async fn a_shell_approval_shows_the_command_and_the_thread_folder() {
-    // Catches a shell request reaching the client as a generic Permissions request that hides the
-    // command it would run.
     for shell in ["Bash", "PowerShell"] {
         let mut harness = Harness::start(Options {
             settings: ThreadSettings {
@@ -565,8 +554,6 @@ async fn a_tilde_form_claude_may_expand_to_another_user_is_refused() {
 
 #[tokio::test]
 async fn an_approval_shows_a_large_tool_input_cut_and_says_so() {
-    // Catches a Write's whole file content copied into the stored approval and sent to every
-    // client, however large it is.
     let mut harness = Harness::start(Options {
         settings: ThreadSettings {
             permission: Permission::AskMe,
@@ -604,8 +591,6 @@ async fn an_approval_shows_a_large_tool_input_cut_and_says_so() {
 
 #[tokio::test]
 async fn tool_search_and_skill_run_without_asking_even_under_ask_me() {
-    // Catches the CLI's own tool loader asking the user, which stalls plan mode: the CLI loads
-    // `ExitPlanMode` through `ToolSearch`.
     let harness = Harness::start(Options {
         settings: ThreadSettings {
             permission: Permission::AskMe,
@@ -636,8 +621,6 @@ async fn tool_search_and_skill_run_without_asking_even_under_ask_me() {
 
 #[tokio::test]
 async fn plan_mode_reads_a_file_without_asking_and_a_write_still_does_not_run() {
-    // Catches plan mode asking the user before every Read, Glob, and Grep, and plan mode letting a
-    // write run on its own.
     for permission in Permission::ALL {
         let mut harness = Harness::start(Options {
             settings: ThreadSettings {

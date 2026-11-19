@@ -362,9 +362,6 @@ async fn reports_the_files_each_turn_edited_and_whether_one_changed_after_the_la
 
 #[tokio::test]
 async fn the_pre_tool_hook_sends_every_tool_to_the_permission_callback() {
-    // Catches a shell command, an in-folder read, a write the user's allow rules name, or a tool
-    // outside Kratos's table such as `Agent` running without Kratos's decision, because the CLI runs
-    // those unasked unless a hook asks.
     let harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     for (index, (name, input)) in [
@@ -400,8 +397,6 @@ async fn the_pre_tool_hook_sends_every_tool_to_the_permission_callback() {
 
 #[tokio::test]
 async fn in_plan_mode_the_cli_writes_its_own_plan_file_without_asking_the_user() {
-    // Catches the pre-tool hook sending Claude's plan file, under the protected `~/.claude`, to the
-    // user for approval on every plan, and a plan-file exemption that reaches any other file.
     for plan_mode in [true, false] {
         let harness = Harness::start(Options {
             settings: ThreadSettings {

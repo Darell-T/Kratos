@@ -148,9 +148,6 @@ impl Actor {
         Ok(Actor::new(settings, hub, store, usage, limit_stops))
     }
 
-    /// A CLI ended. The turn it ran ends as failed and the queue behind it pauses, or as interrupted
-    /// when the user had stopped it. A message it was sent is settled from its transcript, so none
-    /// is sent again that Claude may have taken.
     pub(super) async fn on_exit(&mut self, thread_id: &ThreadId, exit: Exit) {
         self.close_requests(thread_id, None, "Claude exited").await;
         let Some(thread) = self.threads.get_mut(thread_id) else {
@@ -176,7 +173,6 @@ impl Actor {
         }
         let run = thread.run.take();
         let sent = std::mem::take(&mut thread.pending);
-        // A turn the CLI started on its own has no message in flight, only its end to record.
         if sent.is_empty() && run.is_none() {
             return;
         }
@@ -217,8 +213,6 @@ impl Actor {
         self.settle_from_transcript(thread_id, settling);
     }
 
-    /// Reads the transcript to settle the messages a CLI was sent before it ended. A turn the CLI
-    /// started on its own was sent none, and has nothing to settle.
     fn settle_from_transcript(&mut self, thread_id: &ThreadId, settling: Settling) {
         if settling.sent.is_empty() {
             return;
@@ -318,9 +312,6 @@ fn unfinished_claude_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfini
     Ok(unfinished)
 }
 
-/// The transcript of an unfinished thread. One that cannot be read, or does not parse as a
-/// session, is treated as cut off: nothing it holds is proof either way. A thread whose session
-/// the store never recorded reads its first session.
 async fn read_transcript(
     claude_home: &Path,
     thread_id: &ThreadId,

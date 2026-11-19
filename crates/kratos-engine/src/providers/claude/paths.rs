@@ -75,7 +75,6 @@ mod tests {
                 "{raw:?}"
             );
         }
-        // A backslash separates folders only on Windows. Elsewhere it is part of the name.
         let backslashed = if cfg!(windows) {
             home.join("a").join("b")
         } else {
@@ -99,8 +98,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_drive_relative_path_names_no_file() {
-        // Catches `C:..\x` being judged against the engine's own folder, which Rust's join and
-        // canonicalize use for a drive-relative path, while the CLI resolves it elsewhere.
         let home = base().join("h");
         for raw in [r"C:..\..\.kratos\client-token", "C:x", "~/C:x"] {
             assert_eq!(expand(raw, &base(), Some(&home)), None, "{raw:?}");

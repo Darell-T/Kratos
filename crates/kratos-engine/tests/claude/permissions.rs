@@ -1,6 +1,3 @@
-//! Requests Kratos never registered are refused, and a thread never launches in a mode that would
-//! skip Kratos's permission callbacks.
-
 use kratos_protocol::{Permission, ThreadSettings};
 use serde_json::{Value, json};
 
@@ -39,8 +36,6 @@ async fn running(options: Options) -> (Harness, Launch) {
 
 #[tokio::test]
 async fn a_hook_server_or_request_kratos_never_registered_runs_nothing() {
-    // Catches a hook id or MCP server Kratos never declared being accepted, and a request Kratos
-    // does not know hanging Claude.
     let (harness, launch) = running(Options::default()).await;
 
     let hook = ask(
@@ -73,8 +68,6 @@ async fn a_hook_server_or_request_kratos_never_registered_runs_nothing() {
 
 #[tokio::test]
 async fn the_session_registers_kratos_hooks_and_no_tool_servers() {
-    // Catches the pre-tool hook missing, so the CLI runs read-only commands and allow-listed tools
-    // without Kratos's decision, or an SDK MCP server declared that Kratos does not serve.
     let (harness, launch) = running(Options::default()).await;
 
     let received = harness.received(&launch).await;

@@ -49,13 +49,10 @@ pub(super) struct Unfinished {
     pub requests: Closed,
 }
 
-/// Messages from the app-servers that may wait for the actor. A burst pushes back on the servers
-/// instead of growing without bound.
 const FRAMES: usize = 256;
 
 pub(super) struct EndingTurn {
     pub id: TurnId,
-    /// The user stopped the turn, so it ends interrupted however its process ended.
     pub stopped: bool,
     pub changes: TurnChanges,
     pub context: Option<ContextUsage>,

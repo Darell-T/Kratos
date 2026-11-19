@@ -38,7 +38,6 @@ pub const C: &str = "00000000-0000-4000-8000-00000000000c";
 pub const D: &str = "00000000-0000-4000-8000-00000000000d";
 pub const E: &str = "00000000-0000-4000-8000-00000000000e";
 
-/// The `initialize` every session sends: Kratos's three tool hooks and nothing else.
 pub fn initialize() -> Value {
     let hook = |id: &str| json!([{ "hookCallbackIds": [id] }]);
     json!({ "subtype": "initialize", "hooks": {
@@ -74,7 +73,6 @@ pub struct Options {
     pub update_to: &'static str,
     /// The method `claude doctor` says installed the CLI.
     pub install: &'static str,
-    /// How long the fake's updater takes once it starts, as a slow download does.
     pub update_delay: Duration,
     /// How long a session process lives on after Kratos closes its input.
     pub exit_delay: Duration,

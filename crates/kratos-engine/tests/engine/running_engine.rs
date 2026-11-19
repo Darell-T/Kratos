@@ -193,7 +193,6 @@ impl RunningEngine {
         answer["result"].clone()
     }
 
-    /// Each thread runs a fake Codex of its own: the answers of every one the engine started.
     fn every_fake_codex(&self, method: &str) -> Vec<serde_json::Value> {
         codex_control::every_port(&self.fake_codex_control_file())
             .into_iter()
@@ -228,7 +227,6 @@ impl RunningEngine {
         }
     }
 
-    /// Starts the turn whose `turn/start` a fake holds, on whichever thread's fake holds it.
     pub fn start_turn(&self) {
         self.fake_codex_held("turn/start", 1);
         let settle = codex_control::settle_start("turn-1", "inProgress", None);
@@ -508,7 +506,6 @@ fn console_helper_preparation_does_not_use_the_engine_startup_deadline() {
     engine.shutdown();
 }
 
-/// One `test/*` request to the fake Codex listening on `port`, or `None` when it is gone.
 fn fake_codex_at(port: u16, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream.set_read_timeout(Some(WAIT)).ok()?;

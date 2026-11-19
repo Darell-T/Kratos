@@ -1,11 +1,3 @@
-//! Connecting a thread's app-server, loading the thread into it, and what an exit ends. Which
-//! server may start, wait, or close is in [`super::room`].
-//!
-//! A server starts on demand, never on a timer (L4, L5). Each failure in a row doubles the wait
-//! before that server's next start, up to a minute, so a Codex that keeps dying costs one start a
-//! minute at most. A thread Codex cannot resume stays unavailable and says why; Kratos never
-//! starts a fresh Codex thread in its place (L7).
-
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
@@ -302,8 +294,6 @@ impl Actor {
             Err(error) => {
                 let message = format!("Codex could not load the thread: {error}");
                 thread.link = Link::Detached;
-                // A refusal means Codex cannot show the history, now or later, so a message the
-                // user discards is cancelled unseen. A timeout or an exit may pass, and is retried.
                 if matches!(error, RequestError::Rpc { .. }) {
                     for (message_id, reply) in std::mem::take(&mut thread.discards) {
                         self.settle_discard(&thread_id, message_id, None, reply)
@@ -437,9 +427,6 @@ impl Actor {
         .await
     }
 
-    /// Detaches the thread from its Codex thread, which is gone, and ends the work that depended
-    /// on it: its running turn ends, waiting requests close, and a start or steer Codex never
-    /// answered is uncertain. `error` says why.
     pub(super) async fn detach(&mut self, thread_id: &ThreadId, error: &str) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
@@ -474,11 +461,6 @@ impl Actor {
             .await;
     }
 
-    /// `key`'s server ended. Its generation ends first, so replies still in flight from it are
-    /// dropped. Its thread detaches and the thread's running turn ends; no other thread's does. A
-    /// start or steer Codex never answered is uncertain, since the process may have taken it.
-    /// Waiting stops and requests are answered, and untouched queued work requests a replacement,
-    /// respecting the restart backoff. Room it frees goes to what waits for a server.
     pub(super) async fn on_exit(&mut self, key: ServerKey, exit: Exit) {
         self.servers.advance_generation(&key);
         let slot = self.servers.slot(&key);
@@ -494,7 +476,6 @@ impl Actor {
         self.admit_waiting();
     }
 
-    /// Asks `key`'s server to close; its exit arrives as usual.
     pub(super) async fn stop_server(&mut self, key: &ServerKey, reason: &str) {
         if let Some(codex) = self.servers.codex(key) {
             eprintln!("closing Codex for {key:?}: {reason}");
@@ -502,7 +483,6 @@ impl Actor {
         }
     }
 
-    /// Closes every server and waits until each has ended.
     pub(super) async fn close_all(&mut self) {
         for key in self.servers.keys() {
             if let Some(codex) = self.servers.codex(&key) {
@@ -641,8 +621,6 @@ mod tests {
 
     #[test]
     fn kratos_variables_are_found_in_any_case() {
-        // Catches a lower-case `kratos_` variable, which Windows reads as Kratos's own, passed to
-        // Codex and the commands it runs (L8).
         for name in ["KRATOS_HOME", "kratos_token", "Kratos_Port"] {
             assert!(is_kratos_variable(std::ffi::OsStr::new(name)), "{name}");
         }

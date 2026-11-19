@@ -58,10 +58,7 @@ pub struct Launch {
     pub max_line_bytes: usize,
 }
 
-/// The default limit on one line from the app-server. A thread's whole history arrives as one
-/// `thread/read` reply: measured with Codex 0.166, a thread whose session file held 13,658,700
-/// bytes came back as a 3,195,219-byte line. 256 MiB is about 80 times that, and one line still
-/// cannot take the machine's memory.
+/// A whole thread history arrives in one reply. Codex 0.166 returned 3,195,219 bytes for a 13,658,700-byte session file.
 pub const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 
 /// A JSON-RPC id. Kratos numbers its own requests; the server may use strings for its own.
@@ -474,15 +471,11 @@ async fn keep_stderr(stderr: ChildStderr, kept: Arc<Mutex<VecDeque<String>>>) {
     }
 }
 
-/// What ends the server besides its own exit.
 struct Ending {
     close_requested: oneshot::Receiver<Duration>,
-    /// The reader could not read the server's output, so nothing hears it any more.
     unreadable: oneshot::Receiver<()>,
 }
 
-/// Owns the process. Ends the tree once the server exits on its own, at once when its output
-/// cannot be read, or after a requested close once the server exits or the close timeout passes.
 async fn keep(
     mut child: OwnedChild,
     ending: Ending,
@@ -529,7 +522,6 @@ struct Reader {
     stderr_lines: Arc<Mutex<VecDeque<String>>>,
 }
 
-/// The reader's ends of the channels to the process's keeper.
 struct Keeper {
     unreadable: oneshot::Sender<()>,
     exited: oneshot::Receiver<Option<i32>>,
@@ -542,8 +534,6 @@ async fn read(reader: Reader, stdout: ChildStdout, keeper: Keeper, max_line_byte
             Next::Message(message) => reader.dispatch(message).await,
             Next::NotJson => {}
             Next::Unreadable(why) => {
-                // No later message can be trusted, and a server left running would answer
-                // nothing, so its tree ends and its exit is reported.
                 eprintln!("codex: {why}");
                 let _ = keeper.unreadable.send(());
                 break;
@@ -555,7 +545,6 @@ async fn read(reader: Reader, stdout: ChildStdout, keeper: Keeper, max_line_byte
     reader.finish(code).await;
 }
 
-/// What the next line of the server's output holds.
 enum Next {
     Message(Value),
     /// The server logs to stderr, but a stray line on stdout must not end the connection.

@@ -668,8 +668,6 @@ impl Actor {
             .get(&thread_id)
             .and_then(|thread| thread.turn.running_id())
             == Some(&turn_id);
-        // A stop always ends the turn. Codex gets the grace period to end it, whether or not it
-        // answered the interrupt, and is closed if the turn still runs after that.
         if let Err(error) = &result {
             eprintln!("Codex did not answer the stop of turn {turn_id}: {error}");
         }
@@ -683,8 +681,6 @@ impl Actor {
         waiters.tell(|| Ok(()));
     }
 
-    /// The user stopped the turn and it did not end in time: Codex is closed, which ends the turn
-    /// as interrupted.
     pub(super) async fn on_stop_expired(&mut self, thread_id: &ThreadId, turn_id: &TurnId) {
         let still_stopping = matches!(
             self.threads.get(thread_id).map(|thread| &thread.turn),

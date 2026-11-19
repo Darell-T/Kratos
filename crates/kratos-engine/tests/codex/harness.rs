@@ -341,8 +341,6 @@ impl Harness {
         self.control.as_mut().expect("connected above")
     }
 
-    /// The result of one control request to the fake at `port`, or `None` when the fake does not
-    /// answer. Each thread has a fake Codex of its own, with a control port of its own.
     async fn on_fake(port: u16, method: &str, params: Value) -> Option<Value> {
         let stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
         let (reader, mut writer) = stream.into_split();
@@ -360,7 +358,6 @@ impl Harness {
         Some(answer["result"].clone())
     }
 
-    /// The held requests every fake received, oldest first, as `{method, params, receivedAt}`.
     pub async fn turn_requests(&mut self) -> Vec<Value> {
         let mut requests = Vec::new();
         for port in codex_control::every_port(&self.control_file) {
@@ -379,7 +376,6 @@ impl Harness {
         requests
     }
 
-    /// Waits until the fakes together hold `count` requests of `method`, and returns them.
     pub async fn held(&mut self, method: &str, count: usize) -> Vec<Value> {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
@@ -401,8 +397,6 @@ impl Harness {
         }
     }
 
-    /// The control port of the fake that holds the `turn/start` of message `message_id`: the
-    /// fake of that message's thread.
     pub async fn fake_of(&self, message_id: &str) -> u16 {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
@@ -426,14 +420,12 @@ impl Harness {
         }
     }
 
-    /// A control request to the fake at `port`. Panics when the fake does not answer.
     pub async fn control_at(&self, port: u16, request: ControlRequest) -> Value {
         Self::on_fake(port, request.method, request.params)
             .await
             .expect("the fake answers")
     }
 
-    /// Answers the oldest `turn/start` any fake still holds with a turn in `status`.
     pub async fn settle_start_everywhere(&mut self, turn_id: &str, status: &str) {
         let arrived = |request: &Value| {
             request["receivedAt"]

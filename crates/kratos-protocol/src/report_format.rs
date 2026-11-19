@@ -1,19 +1,11 @@
-//! The schema a thread's final replies must match, checked where it enters Kratos.
-//!
-//! Both providers turn the schema into a structured-output request, and neither checks it up
-//! front. Measured with Claude Code 2.1.322: a schema whose `type` is not a JSON type, or whose
-//! `properties` is not an object, is accepted and then ignored, so the turn ends with no report;
-//! a root that is not an object fails the turn with an API error. Kratos checks the part of JSON
-//! Schema the providers read, so such a schema is refused when it is set, not found out later.
+//! Claude Code 2.1.322 can silently ignore malformed structured output schemas. Kratos checks new schemas before dispatch.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// A JSON Schema object the agent's final reply must match. A completed turn under one ends with
-/// an [`AgentItem::Report`](crate::AgentItem::Report) holding the parsed reply, whichever provider
-/// ran it. Built only through [`ReportFormat::new`], so every value has passed the check.
+/// The requested shape of a final reply. A provider can finish without returning structured output.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Map<String, Value>", into = "Map<String, Value>")]
 pub struct ReportFormat(Map<String, Value>);
@@ -84,11 +76,8 @@ impl fmt::Display for ReportFormatError {
 
 impl std::error::Error for ReportFormatError {}
 
-/// The check of one keyword's value: whether it has the shape JSON Schema gives that keyword.
 type Check = fn(&Value, &str) -> Result<(), ReportFormatError>;
 
-/// The keywords the providers' structured outputs read, each with its check. Other keywords pass
-/// through unchecked.
 const KEYWORDS: [(&str, Check); 15] = [
     ("type", types),
     ("properties", schema_map),
@@ -215,8 +204,6 @@ mod tests {
 
     #[test]
     fn a_schema_the_providers_can_follow_is_accepted() {
-        // Catches the check refusing an ordinary report shape, nested objects, lists, unions, or
-        // keywords it does not read.
         let schema = json!({
             "type": "object",
             "properties": {
@@ -237,9 +224,6 @@ mod tests {
 
     #[test]
     fn a_schema_a_provider_would_ignore_or_refuse_is_refused_with_where_and_why() {
-        // Catches the schemas measured to fail late: a type that is not a JSON type and
-        // properties that are not an object (Claude ignores the schema), and a root that is not an
-        // object (the API refuses the turn).
         for (schema, pointer) in [
             (json!({ "type": "objekt" }), ""),
             (

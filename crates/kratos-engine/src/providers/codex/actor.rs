@@ -1,11 +1,3 @@
-//! The actor: its inputs, its state, and the loop that serves them one at a time.
-//!
-//! Three inputs: commands from handles, messages from the Codex app-servers, and completions of the
-//! work the actor started (a request to Codex, a timer). Each handler runs to its end before the
-//! next input, so no two handlers see a thread half changed. A handler awaits only the store, never
-//! Codex. Each thread has an app-server of its own ([`super::servers`]); their messages arrive on
-//! one channel, tagged with the server they came from.
-
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -139,8 +131,6 @@ pub(super) enum Done {
     Account {
         plan: Option<String>,
     },
-    /// Whether an idle server holds no background terminal, so closing it ends no work, or why
-    /// Codex did not say.
     Quiet {
         quiet: Result<bool, String>,
     },
@@ -255,7 +245,6 @@ pub(crate) struct Actor {
     pub(super) store: StoreThread,
     pub(super) usage: UsageTracker,
     pub(super) servers: Servers,
-    /// Every server's messages, forwarded by a task per server.
     pub(super) frames: mpsc::Receiver<Frame>,
     pub(super) frame_sender: mpsc::Sender<Frame>,
     /// Each model's own context window, as Codex reported it with no setting of Kratos's in force
@@ -267,8 +256,6 @@ pub(crate) struct Actor {
     pub(super) requests: Requests,
     /// Threads waiting for a start slot, oldest first.
     pub(super) ready: VecDeque<ThreadId>,
-    /// Threads to load once their app-servers are up, so their history settles their uncertain
-    /// messages.
     pub(super) reconcile: Vec<ThreadId>,
     pub(super) done: mpsc::UnboundedSender<Completion>,
     pub(super) completions: mpsc::UnboundedReceiver<Completion>,
@@ -314,8 +301,6 @@ impl Actor {
         }
     }
 
-    /// Starts `work` against the server `key` names, in a task of its own, and hands its result
-    /// back as a completion, dropped if that server has since ended.
     pub(super) fn spawn<F>(&self, key: &ServerKey, work: F)
     where
         F: Future<Output = Done> + Send + 'static,
@@ -440,7 +425,6 @@ impl Actor {
     }
 }
 
-/// How often idle servers are looked for.
 const IDLE_CHECK: Duration = Duration::from_secs(30);
 
 #[cfg(test)]

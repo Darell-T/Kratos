@@ -251,13 +251,11 @@ pub struct RateLimitEvent {
     pub metadata: BTreeMap<String, Value>,
 }
 
-/// What the CLI reports of its background tasks.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Background {
     /// How many run now. Each report gives the whole set, so the latest count is the current one.
     Running(usize),
-    /// One ended. The CLI then starts a turn of its own to report it, with no message of the
-    /// client's in it. `summary` is what the CLI said of the task.
+    /// The CLI may follow a finished task with a report turn. It supplies the summary when available.
     Ended { summary: Option<String> },
 }
 

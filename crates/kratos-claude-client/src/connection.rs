@@ -20,11 +20,7 @@ use crate::{
     ControlRequest, Initialize, Initialized, Launch, ParseError, StreamMessage, UsageRead,
 };
 
-/// The default limit on one line from the CLI. An `Edit` or `Write` sends the whole file as it was
-/// before the change in its post-tool hook and its result, so a line grows with the file Claude
-/// edits: measured with 2.1.322, editing a 3,025,002-byte file sent a 3,082,014-byte line. 256 MiB
-/// lets Claude edit any file up to about 250 MB while one line still cannot take the machine's
-/// memory. The CLI itself refuses to edit a file over 1 GiB.
+/// Claude Code 2.1.322 sent a 3,082,014-byte line for an edit to a 3,025,002-byte file.
 pub const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 const QUEUE_CAPACITY: usize = 256;
 const STDERR_BYTES_KEPT: usize = 16 * 1024;

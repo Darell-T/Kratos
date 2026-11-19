@@ -1,6 +1,3 @@
-//! Claude tool requests at the trust boundary. Parsing and filesystem resolution precede the pure
-//! permission table.
-
 use std::path::{Path, PathBuf};
 
 use kratos_claude_client::{CanUseTool, ControlRequest, IncomingControl};
@@ -20,7 +17,6 @@ use super::requests::{Answer, Pending};
 use super::shell::{self, Shell};
 use crate::providers::writes;
 
-/// Answers a control the CLI sends while no turn runs: no hook may go on, and no tool may run.
 pub(super) fn startup(control: IncomingControl) {
     let queued = match &control.request {
         ControlRequest::HookCallback(_) => control.answer(
@@ -33,22 +29,18 @@ pub(super) fn startup(control: IncomingControl) {
     }
 }
 
-/// How Kratos judges a tool, by its name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Rule {
     File,
     Question,
     ExitPlan,
-    /// Reads a file or folder Kratos judges by path.
     LocalRead,
-    /// Changes nothing outside the session: the to-do list and entering plan mode.
     Planning,
     Web,
     Command(Shell),
     /// Loads instructions or tool schemas and needs no permission: `ToolSearch`, which the CLI
     /// uses to load deferred tools such as `ExitPlanMode`, and `Skill`.
     Free,
-    /// Any other tool, including MCP tools and tools a newer CLI adds. The user decides it.
     Unchecked,
 }
 

@@ -229,9 +229,6 @@ async fn removing_a_refused_message_lets_the_next_one_run() {
 
 #[tokio::test]
 async fn at_most_four_threads_wait_on_codex_to_start_a_turn() {
-    // Catches a burst of messages to many threads flooding Codex with starts (D85), and a waiting
-    // thread that never gets the slot a finished start frees. Each thread runs its own Codex, so
-    // the count is across all of them.
     let mut harness = Harness::start(Options::default()).await;
     let mut threads = vec![harness.thread_id.clone()];
     for n in 2..=5 {
@@ -321,8 +318,6 @@ async fn waiting_threads_take_freed_start_slots_in_order() {
 
 #[tokio::test]
 async fn at_the_server_limit_a_thread_waits_with_a_note_until_a_working_thread_finishes() {
-    // Catches a ninth Codex server started past the limit, a waiting thread told nothing, and one
-    // that never gets the server a finished thread's idle process frees.
     let mut harness = Harness::start(Options::default()).await;
     let mut threads = vec![harness.thread_id.clone()];
     for n in 2..=9 {
@@ -384,7 +379,6 @@ async fn at_the_server_limit_a_thread_waits_with_a_note_until_a_working_thread_f
         )
         .await;
 
-    // The finished thread's server closed, so its requests left the count with it.
     harness.fake_of("m8").await;
     assert!(
         harness
@@ -403,8 +397,6 @@ async fn at_the_server_limit_a_thread_waits_with_a_note_until_a_working_thread_f
 
 #[tokio::test]
 async fn a_waiting_thread_asks_an_idle_server_with_a_background_terminal_once_per_change() {
-    // Catches an idle server found holding a background terminal asked again at once, without
-    // end, while a thread waits for a server.
     let mut harness = Harness::start(Options::default()).await;
     let mut threads = vec![harness.thread_id.clone()];
     for n in 2..=9 {
@@ -489,7 +481,6 @@ async fn a_waiting_thread_asks_an_idle_server_with_a_background_terminal_once_pe
         "the waiting thread starts no ninth server"
     );
 
-    // Another thread finishing is a change: its idle server closes for the waiting thread.
     let second = harness.fake_of("m1").await;
     harness
         .control_at(
@@ -502,12 +493,8 @@ async fn a_waiting_thread_asks_an_idle_server_with_a_background_terminal_once_pe
 
 #[tokio::test]
 async fn a_usage_read_with_no_thread_running_uses_an_account_only_server() {
-    // Catches account work that has no thread to run on failing, and an account server that loads
-    // a thread or stands in for the thread's own server.
     let harness = Harness::start(Options::default()).await;
 
-    // The fake reports no rate limits until a test sets some, so its answer is an error, but one
-    // a running Codex gave.
     let read = harness.provider.refresh_usage().await;
     assert!(
         matches!(&read, Err(ProviderError::Unavailable(error)) if error.contains("Codex did not report")),

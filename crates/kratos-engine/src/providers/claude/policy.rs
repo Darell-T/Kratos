@@ -8,18 +8,13 @@ pub(super) use crate::providers::writes::Destination;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     File(Destination),
-    /// A shell command the CLI runs as the user. `flagged` is the dangerous-command check's verdict.
     Command {
         flagged: bool,
     },
-    /// Changes nothing on disk or on the network: a read of an unprotected path, the to-do list.
     Read,
-    /// A read from the network.
     Fetch,
     ProtectedRead,
-    /// Needs no permission in any mode: loading a skill's or a tool's instructions.
     Free,
-    /// A tool Kratos cannot judge, which the user decides.
     Unchecked,
     Question,
     ExitPlan,
@@ -46,7 +41,6 @@ pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
         (Action::ExitPlan, true, _) => Decision::Deny,
         (Action::Command { flagged: true }, _, _) => Decision::Ask(AskReason::Dangerous),
         (Action::Unchecked, _, _) => Decision::Ask(AskReason::Unchecked),
-        // Plan mode reads without asking under every permission; it only writes nothing.
         (Action::Read, true, _) => Decision::Allow,
         (_, true, _) | (_, _, Permission::AskMe) => Decision::Ask(AskReason::AskEveryAction),
         _ => Decision::Allow,

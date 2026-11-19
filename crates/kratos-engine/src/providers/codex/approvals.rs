@@ -79,7 +79,6 @@ impl Requests {
         }
     }
 
-    /// Whether an approval or a question of `thread_id`'s waits on the user.
     pub(super) fn awaits_user(&self, thread_id: &ThreadId) -> bool {
         self.approvals
             .values()

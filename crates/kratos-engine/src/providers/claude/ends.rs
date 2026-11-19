@@ -44,7 +44,6 @@ impl TurnEnd {
         }
     }
 
-    /// A turn the user stopped whose process ended before it reported the stop.
     pub(super) fn interrupted() -> TurnEnd {
         TurnEnd {
             outcome: TurnOutcome::Interrupted,

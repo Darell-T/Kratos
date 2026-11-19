@@ -333,8 +333,6 @@ impl Actor {
         };
         thread.rejection = None;
         thread.answering_model = None;
-        // It decides tools under the thread's settings now, not those of the last turn a message
-        // started: the user may have lowered them since.
         thread.turn_settings = Some(thread.settings.clone());
         let turn_id = TurnId::new(uuid::Uuid::new_v4().to_string());
         let recorded = turn_id.clone();
@@ -429,8 +427,6 @@ impl Actor {
         }
     }
 
-    /// Asks Claude to stop the turn. The turn ends with its result, which settles every waiting
-    /// stop. A CLI whose turn still runs after the stop timeout is closed, whatever it answered.
     pub(super) fn interrupt(&mut self, thread_id: &ThreadId, waiters: Vec<Reply<()>>) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
@@ -492,8 +488,6 @@ impl Actor {
                 kratos_claude_client::RequestError::Exited(_)
                 | kratos_claude_client::RequestError::Closing,
             ) => {}
-            // A refused or unanswered interrupt still ends the turn: the stop timer stays armed
-            // and closes the CLI if the turn runs on.
             other => {
                 if let Err(error) = other {
                     eprintln!("Claude did not answer the stop of thread {thread_id}: {error}");

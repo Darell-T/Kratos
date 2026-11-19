@@ -1,9 +1,4 @@
-//! The tools, as a table: adding a tool is adding a row. A tool answers with JSON text, or with a
-//! refusal that Codex shows the agent as a failed tool call. Every request names the caller's
-//! thread in the `Kratos-Thread` header, and the engine refuses what that thread may not do. A tool
-//! calls only the routes the engine opens to agents, in `server::agent_routes`, with one exception:
-//! `wait_for_turn` follows a thread on `/api/events`, a user route, without the header, because the
-//! engine refuses an agent there. It reads only the followed thread's events.
+//! Agent HTTP requests carry the acting thread in the Kratos-Thread header.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

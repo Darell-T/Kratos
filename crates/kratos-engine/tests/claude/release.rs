@@ -142,8 +142,6 @@ async fn an_update_waits_for_the_user_while_a_thread_works() {
 
 #[tokio::test]
 async fn an_update_waits_while_a_thread_runs_a_background_command() {
-    // Catches an update closing a CLI whose shell command still runs in the background after its
-    // turn ended, which ends that command with no word in the thread.
     let mut harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     let tasks = |tasks: serde_json::Value| json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks });
@@ -220,8 +218,6 @@ async fn a_cli_another_manager_installed_is_never_updated_under_its_running_sess
 
 #[tokio::test]
 async fn engine_shutdown_cancels_an_update_that_has_not_started_installing() {
-    // Catches shutdown waiting on, or letting start, an update that has replaced nothing yet:
-    // one still closing the sessions whose files the updater would replace.
     let mut harness = Harness::start(Options {
         exit_delay: Duration::from_millis(3_000),
         ..Options::default()
@@ -256,8 +252,6 @@ async fn engine_shutdown_cancels_an_update_that_has_not_started_installing() {
 
 #[tokio::test]
 async fn engine_shutdown_waits_for_an_update_that_is_installing() {
-    // Catches shutdown ending the updater halfway through replacing the CLI, which can leave a
-    // broken install.
     let harness = Harness::start(Options {
         update_delay: Duration::from_millis(1_500),
         ..Options::default()
@@ -288,8 +282,6 @@ async fn engine_shutdown_waits_for_an_update_that_is_installing() {
 
 #[tokio::test]
 async fn a_caller_that_goes_away_mid_update_does_not_block_the_next_update() {
-    // Catches the update's state reset only in the caller, which a disconnected client's dropped
-    // request never reaches, so every later update answered "already updating".
     let harness = Harness::start(Options {
         update_delay: Duration::from_millis(800),
         ..Options::default()
@@ -318,8 +310,6 @@ async fn a_caller_that_goes_away_mid_update_does_not_block_the_next_update() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // Under load each CLI the updates run takes seconds, so reaching the updater and finishing
-    // each get their own wait.
     std::fs::remove_file(&started).unwrap();
     let provider = harness.provider.clone();
     let again = tokio::spawn(async move {

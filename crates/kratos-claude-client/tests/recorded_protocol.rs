@@ -353,8 +353,6 @@ async fn a_torn_last_line_keeps_the_earlier_ids_and_says_delivery_may_be_unknown
 #[tokio::test]
 async fn a_malformed_line_before_the_tail_marks_the_evidence_incomplete_and_later_rows_still_count()
 {
-    // Catches corruption in the middle of a transcript treated as harmless, and a hard error that
-    // left an uncertain message impossible to discard, holding the thread's queue for good.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.jsonl");
     std::fs::write(
@@ -468,9 +466,6 @@ async fn malformed_delivery_markers_mark_the_evidence_incomplete_instead_of_repo
 #[cfg(unix)]
 #[test]
 fn a_folder_reached_through_a_symbolic_link_names_the_project_of_its_physical_path() {
-    // Catches a transcript looked for under the folder's spelling when the CLI, whose working
-    // folder is the physical path, stores it under the resolved one, which refused the thread's
-    // next start as "its saved session is gone".
     let root = tempfile::tempdir().unwrap();
     let real = root.path().join("real");
     std::fs::create_dir(&real).unwrap();

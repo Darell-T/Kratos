@@ -1,6 +1,3 @@
-//! Reading a child's output one line at a time within a budget (L3), so a child that writes an
-//! endless line cannot take the engine's memory.
-
 use std::io;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt};
@@ -63,7 +60,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_line_over_the_budget_is_reported_and_the_next_line_reads() {
-        // Catches an oversized line kept in memory, or one that swallows the line after it.
         let input = format!("short\n{}\nafter\nlast", "x".repeat(40));
         let mut reader = tokio::io::BufReader::with_capacity(8, input.as_bytes());
         let mut lines = Vec::new();

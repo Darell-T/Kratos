@@ -18,8 +18,6 @@ use crate::bench::temp_workspace;
 use crate::{BenchError, BenchReport};
 
 const WAIT: Duration = Duration::from_secs(10);
-/// As many threads as Kratos runs Codex servers at once, so each keeps a warm server and the turns
-/// measure the engine, not process starts.
 const THREADS: usize = 8;
 const TURNS: usize = 200;
 
@@ -33,12 +31,6 @@ pub struct TurnBenchReport {
     pub measurement: &'static str,
 }
 
-/// Measures 200 sequential turns on eight threads against an engine running fake-codex.
-/// Both intervals include local transport, so they upper-bound engine overhead without adding
-/// instrumentation to production. All timestamps come from this process's monotonic clock.
-///
-/// Each thread runs a fake Codex of its own. A thread's first turn, a warmup the report leaves
-/// out, finds that fake and registers an observer on it for the measured turns.
 pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchReport, BenchError> {
     client.get(routes::USAGE)?.parse::<Value>()?;
     let threads = create_threads(client)?;
@@ -88,8 +80,6 @@ fn create_threads(client: &Client) -> Result<Vec<Thread>, BenchError> {
         .map_err(BenchError::from)
 }
 
-/// Runs `thread`'s first turn: posts it, finds the fake Codex the engine started for the thread,
-/// reads the turn's start from what that fake holds, and leaves an observer on it.
 fn warm_up(
     client: &Client,
     control_file: &Path,
@@ -126,8 +116,6 @@ fn warm_up(
     ))
 }
 
-/// The fake Codex, not among `known`, that holds the `turn/start` of `message_id`, and that
-/// request. Waits for the fake to start and publish its port, as the engine starts it on demand.
 fn started_fake(
     control_file: &Path,
     known: &[u16],
@@ -346,8 +334,6 @@ mod tests {
 
     #[test]
     fn the_benchmark_waits_for_a_thread_s_fake_codex_that_starts_late() {
-        // Catches a benchmark that fails when the thread's Codex has not yet written its control
-        // port, because it read the ports once.
         let dir = tempfile::tempdir().unwrap();
         let control_file = dir.path().join("fake-codex-control");
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
