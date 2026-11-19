@@ -11,7 +11,9 @@ use super::{ProviderError, wire};
 impl Actor {
     pub(super) fn read_account(&self, key: &ServerKey, codex: Codex) {
         let reader = codex.clone();
+        let pending_request = self.servers.request_guard(key);
         self.spawn(key, async move {
+            let _guard = pending_request;
             let plan = match reader
                 .request::<methods::AccountRead>(&types::GetAccountParams::default())
                 .await
@@ -44,7 +46,9 @@ impl Actor {
     /// Reads the account's usage; a read finished after the account changed is dropped (D38).
     pub(super) fn read_usage(&self, key: &ServerKey, codex: Codex, reply: Option<Reply<()>>) {
         let tracker_generation = self.usage.generation(Provider::Codex);
+        let pending_request = self.servers.request_guard(key);
         self.spawn(key, async move {
+            let _guard = pending_request;
             let result = codex
                 .request::<methods::RateLimitsRead>(&None)
                 .await

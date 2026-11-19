@@ -191,6 +191,14 @@ impl Actor {
         thread_id: &ThreadId,
     ) -> Result<Option<String>, ProviderError> {
         self.load(thread_id).await?;
+        let key = ServerKey::Thread(thread_id.clone());
+        if self
+            .servers
+            .get(&key)
+            .is_some_and(|slot| matches!(slot.server, Server::Closing(_)))
+        {
+            return Ok(None);
+        }
         let thread = self.threads.get(thread_id).expect("loaded above");
         // Codex applies a context limit only when it loads the thread, so a thread loaded under
         // another limit is unloaded and loaded again.
@@ -208,7 +216,6 @@ impl Actor {
             Link::Attaching => return Ok(None),
             Link::Detached => (None, thread.turn_settings().access()),
         };
-        let key = ServerKey::Thread(thread_id.clone());
         let Some(codex) = self.connection(&key)? else {
             return Ok(None);
         };
@@ -294,7 +301,7 @@ impl Actor {
             Err(error) => {
                 let message = format!("Codex could not load the thread: {error}");
                 thread.link = Link::Detached;
-                if matches!(error, RequestError::Rpc { .. }) {
+                if error.is_missing_rollout() {
                     for (message_id, reply) in std::mem::take(&mut thread.discards) {
                         self.settle_discard(&thread_id, message_id, None, reply)
                             .await;
@@ -442,11 +449,10 @@ impl Actor {
             requests: self.requests.close(thread_id, |_| true),
             ..Unfinished::default()
         };
-        let stopped = matches!(thread.turn, Turn::Running { stopping: true, .. });
         if let Some((turn_id, work)) = thread.turn.end_running() {
             unfinished.running_turn = Some(EndingTurn {
                 id: turn_id,
-                stopped,
+                stopped: work.stop_id.is_some(),
                 changes: work.changes.finish(),
                 context: work.context,
             });
@@ -464,9 +470,16 @@ impl Actor {
     pub(super) async fn on_exit(&mut self, key: ServerKey, exit: Exit) {
         self.servers.advance_generation(&key);
         let slot = self.servers.slot(&key);
-        slot.server = Server::Down;
+        let ended = std::mem::replace(&mut slot.server, Server::Down);
         slot.terminals = TerminalCheck::NotAsked;
-        slot.restarts.exited();
+        if matches!(ended, Server::Closing(_)) {
+            slot.restarts = Restarts::default();
+        } else {
+            slot.restarts.exited();
+        }
+        if !slot.deferred.is_empty() {
+            self.servers.wait(&key);
+        }
         if let ServerKey::Thread(thread_id) = &key {
             self.detach(thread_id, &exit.to_string()).await;
             self.ready.retain(|waiting| waiting != thread_id);
@@ -485,7 +498,9 @@ impl Actor {
 
     pub(super) async fn close_all(&mut self) {
         for key in self.servers.keys() {
-            if let Some(codex) = self.servers.codex(&key) {
+            if let Some(Server::Up(codex) | Server::Closing(codex)) =
+                self.servers.get(&key).map(|slot| &slot.server)
+            {
                 codex.close().await;
             }
         }

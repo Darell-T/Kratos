@@ -252,7 +252,7 @@ impl Actor {
         control: IncomingControl,
         request: kratos_claude_client::Elicitation,
     ) {
-        let Some(turn_id) = self.threads[thread_id].run.clone() else {
+        let Some(turn_id) = self.threads[thread_id].running_id().cloned() else {
             let _ = control.answer(json!({ "action": "cancel" }));
             return;
         };
@@ -286,7 +286,7 @@ impl Actor {
 
     async fn on_tool(&mut self, thread_id: &ThreadId, control: IncomingControl, tool: CanUseTool) {
         let thread = &self.threads[thread_id];
-        let Some(turn_id) = thread.run.clone() else {
+        let Some(turn_id) = thread.running_id().cloned() else {
             let _ = control
                 .answer(json!({ "behavior": "deny", "message": "No Claude turn is running" }));
             return;
@@ -322,9 +322,15 @@ pub(super) fn shown(pending: &Pending, folder: &str) -> ApprovalRequest {
             access: ExtraAccess::default(),
         };
     };
-    shell::approval(tool, folder).unwrap_or_else(|| ApprovalRequest::Permissions {
-        reason: Some(approval_text(&format!("{} {}", tool.tool_name, tool.input))),
-        access: ExtraAccess::default(),
+    shell::approval(tool, folder).unwrap_or_else(|| {
+        let preview = match edit_path(&tool.tool_name, &tool.input) {
+            Some(path) => format!("{} {}\n{}", tool.tool_name, json!(path), tool.input),
+            None => format!("{} {}", tool.tool_name, tool.input),
+        };
+        ApprovalRequest::Permissions {
+            reason: Some(approval_text(&preview)),
+            access: ExtraAccess::default(),
+        }
     })
 }
 

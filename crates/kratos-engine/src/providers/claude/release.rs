@@ -38,7 +38,9 @@ pub(super) enum Updating {
     },
     /// The updater or the version check after it runs. Stopping it midway can leave a broken CLI,
     /// so shutdown waits for it.
-    Installing { ended: watch::Receiver<()> },
+    Installing {
+        ended: watch::Receiver<()>,
+    },
     ShuttingDown,
 }
 
@@ -58,7 +60,7 @@ impl Release {
         self.updating.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    pub fn start<T: Send + 'static>(
+    pub fn spawn_update<T: Send + 'static>(
         self: &Arc<Self>,
         update: impl Future<Output = T> + Send + 'static,
     ) -> Result<JoinHandle<T>, ProviderError> {

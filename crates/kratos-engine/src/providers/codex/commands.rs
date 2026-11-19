@@ -140,7 +140,9 @@ impl Actor {
             }
         };
         let folder = self.threads[&thread_id].folder.clone();
+        let pending_request = self.servers.request_guard(&key);
         tokio::spawn(async move {
+            let _guard = pending_request;
             let _ = reply.send(list_skills(&codex, folder).await);
         });
     }
@@ -180,7 +182,9 @@ impl Actor {
         let thread = &self.threads[&thread_id];
         let profile = Profile::for_settings(&thread.settings).id().to_owned();
         let folder = thread.folder.clone();
+        let pending_request = self.servers.request_guard(&key);
         tokio::spawn(async move {
+            let _guard = pending_request;
             let mut reply = reply;
             let process_id = uuid::Uuid::new_v4().to_string();
             tokio::select! {

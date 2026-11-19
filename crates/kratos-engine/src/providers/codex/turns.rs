@@ -63,6 +63,14 @@ impl Actor {
         let Some(next) = self.next_to_start(thread_id).await else {
             return;
         };
+        if let Err(error) = self.threads[thread_id].settings.validate_report_format() {
+            self.pause_unavailable_if_waiting(
+                thread_id,
+                format!("{error}. Replace or clear the report format, then resume the thread."),
+            )
+            .await;
+            return;
+        }
         let native_id = match self.attached(thread_id).await {
             Ok(Some(native_id)) => native_id,
             // Loading; the load's completion dispatches again.
@@ -233,7 +241,7 @@ impl Actor {
         let (
             Turn::Running {
                 turn_id,
-                stopping: false,
+                work: TurnWork { stop_id: None, .. },
                 ..
             },
             Some(native_id),
@@ -450,7 +458,6 @@ impl Actor {
         };
         thread.turn = Turn::Running {
             turn_id: turn_id.clone(),
-            stopping: false,
             work,
         };
         if recorded.is_err() {
@@ -509,16 +516,21 @@ impl Actor {
             return;
         }
         let (turn_id, work) = thread.turn.end_running().expect("the turn runs");
-        let outcome = wire::turn_outcome(&turn).unwrap_or(TurnOutcome::Failed {
-            error: "Codex reported the turn finished while still in progress".to_owned(),
-        });
+        let outcome = if work.stop_id.is_some() {
+            TurnOutcome::Interrupted
+        } else {
+            wire::turn_outcome(&turn).unwrap_or(TurnOutcome::Failed {
+                error: "Codex reported the turn finished while still in progress".to_owned(),
+            })
+        };
         // Whether the turn stopped because the account ran out of its included usage (D39).
-        let at_limit = matches!(
-            turn.error
-                .as_ref()
-                .and_then(|error| error.codex_error_info.as_ref()),
-            Some(types::CodexErrorInfo::UsageLimitExceeded)
-        );
+        let at_limit = work.stop_id.is_none()
+            && matches!(
+                turn.error
+                    .as_ref()
+                    .and_then(|error| error.codex_error_info.as_ref()),
+                Some(types::CodexErrorInfo::UsageLimitExceeded)
+            );
         let after = match &outcome {
             _ if at_limit => After::Pause(PauseReason::UsageLimit {
                 turn_id: turn_id.clone(),
@@ -562,6 +574,7 @@ impl Actor {
             changes,
             context,
             last_reply,
+            ..
         } = work;
         let changes = changes.finish();
         // Codex holds the final reply to the format, so a reply that is not JSON means the turn
@@ -606,6 +619,7 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
+        self.arm_stop_deadline(thread_id);
         let thread = self.threads.get_mut(thread_id).expect("loaded above");
         match &mut thread.turn {
             Turn::Idle => drop(reply.send(Ok(()))),
@@ -615,18 +629,35 @@ impl Actor {
         }
     }
 
+    fn arm_stop_deadline(&mut self, thread_id: &ThreadId) {
+        let thread = self
+            .threads
+            .get_mut(thread_id)
+            .expect("stop loaded this thread");
+        let Some(work) = thread.turn.work_mut() else {
+            return;
+        };
+        if work.stop_id.is_some() {
+            return;
+        }
+        let stop_id = uuid::Uuid::new_v4();
+        work.stop_id = Some(stop_id);
+        let deadline = tokio::time::Instant::now() + self.settings.stop_timeout;
+        let thread_id = thread_id.clone();
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
+            tokio::time::sleep_until(deadline).await;
+            Done::StopExpired { thread_id, stop_id }
+        });
+    }
+
     pub(super) fn interrupt(&mut self, thread_id: &ThreadId, waiters: StopWaiters) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
-        let Turn::Running {
-            turn_id, stopping, ..
-        } = &mut thread.turn
-        else {
+        let Turn::Running { turn_id, .. } = &mut thread.turn else {
             waiters.tell(|| Ok(()));
             return;
         };
-        *stopping = true;
         let turn_id = turn_id.clone();
         let (Some(native_id), Some(codex)) = (
             thread.native_id().map(str::to_owned),
@@ -656,42 +687,16 @@ impl Actor {
         });
     }
 
-    pub(super) async fn on_interrupted(
-        &mut self,
-        thread_id: ThreadId,
-        turn_id: TurnId,
-        result: Result<(), RequestError>,
-        waiters: StopWaiters,
-    ) {
-        let still_running = self
+    pub(super) fn on_stop_expired(&mut self, thread_id: &ThreadId, stop_id: uuid::Uuid) {
+        let current = self
             .threads
-            .get(&thread_id)
-            .and_then(|thread| thread.turn.running_id())
-            == Some(&turn_id);
-        if let Err(error) = &result {
-            eprintln!("Codex did not answer the stop of turn {turn_id}: {error}");
-        }
-        if still_running {
-            let timeout = self.settings.stop_timeout;
-            self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
-                tokio::time::sleep(timeout).await;
-                Done::StopExpired { thread_id, turn_id }
-            });
-        }
-        waiters.tell(|| Ok(()));
-    }
-
-    pub(super) async fn on_stop_expired(&mut self, thread_id: &ThreadId, turn_id: &TurnId) {
-        let still_stopping = matches!(
-            self.threads.get(thread_id).map(|thread| &thread.turn),
-            Some(Turn::Running { turn_id: running, stopping: true, .. }) if running == turn_id
-        );
-        if still_stopping {
-            self.stop_server(
-                &ServerKey::Thread(thread_id.clone()),
-                "a stopped turn did not end",
-            )
-            .await;
+            .get_mut(thread_id)
+            .and_then(|thread| thread.turn.work_mut());
+        if current.is_some_and(|work| work.stop_id == Some(stop_id)) {
+            let key = ServerKey::Thread(thread_id.clone());
+            if let Some(codex) = self.servers.begin_close(&key) {
+                tokio::spawn(async move { codex.terminate().await });
+            }
         }
     }
 }

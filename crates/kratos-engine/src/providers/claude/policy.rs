@@ -8,9 +8,7 @@ pub(super) use crate::providers::writes::Destination;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     File(Destination),
-    Command {
-        flagged: bool,
-    },
+    Command { flagged: bool },
     Read,
     Fetch,
     ProtectedRead,

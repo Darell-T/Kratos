@@ -32,6 +32,7 @@ fn main() {
     }
     let fake = Arc::new(Mutex::new(Fake {
         initialize: InitializeMode::from_arguments(&arguments),
+        closing_on_resume: arguments.iter().any(|arg| arg == "--closing-on-resume"),
         fail_resume: arguments.iter().any(|argument| argument == "--fail-resume"),
         ..Fake::default()
     }));
@@ -151,6 +152,7 @@ struct Fake {
     turn_observer: Option<TcpStream>,
     initialize: InitializeMode,
     fail_resume: bool,
+    closing_on_resume: bool,
     fail_next_fork: bool,
     initialized: bool,
     /// Every held request, in arrival order, for `test/turnRequests`.
@@ -360,10 +362,23 @@ impl Fake {
     fn resume_thread(&mut self, id: &Value, params: &Value) {
         self.thread_log
             .push(json!({ "method": "thread/resume", "params": params }));
-        if self.fail_resume {
-            return self.fail(id, -32600, "no rollout found for the thread");
-        }
         let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
+        if self.closing_on_resume {
+            return self.fail(
+                id,
+                -32600,
+                &format!(
+                    "thread {thread_id} is closing; retry thread/resume after the thread is closed"
+                ),
+            );
+        }
+        if self.fail_resume {
+            return self.fail(
+                id,
+                -32600,
+                &format!("no rollout found for thread id {thread_id}"),
+            );
+        }
         let mut thread = self.thread(&thread_id, params["cwd"].as_str());
         if let Some(model) = params["model"].as_str() {
             thread["model"] = json!(model);

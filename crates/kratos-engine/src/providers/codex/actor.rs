@@ -167,7 +167,7 @@ pub(super) enum Done {
     },
     StopExpired {
         thread_id: ThreadId,
-        turn_id: kratos_protocol::TurnId,
+        stop_id: uuid::Uuid,
     },
     HistoryForDiscard {
         thread_id: ThreadId,
@@ -357,12 +357,14 @@ impl Actor {
                 result,
                 waiters,
             } => {
-                self.on_interrupted(thread_id, turn_id, result, waiters)
-                    .await
+                if let Err(error) = result {
+                    eprintln!(
+                        "Codex did not answer Stop for {thread_id:?} turn {turn_id}: {error}"
+                    );
+                }
+                waiters.tell(|| Ok(()));
             }
-            Done::StopExpired { thread_id, turn_id } => {
-                self.on_stop_expired(&thread_id, &turn_id).await
-            }
+            Done::StopExpired { thread_id, stop_id } => self.on_stop_expired(&thread_id, stop_id),
             Done::HistoryForDiscard {
                 thread_id,
                 message_id,

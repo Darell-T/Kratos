@@ -126,7 +126,9 @@ impl Actor {
             .servers
             .codex(&key)
             .expect("an attached thread's server is up");
+        let pending_request = self.servers.request_guard(&key);
         self.spawn(&key, async move {
+            let _guard = pending_request;
             let result = read_history(&codex, &native_id).await.map(Box::new);
             Done::HistoryForDiscard {
                 thread_id,

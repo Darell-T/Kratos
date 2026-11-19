@@ -178,7 +178,7 @@ pub(super) enum Done {
     ReportOverdue {
         thread_id: ThreadId,
         epoch: u64,
-        ended: std::num::NonZeroU64,
+        report_id: super::threads::ReportId,
     },
     Transcript {
         thread_id: ThreadId,
@@ -196,6 +196,12 @@ pub(super) enum Done {
     },
 }
 
+pub(super) enum UpdateHold {
+    Open,
+    Closing(Reply<()>),
+    Held,
+}
+
 pub(crate) struct Actor {
     pub(super) requests: super::requests::Requests,
     pub(super) settings: ClaudeSettings,
@@ -211,7 +217,8 @@ pub(crate) struct Actor {
     /// Set when a write failed: no CLI runs after that, because its work would go unrecorded (L2).
     pub(super) parked: Option<String>,
     /// Set while Claude Code's updater runs. No CLI starts, and queued messages wait.
-    pub(super) updating: bool,
+    pub(super) update_hold: UpdateHold,
+    pub(super) retiring: tokio::task::JoinSet<()>,
     pub(super) done: mpsc::UnboundedSender<Done>,
     completions: mpsc::UnboundedReceiver<Done>,
     pub(super) frames: mpsc::Sender<SessionEvent>,
@@ -238,7 +245,8 @@ impl Actor {
             limit_stops,
             threads: HashMap::new(),
             parked: None,
-            updating: false,
+            update_hold: UpdateHold::Open,
+            retiring: tokio::task::JoinSet::new(),
             done,
             completions,
             frames,
@@ -264,6 +272,10 @@ impl Actor {
                     }
                 },
                 Some(done) = self.completions.recv() => self.on_done(done).await,
+                Some(closed) = self.retiring.join_next(), if !self.retiring.is_empty() => {
+                    closed.expect("Claude session close task panicked");
+                    self.release_updater_when_idle();
+                }
                 Some(event) = self.incoming.recv() => self.on_event(event).await,
                 _ = idle_check.tick() => self.close_sessions_idle_for(self.settings.idle_close),
             }
@@ -314,8 +326,8 @@ impl Actor {
             Done::ReportOverdue {
                 thread_id,
                 epoch,
-                ended,
-            } => self.on_report_overdue(&thread_id, epoch, ended).await,
+                report_id,
+            } => self.on_report_overdue(&thread_id, epoch, report_id).await,
             Done::Transcript {
                 thread_id,
                 work,
@@ -364,7 +376,8 @@ impl Actor {
             thread.epoch += 1;
             thread.restarts.cancel_timer();
             if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
-                tokio::spawn(async move { open.claude.close().await });
+                self.retiring
+                    .spawn(async move { open.claude.close().await });
             }
             thread.pending.clear();
             thread.run = None;
@@ -392,16 +405,17 @@ impl Actor {
             self.close_requests(&id, None, "Kratos is shutting down")
                 .await;
         }
-        let mut closing = Vec::new();
+
         for thread in self.threads.values_mut() {
             thread.epoch += 1;
             thread.restarts.cancel_timer();
             if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
-                closing.push(tokio::spawn(async move { open.claude.close().await }));
+                self.retiring
+                    .spawn(async move { open.claude.close().await });
             }
         }
-        for closed in closing {
-            let _ = closed.await;
+        while let Some(closed) = self.retiring.join_next().await {
+            closed.expect("Claude session close task panicked");
         }
     }
 }

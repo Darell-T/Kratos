@@ -177,6 +177,7 @@ fn agent_routes() -> Router<ServerState> {
 
 /// Every other route. `router` refuses a request naming a thread on all of them, so a new route
 /// stays closed to agents until it moves to [`agent_routes`].
+/// The MCP wait tool subscribes to its target thread through the authenticated user event socket.
 fn user_routes() -> Router<ServerState> {
     Router::new()
         .route(HEALTH, get(health))

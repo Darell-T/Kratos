@@ -313,7 +313,7 @@ impl ClaudeProvider {
     /// on the new release.
     pub async fn update_cli(&self) -> Result<CliRelease, ProviderError> {
         let provider = self.clone();
-        let task = self.release.start(async move {
+        let task = self.release.spawn_update(async move {
             provider.release.check_native().await?;
             provider
                 .ask(|reply| actor::Command::HoldForUpdate { reply })

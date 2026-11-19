@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 /// The requested shape of a final reply. A provider can finish without returning structured output.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "Map<String, Value>", into = "Map<String, Value>")]
+#[serde(transparent)]
 pub struct ReportFormat(Map<String, Value>);
 
 impl ReportFormat {
@@ -17,14 +17,23 @@ impl ReportFormat {
     /// Returns where and why the schema is not one the providers can follow: the root must be an
     /// object schema, and each keyword below it the providers read must have its JSON Schema shape.
     pub fn new(schema: Map<String, Value>) -> Result<ReportFormat, ReportFormatError> {
-        if schema.get("type") != Some(&Value::String("object".to_owned())) {
+        let format = Self(schema);
+        format.validate()?;
+        Ok(format)
+    }
+
+    /// Checks whether this schema can be used for a new turn.
+    ///
+    /// # Errors
+    /// Returns the offending JSON pointer for an unsupported schema.
+    pub fn validate(&self) -> Result<(), ReportFormatError> {
+        if self.0.get("type").and_then(Value::as_str) != Some("object") {
             return Err(ReportFormatError::at(
                 "",
                 "the root must have \"type\": \"object\"",
             ));
         }
-        check_schema_object(&schema, "")?;
-        Ok(ReportFormat(schema))
+        check_schema_object(&self.0, "")
     }
 
     pub fn schema(&self) -> &Map<String, Value> {
@@ -133,8 +142,12 @@ fn schema_map(value: &Value, pointer: &str) -> Result<(), ReportFormatError> {
             "must map names to schema objects",
         ));
     };
-    map.iter()
-        .try_for_each(|(name, value)| schema(value, &format!("{pointer}/{name}")))
+    map.iter().try_for_each(|(name, value)| {
+        schema(
+            value,
+            &format!("{pointer}/{}", name.replace('~', "~0").replace('/', "~1")),
+        )
+    })
 }
 
 fn schema_list(value: &Value, pointer: &str) -> Result<(), ReportFormatError> {

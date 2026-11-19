@@ -84,7 +84,7 @@ impl Actor {
 
     pub(super) fn allow_pending(&mut self, mut pending: Pending) {
         let thread = &self.threads[&pending.thread_id];
-        if thread.stopping || thread.run.as_ref() != Some(&pending.turn_id) {
+        if thread.stopping || thread.running_id() != Some(&pending.turn_id) {
             pending.deny();
             return;
         }

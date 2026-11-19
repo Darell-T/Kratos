@@ -813,3 +813,43 @@ fn a_report_format_the_providers_cannot_follow_is_refused_where_it_is_set() {
     let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
     assert_eq!(details.body["settings"]["reportFormat"], good);
 }
+
+#[test]
+fn legacy_report_settings_can_be_read_and_replaced_without_losing_history() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let thread = engine.create_thread();
+    change_model(&engine.client(), &thread, "old-model");
+    drop(engine);
+    let db = rusqlite::Connection::open(home.path().join("kratos.db")).unwrap();
+    db.execute(
+        "UPDATE threads SET report_format = '{}' WHERE id = ?1",
+        [thread.id.as_str()],
+    )
+    .unwrap();
+    let updated = db.execute(
+        "UPDATE thread_events SET event = json_set(event, '$.settings.reportFormat', json('{}'))
+         WHERE thread_id = ?1 AND json_extract(event, '$.kind') = 'settings.changed'",
+        [thread.id.as_str()],
+    ).unwrap();
+    assert_eq!(updated, 1);
+    drop(db);
+
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let path = format!("/api/threads/{}", thread.id);
+    let details = client.get(&path).unwrap();
+    assert_eq!(details.status, 200);
+    assert_eq!(details.body["settings"]["reportFormat"], json!({}));
+    change_model(&client, &thread, "repaired-model");
+    let history = client.get(&format!("{path}/events")).unwrap();
+    assert_eq!(history.status, 200);
+    assert!(
+        history
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["event"]["settings"]["reportFormat"] == json!({}))
+    );
+}

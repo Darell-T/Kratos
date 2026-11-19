@@ -38,6 +38,50 @@ async fn after_a_finished_turn(harness: &mut Harness) -> Launch {
 }
 
 #[tokio::test]
+async fn a_same_settings_message_waits_for_the_background_reply() {
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = after_a_finished_turn(&mut harness).await;
+    let (_, mut live) = harness.hub.watch_live(&harness.thread_id);
+    harness
+        .emit(
+            &launch,
+            json!({"type":"system","subtype":"task_notification",
+        "task_id":"t1","status":"completed","summary":SUMMARY}),
+        )
+        .await;
+    // The next control response fences earlier frames on the same stdout pipe.
+    crate::requests::send(
+        &harness,
+        &launch,
+        "barrier",
+        "Read",
+        json!({"file_path":"notes.txt"}),
+    )
+    .await;
+    crate::requests::response(&harness, &launch, "barrier").await;
+    harness.send(B, "B").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(live.recv().await.unwrap(), LiveUpdate::Waiting { .. }) {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(harness.written(&launch).await, [A]);
+    harness.init(&launch).await;
+    let started = harness
+        .wait_for(|e| matches!(e, ThreadEventBody::TurnStarted { .. }))
+        .await;
+    assert!(matches!(
+        started,
+        ThreadEventBody::TurnStarted {
+            origin: TurnOrigin::BackgroundTask { .. },
+            ..
+        }
+    ));
+    harness.finish(&launch, &[], json!({})).await;
+    harness.wait_written(&launch, &[A, B]).await;
+}
+
+#[tokio::test]
 async fn a_turn_claude_starts_after_a_background_command_is_recorded_with_its_replies() {
     let mut harness = Harness::start(Options::default()).await;
     let launch = after_a_finished_turn(&mut harness).await;
@@ -85,6 +129,50 @@ async fn a_turn_claude_starts_after_a_background_command_is_recorded_with_its_re
 
     harness.send(B, "B").await;
     harness.wait_written(&launch, &[A, B]).await;
+}
+
+#[tokio::test]
+async fn a_background_reply_does_not_accept_a_message_already_in_the_pipe() {
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = after_a_finished_turn(&mut harness).await;
+    harness.send(B, "B").await;
+    harness.wait_written(&launch, &[A, B]).await;
+    background_task_ends(&harness, &launch).await;
+    harness
+        .emit(
+            &launch,
+            json!({
+                "type": "assistant", "uuid": "u-bg", "session_id": "s",
+                "message": {"id": "m-bg", "content": [{"type": "text", "text": "Build finished."}]}
+            }),
+        )
+        .await;
+    harness.finish(&launch, &[], json!({})).await;
+    let started = harness
+        .wait_for(|e| matches!(e, ThreadEventBody::TurnStarted { .. }))
+        .await;
+    assert!(matches!(
+        started,
+        ThreadEventBody::TurnStarted {
+            origin: TurnOrigin::BackgroundTask { .. },
+            ..
+        }
+    ));
+    harness
+        .wait_for(|e| matches!(e, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    harness
+        .message_becomes(B, |status| {
+            matches!(status, kratos_protocol::MessageStatus::Submitting)
+        })
+        .await;
+    harness.accept(&launch, B).await;
+    let started = harness
+        .wait_for(|e| matches!(e, ThreadEventBody::TurnStarted { .. }))
+        .await;
+    assert!(
+        matches!(started, ThreadEventBody::TurnStarted { turn_id, origin: TurnOrigin::Messages } if turn_id.as_str() == B)
+    );
 }
 
 #[tokio::test]

@@ -362,6 +362,42 @@ async fn a_long_turn_is_never_stopped_by_kratos_and_the_queue_runs_after_it() {
     harness.held("turn/start", 2).await;
 }
 
+#[tokio::test]
+async fn a_limit_failure_after_stop_is_interrupted_and_does_not_pause() {
+    let mut harness = Harness::start(Options::default()).await;
+    harness.running_turn("a", "t1").await;
+    let provider = harness.provider.clone();
+    let id = harness.thread_id.clone();
+    let stop = tokio::spawn(async move { provider.stop(id).await });
+    harness.held("turn/interrupt", 1).await;
+    harness.settle("turn/interrupt", json!({})).await;
+    stop.await.unwrap().unwrap();
+    harness
+        .emit(
+            "turn/completed",
+            json!({
+                "threadId": THREAD, "turn": {"id":"t1","items":[],"status":"failed",
+                "error":{"message":"limit","codexErrorInfo":"usageLimitExceeded"}}
+            }),
+        )
+        .await;
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(matches!(
+        ended,
+        ThreadEventBody::TurnCompleted {
+            outcome: TurnOutcome::Interrupted,
+            ..
+        }
+    ));
+    assert!(harness.details().await.paused.is_none());
+    assert!(matches!(
+        harness.stops.as_mut().unwrap().try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
 async fn stop_a_turn_codex_does_not_end(answer: &str) -> ThreadEventBody {
     let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(300),
@@ -384,11 +420,15 @@ async fn stop_a_turn_codex_does_not_end(answer: &str) -> ThreadEventBody {
         "refuse" => harness.refuse("turn/interrupt", -32603, "busy").await,
         _ => {}
     }
-    stop.await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        stop.await.unwrap().unwrap();
 
-    harness
-        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
-        .await
+        harness
+            .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+            .await
+    })
+    .await
+    .expect("interrupt RPC timeout must not postpone the stop deadline")
 }
 
 #[tokio::test]

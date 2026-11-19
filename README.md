@@ -122,10 +122,11 @@ hook sends every command to Kratos's decision, including the ones Claude Code wo
 check misses many destructive commands, so an unflagged command can change or delete anything the user can, and can
 read Kratos's client token.
 
-The hook sends every Claude tool to that decision. `ToolSearch` and `Skill` run without asking. A tool outside Kratos's
-rule table, such as `Agent` or `EnterWorktree`, asks the user. Plan mode reads files without asking, under every
-permission, and asks before anything else. A write outside the thread's workspace and the temporary folder asks under
-Approve for me, for Claude and Codex alike. A thread's tools create and message threads only in its own workspace.
+Kratos lets Claude load skills and tool definitions without asking. Unrecognized tools require approval.
+In plan mode, ordinary reads run without asking, protected reads are denied, and web and shell tools ask.
+Claude decides direct edits in its plans directory. Under Approve for me, Claude file edits and Codex patches
+outside the workspace and temporary folder ask for approval. Only Full access can create, message, stop, or
+answer threads in another workspace. Any thread can read across workspaces.
 
 ```sh
 cargo run -p kratos-client -- send <thread-id> "Explain this repository"
@@ -140,7 +141,7 @@ Every Codex thread gets a `kratos` MCP server. Codex starts
 can list workspaces and threads, read a thread, create a thread, send another thread a message labelled with its own
 id, wait for a thread's turn, stop a turn, answer a question, and decide an approval.
 
-The server names the agent's thread in a `Kratos-Thread` header on every request. The engine answers 403 to that
+The server names the acting thread on HTTP tool requests. For `wait_for_turn` it subscribes to the target thread on the authenticated event socket. The engine answers 403 to that
 header on every route the tools do not call, such as a settings change, a steer, or a schedule. A new route stays
 closed to agents until it is added to `agent_routes` in `crates/kratos-engine/src/server/mod.rs`. On the open routes
 the engine checks each request against the agent's thread. A thread it creates gets at most its permission, only a Full access thread may

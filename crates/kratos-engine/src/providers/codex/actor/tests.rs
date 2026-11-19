@@ -905,14 +905,14 @@ async fn the_idle_check_asks_a_server_found_busy_again_after_another_idle_time()
         .await
         .apply(&mut harness.actor)
         .await;
-    assert_eq!(check(&harness), Some(TerminalCheck::Busy));
+    assert_eq!(check(&harness), Some(TerminalCheck::KeepAlive));
 
     harness
         .actor
         .retire_idle(Instant::now() + Duration::from_secs(60));
     assert_eq!(
         check(&harness),
-        Some(TerminalCheck::Busy),
+        Some(TerminalCheck::KeepAlive),
         "asked again before another idle time"
     );
 
@@ -925,10 +925,8 @@ async fn the_idle_check_asks_a_server_found_busy_again_after_another_idle_time()
         Some(TerminalCheck::Asking),
         "not asked again after another idle time"
     );
-    harness
+    let quiet = harness
         .completion(|done| matches!(done, Done::Quiet { .. }))
-        .await
-        .apply(&mut harness.actor)
         .await;
     assert_eq!(
         harness
@@ -936,6 +934,7 @@ async fn the_idle_check_asks_a_server_found_busy_again_after_another_idle_time()
             .await,
         json!(2)
     );
+    quiet.apply(&mut harness.actor).await;
     loop {
         let frame = tokio::time::timeout(WAIT, harness.actor.frames.recv())
             .await

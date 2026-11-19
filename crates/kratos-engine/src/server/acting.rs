@@ -71,7 +71,10 @@ impl Acting {
         Ok(())
     }
 
-    pub(super) fn in_workspace(&self, workspace_id: &WorkspaceId) -> Result<(), ApiError> {
+    pub(super) fn check_workspace_access(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<(), ApiError> {
         if self.access != AccessLimit::FULL && self.workspace_id != *workspace_id {
             return Err(forbidden(
                 "Below Full access, Kratos's tools act only on threads in your own workspace. Ask the user to act in another one.",
@@ -90,7 +93,7 @@ impl Acting {
             .store
             .call(move |store| store.provider_thread(&target))
             .await?;
-        self.in_workspace(&thread.thread.workspace_id)
+        self.check_workspace_access(&thread.thread.workspace_id)
     }
 
     /// A thread it creates gets no more access than it has.

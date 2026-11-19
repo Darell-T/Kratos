@@ -261,7 +261,7 @@ async fn at_most_four_threads_wait_on_codex_to_start_a_turn() {
 async fn waiting_threads_take_freed_start_slots_in_order() {
     let mut harness = Harness::start(Options::default()).await;
     let mut threads = vec![harness.thread_id.clone()];
-    for n in 2..=7 {
+    for n in 2..=8 {
         threads.push(harness.another_thread(&format!("project-{n}")).await);
     }
     for (n, thread_id) in threads.iter().enumerate() {
@@ -300,7 +300,18 @@ async fn waiting_threads_take_freed_start_slots_in_order() {
         }
     }
 
-    for count in 5..=7 {
+    let ninth = harness.another_thread("ninth").await;
+    harness
+        .provider
+        .send(
+            ninth,
+            message_id("m8"),
+            text_input("ninth"),
+            MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+    for count in 5..=8 {
         harness
             .settle_start_everywhere(&format!("turn-{count}"), "inProgress")
             .await;
@@ -313,7 +324,7 @@ async fn waiting_threads_take_freed_start_slots_in_order() {
         .iter()
         .map(|request| request["params"]["clientUserMessageId"].as_str().unwrap())
         .collect();
-    assert_eq!(order, ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]);
+    assert_eq!(order, ["m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7"]);
 }
 
 #[tokio::test]
@@ -393,6 +404,15 @@ async fn at_the_server_limit_a_thread_waits_with_a_note_until_a_working_thread_f
             .is_object(),
         "only the finished thread's idle server closed"
     );
+    harness.send("again", "return to the evicted thread").await;
+    harness
+        .control_at(
+            second,
+            fake_agents::codex_control::complete("thread-A", "turn-1", "completed"),
+        )
+        .await;
+    harness.fake_of("again").await;
+    assert!(harness.details().await.paused.is_none());
 }
 
 #[tokio::test]

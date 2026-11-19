@@ -104,8 +104,7 @@ impl ThreadWrite<'_> {
         Ok((pending, position))
     }
 
-    /// Moves a message to `status` and records the change. `Err(MessageTransition)` for a change
-    /// [`may_move`] does not allow, which writes nothing.
+    /// Records an allowed status change. An invalid transition returns `MessageTransition` and leaves the message unchanged.
     pub fn set_message_status(
         &mut self,
         id: &MessageId,

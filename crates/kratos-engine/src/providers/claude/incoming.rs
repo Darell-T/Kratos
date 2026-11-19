@@ -55,7 +55,9 @@ impl Actor {
         match message {
             StreamMessage::Init(_) => {
                 self.mark_started(thread_id);
-                self.start_own_turn_if_idle(thread_id).await;
+                if self.threads[thread_id].pending.is_empty() {
+                    self.start_background_turn(thread_id).await;
+                }
             }
 
             StreamMessage::Replay { uuid } => {
@@ -105,26 +107,12 @@ impl Actor {
             thread.answering_model = Some(model.to_owned());
         }
         let items = wire::assistant_items(assistant);
-        let Some(thread) = self.threads.get(thread_id) else {
-            return;
-        };
-        let (run, head) = (
-            thread.run.clone(),
-            thread
-                .pending
-                .first()
-                .map(|flight| flight.message_id.clone()),
-        );
         if items.is_empty() {
             return;
         }
-        let turn_id = match (run, head) {
-            (Some(run), _) => run,
-            (None, Some(head)) => match self.record_run(thread_id, vec![head], None).await {
-                Ok(turn_id) => turn_id,
-                Err(_) => return,
-            },
-            (None, None) => return,
+        let ids = assistant.user_message_uuids.as_deref().unwrap_or_default();
+        let Some(turn_id) = self.assistant_turn(thread_id, ids).await else {
+            return;
         };
         let _ = self
             .write(thread_id, move |write| {
@@ -139,13 +127,33 @@ impl Actor {
             .await;
     }
 
+    async fn assistant_turn(
+        &mut self,
+        thread_id: &ThreadId,
+        message_ids: &[String],
+    ) -> Option<TurnId> {
+        let thread = self.threads.get(thread_id)?;
+        if let Some(run) = thread.running_id() {
+            return Some(run.clone());
+        }
+        let delivered = thread.messages_named(message_ids);
+        if !delivered.is_empty() {
+            return self.record_run(thread_id, delivered, None).await.ok();
+        }
+        if message_ids.is_empty() && thread.awaits_background_turn() {
+            self.start_background_turn(thread_id).await;
+            return self.threads[thread_id].running_id().cloned();
+        }
+        None
+    }
+
     /// Shows a reply as it is written, and the context each request fills as it starts and ends
     /// (D76), to the clients following the thread.
     fn on_stream(&mut self, thread_id: &ThreadId, stream: &StreamEvent) {
         let Some((turn_id, window)) = self
             .threads
             .get(thread_id)
-            .and_then(|thread| Some((thread.run.clone()?, thread.context_window)))
+            .and_then(|thread| Some((thread.running_id().cloned()?, thread.context_window)))
         else {
             return;
         };
@@ -194,7 +202,7 @@ impl Actor {
         let run = self
             .threads
             .get(thread_id)
-            .and_then(|thread| thread.run.clone());
+            .and_then(|thread| thread.running_id().cloned());
         let Some(turn_id): Option<TurnId> = run else {
             eprintln!("claude: {message}");
             return;

@@ -35,6 +35,9 @@ impl Actor {
 /// Refuses a setting the pinned Claude CLI cannot honor. Claude Code reports no way to change its
 /// context window from a client, so a context limit is unsupported rather than ignored (D76).
 pub(super) fn check_settings(settings: &ThreadSettings) -> Result<(), ProviderError> {
+    settings
+        .validate_report_format()
+        .map_err(|error| ProviderError::Unsupported(error.to_string()))?;
     if settings.context_limit_tokens.is_some() {
         return Err(ProviderError::Unsupported(
             "contextLimitTokens: Kratos cannot set Claude's context window yet".into(),

@@ -13,7 +13,7 @@ use kratos_store::{StoreError, ThreadWrite};
 
 use super::actor::{Actor, Done, Reply};
 use super::ends::{Stop, TurnEnd, end_turn};
-use super::threads::{InFlight, SessionConfig};
+use super::threads::{ActiveTurn, InFlight, SessionConfig};
 use super::{ProviderError, wire};
 use crate::providers::queue::mark_refused;
 use crate::usage::LimitStop;
@@ -26,7 +26,7 @@ impl Actor {
     /// is in flight, the queue is not paused, and a process with the right settings runs. Safe to
     /// call at any time; it does nothing otherwise.
     pub(super) async fn dispatch(&mut self, thread_id: &ThreadId) {
-        if self.parked.is_some() || self.updating {
+        if self.parked.is_some() || !matches!(self.update_hold, super::actor::UpdateHold::Open) {
             return;
         }
         let Some(thread) = self.threads.get(thread_id) else {
@@ -44,21 +44,37 @@ impl Actor {
                 .cancel_timer();
             return;
         };
+        self.dispatch_message(thread_id, next).await;
+    }
+
+    async fn dispatch_message(&mut self, thread_id: &ThreadId, next: Message) {
         let thread = &self.threads[thread_id];
-        let wanted = SessionConfig::of(&effective(thread, &next));
-        match thread.open() {
-            Some(open) if open.config == wanted => self.start_turn(thread_id, next).await,
-            Some(open) if open.holds_background_work() => {
-                self.tell_waiting_for_background(thread_id);
-            }
-            Some(_) => {
-                self.retire_session(thread_id);
-                let _ = self.open_session(thread_id, wanted).await;
-            }
-            None => {
-                let _ = self.open_session(thread_id, wanted).await;
-            }
+        if let Err(error) = thread.settings.validate_report_format() {
+            self.pause_unavailable_if_waiting(
+                thread_id,
+                format!("{error}. Replace or clear the report format, then resume the thread."),
+            )
+            .await;
+            return;
         }
+        let wanted = SessionConfig::of(&effective(thread, &next));
+        if let Some(open) = thread.open() {
+            if let Some(reason) = open.message_wait_reason(&wanted) {
+                self.hub.publish(
+                    thread_id,
+                    LiveUpdate::Waiting {
+                        reason: reason.to_owned(),
+                    },
+                );
+                return;
+            }
+            if open.config == wanted {
+                self.start_turn(thread_id, next).await;
+                return;
+            }
+            self.retire_session(thread_id);
+        }
+        let _ = self.open_session(thread_id, wanted).await;
     }
 
     /// The thread's first waiting message when it may start: the queue is not paused, and the
@@ -242,22 +258,33 @@ impl Actor {
         let _ = self.record_run(thread_id, vec![message_id], None).await;
     }
 
-    /// Claude ended the turn it ran for the messages the result names.
+    async fn messages_for_result(
+        &mut self,
+        thread_id: &ThreadId,
+        ids: &[String],
+    ) -> Option<Vec<MessageId>> {
+        let thread = self.threads.get(thread_id)?;
+        if !ids.is_empty() {
+            let delivered = thread.messages_named(ids);
+            return (!delivered.is_empty()).then_some(delivered);
+        }
+        if thread.awaits_background_turn() {
+            self.start_background_turn(thread_id).await;
+        }
+        self.threads[thread_id].runs_own_turn().then(Vec::new)
+    }
+
     pub(super) async fn on_result(&mut self, thread_id: &ThreadId, result: TurnResult) {
-        let Some(thread) = self.threads.get_mut(thread_id) else {
+        let Some(ended) = self
+            .messages_for_result(thread_id, &result.message_ids)
+            .await
+        else {
             return;
         };
-        let ended: Vec<MessageId> = thread
-            .pending
-            .iter()
-            .filter(|flight| result.message_ids.contains(&flight.native))
-            .map(|flight| flight.message_id.clone())
-            .collect();
-        // A result that names no message ends the turn the CLI started on its own, and nothing
-        // else: measured, the CLI sends such a result only for that turn.
-        if ended.is_empty() && !thread.runs_own_turn() {
-            return;
-        }
+        let thread = self
+            .threads
+            .get_mut(thread_id)
+            .expect("matched a result for this thread");
         if let Some(open) = thread.open_mut() {
             open.worked = true;
         }
@@ -265,19 +292,7 @@ impl Actor {
         self.close_requests(thread_id, None, "Claude's turn ended")
             .await;
         let thread = self.threads.get_mut(thread_id).expect("found above");
-        // Only a refusal of the included quota can stop the turn: not one extra usage pays past,
-        // and never one of a turn Kratos was asked to interrupt, whatever its result says. The
-        // user's Stop must not become an automatic continuation.
-        let stopping = thread.stopping;
-        let rejection = thread
-            .rejection
-            .take()
-            .filter(|refused| !refused.is_using_overage && !stopping);
-        let end = TurnEnd::of(
-            &result,
-            rejection.as_ref(),
-            thread.answering_model.as_deref(),
-        );
+        let end = thread.reported_end(&result);
         let (context, stop) = (end.context.clone(), end.stop.clone());
         let Ok(turn_id) = self.record_run(thread_id, ended.clone(), Some(end)).await else {
             return;
@@ -313,21 +328,19 @@ impl Actor {
         self.dispatch(thread_id).await;
     }
 
-    /// The CLI began a turn with no message of the user's in flight: after a background task
-    /// ended, it continues on its own (measured with Claude Code 2.1.322). The turn is recorded as
-    /// such, so its replies, approvals, and end are the thread's like any other turn's.
-    pub(super) async fn start_own_turn_if_idle(&mut self, thread_id: &ThreadId) {
+    /// Claude Code 2.1.322 can start a turn to report finished background work before reading its next input.
+    pub(super) async fn start_background_turn(&mut self, thread_id: &ThreadId) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
-        if !thread.pending.is_empty() || thread.run.is_some() {
+        if thread.run.is_some() {
             return;
         }
         let Some(open) = thread.open_mut() else {
             return;
         };
         let finished = std::mem::take(&mut open.finished_tasks);
-        open.report_owed = None;
+        open.awaited_report = None;
         let origin = TurnOrigin::BackgroundTask {
             summary: (!finished.is_empty()).then(|| finished.join("\n")),
         };
@@ -341,7 +354,7 @@ impl Actor {
             .await;
         if started.is_ok() {
             let thread = self.threads.get_mut(thread_id).expect("found above");
-            thread.run = Some(turn_id);
+            thread.run = Some(ActiveTurn::Background(turn_id));
         }
     }
 
@@ -356,7 +369,7 @@ impl Actor {
         end: Option<TurnEnd>,
     ) -> Result<TurnId, ProviderError> {
         let thread = &self.threads[thread_id];
-        let (turn_id, started) = match &thread.run {
+        let (turn_id, started) = match thread.running_id() {
             Some(turn_id) => (turn_id.clone(), true),
             None => (wire::turn_of(&accept[0]), false),
         };
@@ -365,18 +378,13 @@ impl Actor {
             _ => None,
         };
         let ends = end.is_some();
-        let changes = if ends {
-            std::mem::take(
-                &mut self
-                    .threads
-                    .get_mut(thread_id)
-                    .expect("found above")
-                    .changes,
-            )
-            .finish()
-        } else {
-            crate::providers::changes::ChangesRecorder::default().finish()
-        };
+        let end = end.map(|end| {
+            let thread = self
+                .threads
+                .get_mut(thread_id)
+                .expect("recording a loaded thread");
+            (end, std::mem::take(&mut thread.changes).finish())
+        });
         let recorded_turn = turn_id.clone();
         self.write(thread_id, move |write| {
             if let Some((native_id, plan)) = session {
@@ -386,12 +394,20 @@ impl Actor {
             if !started {
                 write.start_turn(recorded_turn.clone(), TurnOrigin::Messages)?;
             }
-            end.map_or(Ok(()), |end| end_turn(write, recorded_turn, end, changes))
+            end.map_or(Ok(()), |(end, changes)| {
+                end_turn(write, recorded_turn, end, changes)
+            })
         })
         .await?;
         let thread = self.threads.get_mut(thread_id).expect("found above");
         thread.recorded = true;
-        thread.run = (!ends).then(|| turn_id.clone());
+        if ends {
+            thread.run = None;
+        } else {
+            thread
+                .run
+                .get_or_insert_with(|| ActiveTurn::Messages(turn_id.clone()));
+        }
         Ok(turn_id)
     }
 

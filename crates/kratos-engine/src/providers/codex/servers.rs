@@ -32,6 +32,7 @@ pub(super) enum Server {
     Down,
     Starting,
     Up(Codex),
+    Closing(Codex),
 }
 
 pub(super) struct Slot {
@@ -39,6 +40,7 @@ pub(super) struct Slot {
     pub generation: u64,
     pub restarts: Restarts,
     pub deferred: Vec<Command>,
+    outstanding: std::sync::Arc<()>,
     pub last_used: Instant,
     pub terminals: TerminalCheck,
 }
@@ -47,7 +49,7 @@ pub(super) struct Slot {
 pub(super) enum TerminalCheck {
     NotAsked,
     Asking,
-    Busy,
+    KeepAlive,
 }
 
 impl Slot {
@@ -57,9 +59,14 @@ impl Slot {
             generation: 0,
             restarts: Restarts::default(),
             deferred: Vec::new(),
+            outstanding: Default::default(),
             last_used: Instant::now(),
             terminals: TerminalCheck::NotAsked,
         }
+    }
+
+    pub(super) fn has_pending_requests(&self) -> bool {
+        !self.deferred.is_empty() || std::sync::Arc::strong_count(&self.outstanding) > 1
     }
 
     pub(super) fn is_live(&self) -> bool {
@@ -70,7 +77,7 @@ impl Slot {
 #[derive(Default)]
 pub(super) struct Servers {
     slots: HashMap<ServerKey, Slot>,
-    issued: u64,
+    last_generation: u64,
     waiting: VecDeque<ServerKey>,
 }
 
@@ -106,21 +113,31 @@ impl Servers {
     }
 
     pub(super) fn advance_generation(&mut self, key: &ServerKey) {
-        self.issued += 1;
-        let generation = self.issued;
+        self.last_generation += 1;
+        let generation = self.last_generation;
         self.slot(key).generation = generation;
     }
 
     pub(super) fn codex(&self, key: &ServerKey) -> Option<Codex> {
         match &self.slots.get(key)?.server {
             Server::Up(codex) => Some(codex.clone()),
-            Server::Down | Server::Starting => None,
+            Server::Down | Server::Starting | Server::Closing(_) => None,
         }
     }
 
     pub(super) fn any_up(&self) -> Option<(ServerKey, Codex)> {
         let up = |key: &ServerKey| self.codex(key).map(|codex| (key.clone(), codex));
         up(&ServerKey::Account).or_else(|| self.slots.keys().find_map(up))
+    }
+
+    pub(super) fn request_guard(&self, key: &ServerKey) -> std::sync::Arc<()> {
+        self.slots[key].outstanding.clone()
+    }
+
+    pub(super) fn begin_close(&mut self, key: &ServerKey) -> Option<Codex> {
+        let codex = self.codex(key)?;
+        self.slot(key).server = Server::Closing(codex.clone());
+        Some(codex)
     }
 
     pub(super) fn live(&self) -> usize {
@@ -133,7 +150,7 @@ impl Servers {
 
     pub(super) fn recheck_busy(&mut self) {
         for slot in self.slots.values_mut() {
-            if slot.terminals == TerminalCheck::Busy {
+            if slot.terminals == TerminalCheck::KeepAlive {
                 slot.terminals = TerminalCheck::NotAsked;
             }
         }
@@ -142,7 +159,7 @@ impl Servers {
     pub(super) fn recheck_busy_unused(&mut self, now: Instant) {
         for (key, slot) in &mut self.slots {
             let unused_for = now.duration_since(slot.last_used);
-            if slot.terminals == TerminalCheck::Busy && unused_for >= key.idle_close() {
+            if slot.terminals == TerminalCheck::KeepAlive && unused_for >= key.idle_close() {
                 slot.terminals = TerminalCheck::NotAsked;
             }
         }

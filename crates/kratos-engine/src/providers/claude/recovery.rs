@@ -171,7 +171,7 @@ impl Actor {
         for waiter in std::mem::take(&mut thread.stop_waiters) {
             let _ = waiter.send(Ok(()));
         }
-        let run = thread.run.take();
+        let run = thread.run.take().map(|turn| turn.id().clone());
         let sent = std::mem::take(&mut thread.pending);
         if sent.is_empty() && run.is_none() {
             return;

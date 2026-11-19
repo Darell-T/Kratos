@@ -38,7 +38,7 @@ pub(super) fn initialize(report_format: Option<ReportFormat>) -> Initialize {
 
 /// Asking here routes CLI allow rules through Kratos. In plan mode the CLI decides direct edits in its plans directory.
 fn pre_tool(hook: &HookCallback, plans: Option<&Path>) -> Value {
-    if plans.is_some_and(|plans| writes_plan_file(hook, plans)) {
+    if plans.is_some_and(|plans| edits_in_plan_directory(hook, plans)) {
         return json!({ "continue": true });
     }
     json!({
@@ -51,7 +51,7 @@ fn pre_tool(hook: &HookCallback, plans: Option<&Path>) -> Value {
     })
 }
 
-fn writes_plan_file(hook: &HookCallback, plans: &Path) -> bool {
+fn edits_in_plan_directory(hook: &HookCallback, plans: &Path) -> bool {
     let Some(name) = hook.input["tool_name"].as_str() else {
         return false;
     };

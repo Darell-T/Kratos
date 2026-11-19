@@ -249,6 +249,15 @@ pub enum RequestError {
     Unreadable { method: String, error: String },
 }
 
+impl RequestError {
+    /// Codex 0.159.1's response when the requested thread has no stored rollout.
+    pub fn is_missing_rollout(&self) -> bool {
+        matches!(self, Self::Rpc { code: crate::INVALID_REQUEST, message }
+            if message.strip_prefix("no rollout found for thread id ").is_some_and(|id|
+                !id.is_empty() && !id.contains(char::is_whitespace)))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     #[error(
@@ -434,6 +443,15 @@ impl Codex {
     /// whole process tree. Returns once no process of the tree runs, even while the consumer has
     /// not read the server's last messages; calling it again only waits.
     pub async fn close(&self) {
+        self.close_within(self.shared.close_timeout).await;
+    }
+
+    /// Ends the process tree immediately after the caller's graceful stop deadline expires.
+    pub async fn terminate(&self) {
+        self.close_within(Duration::ZERO).await;
+    }
+
+    async fn close_within(&self, timeout: Duration) {
         let close = self
             .close
             .lock()
@@ -441,7 +459,7 @@ impl Codex {
             .take();
         if let Some(close) = close {
             let _ = self.shared.writer.send(Write::Close);
-            let _ = close.send(self.shared.close_timeout);
+            let _ = close.send(timeout);
         }
         let mut tree_ended = self.shared.tree_ended.clone();
         let _ = tree_ended.wait_for(|ended| *ended).await;

@@ -248,7 +248,7 @@ fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMiss
             config.codex_home.clone(),
             config.user_home.clone(),
         ),
-        stop_timeout: STOP_TIMEOUT,
+        stop_timeout: Duration::from_secs(4),
         request_timeout: REQUEST_TIMEOUT,
         platform: DangerousCommandPlatform::host(),
         mcp: Some(McpServer {

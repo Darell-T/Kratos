@@ -38,15 +38,9 @@ pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchRepo
     for thread in &threads {
         socket.subscribe(&thread.id, Seq::BEFORE_FIRST)?;
     }
-    let mut dispatch = Vec::with_capacity(THREADS + TURNS);
-    let mut completion = Vec::with_capacity(THREADS + TURNS);
-    let mut fakes = Vec::with_capacity(THREADS);
-    for (number, thread) in threads.iter().enumerate() {
-        let (fake, sent, completed) = warm_up(client, control_file, thread, number, &mut socket)?;
-        fakes.push(fake);
-        dispatch.push(sent);
-        completion.push(completed);
-    }
+    let mut fakes = warm_sessions(client, control_file, &threads, &mut socket)?;
+    let mut dispatch = Vec::with_capacity(TURNS);
+    let mut completion = Vec::with_capacity(TURNS);
     for number in THREADS..THREADS + TURNS {
         let thread = &threads[number % THREADS];
         let (control, observer) = &mut fakes[number % THREADS];
@@ -58,10 +52,35 @@ pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchRepo
     Ok(TurnBenchReport {
         threads: THREADS,
         warmup_turns: THREADS,
-        dispatch: BenchReport::from_latencies(dispatch.split_off(THREADS)),
-        completion: BenchReport::from_latencies(completion.split_off(THREADS)),
+        dispatch: BenchReport::from_latencies(dispatch),
+        completion: BenchReport::from_latencies(completion),
         measurement: "Upper bounds: client POST to fake turn/start receipt; completion injection to client event. Includes localhost transport; excludes model time and eight warmup turns.",
     })
+}
+
+fn warm_sessions(
+    client: &Client,
+    control_file: &Path,
+    threads: &[Thread],
+    socket: &mut EventSocket,
+) -> Result<Vec<(Control, Observer)>, BenchError> {
+    let mut fakes = Vec::with_capacity(threads.len());
+    for (number, thread) in threads.iter().enumerate() {
+        fakes.push(warm_up(client, control_file, thread, number, socket)?);
+    }
+    for (control, _) in &mut fakes {
+        control
+            .call(ControlRequest {
+                method: "test/echo",
+                params: json!({}),
+            })
+            .map_err(|error| {
+                BenchError::Failed(format!(
+                    "a warmed Codex process exited before measurement: {error}"
+                ))
+            })?;
+    }
+    Ok(fakes)
 }
 
 fn create_threads(client: &Client) -> Result<Vec<Thread>, BenchError> {
@@ -86,10 +105,9 @@ fn warm_up(
     thread: &Thread,
     number: usize,
     socket: &mut EventSocket,
-) -> Result<((Control, Observer), Duration, Duration), BenchError> {
+) -> Result<(Control, Observer), BenchError> {
     let known = codex_control::every_port(control_file);
     let message_id = format!("bench-{number}");
-    let posted_at = Instant::now();
     client
         .post(
             &routes::thread_messages(&thread.id),
@@ -97,7 +115,6 @@ fn warm_up(
         )?
         .parse::<Value>()?;
     let (mut fake, request) = started_fake(control_file, &known, &message_id)?;
-    let received_at = Instant::now();
     let native_id = started_thread(&request, &message_id)?.to_owned();
     let turn_id = format!("bench-turn-{number}");
     fake.call(codex_control::settle_start(
@@ -105,15 +122,10 @@ fn warm_up(
         "inProgress",
         Some(&native_id),
     ))?;
-    let completion_sent = Instant::now();
     fake.call(codex_control::complete(&native_id, &turn_id, "completed"))?;
     await_completion(socket, &thread.id, &turn_id)?;
     let observer = Observer::start(&mut fake)?;
-    Ok((
-        (fake, observer),
-        received_at.duration_since(posted_at),
-        completion_sent.elapsed(),
-    ))
+    Ok((fake, observer))
 }
 
 fn started_fake(

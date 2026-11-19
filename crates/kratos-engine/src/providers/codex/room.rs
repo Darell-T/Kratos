@@ -91,7 +91,7 @@ impl Actor {
             .servers
             .up_by_age()
             .into_iter()
-            .find(|key| self.is_idle(key) && !self.servers.waits(key));
+            .find(|key| self.has_no_engine_work(key) && !self.servers.waits(key));
         let Some(key) = candidate else {
             return false;
         };
@@ -108,26 +108,30 @@ impl Actor {
                 .servers
                 .get(&key)
                 .map_or(Duration::ZERO, |slot| now.duration_since(slot.last_used));
-            if unused_for >= key.idle_close() && self.is_idle(&key) {
+            if unused_for >= key.idle_close() && self.has_no_engine_work(&key) {
                 self.retire_if_quiet(&key);
             }
         }
     }
 
-    fn is_idle(&self, key: &ServerKey) -> bool {
+    fn has_no_engine_work(&self, key: &ServerKey) -> bool {
         let quiet_slot = self
             .servers
             .get(key)
-            .is_some_and(|slot| slot.deferred.is_empty());
+            .is_some_and(|slot| !slot.has_pending_requests());
         let ServerKey::Thread(thread_id) = key else {
             return quiet_slot;
         };
         let thread_idle = self.threads.get(thread_id).is_none_or(|thread| {
-            matches!(thread.turn, Turn::Idle)
+            !matches!(thread.link, super::threads::Link::Attaching)
+                && matches!(thread.turn, Turn::Idle)
                 && thread.steering.is_empty()
                 && thread.discards.is_empty()
         });
-        quiet_slot && thread_idle && !self.requests.awaits_user(thread_id)
+        quiet_slot
+            && thread_idle
+            && !self.ready.contains(thread_id)
+            && !self.requests.awaits_user(thread_id)
     }
 
     fn retire_if_quiet(&mut self, key: &ServerKey) {
@@ -170,17 +174,18 @@ impl Actor {
             eprintln!("Codex did not list the background terminals of {key:?}: {error}");
             false
         });
-        if quiet && self.is_idle(&key) {
+        if quiet && self.has_no_engine_work(&key) {
             self.servers.slot(&key).terminals = TerminalCheck::NotAsked;
-            self.stop_server(&key, "nobody used it, and its thread is idle")
-                .await;
+            if let Some(codex) = self.servers.begin_close(&key) {
+                tokio::spawn(async move { codex.close().await });
+            }
             return;
         }
         let slot = self.servers.slot(&key);
         slot.terminals = if quiet {
             TerminalCheck::NotAsked
         } else {
-            TerminalCheck::Busy
+            TerminalCheck::KeepAlive
         };
         slot.last_used = Instant::now();
         if self.servers.anyone_waits() {

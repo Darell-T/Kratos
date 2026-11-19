@@ -135,8 +135,17 @@ impl ThreadSettings {
         }
     }
 
-    /// The report format a turn under these settings follows. Plan mode has none, since the plan
-    /// is that turn's reply.
+    /// Checks the format before saving new settings or using settings from an older release.
+    ///
+    /// # Errors
+    /// Returns the location of an unsupported schema value.
+    pub fn validate_report_format(&self) -> Result<(), crate::ReportFormatError> {
+        self.report_format
+            .as_ref()
+            .map_or(Ok(()), ReportFormat::validate)
+    }
+
+    /// The requested output schema, except in plan mode where the reply is the plan.
     pub fn turn_report_format(&self) -> Option<&ReportFormat> {
         self.report_format.as_ref().filter(|_| !self.plan_mode)
     }

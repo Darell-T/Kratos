@@ -77,7 +77,7 @@ impl Actor {
             Command::RefreshOpenUsage { reply } => self.refresh_open_usage(reply),
             Command::HoldForUpdate { reply } => self.hold_for_update(reply),
             Command::EndUpdateHold { reply } => {
-                self.updating = false;
+                self.update_hold = super::actor::UpdateHold::Open;
                 let thread_ids: Vec<_> = self.threads.keys().cloned().collect();
                 for thread_id in thread_ids {
                     self.dispatch(&thread_id).await;

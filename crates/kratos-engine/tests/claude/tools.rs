@@ -580,6 +580,10 @@ async fn an_approval_shows_a_large_tool_input_cut_and_says_so() {
     else {
         panic!("a write asks with its input: {:?}", asked.request);
     };
+    assert!(
+        reason.starts_with("Write \"big.txt\"\n"),
+        "missing edit target"
+    );
     assert!(reason.len() < 17 * 1024, "{} bytes", reason.len());
     assert!(reason.contains("more bytes not shown"), "{reason}");
     harness

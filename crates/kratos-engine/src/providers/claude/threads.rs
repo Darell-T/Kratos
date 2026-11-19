@@ -1,7 +1,6 @@
 //! What the actor knows about one Claude thread between store reads: its CLI process, the messages
 //! written to it, and the turn they make.
 
-use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use kratos_claude_client::{Claude, PermissionMode, SessionId};
@@ -72,6 +71,9 @@ impl Waiter {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ReportId(pub uuid::Uuid);
+
 pub(super) struct OpenSession {
     pub claude: Claude,
     pub config: SessionConfig,
@@ -86,24 +88,39 @@ pub(super) struct OpenSession {
     pub last_active: Instant,
     pub background_tasks: usize,
     pub finished_tasks: Vec<String>,
-    pub tasks_ended: u64,
-    pub report_owed: Option<NonZeroU64>,
+    pub awaited_report: Option<ReportId>,
 }
 
 impl OpenSession {
-    pub(super) fn note(&mut self, background: kratos_claude_client::Background) {
+    pub(super) fn message_wait_reason(&self, wanted: &SessionConfig) -> Option<&'static str> {
+        if self.awaited_report.is_some() {
+            return Some(
+                "Claude is finishing a background command report. This message will start afterward.",
+            );
+        }
+        (self.background_tasks > 0 && &self.config != wanted).then_some(super::background::WAITING)
+    }
+
+    pub(super) fn note(
+        &mut self,
+        background: kratos_claude_client::Background,
+    ) -> Option<ReportId> {
         match background {
-            kratos_claude_client::Background::Running(running) => self.background_tasks = running,
+            kratos_claude_client::Background::Running(running) => {
+                self.background_tasks = running;
+                None
+            }
             kratos_claude_client::Background::Ended { summary } => {
                 self.finished_tasks.extend(summary);
-                self.tasks_ended += 1;
-                self.report_owed = NonZeroU64::new(self.tasks_ended);
+                let id = ReportId(uuid::Uuid::new_v4());
+                self.awaited_report = Some(id);
+                Some(id)
             }
         }
     }
 
     pub(super) fn holds_background_work(&self) -> bool {
-        self.background_tasks > 0 || self.report_owed.is_some()
+        self.background_tasks > 0 || self.awaited_report.is_some()
     }
 }
 
@@ -189,6 +206,19 @@ impl Restarts {
     }
 }
 
+pub(super) enum ActiveTurn {
+    Messages(TurnId),
+    Background(TurnId),
+}
+
+impl ActiveTurn {
+    pub fn id(&self) -> &TurnId {
+        match self {
+            Self::Messages(id) | Self::Background(id) => id,
+        }
+    }
+}
+
 pub(super) struct ThreadState {
     pub turn_settings: Option<ThreadSettings>,
     pub changes: crate::providers::changes::ChangesRecorder,
@@ -205,7 +235,7 @@ pub(super) struct ThreadState {
     pub pending: Vec<InFlight>,
     /// The turn the log shows running. It ends at a result, and messages still in flight after it
     /// start the next turn when Claude takes them.
-    pub run: Option<TurnId>,
+    pub run: Option<ActiveTurn>,
     pub stopping: bool,
     /// Stops asked for, answered when Claude acknowledges the interrupt or the stopped turn ends.
     pub stop_waiters: Vec<Reply<()>>,
@@ -261,7 +291,26 @@ impl ThreadState {
     }
 
     pub(super) fn runs_own_turn(&self) -> bool {
-        self.run.is_some() && self.pending.is_empty()
+        matches!(self.run, Some(ActiveTurn::Background(_)))
+    }
+
+    pub(super) fn awaits_background_turn(&self) -> bool {
+        self.run.is_none()
+            && self
+                .open()
+                .is_some_and(|open| open.awaited_report.is_some())
+    }
+
+    pub(super) fn messages_named(&self, ids: &[String]) -> Vec<MessageId> {
+        self.pending
+            .iter()
+            .filter(|flight| ids.contains(&flight.native))
+            .map(|flight| flight.message_id.clone())
+            .collect()
+    }
+
+    pub fn running_id(&self) -> Option<&TurnId> {
+        self.run.as_ref().map(ActiveTurn::id)
     }
 
     pub(super) fn is_busy_or_stopping(&self) -> bool {

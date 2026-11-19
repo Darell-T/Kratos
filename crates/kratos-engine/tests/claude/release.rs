@@ -78,6 +78,34 @@ async fn an_update_installs_the_newest_release_and_the_next_message_resumes_on_i
 }
 
 #[tokio::test]
+async fn update_waits_for_a_session_already_retiring_after_a_model_change() {
+    let mut harness = Harness::start(Options {
+        exit_delay: Duration::from_millis(800),
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    harness.finish(&launch, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    harness
+        .provider
+        .set_settings(
+            harness.thread_id.clone(),
+            kratos_protocol::ThreadSettings {
+                model: Some(kratos_protocol::RequiredText::new("changed").unwrap()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    harness.provider.update_cli().await.unwrap();
+    assert!(!harness.is_running(&launch));
+}
+
+#[tokio::test]
 async fn a_failed_update_says_why_leaves_the_release_and_lets_the_thread_go_on() {
     // Catches an updater's failure reported as success or without its reason, and a hold on new
     // sessions that outlives an update that never happened.

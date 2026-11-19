@@ -1094,14 +1094,29 @@ fn a_thread_below_full_access_stops_and_answers_threads_only_in_its_own_workspac
         details.body["questions"][0]["id"], question,
         "the question still waits on the user"
     );
-    let stop = engine
-        .client()
-        .post(&format!("{path}/stop"), &json!({}))
-        .unwrap();
-    assert_eq!(stop.status, 200, "{}", stop.body);
+    let client = engine.client();
+    let stop_path = format!("{path}/stop");
+    let stop = std::thread::spawn(move || client.post(&stop_path, &json!({})).unwrap());
     assert_eq!(
         engine.fake_codex_held("turn/interrupt", 1).len(),
         1,
-        "only the user's stop reached Codex"
+        "only the user requested Stop"
     );
+    engine.fake_codex_request(codex_control::settle("turn/interrupt", json!({}), None));
+    let response = stop.join().unwrap();
+    assert_eq!(response.status, 200, "{}", response.body);
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "interrupted"));
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let details = engine.client().get(&path).unwrap();
+        if details.body["runningTurn"].is_null() {
+            assert_eq!(details.body["questions"], json!([]));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the interrupted turn did not close"
+        );
+        std::thread::yield_now();
+    }
 }

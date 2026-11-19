@@ -226,13 +226,19 @@ async fn a_discard_sent_while_codex_loads_the_thread_settles_once_it_has() {
 }
 
 #[tokio::test]
-async fn a_discard_settles_the_message_as_cancelled_when_codex_cannot_load_the_thread() {
+async fn discard_distinguishes_a_missing_history_from_a_temporary_refusal() {
+    for option in ["--fail-resume", "--closing-on-resume"] {
+        check_discard_refusal(option).await;
+    }
+}
+
+async fn check_discard_refusal(option: &str) {
     let mut harness = Harness::start(Options::default()).await;
     harness.send("a", "first").await;
     harness.held("turn/start", 1).await;
     let (root, thread_id) = harness.stop().await;
     let options = Options {
-        fake_args: vec!["--fail-resume".into()],
+        fake_args: vec![option.into()],
         ..Options::default()
     };
 
@@ -245,6 +251,15 @@ async fn a_discard_settles_the_message_as_cancelled_when_codex_cannot_load_the_t
     )
     .await;
 
+    if option == "--closing-on-resume" {
+        assert!(discarded.expect("the request finishes").is_err());
+        assert!(matches!(
+            harness.message("a").await.status,
+            MessageStatus::Unknown { .. }
+        ));
+        assert!(harness.turn_requests().await.is_empty());
+        return;
+    }
     let discarded = discarded.expect("the discard settles").unwrap();
     assert_eq!(discarded.status, MessageStatus::Cancelled);
     assert_eq!(harness.message("a").await.status, MessageStatus::Cancelled);
