@@ -4,3 +4,6 @@ target/
 *.tsbuildinfo
 .env
 .env.*
+
+# Local project notes
+/docs/r3-verification.md

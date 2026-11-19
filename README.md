@@ -114,7 +114,7 @@ data folder.
 Codex 0.159.1 is the tested protocol release. On Windows, the engine checks elevated sandbox readiness before
 opening a Codex thread and requests setup when necessary. Setup failure leaves queued work unsent and reports why.
 Ask me and Approve for me write only the thread's workspace and temporary folders. Full access runs commands without
-a sandbox and still asks before dangerous ones. [R3 verification](docs/r3-verification.md) lists each mode's scope.
+a sandbox and still asks before dangerous ones.
 
 ```sh
 cargo run -p kratos-client -- send <thread-id> "Explain this repository"
