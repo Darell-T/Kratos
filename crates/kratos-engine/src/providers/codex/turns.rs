@@ -210,6 +210,7 @@ impl Actor {
             }
             Err(error) => {
                 self.check_delivery(&thread_id, &message_id, Delivery::Start, error.to_string());
+                return;
             }
         }
         self.start_ready().await;
@@ -380,13 +381,16 @@ impl Actor {
         found: Option<Box<types::Turn>>,
     ) {
         match delivery {
-            Delivery::Start => match found {
-                Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
-                None => {
-                    self.end_start(&thread_id, Ok(()));
-                    self.record_uncertain(&thread_id, message_id, error).await;
+            Delivery::Start => {
+                match found {
+                    Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
+                    None => {
+                        self.end_start(&thread_id, Ok(()));
+                        self.record_uncertain(&thread_id, message_id, error).await;
+                    }
                 }
-            },
+                self.start_ready().await;
+            }
             Delivery::Steer => {
                 if let Some(thread) = self.threads.get_mut(&thread_id) {
                     thread.steering.remove(&message_id);

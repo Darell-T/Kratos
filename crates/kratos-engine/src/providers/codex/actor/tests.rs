@@ -16,6 +16,7 @@ use crate::providers::queue;
 use crate::store_thread;
 
 const WAIT: Duration = Duration::from_secs(20);
+const WAITING: &str = "waiting";
 
 struct Harness {
     actor: Actor,
@@ -161,6 +162,14 @@ impl Harness {
             .unwrap()
     }
 
+    async fn waiting_status(&self, thread_id: &ThreadId) -> MessageStatus {
+        self.actor
+            .message(thread_id, &MessageId::new(WAITING.into()))
+            .await
+            .unwrap()
+            .status
+    }
+
     async fn starts_held(&self) -> usize {
         let mut held = 0;
         for key in self.actor.servers.keys() {
@@ -259,10 +268,9 @@ async fn resume_and_continuation_name_the_action_for_the_blocking_message() {
     }
 }
 
-#[tokio::test]
-async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
-    // Catches exit-time pauses stranding work that lost neither a start nor a running turn.
-    let mut harness = Harness::start().await;
+/// Holds a start for each of [`MAX_STARTING`] threads and queues one more thread behind them.
+/// Returns the queued thread, whose message is [`WAITING`].
+async fn fill_start_slots(harness: &mut Harness) -> ThreadId {
     let mut threads = vec![harness.thread_id.clone()];
     let more = harness
         .actor
@@ -280,7 +288,7 @@ async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
         })
         .await;
     threads.extend(more);
-    let message_id = MessageId::new("waiting".into());
+    let message_id = MessageId::new(WAITING.into());
     for thread_id in &threads {
         harness.send(thread_id, &message_id).await;
         let attached = harness.attached_reply_for(thread_id).await;
@@ -292,63 +300,78 @@ async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
     })
     .await
     .unwrap();
-    let waiting_thread = threads.last().unwrap().clone();
+    let waiting_thread = threads.pop().unwrap();
     assert_eq!(
-        harness
-            .actor
-            .message(&waiting_thread, &message_id)
-            .await
-            .unwrap()
-            .status,
+        harness.waiting_status(&waiting_thread).await,
         MessageStatus::Queued
     );
+    waiting_thread
+}
+
+#[tokio::test]
+async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
+    let mut harness = Harness::start().await;
+    let waiting_thread = fill_start_slots(&mut harness).await;
     let key = harness.key();
     harness.actor.servers.slot(&key).restarts.settled_start();
 
     harness.exit().await;
 
-    let started = tokio::time::timeout(WAIT, async {
+    assert_eq!(
+        harness.waiting_status(&waiting_thread).await,
+        MessageStatus::Submitting,
+        "the exit must wake the next start without another server reply"
+    );
+    let waiting = ServerKey::Thread(waiting_thread);
+    tokio::time::timeout(WAIT, async {
         loop {
-            if harness
-                .actor
-                .message(&waiting_thread, &message_id)
-                .await
+            let held = harness
+                .control_on(&waiting, "test/turnRequests", json!({}))
+                .await;
+            if held
+                .as_array()
                 .unwrap()
-                .status
-                == MessageStatus::Submitting
+                .iter()
+                .any(|r| r["method"] == "turn/start")
             {
                 break;
             }
-            let done = harness.completion(|_| true).await;
-            done.apply(&mut harness.actor).await;
         }
     })
-    .await;
-    if started.is_ok() {
-        let waiting = ServerKey::Thread(waiting_thread.clone());
-        tokio::time::timeout(WAIT, async {
-            loop {
-                let held = harness
-                    .control_on(&waiting, "test/turnRequests", json!({}))
-                    .await;
-                if held
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|request| request["method"] == "turn/start")
-                {
-                    return;
-                }
-            }
-        })
-        .await
-        .expect("the waiting thread's own Codex holds its start");
-    }
+    .await
+    .expect("the waiting thread's own Codex receives its start");
     harness.close().await;
-    assert!(
-        started.is_ok(),
-        "the extra queued thread never started once a start slot freed"
+}
+
+#[tokio::test]
+async fn a_lost_start_answer_frees_its_slot_once_history_settles_it() {
+    let mut harness = Harness::start().await;
+    let waiting_thread = fill_start_slots(&mut harness).await;
+    let lost = RequestError::Timeout {
+        method: "turn/start".into(),
+        after: WAIT,
+    };
+
+    harness
+        .actor
+        .on_start_answered(harness.thread_id.clone(), Err(lost))
+        .await;
+    assert_eq!(
+        harness.waiting_status(&waiting_thread).await,
+        MessageStatus::Queued,
+        "the slot stays taken until history says whether Codex took the message"
     );
+    let checked = harness
+        .completion(|done| matches!(done, Done::DeliveryChecked { .. }))
+        .await;
+    checked.apply(&mut harness.actor).await;
+
+    assert_eq!(
+        harness.waiting_status(&waiting_thread).await,
+        MessageStatus::Submitting,
+        "settling the lost start must wake the next start"
+    );
+    harness.close().await;
 }
 
 #[tokio::test]

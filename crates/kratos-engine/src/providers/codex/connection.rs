@@ -441,9 +441,12 @@ impl Actor {
         thread.link = Link::Detached;
         fail_discards(thread, &format!("Codex could not load the thread: {error}"));
         let mut sending = std::mem::take(&mut thread.steering);
-        if let Turn::Starting { message_id, .. } = &thread.turn {
+        let freed_start_slot = if let Turn::Starting { message_id, .. } = &thread.turn {
             sending.insert(message_id.clone());
-        }
+            true
+        } else {
+            false
+        };
         let mut unfinished = Unfinished {
             sending: sending.into_iter().collect(),
             requests: self.requests.close(thread_id, |_| true),
@@ -465,6 +468,9 @@ impl Actor {
                 recovery::settle(write, unfinished, reason)
             })
             .await;
+        if freed_start_slot {
+            self.start_ready().await;
+        }
     }
 
     pub(super) async fn on_exit(&mut self, key: ServerKey, exit: Exit) {
