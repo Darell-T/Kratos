@@ -71,6 +71,11 @@ pub(super) enum Command {
         thread_id: ThreadId,
         reply: Reply<AccessLimit>,
     },
+    /// Whether the thread still runs a background command, which outlives its turns.
+    RunsBackgroundWork {
+        thread_id: ThreadId,
+        reply: Reply<bool>,
+    },
     /// Ends the thread's process and answers once it exited. Sent for an archived thread only.
     Close {
         thread_id: ThreadId,

@@ -117,6 +117,9 @@ impl Actor {
                 let _ = reply.send(continued);
                 self.dispatch(&thread_id).await;
             }
+            Command::RunsBackgroundWork { thread_id, reply } => {
+                self.runs_background_work(&thread_id, reply);
+            }
             Command::Close { thread_id, reply } => self.close_archived(&thread_id, reply),
             Command::Shutdown { reply } => drop(reply.send(())),
         }

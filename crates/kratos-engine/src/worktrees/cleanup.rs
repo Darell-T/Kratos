@@ -4,7 +4,7 @@
 use std::io;
 use std::path::Path;
 
-use kratos_protocol::{Cleanup, LeftFiles, Worktree};
+use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place};
 use kratos_store::{Removal, RemovalEnd, StoreError};
 
 use super::git::{self, CHECKOUT};
@@ -12,15 +12,22 @@ use super::{PlaceError, Worktrees};
 use crate::store_thread::StoreThread;
 
 impl Worktrees {
-    /// Removes `worktree`, which Kratos made, unless a thread that is not archived still works in
-    /// it. A removal git refuses stays marked as begun, so no thread joins the worktree until a
-    /// later call removes it.
+    /// Removes the worktree at `place` when Kratos made it and no thread that is not archived
+    /// still works in it. The project folder and borrowed worktrees are never removed. A removal
+    /// git refuses stays marked as begun, so no thread joins the worktree until a later call
+    /// removes it.
     pub(crate) async fn clean_up(
         &self,
         store: &StoreThread,
-        worktree: &Worktree,
+        place: &Place,
         files: LeftFiles,
     ) -> Result<Cleanup, StoreError> {
+        let worktree = match place {
+            Place::Worktree(worktree) if worktree.ownership == Ownership::CreatedByKratos => {
+                worktree
+            }
+            Place::Worktree(_) | Place::ProjectFolder => return Ok(Cleanup::NotOwned),
+        };
         let id = worktree.id.clone();
         let repository = match store.call(move |store| store.begin_removal(&id)).await? {
             Removal::InUse => return Ok(Cleanup::InUse),

@@ -9,8 +9,8 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, AccessLimit, ArchiveThread, ArchivedThread, Cleanup, CreateThread,
-    ListEvents, ListThreads, Ownership, Place, Seq, ThreadId,
+    ACTING_THREAD_HEADER, AccessLimit, ArchiveThread, ArchivedThread, CreateThread, ListEvents,
+    ListThreads, Seq, ThreadId,
 };
 use kratos_store::NewPlace;
 
@@ -86,8 +86,9 @@ async fn prepare_place(
 }
 
 /// `POST /api/threads/{id}/archive`: 200 with what happened to the thread's folder, once the
-/// thread is archived and its process has exited. 409 while a turn runs or anything waits in the
-/// thread. Archiving an archived thread tries its worktree's removal again.
+/// thread is archived and its process has exited. 409 while the thread runs anything, a turn or a
+/// background command, or anything waits in it. Archiving an archived thread tries its
+/// worktree's removal again.
 pub(super) async fn archive_thread(
     State(state): State<ServerState>,
     id: ThreadPath,
@@ -95,24 +96,30 @@ pub(super) async fn archive_thread(
 ) -> Result<Response, ApiError> {
     let thread_id = path(id)?;
     let ArchiveThread { files } = read_json(body).await?;
+    let lookup = thread_id.clone();
+    let stored = state
+        .store
+        .call(move |store| store.provider_thread(&lookup))
+        .await?;
+    // A provider that cannot run has no process, so nothing of the thread's runs. Nor does an
+    // archived thread's, whose process was ended.
+    let agent = state.providers.agent(stored.thread.provider).ok();
+    if let Some(agent) = &agent {
+        agent.refuse_while_running(thread_id.clone()).await?;
+    }
+    // A background command starts only in a turn, which this write refuses.
     let thread = state
         .hub
         .write(thread_id.clone(), |write| write.archive())
         .await?
         .value;
-    // A provider that cannot run has no process to end.
-    if let Ok(agent) = state.providers.agent(thread.thread.provider) {
+    if let Some(agent) = &agent {
         agent.close_archived(thread_id).await?;
     }
-    let cleanup = match &thread.place {
-        Place::Worktree(worktree) if worktree.ownership == Ownership::CreatedByKratos => {
-            state
-                .worktrees
-                .clean_up(&state.store, worktree, files)
-                .await?
-        }
-        Place::Worktree(_) | Place::ProjectFolder => Cleanup::NotOwned,
-    };
+    let cleanup = state
+        .worktrees
+        .clean_up(&state.store, &thread.place, files)
+        .await?;
     Ok(json_reply(StatusCode::OK, &ArchivedThread { cleanup }))
 }
 

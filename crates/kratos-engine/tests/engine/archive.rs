@@ -105,6 +105,49 @@ fn archiving_waits_for_the_turn_then_ends_the_threads_process_and_refuses_new_me
 }
 
 #[test]
+fn a_thread_running_a_background_command_cannot_be_archived_until_it_ends() {
+    // Catches an archive that kills a dev server or build the agent left running after its turn,
+    // or removes the worktree it runs in.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "serve", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    post(&client, &thread, "start the dev server");
+    engine.start_turn();
+    wait_for_turn(&client, &thread, true);
+    let terminal = json!({
+        "command": "npm run dev",
+        "cwd": path,
+        "itemId": "item-1",
+        "processId": "process-1",
+    });
+    engine.fake_codex(
+        "test/backgroundTerminals",
+        json!({ "terminals": [terminal] }),
+    );
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+    wait_for_turn(&client, &thread, false);
+
+    let refused = client
+        .post(
+            &routes::thread_archive(&thread.id),
+            &ArchiveThread::default(),
+        )
+        .unwrap();
+
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    let message = refused.body["error"].as_str().unwrap();
+    assert!(message.contains("background command"), "{message}");
+    assert!(details(&client, &thread).archived_at.is_none());
+    assert!(Path::new(&path).exists());
+    engine.fake_codex("test/backgroundTerminals", json!({ "terminals": [] }));
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+}
+
+#[test]
 fn an_unused_clean_worktree_is_removed_and_its_branch_kept() {
     // Catches a worktree left behind once its only thread is archived, or a removal that deletes
     // the branch and the commits on it.

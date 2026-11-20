@@ -100,6 +100,40 @@ impl Actor {
         true
     }
 
+    /// Asks the thread's server whether a background terminal still runs. A thread with no
+    /// server up runs none, since closing a server ends its terminals.
+    pub(super) fn runs_background_work(&mut self, thread_id: &ThreadId, reply: Reply<bool>) {
+        let key = ServerKey::Thread(thread_id.clone());
+        let native_id = self
+            .threads
+            .get(thread_id)
+            .and_then(|thread| thread.native_id().map(str::to_owned));
+        let (Some(codex), Some(native_id)) = (self.servers.codex(&key), native_id) else {
+            let _ = reply.send(Ok(false));
+            return;
+        };
+        let pending_request = self.servers.request_guard(&key);
+        tokio::spawn(async move {
+            let _guard = pending_request;
+            let params = types::ThreadBackgroundTerminalsListParams {
+                thread_id: native_id,
+                cursor: None,
+                limit: None,
+            };
+            let listed = codex
+                .request::<methods::ThreadBackgroundTerminalsList>(&params)
+                .await
+                .map(|listed| !listed.data.is_empty())
+                .map_err(|error| {
+                    ProviderError::Unavailable(format!(
+                        "Codex did not say whether the thread still runs a background command: \
+                         {error}"
+                    ))
+                });
+            let _ = reply.send(listed);
+        });
+    }
+
     /// Ends an archived thread's server and answers once its processes exited, so none holds the
     /// thread's folder. Nothing starts it again: the store refuses an archived thread's messages.
     pub(super) fn close_archived(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
