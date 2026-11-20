@@ -88,10 +88,11 @@ fn turn(id: &str, status: &str) -> Value {
 }
 
 /// Writes `port` to `control_file` whole and renamed into place, so a reader that sees the file
-/// reads the whole port.
+/// reads the whole port. The temporary file carries the process id, so fakes started together
+/// never rename each other's.
 pub fn write_port(control_file: &Path, port: u16) -> io::Result<()> {
     let mut partial = control_file.as_os_str().to_owned();
-    partial.push(".partial");
+    partial.push(format!(".{}.partial", std::process::id()));
     std::fs::write(&partial, port.to_string())?;
     std::fs::rename(&partial, control_file)
 }
