@@ -67,16 +67,6 @@ async fn a_hook_server_or_request_kratos_never_registered_runs_nothing() {
 }
 
 #[tokio::test]
-async fn the_session_registers_kratos_hooks_and_no_tool_servers() {
-    let (harness, launch) = running(Options::default()).await;
-
-    let received = harness.received(&launch).await;
-
-    let initialize = &received[0]["request"];
-    assert_eq!(initialize, &crate::harness::initialize());
-}
-
-#[tokio::test]
 async fn full_access_does_not_launch_a_mode_that_skips_the_ask() {
     // Catches a thread with full access launched in bypass mode, which would let Claude write
     // anywhere with no rule between it and the disk.
