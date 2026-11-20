@@ -7,12 +7,14 @@
 //!
 //! Flags: `--hang-initialize` never answers `initialize`; `--bad-initialize` answers it with `{}`;
 //! `--fail-resume` answers every `thread/resume` with an error; `--sleep` makes the process sleep
-//! for an hour, for `test/spawnChild`; `--control-file <path>` also takes `test/*` requests on a
-//! localhost TCP port, written to `<path>`, for a test whose client under test owns stdio;
-//! `--state-file <path>` starts with the `threads` and `rateLimits` of the JSON object in `<path>`,
-//! as a Codex restarted on an existing history does. The variables `FAKE_CODEX_CONTROL_FILE` and
-//! `FAKE_CODEX_STATE_FILE` stand in for the two flags when the fake is started by an engine, which
-//! passes its own variables on but not its own flags.
+//! for an hour, for `test/spawnChild`; `--exit-delay-ms <n>` waits `n` milliseconds after its
+//! input closes before it exits, as a Codex that cleans up does; `--control-file <path>` also
+//! takes `test/*` requests on a localhost TCP port, written to `<path>`, for a test whose client
+//! under test owns stdio; `--state-file <path>` starts with the `threads` and `rateLimits` of the
+//! JSON object in `<path>`, as a Codex restarted on an existing history does. The variables
+//! `FAKE_CODEX_EXIT_DELAY_MS`, `FAKE_CODEX_CONTROL_FILE`, and `FAKE_CODEX_STATE_FILE` stand in for
+//! those three flags when the fake is started by an engine, which passes its own variables on but
+//! not its own flags.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -53,9 +55,11 @@ fn main() {
     if let Some(path) = flag_or_variable(&arguments, "--control-file", "FAKE_CODEX_CONTROL_FILE") {
         serve_control(fake.clone(), &path);
     }
+    let exit_delay = flag_or_variable(&arguments, "--exit-delay-ms", "FAKE_CODEX_EXIT_DELAY_MS")
+        .map(|millis| Duration::from_millis(millis.parse().expect("the exit delay is a number")));
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
-        let Ok(line) = line else { return };
+        let Ok(line) = line else { break };
         let message: Value = serde_json::from_str(&line).expect("the client sends JSON lines");
         let out = lock(&fake).receive(message);
         for out in out {
@@ -63,6 +67,9 @@ fn main() {
                 Out::Client(message) | Out::Caller(message) => send(&message),
             }
         }
+    }
+    if let Some(delay) = exit_delay {
+        std::thread::sleep(delay);
     }
 }
 

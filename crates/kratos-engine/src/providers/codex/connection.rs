@@ -491,13 +491,16 @@ impl Actor {
     }
 
     pub(super) async fn close_all(&mut self) {
-        for key in self.servers.keys() {
-            if let Some(Server::Up(codex) | Server::Closing(codex)) =
-                self.servers.get(&key).map(|slot| &slot.server)
-            {
-                codex.close().await;
+        let closes = self.servers.keys().into_iter().filter_map(|key| {
+            match &self.servers.get(&key)?.server {
+                Server::Up(codex) | Server::Closing(codex) => {
+                    let codex = codex.clone();
+                    Some(async move { codex.close().await })
+                }
+                Server::Down | Server::Starting => None,
             }
-        }
+        });
+        futures_util::future::join_all(closes).await;
     }
 
     /// The thread's state, read from the store the first time the actor sees the thread.

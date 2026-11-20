@@ -1,7 +1,7 @@
-//! Steering a running turn, stopping one before Codex named it, settling a refused message, and
-//! starting turns in many threads at once.
+//! Steering a running turn, stopping one before Codex named it, settling a refused message,
+//! starting turns in many threads at once, and closing their app-servers together.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
@@ -229,11 +229,41 @@ async fn removing_a_refused_message_lets_the_next_one_run() {
 #[tokio::test]
 async fn threads_start_their_turns_without_waiting_on_each_other() {
     let mut harness = Harness::start(Options::default()).await;
+    start_turns_in_threads(&mut harness, 8).await;
+}
+
+#[tokio::test]
+async fn shutdown_waits_for_slow_app_servers_together_not_one_after_another() {
+    let exit_delay = Duration::from_millis(1500);
+    let mut harness = Harness::start(Options {
+        fake_args: vec![
+            "--exit-delay-ms".into(),
+            exit_delay.as_millis().to_string().into(),
+        ],
+        ..Options::default()
+    })
+    .await;
+    start_turns_in_threads(&mut harness, 4).await;
+
+    let started = Instant::now();
+    harness.provider.shutdown().await;
+    let took = started.elapsed();
+
+    assert!(
+        took >= exit_delay,
+        "shutdown returned before Codex exited: {took:?}"
+    );
+    assert!(
+        took < exit_delay * 2,
+        "four app-servers took {took:?} to close, so they closed one after another"
+    );
+}
+
+async fn start_turns_in_threads(harness: &mut Harness, count: usize) {
     let mut threads = vec![harness.thread_id.clone()];
-    for n in 2..=8 {
+    for n in 2..=count {
         threads.push(harness.another_thread(&format!("project-{n}")).await);
     }
-
     for (n, thread_id) in threads.iter().enumerate() {
         harness
             .provider
@@ -246,8 +276,7 @@ async fn threads_start_their_turns_without_waiting_on_each_other() {
             .await
             .unwrap();
     }
-
-    harness.held("turn/start", threads.len()).await;
+    harness.held("turn/start", count).await;
 }
 
 #[tokio::test]
