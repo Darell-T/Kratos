@@ -6,8 +6,8 @@ use std::time::Duration;
 use kratos_api_client::{ApiReply, ClientError};
 use kratos_protocol::{
     AnswerQuestion, ApprovalDecision, ApprovalId, CreateThread, DecideApproval, ErrorBody,
-    MessageInput, Permission, Provider, QuestionId, RequiredText, SendMessage, Seq, ThreadDetails,
-    ThreadEvent, ThreadId, ThreadSettings, WorkspaceId, routes,
+    MessageInput, Permission, PlaceRequest, Provider, QuestionId, RequiredText, SendMessage, Seq,
+    ThreadDetails, ThreadEvent, ThreadId, ThreadSettings, WorkspaceId, routes,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -200,6 +200,7 @@ fn create_thread(call: &Call, arguments: Value) -> Answer {
             title: request.title,
             provider: Provider::Codex,
             settings: Some(settings),
+            place: PlaceRequest::ProjectFolder,
         },
     )
 }

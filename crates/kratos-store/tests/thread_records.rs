@@ -11,7 +11,7 @@ use kratos_protocol::{
     Provider, Question, QuestionId, QuestionOutcome, ReportFormat, RequiredText, Seq,
     ThreadEventBody, ThreadId, ThreadSettings, TurnChanges, TurnId, TurnOutcome, UsageWait,
 };
-use kratos_store::{Enqueued, QueuePlace, Settle, Store, StoreError, restore};
+use kratos_store::{Enqueued, NewPlace, QueuePlace, Settle, Store, StoreError, restore};
 use rusqlite::Connection;
 use serde_json::json;
 use tempfile::TempDir;
@@ -23,7 +23,7 @@ fn home() -> TempDir {
 }
 
 fn store_with_thread(home: &Path) -> (Store, ThreadId) {
-    let store = Store::open(home).unwrap();
+    let mut store = Store::open(home).unwrap();
     let workspace: CreateWorkspace =
         serde_json::from_value(json!({ "name": "repo", "path": "/work/repo" })).unwrap();
     let workspace = store.create_workspace(&workspace).unwrap();
@@ -31,7 +31,9 @@ fn store_with_thread(home: &Path) -> (Store, ThreadId) {
         json!({ "workspaceId": workspace.id, "title": "chat", "provider": "codex" }),
     )
     .unwrap();
-    let thread = store.create_thread(&request).unwrap();
+    let thread = store
+        .create_thread(&request, &NewPlace::ProjectFolder)
+        .unwrap();
     (store, thread.id)
 }
 
@@ -272,7 +274,10 @@ fn an_approval_of_another_thread_is_unknown_to_this_one() {
         json!({ "workspaceId": workspace.id, "title": "other", "provider": "codex" }),
     )
     .unwrap();
-    let other = store.create_thread(&other).unwrap().id;
+    let other = store
+        .create_thread(&other, &NewPlace::ProjectFolder)
+        .unwrap()
+        .id;
     let mut write = store.write_thread(&thread).unwrap();
     write.request_approval(approval("a-1")).unwrap();
     write.commit().unwrap();
@@ -562,6 +567,7 @@ fn a_thread_cannot_send_another_threads_continuation() {
                 json!({ "workspaceId": workspace_id, "title": "other", "provider": "codex" }),
             )
             .unwrap(),
+            &NewPlace::ProjectFolder,
         )
         .unwrap()
         .id;
@@ -626,7 +632,7 @@ fn the_largest_context_limit_is_stored_and_read_back_unchanged() {
     // that reads back changed or not at all. The API refuses this limit for every provider now,
     // so only the store can prove the round trip of the largest legal value.
     let home = home();
-    let store = Store::open(home.path()).unwrap();
+    let mut store = Store::open(home.path()).unwrap();
     let workspace: CreateWorkspace =
         serde_json::from_value(json!({ "name": "repo", "path": "/work/repo" })).unwrap();
     let workspace = store.create_workspace(&workspace).unwrap();
@@ -640,7 +646,9 @@ fn the_largest_context_limit_is_stored_and_read_back_unchanged() {
         ..ThreadSettings::default()
     });
 
-    let created = store.create_thread(&request).unwrap();
+    let created = store
+        .create_thread(&request, &NewPlace::ProjectFolder)
+        .unwrap();
     drop(store);
     let store = Store::open(home.path()).unwrap();
     let read = store.provider_thread(&created.id).unwrap().settings;

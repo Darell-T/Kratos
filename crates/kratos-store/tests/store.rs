@@ -8,20 +8,23 @@ use kratos_protocol::{
     CreateThread, CreateWorkspace, Seq, Thread, ThreadEvent, ThreadEventBody, ThreadId, WorkspaceId,
 };
 use kratos_store::{
-    BackupId, DirectoryError, OpenError, RestoreError, SCHEMA_VERSION, Store, StoreError, restore,
+    BackupId, DirectoryError, NewPlace, OpenError, RestoreError, SCHEMA_VERSION, Store, StoreError,
+    restore,
 };
 use rusqlite::Connection;
 use rusqlite::types::Value;
 use serde_json::json;
 use tempfile::TempDir;
 
-const STEPS: [&str; 6] = [
+const STEPS: [&str; 8] = [
     include_str!("../migrations/0001_workspaces_and_threads.sql"),
     include_str!("../migrations/0002_codex_threads.sql"),
     include_str!("../migrations/0003_claude_threads.sql"),
     include_str!("../migrations/0004_plan_mode.sql"),
     include_str!("../migrations/0005_thread_sandbox_and_usage.sql"),
     include_str!("../migrations/0006_messages_from_threads.sql"),
+    include_str!("../migrations/0007_report_format.sql"),
+    include_str!("../migrations/0008_thread_places.sql"),
 ];
 
 /// The last schema version the TypeScript engine wrote.
@@ -72,12 +75,15 @@ fn append(
     Ok(write.commit()?.pop().expect("the write appended one event"))
 }
 
-fn seed_thread(store: &Store, title: &str) -> Thread {
+fn seed_thread(store: &mut Store, title: &str) -> Thread {
     let workspace = store
         .create_workspace(&workspace_request("repo", "/tmp/repo"))
         .unwrap();
     store
-        .create_thread(&thread_request(&workspace.id, title, "codex"))
+        .create_thread(
+            &thread_request(&workspace.id, title, "codex"),
+            &NewPlace::ProjectFolder,
+        )
         .unwrap()
 }
 
@@ -222,9 +228,9 @@ fn numbers_events_per_thread_from_one() {
     // log.
     let home = home();
     let mut store = Store::open(home.path()).unwrap();
-    let first = seed_thread(&store, "first");
-    let second = seed_thread(&store, "second");
-    let quiet = seed_thread(&store, "quiet");
+    let first = seed_thread(&mut store, "first");
+    let second = seed_thread(&mut store, "second");
+    let quiet = seed_thread(&mut store, "quiet");
 
     let appended = [
         append(&mut store, &first.id, message("a")).unwrap().seq,
@@ -260,7 +266,7 @@ fn keeps_events_across_reopening() {
             store.backup_taken().is_none(),
             "a new database has nothing to back up"
         );
-        let thread = seed_thread(&store, "persisted");
+        let thread = seed_thread(&mut store, "persisted");
         append(&mut store, &thread.id, message("before restart")).unwrap();
         thread
     };
@@ -292,7 +298,7 @@ fn appending_sets_the_thread_updated_at_to_the_event_time() {
     // Catches an append that forgets the thread, which would sort the thread list wrongly.
     let home = home();
     let mut store = Store::open(home.path()).unwrap();
-    let thread = seed_thread(&store, "clock");
+    let thread = seed_thread(&mut store, "clock");
 
     thread::sleep(Duration::from_millis(10));
     let event = append(&mut store, &thread.id, message("tick")).unwrap();
@@ -325,7 +331,7 @@ fn refuses_events_for_an_unknown_thread_without_writing() {
 fn lists_only_a_workspace_own_threads_oldest_first() {
     // Catches a missing WHERE (another workspace's threads leak in) or a descending order.
     let home = home();
-    let store = Store::open(home.path()).unwrap();
+    let mut store = Store::open(home.path()).unwrap();
     let mine = store
         .create_workspace(&workspace_request("mine", "/tmp/mine"))
         .unwrap();
@@ -333,16 +339,28 @@ fn lists_only_a_workspace_own_threads_oldest_first() {
         .create_workspace(&workspace_request("other", "/tmp/other"))
         .unwrap();
     let a = store
-        .create_thread(&thread_request(&mine.id, "a", "claude"))
+        .create_thread(
+            &thread_request(&mine.id, "a", "claude"),
+            &NewPlace::ProjectFolder,
+        )
         .unwrap();
     let b = store
-        .create_thread(&thread_request(&mine.id, "b", "codex"))
+        .create_thread(
+            &thread_request(&mine.id, "b", "codex"),
+            &NewPlace::ProjectFolder,
+        )
         .unwrap();
     let elsewhere = store
-        .create_thread(&thread_request(&other.id, "elsewhere", "codex"))
+        .create_thread(
+            &thread_request(&other.id, "elsewhere", "codex"),
+            &NewPlace::ProjectFolder,
+        )
         .unwrap();
     let c = store
-        .create_thread(&thread_request(&mine.id, "c", "claude"))
+        .create_thread(
+            &thread_request(&mine.id, "c", "claude"),
+            &NewPlace::ProjectFolder,
+        )
         .unwrap();
 
     assert_eq!(store.list_threads(&mine.id).unwrap(), [a, b, c]);
@@ -354,8 +372,8 @@ fn lists_only_a_workspace_own_threads_oldest_first() {
 fn refuses_a_thread_whose_stored_provider_it_does_not_know() {
     // Catches a provider name this build does not know read back as some provider it does.
     let home = home();
-    let store = Store::open(home.path()).unwrap();
-    let thread = seed_thread(&store, "from a later build");
+    let mut store = Store::open(home.path()).unwrap();
+    let thread = seed_thread(&mut store, "from a later build");
     let connection = Connection::open(live_database(home.path())).unwrap();
     connection
         .execute_batch("PRAGMA ignore_check_constraints = ON;")
@@ -380,14 +398,17 @@ fn reports_an_unknown_workspace_when_listing_or_creating_threads() {
     // Catches an empty list where the API must answer 404, and a thread created in a missing
     // workspace.
     let home = home();
-    let store = Store::open(home.path()).unwrap();
+    let mut store = Store::open(home.path()).unwrap();
     let unknown = WorkspaceId::new("nope".into());
 
     let listing = store.list_threads(&unknown).unwrap_err();
     assert!(matches!(&listing, StoreError::UnknownWorkspace(id) if *id == unknown));
     assert_eq!(listing.to_string(), "Unknown workspace nope");
     let creating = store
-        .create_thread(&thread_request(&unknown, "t", "codex"))
+        .create_thread(
+            &thread_request(&unknown, "t", "codex"),
+            &NewPlace::ProjectFolder,
+        )
         .unwrap_err();
     assert!(matches!(&creating, StoreError::UnknownWorkspace(id) if *id == unknown));
     assert!(rows_of(&contents(&live_database(home.path())), "threads").is_empty());
@@ -399,7 +420,7 @@ fn pages_events_by_size_and_always_moves_forward() {
     // budget.
     let home = home();
     let mut store = Store::open(home.path()).unwrap();
-    let thread = seed_thread(&store, "paged");
+    let thread = seed_thread(&mut store, "paged");
     // Each of these events is stored as `{"kind":"user.message","text":"xxxx…"}`: 133 bytes.
     let text = "x".repeat(100);
     for _ in 0..3 {
@@ -554,8 +575,9 @@ fn backs_up_each_older_version_before_migrating_it() {
                 Value::Null,
                 Value::Null,
                 Value::Null,
+                Value::Null,
             ],
-            "a thread from before migration 5 gets the default settings, unpaused and idle, with              no report format"
+            "a thread from before migration 5 gets the default settings, unpaused and idle, with              no report format, in its project folder"
         );
     }
 }

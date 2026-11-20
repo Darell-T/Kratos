@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use fake_agents::codex_control::{self, ControlRequest};
 use kratos_api_client::{Client, EventSocket, Incoming};
 use kratos_protocol::{
-    CLIENT_TOKEN_FILE, CreateThread, CreateWorkspace, Message, Provider, RequiredText, Seq,
-    ServerMessage, Thread, ThreadEvent, ThreadEventBody, ThreadId, Workspace,
+    CLIENT_TOKEN_FILE, CreateThread, CreateWorkspace, Message, PlaceRequest, Provider,
+    RequiredText, Seq, ServerMessage, Thread, ThreadEvent, ThreadEventBody, ThreadId, Workspace,
 };
 use serde_json::json;
 
@@ -271,6 +271,7 @@ impl RunningEngine {
             title: RequiredText::new("chat").unwrap(),
             provider,
             settings: None,
+            place: PlaceRequest::ProjectFolder,
         };
         self.client().create_thread(&request).unwrap()
     }

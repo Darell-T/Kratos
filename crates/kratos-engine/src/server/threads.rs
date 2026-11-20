@@ -1,6 +1,8 @@
 //! The thread records: the list, a new thread, a thread's details, and its event pages. The routes
 //! that drive a thread's agent are in `agents`.
 
+use std::path::Path as FilePath;
+
 use axum::body::Body;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
@@ -9,6 +11,7 @@ use axum::response::Response;
 use kratos_protocol::{
     ACTING_THREAD_HEADER, AccessLimit, CreateThread, ListEvents, ListThreads, Seq, ThreadId,
 };
+use kratos_store::NewPlace;
 
 use super::acting::Acting;
 use super::json::read_json;
@@ -32,7 +35,7 @@ pub(super) async fn list_threads(
 
 /// `POST /api/threads`: 201 with the thread. Body (413 or 400), then the acting thread's access
 /// (400 or 403), then the settings the thread's provider supports (400), then the workspace (404),
-/// then the insert.
+/// then the place, which git checks and may make (400 or 500), then the insert.
 pub(super) async fn create_thread(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -47,11 +50,29 @@ pub(super) async fn create_thread(
         let agent = state.agent_of(request.provider)?;
         agent.check_settings(settings.clone()).await?;
     }
+    let place = prepare_place(&state, &request).await?;
+    // A worktree made for a thread whose insert then fails stays reserved, and the next start's
+    // sweep removes it.
     let thread = state
         .store
-        .call(move |store| store.create_thread(&request))
+        .call(move |store| store.create_thread(&request, &place))
         .await?;
     Ok(json_reply(StatusCode::CREATED, &thread))
+}
+
+/// The request's place, checked against git in its workspace's folder, and made when it is new.
+async fn prepare_place(state: &ServerState, request: &CreateThread) -> Result<NewPlace, ApiError> {
+    let workspace_id = request.workspace_id.clone();
+    let workspace = state
+        .store
+        .call(move |store| store.workspace(&workspace_id))
+        .await?;
+    let project = FilePath::new(&workspace.path);
+    let title = request.title.as_str();
+    Ok(state
+        .worktrees
+        .prepare(&state.store, project, &request.place, title)
+        .await?)
 }
 
 /// `GET /api/threads/{id}`: 200 with the thread, its settings, its queue, and what waits on the

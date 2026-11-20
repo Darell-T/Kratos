@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -35,6 +36,7 @@ use kratos_engine::scheduler;
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::{LimitStop, UsageTracker};
+use kratos_engine::worktrees::Worktrees;
 
 /// How long a request to Codex may take, from the TypeScript provider. A turn has no deadline: a
 /// live CLI is working, and every way it can die reports its own error.
@@ -106,6 +108,7 @@ fn serve(config: &Config) -> Result<(), StartError> {
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = ClientToken::issue(&config.home).map_err(StartError::Token)?;
+    let worktrees = Worktrees::open(&config.home).map_err(StartError::Hooks)?;
     // The listener already accepts into its backlog, so a client may connect as soon as it reads
     // this.
     println!(
@@ -114,8 +117,9 @@ fn serve(config: &Config) -> Result<(), StartError> {
     );
     let (store_thread, store_jobs) = store_thread::channel();
     let server_config = config.clone();
-    let server =
-        std::thread::spawn(move || run_server(listener, store_thread, &server_config, token));
+    let server = std::thread::spawn(move || {
+        run_server(listener, store_thread, &server_config, token, worktrees)
+    });
     store_jobs.run(store);
     server.join().expect("the server thread does not panic")
 }
@@ -125,6 +129,7 @@ fn run_server(
     store: StoreThread,
     config: &Config,
     token: ClientToken,
+    worktrees: Worktrees,
 ) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -152,6 +157,7 @@ fn run_server(
             scheduler,
             usage,
             token,
+            worktrees: Arc::new(worktrees),
         };
         server::serve(listener, state.clone(), shutdown_signal()).await?;
         // The agents end before the store closes, so nothing they report goes unrecorded (L2).
@@ -349,6 +355,8 @@ enum StartError {
     },
     #[error("cannot run the server: {0}")]
     Server(#[from] io::Error),
+    #[error("cannot make the empty hooks folder for Kratos's git commands: {0}")]
+    Hooks(#[source] io::Error),
     #[error("cannot write the client token: {0}")]
     Token(#[source] io::Error),
     #[error("cannot read what the last engine left unfinished: {0}")]

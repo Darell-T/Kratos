@@ -4,8 +4,8 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, ContextLimit, Message, PauseReason, Question, ReportFormat, RequiredText, Seq,
-    Timestamp, TurnId, WorkspaceId,
+    Approval, ContextLimit, Message, PauseReason, Place, PlaceRequest, Question, ReportFormat,
+    RequiredText, Seq, Timestamp, TurnId, WorkspaceId,
 };
 
 string_id! {
@@ -63,6 +63,8 @@ pub struct CreateThread {
     /// The defaults when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<ThreadSettings>,
+    #[serde(default)]
+    pub place: PlaceRequest,
 }
 
 impl CreateThread {
@@ -240,6 +242,7 @@ pub struct ListEvents {
 pub struct ThreadDetails {
     #[serde(flatten)]
     pub thread: Thread,
+    pub place: Place,
     pub settings: ThreadSettings,
     pub paused: Option<PauseReason>,
     pub running_turn: Option<TurnId>,

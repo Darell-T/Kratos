@@ -362,14 +362,14 @@ mod tests {
 
     use futures_util::StreamExt;
     use kratos_protocol::{CreateThread, CreateWorkspace};
-    use kratos_store::Store;
+    use kratos_store::{NewPlace, Store};
     use serde_json::json;
 
     use super::*;
     use crate::store_thread;
 
     fn hub_with_a_thread(home: &std::path::Path) -> (Hub, ThreadId) {
-        let store = Store::open(home).unwrap();
+        let mut store = Store::open(home).unwrap();
         let workspace: CreateWorkspace =
             serde_json::from_value(json!({ "name": "repo", "path": home })).unwrap();
         let workspace = store.create_workspace(&workspace).unwrap();
@@ -377,7 +377,9 @@ mod tests {
             json!({ "workspaceId": workspace.id, "title": "chat", "provider": "codex" }),
         )
         .unwrap();
-        let thread = store.create_thread(&thread).unwrap();
+        let thread = store
+            .create_thread(&thread, &NewPlace::ProjectFolder)
+            .unwrap();
         let (store_thread, store_jobs) = store_thread::channel();
         std::thread::spawn(move || store_jobs.run(store));
         (Hub::new(store_thread), thread.id)

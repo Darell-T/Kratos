@@ -11,6 +11,7 @@ mod workspaces;
 
 use std::future::{Future, IntoFuture};
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -39,6 +40,7 @@ use crate::providers::{ProviderError, Providers};
 use crate::scheduler::{SchedulerError, SchedulerHandle};
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
+use crate::worktrees::{PlaceError, Worktrees};
 
 pub use auth::ClientToken;
 
@@ -61,6 +63,7 @@ pub struct ServerState {
     pub scheduler: Option<SchedulerHandle>,
     pub usage: UsageTracker,
     pub token: ClientToken,
+    pub worktrees: Arc<Worktrees>,
 }
 
 impl ServerState {
@@ -282,6 +285,20 @@ impl From<StoreError> for ApiError {
             Some(Refusal::Unknown) => ApiError::new(StatusCode::NOT_FOUND, error),
             Some(Refusal::Conflict) => ApiError::new(StatusCode::CONFLICT, error),
             None => ApiError::internal(&error),
+        }
+    }
+}
+
+impl From<PlaceError> for ApiError {
+    /// A place the git state rules out answers 400, git failing answers 500, and both say what
+    /// happened in plain words (L12).
+    fn from(error: PlaceError) -> ApiError {
+        match error {
+            PlaceError::Store(error) => error.into(),
+            failed @ (PlaceError::Git(_) | PlaceError::Io { .. }) => {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
+            }
+            refused => ApiError::bad_request(refused.to_string()),
         }
     }
 }

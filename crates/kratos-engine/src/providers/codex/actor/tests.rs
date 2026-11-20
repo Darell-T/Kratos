@@ -6,7 +6,7 @@ use kratos_command_safety::DangerousCommandPlatform;
 use kratos_protocol::{
     CreateThread, CreateWorkspace, MessageOrigin, MessageStatus, RequiredText, TurnId,
 };
-use kratos_store::Store;
+use kratos_store::{NewPlace, Store};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -29,7 +29,7 @@ impl Harness {
         #[cfg(windows)]
         kratos_process::contain_current_process().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().join("kratos")).unwrap();
+        let mut store = Store::open(&root.path().join("kratos")).unwrap();
         let request: CreateWorkspace = serde_json::from_value(json!({
             "name": "project", "path": root.path(),
         }))
@@ -39,7 +39,10 @@ impl Harness {
             "workspaceId": workspace.id, "title": "chat", "provider": "codex",
         }))
         .unwrap();
-        let thread_id = store.create_thread(&request).unwrap().id;
+        let thread_id = store
+            .create_thread(&request, &NewPlace::ProjectFolder)
+            .unwrap()
+            .id;
         let (store_thread, jobs) = store_thread::channel();
         let store_runner = std::thread::spawn(move || jobs.run(store));
         let hub = Hub::new(store_thread.clone());

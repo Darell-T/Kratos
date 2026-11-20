@@ -10,3 +10,4 @@ pub mod scheduler;
 pub mod server;
 pub mod store_thread;
 pub mod usage;
+pub mod worktrees;

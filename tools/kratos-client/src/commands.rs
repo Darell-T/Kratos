@@ -25,6 +25,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   create-workspace <name> <path>
   threads <workspace-id>
   create-thread <workspace-id> <title> <provider> [--settings <settings-json>]
+                [--worktree new|<path>]
   post <thread-id> <text>
   send <thread-id> <text> [--message-id <id>] [--image <path>]... [--file <path>]...
   thread <thread-id>
@@ -50,6 +51,8 @@ usage: kratos-client [--url <url>] [--normalize] <command>
 create-thread's --settings sets a thread's model, permission, planMode, and reportFormat (a JSON
 Schema object the final reply must match), such as
 '{\"model\":\"claude-haiku-5-5\",\"permission\":\"askMe\",\"planMode\":false,\"contextLimitTokens\":null}'.
+Without --worktree the thread works in the project folder. --worktree new makes a worktree on a new
+branch named after the title, and --worktree <path> uses that existing worktree of the project.
 The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
 engine wrote to $KRATOS_HOME/client-token (default ~/.kratos/client-token), when there is one.
 --normalize replaces ids and times, so two engines' output compares with a plain diff.
@@ -104,7 +107,7 @@ const COMMANDS: [Command; 26] = [
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
     Command { name: "threads", positional: 1, options: &[], run: threads },
     Command {
-        name: "create-thread", positional: 3, options: &["--settings"], run: create_thread,
+        name: "create-thread", positional: 3, options: &["--settings", "--worktree"], run: create_thread,
     },
     Command { name: "post", positional: 2, options: &[], run: post },
     Command {
@@ -288,6 +291,11 @@ fn create_thread(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let mut body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
     if let Some(settings) = args.option("--settings") {
         body["settings"] = json_argument(settings, "settings-json")?;
+    }
+    match args.option("--worktree") {
+        None => {}
+        Some("new") => body["place"] = json!({ "kind": "newWorktree" }),
+        Some(path) => body["place"] = json!({ "kind": "existingWorktree", "path": path }),
     }
     session.post(routes::THREADS, &body)
 }

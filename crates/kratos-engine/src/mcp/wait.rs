@@ -134,6 +134,7 @@ mod tests {
         serde_json::from_value(json!({
             "id": "target", "workspaceId": "workspace", "title": "work", "provider": "codex",
             "createdAt": "2026-10-30T12:00:00.000Z", "updatedAt": "2026-10-30T12:00:00.000Z",
+            "place": { "kind": "projectFolder" },
             "settings": { "model": null, "permission": "askMe", "planMode": false,
                           "contextLimitTokens": null },
             "runningTurn": "turn", "paused": null, "queue": [], "approvals": [],

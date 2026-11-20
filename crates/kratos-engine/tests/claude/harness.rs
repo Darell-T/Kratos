@@ -22,7 +22,7 @@ use kratos_protocol::{
     CreateThread, CreateWorkspace, Message, MessageId, MessageInput, MessageOrigin, RequiredText,
     Seq, ThreadDetails, ThreadEvent, ThreadEventBody, ThreadId, ThreadSettings,
 };
-use kratos_store::Store;
+use kratos_store::{NewPlace, Store};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -171,10 +171,10 @@ impl Harness {
         kratos_process::contain_current_process().unwrap();
         let folder = root.path().join("project");
         std::fs::create_dir_all(&folder).unwrap();
-        let store = Store::open(&root.path().join("kratos")).unwrap();
+        let mut store = Store::open(&root.path().join("kratos")).unwrap();
         let thread_id = match thread_id {
             Some(thread_id) => thread_id,
-            None => create_thread(&store, &folder, options.settings.clone()),
+            None => create_thread(&mut store, &folder, options.settings.clone()),
         };
         let (store_thread, jobs) = store_thread::channel();
         let store_runner = std::thread::spawn(move || jobs.run(store));
@@ -671,7 +671,7 @@ pub fn text_input(text: &str) -> Vec<MessageInput> {
     }]
 }
 
-fn create_thread(store: &Store, folder: &Path, settings: ThreadSettings) -> ThreadId {
+fn create_thread(store: &mut Store, folder: &Path, settings: ThreadSettings) -> ThreadId {
     let workspace: CreateWorkspace =
         serde_json::from_value(json!({ "name": "project", "path": folder })).unwrap();
     let workspace = store.create_workspace(&workspace).unwrap();
@@ -680,5 +680,8 @@ fn create_thread(store: &Store, folder: &Path, settings: ThreadSettings) -> Thre
     )
     .unwrap();
     request.settings = Some(settings);
-    store.create_thread(&request).unwrap().id
+    store
+        .create_thread(&request, &NewPlace::ProjectFolder)
+        .unwrap()
+        .id
 }

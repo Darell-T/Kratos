@@ -131,6 +131,9 @@ impl Harness {
             scheduler: None,
             usage,
             token,
+            worktrees: std::sync::Arc::new(
+                kratos_engine::worktrees::Worktrees::open(&home).unwrap(),
+            ),
         };
         let (shutdown, stopped) = oneshot::channel();
         let serving = tokio::spawn(server::serve(listener, state, async {
