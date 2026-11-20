@@ -69,6 +69,8 @@ pub(crate) enum PlaceError {
         "{0} is a link to another folder, so Kratos will not make worktrees through it. Remove the          link, or start the thread in the project folder."
     )]
     LinkedFolder(String),
+    #[error("Kratos cannot read what git answered to `git {command}`: {output}")]
+    UnreadableGit { command: String, output: String },
     #[error("Kratos cannot use the path {0}, because it is not valid Unicode.")]
     NotUnicode(String),
     #[error(transparent)]
@@ -312,8 +314,11 @@ impl Worktrees {
             Err(error) => return Err(error.into()),
         };
         let mut lines = shown.lines();
-        let (Some(top), Some(shared)) = (lines.next(), lines.next()) else {
-            return Ok(None);
+        let (Some(top), Some(shared), None) = (lines.next(), lines.next(), lines.next()) else {
+            return Err(PlaceError::UnreadableGit {
+                command: args.join(" "),
+                output: shown,
+            });
         };
         Ok(Some(Repository {
             top: resolved_from_git(top).await?,

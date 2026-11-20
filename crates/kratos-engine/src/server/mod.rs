@@ -295,7 +295,9 @@ impl From<PlaceError> for ApiError {
     fn from(error: PlaceError) -> ApiError {
         match error {
             PlaceError::Store(error) => error.into(),
-            failed @ (PlaceError::Git(_) | PlaceError::Io { .. }) => {
+            failed @ (PlaceError::Git(_)
+            | PlaceError::Io { .. }
+            | PlaceError::UnreadableGit { .. }) => {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
             }
             refused => ApiError::bad_request(refused.to_string()),
