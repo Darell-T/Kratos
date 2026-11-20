@@ -198,27 +198,45 @@ impl Actor {
         if !self.is_starting(&thread_id, &message_id) {
             return;
         }
-        match (result, request.attempt) {
-            (Ok(turn), _) => self.accept_start(&thread_id, &message_id, *turn).await,
-            // Refused before it ran, so a second try cannot run it twice.
-            (Err(RequestError::Rpc { code, .. }), StartTry::First)
-                if rejected_before_execution(code)
-                    && let Some(codex) =
-                        self.servers.codex(&ServerKey::Thread(thread_id.clone())) =>
-            {
-                let request = StartRequest {
-                    attempt: StartTry::Last,
-                    ..request
-                };
-                self.request_start(codex, request);
-            }
-            (Err(RequestError::Rpc { code, message }), _) if rejected_before_execution(code) => {
+        if self.may_retry_start(&request, &result)
+            && let Some(codex) = self.servers.codex(&ServerKey::Thread(thread_id.clone()))
+        {
+            let request = StartRequest {
+                attempt: StartTry::Last,
+                ..request
+            };
+            self.request_start(codex, request);
+            return;
+        }
+        match result {
+            // A Stop asked for meanwhile interrupts the turn once it is accepted.
+            Ok(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
+            Err(RequestError::Rpc { code, message }) if rejected_before_execution(code) => {
                 self.refuse_start(&thread_id, &message_id, message).await;
             }
-            (Err(error), _) => {
+            Err(error) => {
                 self.check_delivery(&thread_id, &message_id, Delivery::Start, error.to_string());
             }
         }
+    }
+
+    /// A refused start is sent once more only when the refusal proves the first try never ran,
+    /// the same message is still the one starting, and the user has not asked to stop it.
+    fn may_retry_start(
+        &self,
+        request: &StartRequest,
+        result: &Result<Box<types::Turn>, RequestError>,
+    ) -> bool {
+        let never_ran = matches!(
+            result,
+            Err(RequestError::Rpc { code, .. }) if rejected_before_execution(*code)
+        );
+        let still_wanted = matches!(
+            self.threads.get(&request.thread_id).map(|thread| &thread.turn),
+            Some(Turn::Starting { message_id, work, .. })
+                if *message_id == request.message_id && work.stop_id.is_none()
+        );
+        never_ran && still_wanted && matches!(request.attempt, StartTry::First)
     }
 
     /// Whether `message_id` is the message the thread is starting a turn for. A `turn/start`
@@ -232,12 +250,7 @@ impl Actor {
 
     /// Codex refused the message before acting on it. It may be sent again, by the user.
     async fn refuse_start(&mut self, thread_id: &ThreadId, message_id: &MessageId, error: String) {
-        self.end_start(
-            thread_id,
-            Err(ProviderError::Conflict(format!(
-                "Codex refused the message: {error}"
-            ))),
-        );
+        self.end_start(thread_id);
         let message_id = message_id.clone();
         let _ = self
             .write(thread_id, move |write| {
@@ -399,7 +412,7 @@ impl Actor {
             Delivery::Start => match found {
                 Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
                 None => {
-                    self.end_start(&thread_id, Ok(()));
+                    self.end_start(&thread_id);
                     self.record_uncertain(&thread_id, message_id, error).await;
                 }
             },
@@ -495,18 +508,15 @@ impl Actor {
         }
     }
 
-    /// Leaves the starting state, answering any stop that waited for the start.
-    pub(super) fn end_start(&mut self, thread_id: &ThreadId, for_stop: Result<(), ProviderError>) {
+    /// Leaves the starting state. No turn runs, so any stop that waited for the start succeeded.
+    pub(super) fn end_start(&mut self, thread_id: &ThreadId) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
         if let Turn::Starting { stop_waiters, .. } = std::mem::replace(&mut thread.turn, Turn::Idle)
         {
             for waiter in stop_waiters {
-                let _ = waiter.send(match &for_stop {
-                    Ok(()) => Ok(()),
-                    Err(error) => Err(ProviderError::Conflict(error.to_string())),
-                });
+                let _ = waiter.send(Ok(()));
             }
         }
     }

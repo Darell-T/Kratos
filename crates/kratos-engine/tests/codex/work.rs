@@ -175,6 +175,57 @@ async fn a_stop_sent_before_codex_names_the_turn_stops_it_once_named() {
 }
 
 #[tokio::test]
+async fn a_stop_before_codex_refuses_the_start_sends_no_retry() {
+    // Catches the one retry of a refused turn/start going out after the user asked to stop.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+
+    let provider = harness.provider.clone();
+    let thread_id = harness.thread_id.clone();
+    let stop = tokio::spawn(async move { provider.stop(thread_id).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    harness
+        .refuse("turn/start", -32600, "thread not found")
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        harness.turn_requests().await.len(),
+        1,
+        "a start was sent after the stop"
+    );
+    stop.await.unwrap().unwrap();
+    assert!(matches!(
+        harness.message("a").await.status,
+        MessageStatus::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_stop_while_the_retry_is_out_interrupts_the_turn_it_starts() {
+    // Catches a retried start that runs on after the user asked to stop it.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness
+        .refuse("turn/start", -32600, "thread not found")
+        .await;
+    harness.held("turn/start", 2).await;
+
+    let provider = harness.provider.clone();
+    let thread_id = harness.thread_id.clone();
+    let stop = tokio::spawn(async move { provider.stop(thread_id).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    harness.settle_start("turn-1", "inProgress").await;
+
+    let interrupt = &harness.held("turn/interrupt", 1).await[0]["params"];
+    assert_eq!(interrupt["turnId"], "turn-1");
+    harness.settle("turn/interrupt", json!({})).await;
+    stop.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn a_refused_message_sent_again_runs_and_lifts_the_pause() {
     // Catches a retry that leaves the queue paused, or one that skips ahead of the messages
     // queued after it.

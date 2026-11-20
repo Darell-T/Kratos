@@ -453,7 +453,7 @@ impl Actor {
             });
         }
         thread.file_items.clear();
-        self.end_start(thread_id, Ok(()));
+        self.end_start(thread_id);
         let reason = EndReason::Exited(error.to_owned());
         let _ = self
             .write(thread_id, move |write| {
