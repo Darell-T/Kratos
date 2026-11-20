@@ -235,7 +235,7 @@ impl Actor {
                 let commands = initialized.commands;
                 self.note_plan(plan.as_deref());
                 let thread = self.threads.get_mut(&thread_id).expect("checked above");
-                thread.session = Session::Open(OpenSession {
+                thread.session = Session::Open(Box::new(OpenSession {
                     claude,
                     config,
                     started: false,
@@ -244,9 +244,8 @@ impl Actor {
                     commands,
                     last_active: Instant::now(),
                     background_tasks: 0,
-                    finished_tasks: Vec::new(),
-                    awaited_report: None,
-                });
+                    report: None,
+                }));
                 tokio::spawn(forward(
                     thread_id.clone(),
                     epoch,

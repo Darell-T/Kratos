@@ -87,13 +87,25 @@ pub(super) struct OpenSession {
     /// When the process last sent a frame or served a request.
     pub last_active: Instant,
     pub background_tasks: usize,
+    pub report: Option<DueReport>,
+}
+
+/// A turn Claude owes to report background commands that finished.
+pub(super) struct DueReport {
+    pub id: ReportId,
     pub finished_tasks: Vec<String>,
-    pub awaited_report: Option<ReportId>,
+    /// Messages wait for the report until the report wait passes. After that Claude may still
+    /// send it, and it is still recorded as its own turn.
+    pub holds_queue: bool,
 }
 
 impl OpenSession {
     pub(super) fn message_wait_reason(&self, wanted: &SessionConfig) -> Option<&'static str> {
-        if self.awaited_report.is_some() {
+        if self
+            .report
+            .as_ref()
+            .is_some_and(|report| report.holds_queue)
+        {
             return Some(
                 "Claude is finishing a background command report. This message will start afterward.",
             );
@@ -111,23 +123,36 @@ impl OpenSession {
                 None
             }
             kratos_claude_client::Background::Ended { summary } => {
-                self.finished_tasks.extend(summary);
                 let id = ReportId(uuid::Uuid::new_v4());
-                self.awaited_report = Some(id);
+                let mut finished_tasks = self
+                    .report
+                    .take()
+                    .map(|report| report.finished_tasks)
+                    .unwrap_or_default();
+                finished_tasks.extend(summary);
+                self.report = Some(DueReport {
+                    id,
+                    finished_tasks,
+                    holds_queue: true,
+                });
                 Some(id)
             }
         }
     }
 
     pub(super) fn holds_background_work(&self) -> bool {
-        self.background_tasks > 0 || self.awaited_report.is_some()
+        self.background_tasks > 0
+            || self
+                .report
+                .as_ref()
+                .is_some_and(|report| report.holds_queue)
     }
 }
 
 pub(super) enum Session {
     Closed,
     Opening,
-    Open(OpenSession),
+    Open(Box<OpenSession>),
 }
 
 /// A message written to the CLI that no result has reported yet. The thread is busy while any
@@ -295,10 +320,7 @@ impl ThreadState {
     }
 
     pub(super) fn awaits_background_turn(&self) -> bool {
-        self.run.is_none()
-            && self
-                .open()
-                .is_some_and(|open| open.awaited_report.is_some())
+        self.run.is_none() && self.open().is_some_and(|open| open.report.is_some())
     }
 
     pub(super) fn messages_named(&self, ids: &[String]) -> Vec<MessageId> {

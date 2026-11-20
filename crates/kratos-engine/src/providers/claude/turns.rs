@@ -339,8 +339,11 @@ impl Actor {
         let Some(open) = thread.open_mut() else {
             return;
         };
-        let finished = std::mem::take(&mut open.finished_tasks);
-        open.awaited_report = None;
+        let finished = open
+            .report
+            .take()
+            .map(|report| report.finished_tasks)
+            .unwrap_or_default();
         let origin = TurnOrigin::BackgroundTask {
             summary: (!finished.is_empty()).then(|| finished.join("\n")),
         };

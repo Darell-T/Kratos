@@ -44,11 +44,12 @@ impl Actor {
         if thread.epoch != epoch {
             return;
         }
-        if let Some(open) = thread.open_mut()
-            && open.awaited_report == Some(report_id)
+        if let Some(report) = thread
+            .open_mut()
+            .and_then(|open| open.report.as_mut())
+            .filter(|report| report.id == report_id)
         {
-            open.awaited_report = None;
-            open.finished_tasks.clear();
+            report.holds_queue = false;
         }
         self.dispatch(thread_id).await;
     }

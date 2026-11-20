@@ -82,6 +82,93 @@ async fn a_same_settings_message_waits_for_the_background_reply() {
 }
 
 #[tokio::test]
+async fn a_background_report_inside_the_wait_is_recorded_once_in_its_own_turn() {
+    report_is_recorded_once(Duration::from_secs(10)).await;
+}
+
+#[tokio::test]
+async fn a_background_report_after_the_wait_is_recorded_once_in_its_own_turn() {
+    report_is_recorded_once(Duration::from_millis(300)).await;
+}
+
+/// Claude reports a finished background command while message B waits for that report. When
+/// `report_turn_wait` passes first, B is written before the report arrives.
+async fn report_is_recorded_once(report_turn_wait: Duration) {
+    const REPORT: &str = "The build finished cleanly.";
+    let mut harness = Harness::start(Options {
+        report_turn_wait,
+        ..Options::default()
+    })
+    .await;
+    let launch = after_a_finished_turn(&mut harness).await;
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "system", "subtype": "task_notification", "task_id": "t1",
+                    "status": "completed", "summary": SUMMARY }),
+        )
+        .await;
+    // The next control response fences earlier frames on the same stdout pipe.
+    send(
+        &harness,
+        &launch,
+        "barrier",
+        "Read",
+        json!({"file_path":"notes.txt"}),
+    )
+    .await;
+    response(&harness, &launch, "barrier").await;
+    harness.send(B, "B").await;
+    if report_turn_wait < Duration::from_secs(1) {
+        harness.wait_written(&launch, &[A, B]).await;
+    } else {
+        harness.assert_written(&launch, &[A]).await;
+    }
+
+    harness.init(&launch).await;
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "assistant", "uuid": "u-bg", "session_id": "s",
+                    "message": { "id": "m-bg", "content": [{ "type": "text", "text": REPORT }] } }),
+        )
+        .await;
+    harness.finish(&launch, &[], json!({})).await;
+    harness.wait_written(&launch, &[A, B]).await;
+    harness.accept(&launch, B).await;
+    harness.finish(&launch, &[B], json!({})).await;
+    harness
+        .wait_for(|event| {
+            matches!(event, ThreadEventBody::TurnCompleted { turn_id, .. } if turn_id.as_str() == B)
+        })
+        .await;
+
+    let log = harness.log().await;
+    let report_turn = log.iter().find_map(|event| match event {
+        ThreadEventBody::TurnStarted {
+            turn_id,
+            origin: TurnOrigin::BackgroundTask { .. },
+        } => Some(turn_id),
+        _ => None,
+    });
+    let reports: Vec<_> = log
+        .iter()
+        .filter_map(|event| match event {
+            ThreadEventBody::ItemCompleted {
+                turn_id,
+                item: AgentItem::Message { text, .. },
+            } if text == REPORT => Some(turn_id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        report_turn.is_some(),
+        "no turn reports the command: {log:?}"
+    );
+    assert_eq!(reports, [report_turn.unwrap()], "{log:?}");
+}
+
+#[tokio::test]
 async fn a_turn_claude_starts_after_a_background_command_is_recorded_with_its_replies() {
     let mut harness = Harness::start(Options::default()).await;
     let launch = after_a_finished_turn(&mut harness).await;
