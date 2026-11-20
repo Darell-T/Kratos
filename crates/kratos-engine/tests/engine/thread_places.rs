@@ -62,7 +62,7 @@ fn request(workspace: &Workspace, title: &str, place: PlaceRequest) -> CreateThr
         title: RequiredText::new(title).unwrap(),
         provider: Provider::Codex,
         settings: None,
-        place,
+        place: Some(place),
     }
 }
 
@@ -369,4 +369,34 @@ fn a_repository_hook_never_runs_when_kratos_makes_a_worktree() {
         Some("hooked")
     );
     assert!(!marker.exists(), "Kratos's git ran the repository's hook");
+}
+
+#[test]
+fn an_agent_below_full_access_can_start_threads_only_where_it_works() {
+    // Catches a worktree's agent that reaches the main checkout, or makes git write new branches,
+    // by starting a thread somewhere else instead of asking the user.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let user = engine.client();
+    let parent = create(&user, &workspace, "parent", PlaceRequest::NewWorktree);
+    let agent = engine.client().acting_for(parent.id.clone());
+
+    let child = agent
+        .create_thread(&CreateThread {
+            place: None,
+            ..request(&workspace, "child", PlaceRequest::default())
+        })
+        .unwrap();
+    assert_eq!(worktree_of(&user, &child), worktree_of(&user, &parent));
+
+    for place in [PlaceRequest::ProjectFolder, PlaceRequest::NewWorktree] {
+        let refused = agent
+            .create_thread(&request(&workspace, "escape", place.clone()))
+            .unwrap_err();
+        assert_eq!(refusal(refused).0, 403, "{place:?}");
+    }
+    assert_eq!(threads_in(&user, &workspace).len(), 2);
+    assert_eq!(worktree_count(&repository), 2);
 }

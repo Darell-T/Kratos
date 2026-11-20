@@ -42,7 +42,8 @@ pub(super) async fn create_thread(
     body: Body,
 ) -> Result<Response, ApiError> {
     let request: CreateThread = read_json(body).await?;
-    if let Some(acting) = Acting::of(&state, &headers).await? {
+    let acting = Acting::of(&state, &headers).await?;
+    if let Some(acting) = &acting {
         acting.check_workspace_access(&request.workspace_id)?;
         acting.may_create(&request.settings_or_default())?;
     }
@@ -50,7 +51,7 @@ pub(super) async fn create_thread(
         let agent = state.agent_of(request.provider)?;
         agent.check_settings(settings.clone()).await?;
     }
-    let place = prepare_place(&state, &request).await?;
+    let place = prepare_place(&state, &request, acting.as_ref()).await?;
     // A worktree made for a thread whose insert then fails stays reserved, and the next start's
     // sweep removes it.
     let thread = state
@@ -61,7 +62,15 @@ pub(super) async fn create_thread(
 }
 
 /// The request's place, checked against git in its workspace's folder, and made when it is new.
-async fn prepare_place(state: &ServerState, request: &CreateThread) -> Result<NewPlace, ApiError> {
+async fn prepare_place(
+    state: &ServerState,
+    request: &CreateThread,
+    acting: Option<&Acting>,
+) -> Result<NewPlace, ApiError> {
+    let place = match acting {
+        Some(acting) => acting.place_for(&request.workspace_id, request.place.clone())?,
+        None => request.place.clone().unwrap_or_default(),
+    };
     let workspace_id = request.workspace_id.clone();
     let workspace = state
         .store
@@ -71,7 +80,7 @@ async fn prepare_place(state: &ServerState, request: &CreateThread) -> Result<Ne
     let title = request.title.as_str();
     Ok(state
         .worktrees
-        .prepare(&state.store, project, &request.place, title)
+        .prepare(&state.store, project, &place, title)
         .await?)
 }
 

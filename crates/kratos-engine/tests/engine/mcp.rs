@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use fake_agents::codex_control;
 use kratos_api_client::{ApiRequest, ClientError};
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, CreateThread, Permission, PlaceRequest, Provider, RequiredText, Thread,
-    ThreadSettings, WorkspaceId,
+    ACTING_THREAD_HEADER, CreateThread, Permission, Provider, RequiredText, Thread, ThreadSettings,
+    WorkspaceId,
 };
 use serde_json::{Value, json};
 
@@ -121,7 +121,7 @@ fn thread(
             permission,
             ..ThreadSettings::default()
         }),
-        place: PlaceRequest::ProjectFolder,
+        place: None,
     };
     engine.client().create_thread(&request).unwrap()
 }

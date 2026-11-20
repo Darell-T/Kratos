@@ -5,7 +5,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings, WorkspaceId,
+    ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, Place, PlaceRequest, RequiredText, ThreadId,
+    ThreadSettings, WorkspaceId,
 };
 use kratos_store::StoreError;
 
@@ -23,6 +24,7 @@ pub(super) async fn refuse_agents(request: Request, next: Next) -> Response {
 pub(super) struct Acting {
     thread_id: ThreadId,
     workspace_id: WorkspaceId,
+    place: Place,
     pub(super) access: AccessLimit,
 }
 
@@ -58,6 +60,7 @@ impl Acting {
         Ok(Some(Acting {
             thread_id: thread.thread.id,
             workspace_id: thread.thread.workspace_id,
+            place: thread.place,
             access,
         }))
     }
@@ -104,6 +107,34 @@ impl Acting {
             ));
         }
         Ok(())
+    }
+
+    /// Where a thread it creates in `workspace_id` works: by default where it works itself. Below
+    /// Full access nowhere else, so an agent in a worktree can neither reach the main checkout
+    /// through a new thread nor have Kratos make branches.
+    pub(super) fn place_for(
+        &self,
+        workspace_id: &WorkspaceId,
+        requested: Option<PlaceRequest>,
+    ) -> Result<PlaceRequest, ApiError> {
+        if self.workspace_id != *workspace_id {
+            return Ok(requested.unwrap_or_default());
+        }
+        let own = match &self.place {
+            Place::ProjectFolder => PlaceRequest::ProjectFolder,
+            Place::Worktree(worktree) => PlaceRequest::ExistingWorktree {
+                path: RequiredText::new(&worktree.path).expect("a recorded path is not blank"),
+            },
+        };
+        match requested {
+            None => Ok(own),
+            Some(requested) if requested == own || self.access == AccessLimit::FULL => {
+                Ok(requested)
+            }
+            Some(_) => Err(forbidden(
+                "Below Full access, a thread Kratos's tools start works where your own thread works. Ask the user to start it elsewhere.",
+            )),
+        }
     }
 
     /// Only a Full access thread decides another thread's approval. A lower one would approve what

@@ -63,8 +63,10 @@ pub struct CreateThread {
     /// The defaults when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<ThreadSettings>,
-    #[serde(default)]
-    pub place: PlaceRequest,
+    /// `None` starts the user's thread in the project folder, and an agent's in the agent's own
+    /// place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<PlaceRequest>,
 }
 
 impl CreateThread {

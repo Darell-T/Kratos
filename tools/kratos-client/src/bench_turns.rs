@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use fake_agents::codex_control::{self, ControlRequest};
 use kratos_api_client::{Client, ClientError, EventSocket, Incoming};
 use kratos_protocol::{
-    CreateThread, PlaceRequest, Provider, RequiredText, Seq, ServerMessage, Thread,
-    ThreadEventBody, TurnOutcome, routes,
+    CreateThread, Provider, RequiredText, Seq, ServerMessage, Thread, ThreadEventBody, TurnOutcome,
+    routes,
 };
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -93,7 +93,7 @@ fn create_threads(client: &Client) -> Result<Vec<Thread>, BenchError> {
                     .expect("the title is not blank"),
                 provider: Provider::Codex,
                 settings: None,
-                place: PlaceRequest::ProjectFolder,
+                place: None,
             })
         })
         .collect::<Result<_, _>>()
