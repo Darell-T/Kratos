@@ -4,64 +4,64 @@ An engine for coding agents. It runs the Codex and Claude Code CLIs you already 
 keeps every conversation in one place that you own instead of in each provider's app.
 
 Kratos is early and under active development. It has no app or interface yet. You reach the engine through its JSON
-and WebSocket API. The Rust engine runs Codex turns from chat messages, streams replies, and routes approvals to
-authenticated clients.
+and WebSocket API. The Rust engine runs Codex and Claude Code threads, queues and streams their turns, and sends
+their approvals and questions to authenticated clients.
 
 ## What it is for
 
-- **Your threads, in one place.** Conversations live in Kratos's own database, grouped by project, with each
-  message showing which provider and model wrote it.
-- **Providers are the workers.** Each thread runs on one provider through that provider's own CLI, so you keep its
-  tools, sandbox and your existing subscription. You can switch models within the provider, and continue a thread on
-  another provider as a new linked thread.
-- **Queue and steer.** Messages sent while the agent is busy wait in a queue, or steer the running turn.
-- **Any machine.** The engine runs in the background and keeps agents working while no client is connected. Other
-  machines can open the same threads.
-- **One set of skills and plugins** shared by every provider.
+- **Your threads, in one place.** Conversations live in Kratos's own database, grouped by project. Each message
+  shows which provider and model wrote it.
+- **Providers do the work.** Each thread runs on one provider through that provider's own CLI, so you keep its tools
+  and your existing subscription. You can change the model within a provider.
+- **Queue and steer.** A message sent while the agent is busy waits in a queue, or steers the running turn.
+- **Agents that work together.** A Codex agent can create threads on either provider, message them, and wait for
+  their turns.
+- **Planned next.** Continuing a thread on another provider, opening threads from another machine, one set of skills
+  for every provider, and a sandbox for every provider on every system.
 
 ## Status
 
-| Area                                                                | State       |
-| ------------------------------------------------------------------- | ----------- |
-| Workspaces, threads and an append-only message history              | Working     |
-| Live updates to every client, with catch-up after a reconnect       | Working     |
-| Typed Codex connection: start, requests, events, approvals, cleanup | Working     |
-| Codex skills, plugins, models and sign-in status                    | Working     |
-| Sending chat messages to Codex, with queue and streaming replies    | Working     |
-| Context window tracking and per-thread model and window settings    | Working     |
-| Approvals, diff viewer, file tree and terminal                      | Planned     |
-| Claude Code provider                                                | In progress |
-| Opening threads from another machine                                | Planned     |
+| Area                                                                  | State   |
+| --------------------------------------------------------------------- | ------- |
+| Workspaces, threads, and an append-only message history               | Working |
+| Live updates to every client, with catch-up after a reconnect         | Working |
+| Codex threads: queue, steer, Stop, streaming replies, approvals       | Working |
+| Claude Code threads: queue, steer, Stop, streaming replies, approvals | Working |
+| Usage limits that pause a thread and resume it at the reset           | Working |
+| Agent tools for creating and messaging other threads                  | Working |
+| Context window tracking and per-thread model and window settings      | Working |
+| Diff viewer, file tree, and terminal                                  | Planned |
+| Handing a thread to another provider                                  | Planned |
+| Opening threads from another machine                                  | Planned |
 
 ## Requirements
 
-- Windows, macOS or Linux. Kratos is built for all three. So far its full test suite has passed on Windows only.
-- Node.js 24 and Git
-- Rust, to build the Rust engine. `rust-toolchain.toml` pins 1.99.1, and `rustup` installs it on first use.
-- The Codex CLI, installed and signed in: `npm install -g @openai/codex`, then `codex login`
+- Windows, macOS, or Linux. CI runs the full test suite on all three.
+- Rust. `rust-toolchain.toml` pins 1.99.1, and `rustup` installs it on first use.
+- Git.
+- The Codex CLI, installed and signed in: `npm install -g @openai/codex`, then `codex login`.
+- Claude Code 2.1.303 or newer, installed and signed in. An older release pauses its thread and names both releases.
+- Node.js 24, only for the TypeScript engine and its tools in `packages/`.
 
-Kratos finds `codex` on your PATH. To use a different install, set `CODEX_EXE` to its full path.
+Kratos finds `codex` and `claude` on your PATH. To use a different install, set `CODEX_EXE` or `CLAUDE_EXE` to its
+full path.
 
-## Run it
+## Run the engine
 
 ```sh
-npm install
-npm run build   # bundles the engine into packages/engine/dist
-npm run engine  # runs the engine at http://127.0.0.1:4200
-npm run dev     # runs the engine and restarts it when its source changes
+cargo run --release -p kratos-engine   # runs the engine at http://127.0.0.1:4200
 ```
 
-The engine logs to the terminal it runs in. It answers `GET /api/health` with `{"ok":true}`.
-`KRATOS_PORT` (default 4200) and `KRATOS_HOME` (default `~/.kratos`, which holds `kratos.db`) configure it.
+The engine prints `Kratos engine listening on http://127.0.0.1:<port>` when it is ready, and answers
+`GET /api/health` with `{"ok":true}`. `KRATOS_PORT` (default 4200) and `KRATOS_HOME` (default `~/.kratos`, which
+holds `kratos.db`) configure it. `KRATOS_PORT=0` picks a free port.
 
-## Run the Rust engine
+Every route except `/api/health` requires the per-launch token in `<KRATOS_HOME>/client-token`.
 
-The Rust engine retains the TypeScript storage API and adds Codex operations. It uses the same default port and
-data folder. The TypeScript engine stays until the Rust migration also supports Claude Code.
+### Codex on Windows
 
-On Windows, use the carried Codex 0.159.1 sandbox fix. Stock 0.159.1 and 0.166.0
-can start commands before workspace read permissions are ready. Build the fixed
-helper in a separate install and select it for this terminal:
+Use the carried Codex 0.159.1 sandbox fix. Stock 0.159.1 and 0.166.0 can start commands before workspace read
+permissions are ready. Build the fixed helper in a separate install and select it for this terminal:
 
 ```powershell
 $codexInstall = Join-Path $env:LOCALAPPDATA 'Kratos/codex-0.159.1'
@@ -71,169 +71,139 @@ $env:CODEX_EXE = Join-Path $codexInstall "$nativePath/bin/codex.exe"
 ./scripts/build-codex-sandbox.ps1 -CodexExe $env:CODEX_EXE
 ```
 
-The script builds only the native sandbox helper from a pinned source revision.
-It keeps external dependencies locked, preserves Codex's license and notice,
-and removes its temporary source and build files. CI uses the same script.
+The script builds only the native sandbox helper from a pinned source revision. It keeps external dependencies
+locked, preserves Codex's license and notice, and removes its temporary source and build files. CI uses the same
+script.
 
-```sh
-cargo run --release -p kratos-engine   # runs the engine at http://127.0.0.1:4200
-cargo test --workspace                 # each engine test starts the real binary
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-```
+Before it opens a Codex thread on Windows, the engine checks that the elevated sandbox is ready and requests setup
+when it is not. If setup fails, queued work stays unsent and the thread says why.
 
-The engine prints `Kratos engine listening on http://127.0.0.1:<port>` when it is ready. `KRATOS_PORT` and
-`KRATOS_HOME` configure it as they do the TypeScript engine, and `KRATOS_PORT=0` picks a free port.
+### The data folder
 
-One engine can use a data folder at a time. The Rust engine locks `kratos.lock` in the folder, and a second Rust
-engine on the same folder exits with an error. The TypeScript engine takes no lock, so do not run both on one folder.
+One engine can use a data folder at a time. The engine locks `kratos.lock` in the folder, and a second engine on the
+same folder exits with an error. The TypeScript engine takes no lock, so do not run both on one folder.
 
 When the engine starts on a database with an older schema, it first copies the database to
 `backups/kratos-v<version>-<id>.db` in the data folder and prints where. `kratos-engine restore <backup-id>` makes a
 backup the live database again. It saves the database it replaces as another backup, and it refuses to run while an
 engine uses the folder. If `kratos.db` is missing but `kratos.db-wal` or `kratos.db-shm` remains, restore refuses and
-preserves those files. Confirm that no SQLite program uses the folder before moving the sidecars aside and retrying.
+keeps those files. Confirm that no SQLite program uses the folder before you move the files aside and retry.
 
-`kratos-client` drives either engine and prints each reply and event as one JSON line:
+### Drive it from the command line
+
+`kratos-client` prints each reply and event as one JSON line:
 
 ```sh
 cargo run -p kratos-client -- health
 cargo run -p kratos-client -- create-workspace repo C:\work\repo
-cargo run -p kratos-client -- subscribe <thread-id> --after 0 --count 1
-```
-
-Run `kratos-client` with no arguments to see the other commands.
-
-Every route except `/api/health` requires the per-launch token in `<KRATOS_HOME>/client-token`. `kratos-client`
-reads that file for each request, including after an engine restart. Set `KRATOS_HOME` on the client to the engine's
-data folder.
-
-Codex 0.159.1 is the tested protocol release. On Windows, the engine checks elevated sandbox readiness before
-opening a Codex thread and requests setup when necessary. Setup failure leaves queued work unsent and reports why.
-Ask me and Approve for me write only the thread's workspace and temporary folders. Full access runs commands without
-a sandbox and still asks before dangerous ones.
-
-Claude Code threads use Claude's own shell tools, `Bash` and `PowerShell`. A Claude command runs as the user, with no
-sandbox, on every system. Kratos's guards are its own decision on each tool request and the dangerous-command check.
-Ask me asks before every command. Approve for me and Full access ask only before commands the check flags. A pre-tool
-hook sends every command to Kratos's decision, including the ones Claude Code would otherwise run without asking. The
-check misses many destructive commands, so an unflagged command can change or delete anything the user can, and can
-read Kratos's client token.
-
-Kratos lets Claude load skills and tool definitions without asking. Unrecognized tools require approval.
-In plan mode, ordinary reads run without asking, protected reads are denied, and web and shell tools ask.
-Claude decides direct edits in its plans directory. Under Approve for me, Claude file edits and Codex patches
-outside the workspace and temporary folder ask for approval. Only Full access can create, message, stop, or
-answer threads in another workspace. Any thread can read across workspaces.
-
-```sh
 cargo run -p kratos-client -- send <thread-id> "Explain this repository"
 cargo run -p kratos-client -- approve <approval-id> accept
+cargo run -p kratos-client -- subscribe <thread-id> --after 0 --count 1
 cargo run -p kratos-client -- usage
 ```
 
-### Agent tools
+Run `kratos-client` with no arguments to see the other commands. It reads `<KRATOS_HOME>/client-token` for each
+request, including after an engine restart, so set `KRATOS_HOME` on the client to the engine's data folder.
 
-Every Codex thread gets a `kratos` MCP server. Codex starts
-`kratos-engine mcp` for the thread with its id, and the server calls the engine's API with the client token. An agent
-can list workspaces and threads, read a thread, create a thread, send another thread a message labelled with its own
-id, wait for a thread's turn, stop a turn, answer a question, and decide an approval.
+## Permissions
 
-The server names the acting thread on HTTP tool requests. For `wait_for_turn` it subscribes to the target thread on the authenticated event socket. The engine answers 403 to that
-header on every route the tools do not call, such as a settings change, a steer, or a schedule. A new route stays
-closed to agents until it is added to `agent_routes` in `crates/kratos-engine/src/server/mod.rs`. On the open routes
-the engine checks each request against the agent's thread. A thread it creates gets at most its permission, only a Full access thread may
-decide another thread's approval, and no request acts on the agent's own thread. The server runs outside the agent's
-sandbox, so sandboxed commands still cannot read the token.
+Each thread has one of three permissions. Kratos decides every command, file change, and tool request itself.
 
-Tools use the current turn's permission, even when the user has saved different
-settings for the next turn. An agent reading its own thread sees that effective
-permission, so new threads inherit the right limit. A question answer is refused
-if the sender has less access than the receiving turn. MCP connections keep their
-original client token and must restart with the engine.
+| Permission     | Codex                                                            | Claude Code                                                      |
+| -------------- | ---------------------------------------------------------------- | ---------------------------------------------------------------- |
+| Ask me         | Asks before every command and file change                        | Asks before every command and file change                        |
+| Approve for me | Asks before a dangerous command or a write outside the workspace | Asks before a dangerous command or a write outside the workspace |
+| Full access    | Runs without a sandbox and asks before a dangerous command       | Asks before a dangerous command                                  |
+
+On Ask me and Approve for me, Codex commands run in Codex's sandbox and can write only the thread's workspace and
+temporary folders. Codex's sandbox lets them write to the temporary folder without asking.
+
+Claude Code threads use Claude's own shell tools, `Bash` and `PowerShell`. A Claude command runs as the user, with no
+sandbox, on every system. A pre-tool hook sends every tool request to Kratos, including the ones Claude Code would
+otherwise run without asking. Kratos's guards are its own decision on each request and the dangerous-command check.
+The check misses many destructive commands, so an unflagged command can change or delete anything the user can, and
+can read Kratos's client token.
+
+Kratos lets Claude load skills and tool definitions without asking, and asks about every tool it does not know. In
+plan mode, ordinary reads run without asking, protected reads are denied, and web and shell tools ask.
+
+Under every permission, a write into a protected folder, such as Kratos's own data folder, asks.
+
+Only a Full access thread can create, message, stop, or answer threads in another workspace. Any thread can read
+across workspaces.
+
+Kratos never updates a CLI on its own. `POST /api/agents/claude/cli/update` updates Claude Code only when you ask,
+and refuses while a Claude thread works or runs a background command.
+
+## Agent tools
+
+Every Codex thread gets a `kratos` MCP server. Codex starts `kratos-engine mcp` for the thread with its id, and the
+server calls the engine's API with the client token. An agent can list workspaces and threads, read a thread, create
+a thread, send another thread a message labelled with its own id, wait for a thread's turn, stop a turn, answer a
+question, and decide an approval.
+
+The server names the acting thread on each HTTP request. For `wait_for_turn`, it subscribes to the target thread on
+the authenticated event socket. The engine answers 403 on every route the tools do not call, such as a settings
+change, a steer, or a schedule. A new route stays closed to agents until it is added to `agent_routes` in
+`crates/kratos-engine/src/server/mod.rs`. On the open routes, the engine checks each request against the agent's
+thread:
+
+- A thread an agent creates gets at most the agent's permission.
+- Only a Full access thread may decide another thread's approval.
+- No request acts on the agent's own thread.
+- A question answer is refused if the sender has less access than the receiving turn.
+
+The server runs outside the agent's sandbox, so sandboxed commands still cannot read the token. Tools use the
+current turn's permission, even when the user has saved different settings for the next turn. MCP connections keep
+their original client token and must restart with the engine.
 
 A message from another thread runs in a turn of its own. When it starts, the receiving thread's settings drop to the
-narrower of the two threads' permissions, and to plan mode if either thread plans. They stay there after the turn,
-because the agent remembers the request, until the user raises them. Codex sees the message after a label that
-names the sender and its permission. Such a message cannot be steered into a running turn.
-
-Before a narrower turn starts, Kratos forks the native Codex session with the same
-conversation history. This drops command and file approvals granted for the
-previous session. The Kratos thread keeps its ID.
+narrower of the two threads' permissions, and to plan mode if either thread plans. The settings stay there after the
+turn, because the agent remembers the request, until the user raises them. Codex sees the message after a label that
+names the sender and its permission. Such a message cannot be steered into a running turn. Before a narrower turn
+starts, Kratos forks the native Codex session with the same history. The fork drops command and file approvals
+granted to the previous session, and the Kratos thread keeps its id.
 
 ## Develop
 
 ```sh
-npm run check                         # format, lint, typecheck and tests of packages/**
-npm run generate -w @kratos/codex   # refresh the Codex protocol types after a Codex update
+cargo test --workspace --locked
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+lizard -l rust -C 11 -w -x "crates/kratos-command-safety/*" crates tools
 ```
 
-The tests run against a small fake Codex, so you do not need Codex installed to run them. The Rust crates have their
-own checks, listed above.
+The tests drive small fakes of Codex and Claude Code from `tools/fake-agents`, so you do not need either CLI to run
+them. The `real_codex` tests need the pinned Codex 0.159.1 and a provisioned Windows sandbox home, so only CI runs
+them.
 
-## Codex provider
+## The TypeScript engine
 
-`packages/engine/src/providers/codex.ts` exports `createCodexProvider`. Importing it does not start Codex or run a
-demo. The engine creates one provider with its existing `Store`, and closes the provider before closing the store.
-Connecting it to the chat API is still in progress.
+`packages/` holds the earlier TypeScript engine. It stays until the Rust migration deletes it. It serves the storage
+API and has a Codex provider that the chat API never connected.
 
-```ts
-const provider = await createCodexProvider({ store });
-const threadId = await provider.startThread(projectFolder);
-const message = await provider.sendMessage(
-  threadId,
-  [{ type: 'text', text: 'Review this project', text_elements: [] }],
-  userMessageId,
-);
+```sh
+npm install
+npm run build    # bundles the engine into packages/engine/dist
+npm run engine   # runs the engine at http://127.0.0.1:4200
+npm run check    # format, lint, typecheck, and tests of packages/**
 ```
-
-Thread IDs are native Codex IDs. Pass a stable message ID to deduplicate repeated submissions. Reusing an ID with
-different input throws. Messages sent during a turn stay in the database and run individually in their original
-order. `steerTurn(threadId, message.id)` sends that queued message into the current turn instead. It stays queued
-if the turn is still starting or cannot accept steering.
-
-`onEvent` delivers structured replies, tool items, turn outcomes, message states, approvals and user requests.
-`messages(threadId)` returns the saved submissions. Their delivery states are:
-
-| State        | Meaning                                                         |
-| ------------ | --------------------------------------------------------------- |
-| `queued`     | Saved and waiting to send                                       |
-| `submitting` | Waiting for Codex to acknowledge the input                      |
-| `accepted`   | Codex accepted the input; the saved turn ID identifies its turn |
-| `failed`     | Codex confirmed a rejection before execution                    |
-| `unknown`    | Delivery could not be established                               |
-| `cancelled`  | Removed from the delivery queue                                 |
-
-A known pre-execution rejection gets one retry. An uncertain submission is never automatically replayed.
-`resumeThread(threadId)` restores saved settings and checks native history for input whose reply was lost.
-For a confirmed rejection, use `retryMessage` or `removeQueuedMessage`. For an uncertain submission, use
-`discardMessage` after reviewing the native thread. It checks that Codex is idle and checks history again before
-discarding. Discarding cannot undo work that may already have run.
-
-A failed or timed-out turn pauses follow-ups. Call `resumeQueue` when continuing them is appropriate.
-`waitUntilIdle` rejects when the queue is paused or the thread becomes unavailable. `setThreadModel` applies to
-the next turn. `setThreadPermissions` requires an idle thread so the displayed policy matches the running policy.
-If saving delivery or a turn outcome fails, the provider closes and settles its waiters. Saved submissions can be
-reconciled with native history after storage recovers.
-
-Questions, additional permissions and MCP elicitation have pending-request getters and reply methods:
-`answerUserInput`, `decidePermissions` and `answerElicitation`. Command and file approvals use `decideCommand` and
-`decideFile`. Requests disappear when resolved, when their turn ends, or when the provider closes.
-
-Requests and initialization have a 30-second deadline. Turns have a 10-minute deadline, extended while waiting for
-blocking user input or approval. Stop acknowledgement and completion each have a 5-second deadline. If a
-timed-out turn cannot stop, or an acknowledged Stop never completes, the provider closes the shared Codex process
-and retains pending submissions. The factory accepts `requestTimeoutMs`, `turnTimeoutMs` and `closeTimeoutMs`.
 
 ## Packages
 
-| Package                    | What it is                                                                                    |
-| -------------------------- | --------------------------------------------------------------------------------------------- |
-| `packages/engine`          | The background process: SQLite store, JSON and WebSocket API on `127.0.0.1`, provider logic.  |
-| `packages/protocol`        | Types and schemas for the engine's API.                                                       |
-| `packages/codex`           | A typed client for `codex app-server`, with types generated from the installed Codex.         |
-| `crates/kratos-protocol`   | The Rust engine's wire types: the JSON that clients and the engine exchange.                  |
-| `crates/kratos-store`      | The Rust engine's SQLite store, with migrations, backups, and the data-folder lock.           |
-| `crates/kratos-engine`     | The Rust engine: the same API as `packages/engine`.                                           |
-| `crates/kratos-api-client` | A client for the engine's API, shared by the engine's MCP server, `kratos-client`, and tests. |
-| `tools/kratos-client`      | A command-line client that drives either engine and prints JSON lines.                        |
+| Package                        | What it is                                                                                      |
+| ------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `crates/kratos-engine`         | The engine: the JSON and WebSocket API, the Codex and Claude Code providers, and the scheduler. |
+| `crates/kratos-protocol`       | The wire types: the JSON that clients and the engine exchange.                                  |
+| `crates/kratos-store`          | The SQLite store, with migrations, backups, and the data-folder lock.                           |
+| `crates/kratos-codex-client`   | A typed client for `codex app-server`, the JSON-RPC server inside the Codex CLI.                |
+| `crates/kratos-claude-client`  | A typed client for the Claude Code CLI's stream-json protocol, with no Agent SDK.               |
+| `crates/kratos-process`        | Child processes whose whole process tree ends with their owner.                                 |
+| `crates/kratos-command-safety` | Codex's dangerous-command check, copied from openai/codex.                                      |
+| `crates/kratos-teams`          | The Teams rules, as pure functions over a recorded log of facts.                                |
+| `crates/kratos-api-client`     | A client for the engine's API, shared by the MCP server, `kratos-client`, and tests.            |
+| `tools/kratos-client`          | A command-line client that drives the engine and prints JSON lines.                             |
+| `tools/fake-agents`            | Fakes of the Codex and Claude Code CLIs that the tests drive.                                   |
+| `packages/engine`              | The earlier TypeScript engine.                                                                  |
+| `packages/protocol`            | Types and schemas for the TypeScript engine's API.                                              |
+| `packages/codex`               | A typed TypeScript client for `codex app-server`.                                               |
