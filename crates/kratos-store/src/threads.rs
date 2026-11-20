@@ -317,7 +317,7 @@ fn provider_thread(
                 WHERE thread_id = threads.id AND ended_at IS NULL
                 ORDER BY started_at DESC LIMIT 1),
                threads.report_format,
-               worktrees.id, worktrees.path, worktrees.branch, worktrees.ownership,
+               worktrees.id, worktrees.path, worktrees.branch, worktrees.ownership, worktrees.base,
                threads.archived_at
              FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
                LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
@@ -334,7 +334,7 @@ fn provider_thread_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderThread> {
         thread: thread_from_row(row)?,
         folder: row.get(6)?,
         place: place_from_row(row, 16)?,
-        archived_at: optional_timestamp_column(row, 20, "archived_at")?,
+        archived_at: optional_timestamp_column(row, 21, "archived_at")?,
         settings: settings_from_row(row)?,
         sandbox: from_column(row, 11)?,
         paused: from_column(row, 12)?,

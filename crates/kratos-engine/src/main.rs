@@ -110,7 +110,8 @@ fn serve(config: &Config) -> Result<(), StartError> {
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = ClientToken::issue(&config.home).map_err(StartError::Token)?;
-    let worktrees = Worktrees::open(&config.home).map_err(StartError::Hooks)?;
+    let worktrees =
+        Worktrees::open(&config.home, config.gh_exe.clone()).map_err(StartError::Hooks)?;
     let unfinished = store.unfinished_worktrees()?;
     // The listener already accepts into its backlog, so a client may connect as soon as it reads
     // this.
@@ -368,7 +369,7 @@ enum StartError {
     },
     #[error("cannot run the server: {0}")]
     Server(#[from] io::Error),
-    #[error("cannot make the empty hooks folder for Kratos's git commands: {0}")]
+    #[error("cannot make the folders Kratos's git commands use: {0}")]
     Hooks(#[source] io::Error),
     #[error("cannot write the client token: {0}")]
     Token(#[source] io::Error),

@@ -7,6 +7,7 @@ mod json;
 mod local_only;
 mod socket;
 mod threads;
+mod work;
 mod workspaces;
 
 use std::future::{Future, IntoFuture};
@@ -24,9 +25,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use kratos_protocol::routes::{
     APPROVAL, CLAUDE_CLI, CLAUDE_CLI_UPDATE, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE,
-    MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_ARCHIVE, THREAD_EVENTS,
-    THREAD_MESSAGES, THREAD_RESUME, THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE,
-    WORKSPACE_WORKTREES, WORKSPACES,
+    MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_ARCHIVE, THREAD_COMMIT,
+    THREAD_DIFF, THREAD_EVENTS, THREAD_MESSAGES, THREAD_PULL_REQUEST, THREAD_RESUME,
+    THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE, WORKSPACE_WORKTREES, WORKSPACES,
 };
 use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
 use kratos_store::{Refusal, StoreError};
@@ -192,6 +193,9 @@ fn user_routes() -> Router<ServerState> {
         .route(MESSAGE_DISCARD, post(agents::discard_message))
         .route(THREAD_RESUME, post(agents::resume))
         .route(THREAD_ARCHIVE, post(threads::archive_thread))
+        .route(THREAD_DIFF, get(work::diff))
+        .route(THREAD_COMMIT, post(work::commit))
+        .route(THREAD_PULL_REQUEST, post(work::pull_request))
         .route(THREAD_SETTINGS, put(agents::put_settings))
         .route(THREAD_SKILLS, get(agents::skills))
         .route(CONTINUATION_SCHEDULE, post(agents::schedule))
@@ -300,6 +304,8 @@ impl From<PlaceError> for ApiError {
             failed @ (PlaceError::Git(_)
             | PlaceError::Io { .. }
             | PlaceError::CannotRemove { .. }
+            | PlaceError::NoGh(_)
+            | PlaceError::Gh(_)
             | PlaceError::UnreadableGit { .. }) => {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
             }

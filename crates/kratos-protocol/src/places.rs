@@ -40,6 +40,8 @@ pub struct Worktree {
     /// `None` when the worktree has no branch checked out.
     pub branch: Option<String>,
     pub ownership: Ownership,
+    /// The commit Kratos made the worktree from. `None` for a borrowed worktree.
+    pub base: Option<String>,
 }
 
 /// A worktree of a project's repository, from `GET /api/workspaces/{id}/worktrees`. A new thread
@@ -64,6 +66,48 @@ pub enum Ownership {
     CreatedByKratos,
     /// It existed before Kratos used it, so Kratos never removes it.
     Borrowed,
+}
+
+/// `GET /api/threads/{id}/diff`: everything the thread's folder holds that its base commit does
+/// not, untracked files included and files git ignores left out.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadDiff {
+    /// The worktree's base for a worktree Kratos made, else the folder's `HEAD`.
+    pub base: String,
+    /// The patch `git diff` prints, cut at a size limit when `truncated`.
+    pub patch: String,
+    pub truncated: bool,
+}
+
+/// `POST /api/threads/{id}/commit`: commits everything in the thread's folder as the user's git
+/// identity, with this message and nothing added to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CommitThread {
+    pub message: RequiredText,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Committed {
+    pub commit: String,
+}
+
+/// `POST /api/threads/{id}/pull-request`: pushes the thread's branch to `origin` and opens a pull
+/// request for it with the user's own `gh`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreatePullRequest {
+    pub title: RequiredText,
+    #[serde(default)]
+    pub body: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequest {
+    pub url: String,
 }
 
 /// `POST /api/threads/{id}/archive`.

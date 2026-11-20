@@ -19,6 +19,9 @@ pub const THREAD_RESUME: &str = "/api/threads/{id}/resume";
 pub const THREAD_SETTINGS: &str = "/api/threads/{id}/settings";
 pub const THREAD_SKILLS: &str = "/api/threads/{id}/skills";
 pub const THREAD_ARCHIVE: &str = "/api/threads/{id}/archive";
+pub const THREAD_DIFF: &str = "/api/threads/{id}/diff";
+pub const THREAD_COMMIT: &str = "/api/threads/{id}/commit";
+pub const THREAD_PULL_REQUEST: &str = "/api/threads/{id}/pull-request";
 pub const MESSAGE: &str = "/api/threads/{id}/messages/{message_id}";
 pub const MESSAGE_STEER: &str = "/api/threads/{id}/messages/{message_id}/steer";
 pub const MESSAGE_RETRY: &str = "/api/threads/{id}/messages/{message_id}/retry";
@@ -65,6 +68,18 @@ pub fn thread_settings(id: &ThreadId) -> String {
 
 pub fn thread_skills(id: &ThreadId) -> String {
     fill(THREAD_SKILLS, &[id.as_str()])
+}
+
+pub fn thread_diff(id: &ThreadId) -> String {
+    fill(THREAD_DIFF, &[id.as_str()])
+}
+
+pub fn thread_commit(id: &ThreadId) -> String {
+    fill(THREAD_COMMIT, &[id.as_str()])
+}
+
+pub fn thread_pull_request(id: &ThreadId) -> String {
+    fill(THREAD_PULL_REQUEST, &[id.as_str()])
 }
 
 pub fn thread_archive(id: &ThreadId) -> String {

@@ -54,20 +54,25 @@ pub enum NewPlace {
 }
 
 impl Store {
-    /// Records a worktree Kratos is about to make, so that if the engine stops before a thread
-    /// uses it, the next start knows the folder is Kratos's own leftover. `Err(WorktreeTaken)`
-    /// when a worktree is already recorded at the path.
-    pub fn reserve_worktree(&self, checkout: &Checkout) -> Result<WorktreeId, StoreError> {
+    /// Records a worktree Kratos is about to make from commit `base`, so that if the engine stops
+    /// before a thread uses it, the next start knows the folder is Kratos's own leftover.
+    /// `Err(WorktreeTaken)` when a worktree is already recorded at the path.
+    pub fn reserve_worktree(
+        &self,
+        checkout: &Checkout,
+        base: &str,
+    ) -> Result<WorktreeId, StoreError> {
         let id = WorktreeId::new(Uuid::new_v4().to_string());
         let inserted = self.connection.execute(
-            "INSERT INTO worktrees (id, path, repository, branch, ownership, state, created_at)
-             VALUES (?1, ?2, ?3, ?4, 'createdByKratos', 'creating', ?5)
+            "INSERT INTO worktrees (id, path, repository, branch, base, ownership, state, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'createdByKratos', 'creating', ?6)
              ON CONFLICT (path) WHERE state != 'removed' DO NOTHING",
             params![
                 id.as_str(),
                 checkout.path,
                 checkout.repository,
                 checkout.branch,
+                base,
                 timestamp_now()?.as_str()
             ],
         )?;
@@ -209,8 +214,8 @@ pub(crate) fn attach(
     }
 }
 
-/// The place in columns `first..first + 4`, `worktrees.id, path, branch, ownership`, of a thread
-/// row joined to its worktree. A thread with no worktree has NULL there.
+/// The place in columns `first..first + 5`, `worktrees.id, path, branch, ownership, base`, of a
+/// thread row joined to its worktree. A thread with no worktree has NULL there.
 pub(crate) fn place_from_row(row: &Row<'_>, first: usize) -> rusqlite::Result<Place> {
     let Some(id) = row.get::<_, Option<String>>(first)? else {
         return Ok(Place::ProjectFolder);
@@ -227,6 +232,7 @@ pub(crate) fn place_from_row(row: &Row<'_>, first: usize) -> rusqlite::Result<Pl
             first + 3,
             "ownership",
         )?,
+        base: row.get(first + 4)?,
     }))
 }
 

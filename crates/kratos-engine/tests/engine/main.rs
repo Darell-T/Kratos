@@ -8,6 +8,7 @@ mod claude_threads;
 mod codex_process;
 mod data_directory;
 mod event_stream;
+mod finished_work;
 mod mcp;
 mod running_engine;
 mod server;

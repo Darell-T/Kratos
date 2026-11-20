@@ -44,6 +44,9 @@ const FAKE_CODEX_CONTROL: &str = "fake-codex-control";
 /// Where the scripted fake Claude logs each process it starts.
 const FAKE_CLAUDE_LOG: &str = "fake-claude.log";
 
+/// Where the stand-in `gh` logs the arguments of each run.
+const FAKE_GH_LOG: &str = "fake-gh.log";
+
 impl RunningEngine {
     pub fn start(home: &Path) -> RunningEngine {
         RunningEngine::start_on(home, 0)
@@ -75,6 +78,15 @@ impl RunningEngine {
     }
 
     /// The file where the scripted `fake-claude` logs each process the engine starts.
+    /// The arguments of each run of the stand-in `gh`, oldest first.
+    pub fn fake_gh_runs(&self) -> Vec<Vec<String>> {
+        std::fs::read_to_string(self.home.join(FAKE_GH_LOG))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     pub fn fake_claude_log(&self) -> PathBuf {
         self.home.join(FAKE_CLAUDE_LOG)
     }
@@ -401,6 +413,8 @@ fn command(home: &Path, port: &str) -> Command {
         // It never finishes starting, so a Claude thread's log holds one `message.queued` event
         // per message and nothing a process would add. Tests of a working Claude remove this.
         .env("FAKE_CLAUDE_SILENT", "1")
+        .env("GH_EXE", fake_agents::executable("fake-gh"))
+        .env("FAKE_GH_LOG", home.join(FAKE_GH_LOG))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command

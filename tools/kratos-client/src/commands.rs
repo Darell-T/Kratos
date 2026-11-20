@@ -37,6 +37,9 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   stop <thread-id>
   resume <thread-id>
   archive <thread-id> [--files keep|discard]
+  diff <thread-id>
+  commit <thread-id> <message>
+  pull-request <thread-id> <title> [--body <text>]
   settings <thread-id> <settings-json>
   skills <thread-id>
   approve <approval-id> <decision>
@@ -106,7 +109,7 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 28] = [
+const COMMANDS: [Command; 31] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
@@ -127,6 +130,9 @@ const COMMANDS: [Command; 28] = [
     Command { name: "stop", positional: 1, options: &[], run: stop },
     Command { name: "resume", positional: 1, options: &[], run: resume },
     Command { name: "archive", positional: 1, options: &["--files"], run: archive },
+    Command { name: "diff", positional: 1, options: &[], run: diff },
+    Command { name: "commit", positional: 2, options: &[], run: commit },
+    Command { name: "pull-request", positional: 2, options: &["--body"], run: pull_request },
     Command { name: "settings", positional: 2, options: &[], run: settings },
     Command { name: "skills", positional: 1, options: &[], run: skills },
     Command { name: "approve", positional: 2, options: &[], run: approve },
@@ -388,6 +394,23 @@ fn archive(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let files = args.option("--files").unwrap_or("keep");
     let body = json!({ "files": files });
     session.post(&routes::thread_archive(&thread_id(args)), &body)
+}
+
+fn diff(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    session.get(&routes::thread_diff(&thread_id(args)))
+}
+
+fn commit(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let body = json!({ "message": args.positional[1] });
+    session.post(&routes::thread_commit(&thread_id(args)), &body)
+}
+
+fn pull_request(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let body = json!({
+        "title": args.positional[1],
+        "body": args.option("--body").unwrap_or_default(),
+    });
+    session.post(&routes::thread_pull_request(&thread_id(args)), &body)
 }
 
 fn settings(session: &mut Session, args: &Args) -> Result<(), Failure> {

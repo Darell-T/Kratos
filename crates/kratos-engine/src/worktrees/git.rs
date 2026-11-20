@@ -52,8 +52,33 @@ impl Git {
         args: &[&str],
         budget: Duration,
     ) -> Result<String, GitError> {
+        self.run_with(folder, args, budget, None).await
+    }
+
+    /// [`Git::run`] with `index` as git's index file instead of the worktree's own, so staging
+    /// there leaves the user's staged changes as they were.
+    pub(super) async fn run_with_index(
+        &self,
+        folder: &Path,
+        args: &[&str],
+        budget: Duration,
+        index: &Path,
+    ) -> Result<String, GitError> {
+        self.run_with(folder, args, budget, Some(index)).await
+    }
+
+    async fn run_with(
+        &self,
+        folder: &Path,
+        args: &[&str],
+        budget: Duration,
+        index: Option<&Path>,
+    ) -> Result<String, GitError> {
         let command = args.join(" ");
         let mut git = Command::new("git");
+        if let Some(index) = index {
+            git.env("GIT_INDEX_FILE", index);
+        }
         git.arg("-c")
             .arg(format!("core.hooksPath={}", self.hooks_off.display()))
             .arg("-C")

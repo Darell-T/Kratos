@@ -67,8 +67,8 @@ pub use messages::{
     PostMessage, QueueFull, SendMessage,
 };
 pub use places::{
-    ArchiveThread, ArchivedThread, Cleanup, LeftFiles, Ownership, Place, PlaceRequest,
-    ProjectWorktree, Worktree, WorktreeId,
+    ArchiveThread, ArchivedThread, Cleanup, CommitThread, Committed, CreatePullRequest, LeftFiles,
+    Ownership, Place, PlaceRequest, ProjectWorktree, PullRequest, ThreadDiff, Worktree, WorktreeId,
 };
 pub use report_format::{ReportFormat, ReportFormatError};
 pub use skills::{Skill, SlashCommand, ThreadSkills};

@@ -378,7 +378,7 @@ fn the_next_engine_removes_a_clean_checkout_no_thread_took_and_keeps_one_with_fi
             repository: shared.to_str().unwrap().to_owned(),
             branch: Some(name.to_owned()),
         };
-        store.reserve_worktree(&checkout).unwrap();
+        store.reserve_worktree(&checkout, "0000000").unwrap();
         git(
             &repository,
             &["worktree", "add", "--quiet", "-b", name, &checkout.path],

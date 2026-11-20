@@ -933,7 +933,7 @@ fn a_reserved_worktree_stays_reserved_until_a_thread_uses_it_or_git_never_made_i
         repository: "/work/repo/.git".into(),
         branch: Some("chat".into()),
     };
-    let reserved = store.reserve_worktree(&checkout).unwrap();
+    let reserved = store.reserve_worktree(&checkout, "0000000").unwrap();
     let unknown = WorkspaceId::new("gone".into());
 
     let failed = store.create_thread(
@@ -942,7 +942,7 @@ fn a_reserved_worktree_stays_reserved_until_a_thread_uses_it_or_git_never_made_i
     );
     assert!(matches!(failed, Err(StoreError::UnknownWorkspace(_))));
     assert!(matches!(
-        store.reserve_worktree(&checkout),
+        store.reserve_worktree(&checkout, "0000000"),
         Err(StoreError::WorktreeTaken(_))
     ));
 
@@ -955,7 +955,7 @@ fn a_reserved_worktree_stays_reserved_until_a_thread_uses_it_or_git_never_made_i
     store.release_reservation(&reserved).unwrap();
     assert!(
         matches!(
-            store.reserve_worktree(&checkout),
+            store.reserve_worktree(&checkout, "0000000"),
             Err(StoreError::WorktreeTaken(_))
         ),
         "a worktree a thread uses is no longer a reservation to release"
@@ -965,9 +965,9 @@ fn a_reserved_worktree_stays_reserved_until_a_thread_uses_it_or_git_never_made_i
         path: "/work/repo/.kratos-worktrees/never-made".into(),
         ..checkout
     };
-    let never_made = store.reserve_worktree(&other).unwrap();
+    let never_made = store.reserve_worktree(&other, "0000000").unwrap();
     store.release_reservation(&never_made).unwrap();
-    store.reserve_worktree(&other).unwrap();
+    store.reserve_worktree(&other, "0000000").unwrap();
 }
 
 #[test]
@@ -984,7 +984,7 @@ fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_
         repository: "/work/repo/.git".into(),
         branch: Some("chat".into()),
     };
-    let id = store.reserve_worktree(&checkout).unwrap();
+    let id = store.reserve_worktree(&checkout, "0000000").unwrap();
     let thread = store
         .create_thread(
             &thread_request(&workspace.id, "chat", "codex"),
@@ -1016,5 +1016,5 @@ fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_
 
     store.end_removal(&id, RemovalEnd::Removed).unwrap();
     assert_eq!(store.begin_removal(&id).unwrap(), Removal::Done);
-    store.reserve_worktree(&checkout).unwrap();
+    store.reserve_worktree(&checkout, "0000000").unwrap();
 }

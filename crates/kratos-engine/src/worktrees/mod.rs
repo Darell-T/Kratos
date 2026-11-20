@@ -7,8 +7,10 @@
 mod cleanup;
 mod git;
 mod list;
+mod work;
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -32,6 +34,10 @@ const MAX_NAME_CHARS: usize = 40;
 
 pub struct Worktrees {
     git: Git,
+    /// The user's `gh`, which opens pull requests.
+    gh: OsString,
+    /// Where Kratos keeps the short-lived index files a diff stages into.
+    scratch: PathBuf,
     /// One lock per repository, keyed by its shared git folder.
     repositories: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 }
@@ -74,6 +80,16 @@ pub(crate) enum PlaceError {
     LinkedFolder(String),
     #[error("Kratos cannot read what git answered to `git {command}`: {output}")]
     UnreadableGit { command: String, output: String },
+    #[error("Nothing changed since the last commit, so there is nothing to commit.")]
+    NothingToCommit,
+    #[error("{0} has no branch checked out. Check out a branch to open a pull request from it.")]
+    NoBranch(String),
+    #[error(
+        "Kratos could not run gh. Install the GitHub CLI and sign in with `gh auth login`. ({0})"
+    )]
+    NoGh(#[source] io::Error),
+    #[error("gh could not open the pull request: {0}")]
+    Gh(String),
     #[error("Kratos cannot use the path {0}, because it is not valid Unicode.")]
     NotUnicode(String),
     #[error(transparent)]
@@ -105,16 +121,21 @@ struct Repository {
 }
 
 impl Worktrees {
-    /// Makes the empty folder in Kratos's data folder that git reads as the hooks folder, so no
-    /// hook runs.
+    /// Makes the folders in Kratos's data folder that its git commands use: an empty one git reads
+    /// as the hooks folder, so no hook runs, and one for scratch index files. `gh` is the program
+    /// that opens pull requests.
     ///
     /// # Errors
-    /// Returns why the folder could not be made.
-    pub fn open(kratos_home: &Path) -> io::Result<Worktrees> {
+    /// Returns why a folder could not be made.
+    pub fn open(kratos_home: &Path, gh: OsString) -> io::Result<Worktrees> {
         let hooks_off = kratos_home.join("git-hooks-off");
+        let scratch = kratos_home.join("git-scratch");
         std::fs::create_dir_all(&hooks_off)?;
+        std::fs::create_dir_all(&scratch)?;
         Ok(Worktrees {
             git: Git::new(hooks_off),
+            gh,
+            scratch,
             repositories: Mutex::default(),
         })
     }
@@ -226,8 +247,9 @@ impl Worktrees {
             repository: text(&repository.shared)?,
             branch: Some(name.to_owned()),
         };
+        let recorded = base.to_owned();
         let id = match store
-            .call(move |store| store.reserve_worktree(&checkout))
+            .call(move |store| store.reserve_worktree(&checkout, &recorded))
             .await
         {
             Err(StoreError::WorktreeTaken(_)) => return Ok(None),

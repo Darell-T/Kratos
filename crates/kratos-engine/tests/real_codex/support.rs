@@ -132,7 +132,7 @@ impl Harness {
             usage,
             token,
             worktrees: std::sync::Arc::new(
-                kratos_engine::worktrees::Worktrees::open(&home).unwrap(),
+                kratos_engine::worktrees::Worktrees::open(&home, "gh".into()).unwrap(),
             ),
         };
         let (shutdown, stopped) = oneshot::channel();
