@@ -6,7 +6,7 @@ use kratos_api_client::{ApiRequest, Client, ClientError};
 use kratos_protocol::{LiveUpdate, Provider, ServerMessage, Thread, ThreadEventBody};
 use serde_json::{Value, json};
 
-use crate::running_engine::{RunningEngine, expect_silence, next_text, subscribed};
+use crate::running_engine::{RunningEngine, expect_silence, next_text, post, subscribed};
 use crate::server::post_whole_body_then_read;
 
 fn messages_path(thread: &Thread) -> String {
@@ -295,7 +295,7 @@ fn without_codex_a_codex_thread_answers_503_and_other_threads_still_work() {
     let refused = client
         .post(&messages_path(&codex), &json!({ "text": "hello" }))
         .unwrap();
-    let logged = client
+    let delivered = client
         .post(&messages_path(&claude), &json!({ "text": "hello" }))
         .unwrap();
 
@@ -308,7 +308,77 @@ fn without_codex_a_codex_thread_answers_503_and_other_threads_still_work() {
         "{}",
         refused.body
     );
-    assert_eq!(logged.status, 201);
+    assert_eq!(delivered.status, 201, "{}", delivered.body);
+    assert_eq!(delivered.body["status"], "queued");
+}
+
+#[test]
+fn without_claude_a_claude_thread_answers_503_with_the_reason_and_stores_nothing() {
+    // Catches a message accepted for a thread whose agent cannot run, which the user then
+    // believes Claude will read: a 201 that says nothing about the missing CLI (L8), and an event
+    // logged that no agent will ever act on.
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("no-claude-here");
+    let engine = RunningEngine::start_with_claude(home.path(), &missing);
+    let client = engine.client();
+    let claude = engine.create_thread_of(Provider::Claude);
+
+    let refused = client
+        .post(&messages_path(&claude), &json!({ "text": "hello" }))
+        .unwrap();
+    let events = client
+        .get(&format!("/api/threads/{}/events", claude.id))
+        .unwrap();
+
+    assert_eq!(refused.status, 503, "{}", refused.body);
+    assert!(
+        refused.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("CLAUDE_EXE"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(events.body, json!([]), "nothing was stored");
+}
+
+#[test]
+fn without_claude_every_route_that_reaches_the_agent_answers_503_not_a_success() {
+    // Catches a route that skips the agent when Claude cannot run and answers 200 or 204 as if it
+    // had acted: a stop, a resume, a settings change, or a change to a queued message.
+    let home = tempfile::tempdir().unwrap();
+    let missing = home.path().join("no-claude-here");
+    let engine = RunningEngine::start_with_claude(home.path(), &missing);
+    let client = engine.client();
+    let claude = engine.create_thread_of(Provider::Claude);
+    let thread = format!("/api/threads/{}", claude.id);
+    let settings = json!({ "model": null, "permission": "askMe", "planMode": false,
+                           "contextLimitTokens": null });
+
+    let replies = [
+        client.post(&format!("{thread}/stop"), &json!({})).unwrap(),
+        client
+            .post(&format!("{thread}/resume"), &json!({}))
+            .unwrap(),
+        client
+            .put(&format!("{thread}/settings"), &settings)
+            .unwrap(),
+        client
+            .post(&format!("{thread}/messages/m/steer"), &json!({}))
+            .unwrap(),
+        client
+            .post(&format!("{thread}/messages/m/retry"), &json!({}))
+            .unwrap(),
+        client
+            .post(&format!("{thread}/messages/m/discard"), &json!({}))
+            .unwrap(),
+        client.delete(&format!("{thread}/messages/m")).unwrap(),
+    ];
+
+    for reply in replies {
+        assert_eq!(reply.status, 503, "{}", reply.body);
+        assert!(reply.body["error"].as_str().unwrap().contains("CLAUDE_EXE"));
+    }
 }
 
 #[test]
@@ -410,4 +480,156 @@ fn a_full_queue_answers_429_and_stores_nothing() {
     );
     let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
     assert_eq!(details.body["queue"].as_array().unwrap().len(), 10);
+}
+
+#[test]
+fn a_claude_threads_skills_are_the_slash_commands_its_session_reports() {
+    // Catches the route still refusing a Claude thread, a command listed without its aliases or
+    // its built-in mark, and a silent gap where the project's own commands are not listed (D97).
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start_with_answering_claude(home.path());
+    let thread = engine.create_thread_of(Provider::Claude);
+
+    let skills = engine
+        .client()
+        .get(&format!("/api/threads/{}/skills", thread.id))
+        .unwrap();
+
+    assert_eq!(skills.status, 200, "{}", skills.body);
+    assert_eq!(skills.body["skills"], json!([]));
+    assert_eq!(
+        skills.body["slashCommands"],
+        json!([
+            { "name": "synthetic-command", "description": "Synthetic command",
+              "argumentHint": "", "aliases": ["synthetic-alias"], "builtin": true },
+            { "name": "synthetic-plugin-command", "description": "Defined outside the CLI",
+              "argumentHint": "<file>", "aliases": [], "builtin": false },
+        ])
+    );
+    assert!(
+        skills.body["slashCommandsGap"]
+            .as_str()
+            .unwrap()
+            .contains("Claude settings")
+    );
+}
+
+#[test]
+fn a_codex_threads_skills_still_list_no_slash_commands_and_keep_their_gap() {
+    // Catches the new slash command list leaking Claude's commands into a Codex thread, or the
+    // gap text Codex clients read changing (D97).
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let thread = engine.create_thread_of(Provider::Codex);
+
+    let skills = engine
+        .client()
+        .get(&format!("/api/threads/{}/skills", thread.id))
+        .unwrap();
+
+    assert_eq!(skills.body["slashCommands"], json!([]));
+    assert_eq!(
+        skills.body["slashCommandsGap"],
+        "Codex's app-server protocol does not list its slash commands, so Kratos cannot offer them"
+    );
+}
+
+#[test]
+fn usage_lists_the_claude_account_s_two_windows_beside_codex_s() {
+    // Catches Claude's windows missing from the report, or listed in the CLI's own units: a whole
+    // percent and the five-hour and weekly lengths, with the reset in the engine's time form.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start_with_answering_claude(home.path());
+    let client = engine.client();
+    client.get("/api/usage").unwrap();
+    engine.fake_codex(
+        "test/rateLimits",
+        json!({ "accountId": "account-1", "ordinaryUsageAllowed": true,
+                "rateLimits": { "limitId": "codex", "planType": "plus",
+                    "primary": { "usedPercent": 20, "windowDurationMins": 300, "resetsAt": 4_102_444_800_i64 } } }),
+    );
+    let thread = engine.create_thread_of(Provider::Claude);
+    post(&client, &thread, "hello");
+
+    let deadline = std::time::Instant::now() + crate::running_engine::WAIT;
+    let usage = loop {
+        let usage = client.get("/api/usage").unwrap();
+        let providers: Vec<&str> = usage.body["accounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|account| account["provider"].as_str().unwrap())
+            .collect();
+        if providers == ["claude", "codex"] {
+            break usage;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the report lists {providers:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+
+    let claude = &usage.body["accounts"][0];
+    assert_eq!(claude["allowance"], json!({ "state": "allowed" }));
+    assert_eq!(
+        claude["account"],
+        Value::Null,
+        "no account id and no email (D24)"
+    );
+    assert_eq!(claude["plan"], "Claude Pro");
+    let unified = &claude["buckets"][0];
+    assert_eq!(unified["limitId"], "unified");
+    assert_eq!(unified["primary"]["usedPercent"], 19);
+    assert_eq!(unified["primary"]["windowMinutes"], 300);
+    assert_eq!(unified["secondary"]["usedPercent"], 7);
+    assert_eq!(unified["secondary"]["windowMinutes"], 10080);
+    assert_eq!(unified["primary"]["resetsAt"], "2030-01-01T05:00:00.123Z");
+    assert_eq!(
+        usage.body["accounts"][1]["buckets"][0]["primary"]["usedPercent"],
+        20
+    );
+}
+
+fn next_usage(socket: &mut kratos_api_client::EventSocket) -> kratos_protocol::UsageReport {
+    match serde_json::from_str(&next_text(socket)).unwrap() {
+        ServerMessage::Usage { report } => report,
+        other => panic!("expected a usage report, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_usage_watcher_gets_the_report_at_once_and_again_when_an_account_changes() {
+    // Catches usage that reaches a client only when it polls, and a watcher that waits for a
+    // change before it sees anything (D38).
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start_with_answering_claude(home.path());
+    let client = engine.client();
+    let mut socket = client.connect_events(&[]).unwrap();
+    socket
+        .send_text(json!({ "type": "watchUsage" }).to_string())
+        .unwrap();
+
+    let first = next_usage(&mut socket);
+    assert!(
+        first
+            .accounts
+            .iter()
+            .all(|account| account.provider != Provider::Claude),
+        "no Claude session has run yet: {first:?}"
+    );
+    let thread = engine.create_thread_of(Provider::Claude);
+    post(&client, &thread, "hello");
+
+    let deadline = std::time::Instant::now() + crate::running_engine::WAIT;
+    while !next_usage(&mut socket)
+        .accounts
+        .iter()
+        .any(|account| account.provider == Provider::Claude)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the Claude account never reached the watcher"
+        );
+    }
 }

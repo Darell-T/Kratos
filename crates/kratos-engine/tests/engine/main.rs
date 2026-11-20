@@ -3,6 +3,7 @@
 
 mod agents;
 mod caller_errors;
+mod claude_threads;
 mod codex_process;
 mod data_directory;
 mod event_stream;

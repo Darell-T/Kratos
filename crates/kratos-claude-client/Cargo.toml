@@ -1,0 +1,29 @@
+[package]
+name = "kratos-claude-client"
+description = "A typed stream-json client for the Claude Code CLI"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[features]
+# Lets tests send arbitrary controls to a fake CLI.
+test-util = []
+
+[dependencies]
+kratos-process.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "time"] }
+uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+kratos-claude-client = { workspace = true, features = ["test-util"] }
+fake-agents.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

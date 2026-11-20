@@ -7,3 +7,6 @@ target/
 
 # Local project notes
 /docs/r3-verification.md
+/docs/r4-claude-provider.md
+/docs/unified-skills.md
+/crates/kratos-claude-client/PORTING.md

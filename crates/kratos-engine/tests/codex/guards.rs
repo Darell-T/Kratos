@@ -142,7 +142,8 @@ async fn the_thread_keeps_the_sender_s_permission_until_the_user_raises_it() {
 #[tokio::test]
 async fn the_thread_opens_untrusted_and_the_launch_defines_every_profile() {
     // Catches a launch that leaves a profile undefined, which Codex rejects at the first turn, or
-    // a profile that lets agents read Kratos's data folder and its client token (D19).
+    // a profile that lets agents read Kratos's data folder and its client token (D19), or a
+    // Claude-only profile that widens writes beyond what Codex allows at the same level.
     let mut harness = Harness::start(settings(Permission::AskMe, false)).await;
     harness.send("a", "first").await;
     harness.held("turn/start", 1).await;
@@ -174,6 +175,12 @@ async fn the_thread_opens_untrusted_and_the_launch_defines_every_profile() {
         );
     }
     assert!(arguments.contains(&"default_permissions=\"kratos-plan\"".to_owned()));
+    assert!(
+        arguments
+            .iter()
+            .all(|argument| !argument.contains("claude")),
+        "a Claude command runs in the profile Codex uses, so no Claude-only profile exists: {arguments:?}"
+    );
 }
 
 #[tokio::test]

@@ -6,6 +6,8 @@ use crate::{ApprovalId, ContinuationId, MessageId, QuestionId, Seq, ThreadId, Wo
 pub const HEALTH: &str = "/api/health";
 pub const EVENTS: &str = "/api/events";
 pub const USAGE: &str = "/api/usage";
+pub const CLAUDE_CLI: &str = "/api/agents/claude/cli";
+pub const CLAUDE_CLI_UPDATE: &str = "/api/agents/claude/cli/update";
 pub const WORKSPACES: &str = "/api/workspaces";
 pub const THREADS: &str = "/api/threads";
 pub const THREAD: &str = "/api/threads/{id}";

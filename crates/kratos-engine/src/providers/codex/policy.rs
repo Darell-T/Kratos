@@ -12,6 +12,7 @@ use kratos_command_safety::{
 use kratos_protocol::{AskReason, FileChange, FileChangeKind, Permission, ThreadSettings};
 
 use super::profiles::ProtectedFolders;
+use crate::providers::writes::{self, Destination};
 
 /// The policy every thread and turn opens with, so each request reaches this module first.
 pub(super) const APPROVAL_POLICY: types::AskForApproval = types::AskForApproval::Untrusted;
@@ -62,7 +63,8 @@ pub(super) fn decide_command(
     Verdict::Accept
 }
 
-/// An approved patch writes wherever its paths point, outside the sandbox, so its paths decide.
+/// An approved patch writes wherever its paths point, outside the sandbox, so its paths decide, by
+/// the rule a Claude write follows: Approve for me asks before a write outside the workspace.
 /// `changes` is `None` when Codex has not said which files the patch touches. Relative paths are
 /// read against the thread's `folder`.
 pub fn decide_patch(
@@ -75,19 +77,20 @@ pub fn decide_patch(
     let Some(changes) = changes else {
         return Verdict::Ask(AskReason::Unchecked);
     };
+    let mut lands = Destination::Inside;
     for path in changes.iter().flat_map(changed_paths) {
-        match protected.containing(&folder.join(path)) {
-            Ok(Some(protected_folder)) => {
-                return Verdict::Ask(AskReason::ProtectedFolder {
-                    path: protected_folder.display().to_string(),
-                });
-            }
+        match writes::destination(&folder.join(path), folder, protected) {
+            Ok(Destination::Inside) => {}
+            Ok(Destination::Outside) => lands = Destination::Outside,
+            Ok(guarded @ Destination::Protected(_)) => lands = guarded,
             Err(_) => return Verdict::Ask(AskReason::Unchecked),
-            Ok(None) => {}
+        }
+        if matches!(lands, Destination::Protected(_)) {
+            break;
         }
     }
-    if asks_every_action(settings.permission) || settings.plan_mode {
-        return Verdict::Ask(AskReason::AskEveryAction);
+    if let Some(reason) = writes::asks(settings, lands) {
+        return Verdict::Ask(reason);
     }
     if asks_for_root {
         return Verdict::Ask(AskReason::Escalation);
@@ -262,6 +265,41 @@ mod tests {
                 matches!(verdict, Verdict::Ask(AskReason::ProtectedFolder { .. })),
                 "{changes:?}"
             );
+        }
+    }
+
+    #[test]
+    fn under_approve_for_me_a_patch_outside_the_workspace_asks_as_a_claude_write_does() {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        std::fs::create_dir_all(&target).unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("patch-scope-")
+            .tempdir_in(target)
+            .unwrap();
+        let base = std::fs::canonicalize(root.path()).unwrap();
+        assert!(!base.starts_with(std::fs::canonicalize(std::env::temp_dir()).unwrap()));
+        let folder = base.join("repo");
+        std::fs::create_dir_all(&folder).unwrap();
+        let protected = ProtectedFolders::new(base.join(".kratos"), None, None);
+        let inside = [change("src/lib.rs", FileChangeKind::Add)];
+        let outside = [change("../profile.ps1", FileChangeKind::Add)];
+        for (permission, changes, expected) in [
+            (Permission::ApproveForMe, &inside[..], Verdict::Accept),
+            (
+                Permission::ApproveForMe,
+                &outside[..],
+                Verdict::Ask(AskReason::Escalation),
+            ),
+            (Permission::FullAccess, &outside[..], Verdict::Accept),
+        ] {
+            let verdict = decide_patch(
+                &settings(permission, false),
+                Some(changes),
+                false,
+                &folder,
+                &protected,
+            );
+            assert_eq!(verdict, expected, "{permission:?} {changes:?}");
         }
     }
 

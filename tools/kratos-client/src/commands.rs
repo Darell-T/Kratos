@@ -5,13 +5,12 @@
 //! refusals. The create commands send their arguments unchecked, so a lane can send blank or
 //! relative values.
 
-use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::thread;
 use std::time::Duration;
 
 use kratos_api_client::{ApiReply, ApiRequest, Client, ClientError, Followed, Incoming};
-use kratos_client::{BenchError, Normalizer, bench_post, bench_turns};
+use kratos_client::{BenchError, Normalizer, bench_turns};
 use kratos_protocol::{
     ApprovalId, ContinuationId, DEFAULT_PORT, HOME_VAR, MessageId, QuestionId, Seq, ServerMessage,
     ThreadId, WorkspaceId, engine_home, routes,
@@ -25,7 +24,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   workspaces
   create-workspace <name> <path>
   threads <workspace-id>
-  create-thread <workspace-id> <title> <provider>
+  create-thread <workspace-id> <title> <provider> [--settings <settings-json>]
   post <thread-id> <text>
   send <thread-id> <text> [--message-id <id>] [--image <path>]... [--file <path>]...
   thread <thread-id>
@@ -41,12 +40,16 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   answer <question-id> <answers-json>
   schedule <continuation-id>
   usage
+  claude-cli
+  update-claude-cli
   subscribe <thread-id> [--after <seq>] [--count <n>] [--read-delay-ms <ms>]
   request <METHOD> <path> [--header <name:value>]... [--json <body> | --body-bytes <n>]
   socket-send <bytes> [--header <name:value>]...
-  bench-post
   bench-turns <fake-control-file>
 
+create-thread's --settings sets a thread's model, permission, planMode, and reportFormat (a JSON
+Schema object the final reply must match), such as
+'{\"model\":\"claude-haiku-5-5\",\"permission\":\"askMe\",\"planMode\":false,\"contextLimitTokens\":null}'.
 The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
 engine wrote to $KRATOS_HOME/client-token (default ~/.kratos/client-token), when there is one.
 --normalize replaces ids and times, so two engines' output compares with a plain diff.
@@ -54,6 +57,8 @@ subscribe follows a thread through disconnects and engine restarts and prints ea
 and live updates, such as a reply as it is written, as they come; --count counts events only.
 --read-delay-ms makes it a stalled reader: it subscribes, waits, then reads.
 request sends exactly what it is told, for the Host, Origin, and size-cap checks.
+update-claude-cli runs Claude Code's updater in the engine, which keeps going if this client
+times out; claude-cli then shows the release installed.
 socket-send sends one message of exactly <bytes> bytes and reports whether the engine closed
 the socket.";
 
@@ -61,7 +66,6 @@ the socket.";
 const SUBSCRIBE_WAIT: Duration = Duration::from_secs(60);
 /// `socket-send` waits this long to learn whether the engine closes the socket.
 const SOCKET_SEND_WAIT: Duration = Duration::from_secs(2);
-const BENCH_MESSAGES: NonZeroUsize = NonZeroUsize::new(500).unwrap();
 
 pub(crate) enum Failure {
     /// The command line is wrong. Nothing was sent.
@@ -94,12 +98,14 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 25] = [
+const COMMANDS: [Command; 26] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
     Command { name: "threads", positional: 1, options: &[], run: threads },
-    Command { name: "create-thread", positional: 3, options: &[], run: create_thread },
+    Command {
+        name: "create-thread", positional: 3, options: &["--settings"], run: create_thread,
+    },
     Command { name: "post", positional: 2, options: &[], run: post },
     Command {
         name: "send", positional: 2, options: &["--message-id", "--image", "--file"], run: send,
@@ -117,6 +123,8 @@ const COMMANDS: [Command; 25] = [
     Command { name: "answer", positional: 2, options: &[], run: answer },
     Command { name: "schedule", positional: 1, options: &[], run: schedule },
     Command { name: "usage", positional: 0, options: &[], run: usage_report },
+    Command { name: "claude-cli", positional: 0, options: &[], run: claude_cli },
+    Command { name: "update-claude-cli", positional: 0, options: &[], run: update_claude_cli },
     Command {
         name: "subscribe", positional: 1,
         options: &["--after", "--count", "--read-delay-ms"], run: subscribe,
@@ -126,7 +134,6 @@ const COMMANDS: [Command; 25] = [
         options: &["--header", "--json", "--body-bytes"], run: request,
     },
     Command { name: "socket-send", positional: 1, options: &["--header"], run: socket_send },
-    Command { name: "bench-post", positional: 0, options: &[], run: bench },
     Command { name: "bench-turns", positional: 1, options: &[], run: turns_bench },
 ];
 
@@ -278,7 +285,10 @@ fn threads(session: &mut Session, args: &Args) -> Result<(), Failure> {
 
 fn create_thread(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let [workspace_id, title, provider] = [0, 1, 2].map(|index| &args.positional[index]);
-    let body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
+    let mut body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
+    if let Some(settings) = args.option("--settings") {
+        body["settings"] = json_argument(settings, "settings-json")?;
+    }
     session.post(routes::THREADS, &body)
 }
 
@@ -386,6 +396,14 @@ fn usage_report(session: &mut Session, _: &Args) -> Result<(), Failure> {
     session.get(routes::USAGE)
 }
 
+fn claude_cli(session: &mut Session, _: &Args) -> Result<(), Failure> {
+    session.get(routes::CLAUDE_CLI)
+}
+
+fn update_claude_cli(session: &mut Session, _: &Args) -> Result<(), Failure> {
+    session.post(routes::CLAUDE_CLI_UPDATE, &json!({}))
+}
+
 fn json_argument(text: &str, name: &str) -> Result<Value, Failure> {
     serde_json::from_str(text).or_else(|_| usage(format!("{name} must be JSON, got {text:?}")))
 }
@@ -471,15 +489,6 @@ fn socket_send(session: &mut Session, args: &Args) -> Result<(), Failure> {
         Err(error) => json!({ "socket": "closed", "code": null, "error": error.to_string() }),
     };
     session.print(line);
-    Ok(())
-}
-
-fn bench(session: &mut Session, _: &Args) -> Result<(), Failure> {
-    let report = bench_post(&session.client, BENCH_MESSAGES)?;
-    println!(
-        "{}",
-        serde_json::to_string(&report).expect("a bench report serializes")
-    );
     Ok(())
 }
 

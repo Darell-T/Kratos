@@ -13,11 +13,12 @@ use kratos_protocol::{
 use kratos_store::{Store, StoreError, ThreadWrite};
 use tokio::sync::mpsc;
 
-use super::actor::{Actor, Server};
+use super::CodexSettings;
+use super::actor::Actor;
 use super::approvals::{Closed, Requests, settle_closed};
-use super::{CodexSettings, queue};
 use crate::hub::{Hub, PAGE_BYTES};
 use crate::providers::changes::ChangesRecorder;
+use crate::providers::queue;
 use crate::store_thread::StoreThread;
 use crate::usage::LimitStop;
 use crate::usage::UsageTracker;
@@ -48,8 +49,11 @@ pub(super) struct Unfinished {
     pub requests: Closed,
 }
 
+const FRAMES: usize = 256;
+
 pub(super) struct EndingTurn {
     pub id: TurnId,
+    pub stopped: bool,
     pub changes: TurnChanges,
     pub context: Option<ContextUsage>,
 }
@@ -81,20 +85,19 @@ impl Actor {
             .await?;
         }
         let (done, completions) = mpsc::unbounded_channel();
+        let (frame_sender, frames) = mpsc::channel(FRAMES);
         let actor = Actor {
             settings,
             hub,
             store,
             usage,
-            server: Server::Down,
-            generation: 0,
-            restarts: Default::default(),
+            servers: Default::default(),
+            frames,
+            frame_sender,
             windows: HashMap::new(),
             plan: None,
             threads: HashMap::new(),
             requests: Requests::default(),
-            ready: Default::default(),
-            deferred: Vec::new(),
             reconcile: Vec::new(),
             done,
             completions,
@@ -118,19 +121,22 @@ pub(super) fn settle(
     settle_closed(write, &work.requests, request_reason)?;
     if let Some(turn) = work.running_turn {
         let (outcome, pause) = match &reason {
-            EndReason::Restarted => (TurnOutcome::Interrupted, PauseReason::Interrupted),
+            _ if turn.stopped => (TurnOutcome::Interrupted, None),
+            EndReason::Restarted => (TurnOutcome::Interrupted, Some(PauseReason::Interrupted)),
             EndReason::Exited(error) => (
                 TurnOutcome::Failed {
                     error: error.clone(),
                 },
-                PauseReason::TurnFailed {
+                Some(PauseReason::TurnFailed {
                     turn_id: turn.id.clone(),
                     error: error.clone(),
-                },
+                }),
             ),
         };
         write.complete_turn(turn.id, outcome, turn.changes, turn.context)?;
-        queue::pause_if_waiting(write, pause)?;
+        if let Some(pause) = pause {
+            queue::pause_if_waiting(write, pause)?;
+        }
     }
     work.sending.into_iter().try_for_each(|message_id| {
         queue::mark_uncertain(write, message_id, uncertain_reason.to_owned())
@@ -144,6 +150,7 @@ fn unfinished_codex_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfinis
         let changes = recorded_changes(store, &thread_id, &turn_id)?;
         unfinished.entry(thread_id).or_default().running_turn = Some(EndingTurn {
             id: turn_id,
+            stopped: false,
             changes,
             context: None,
         });

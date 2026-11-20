@@ -21,21 +21,21 @@ authenticated clients.
 
 ## Status
 
-| Area                                                                | State   |
-| ------------------------------------------------------------------- | ------- |
-| Workspaces, threads and an append-only message history              | Working |
-| Live updates to every client, with catch-up after a reconnect       | Working |
-| Typed Codex connection: start, requests, events, approvals, cleanup | Working |
-| Codex skills, plugins, models and sign-in status                    | Working |
-| Sending chat messages to Codex, with queue and streaming replies    | Working |
-| Context window tracking and per-thread model and window settings    | Working |
-| Approvals, diff viewer, file tree and terminal                      | Planned |
-| Claude Code provider                                                | Planned |
-| macOS, and opening threads from another machine                     | Planned |
+| Area                                                                | State       |
+| ------------------------------------------------------------------- | ----------- |
+| Workspaces, threads and an append-only message history              | Working     |
+| Live updates to every client, with catch-up after a reconnect       | Working     |
+| Typed Codex connection: start, requests, events, approvals, cleanup | Working     |
+| Codex skills, plugins, models and sign-in status                    | Working     |
+| Sending chat messages to Codex, with queue and streaming replies    | Working     |
+| Context window tracking and per-thread model and window settings    | Working     |
+| Approvals, diff viewer, file tree and terminal                      | Planned     |
+| Claude Code provider                                                | In progress |
+| Opening threads from another machine                                | Planned     |
 
 ## Requirements
 
-- Windows (macOS is planned)
+- Windows, macOS or Linux. Kratos is built for all three. So far its full test suite has passed on Windows only.
 - Node.js 24 and Git
 - Rust, to build the Rust engine. `rust-toolchain.toml` pins 1.99.1, and `rustup` installs it on first use.
 - The Codex CLI, installed and signed in: `npm install -g @openai/codex`, then `codex login`
@@ -100,7 +100,6 @@ preserves those files. Confirm that no SQLite program uses the folder before mov
 cargo run -p kratos-client -- health
 cargo run -p kratos-client -- create-workspace repo C:\work\repo
 cargo run -p kratos-client -- subscribe <thread-id> --after 0 --count 1
-cargo run -p kratos-client -- --url http://127.0.0.1:4200 bench-post
 ```
 
 Run `kratos-client` with no arguments to see the other commands.
@@ -113,6 +112,19 @@ Codex 0.159.1 is the tested protocol release. On Windows, the engine checks elev
 opening a Codex thread and requests setup when necessary. Setup failure leaves queued work unsent and reports why.
 Ask me and Approve for me write only the thread's workspace and temporary folders. Full access runs commands without
 a sandbox and still asks before dangerous ones.
+
+Claude Code threads use Claude's own shell tools, `Bash` and `PowerShell`. A Claude command runs as the user, with no
+sandbox, on every system. Kratos's guards are its own decision on each tool request and the dangerous-command check.
+Ask me asks before every command. Approve for me and Full access ask only before commands the check flags. A pre-tool
+hook sends every command to Kratos's decision, including the ones Claude Code would otherwise run without asking. The
+check misses many destructive commands, so an unflagged command can change or delete anything the user can, and can
+read Kratos's client token.
+
+Kratos lets Claude load skills and tool definitions without asking. Unrecognized tools require approval.
+In plan mode, ordinary reads run without asking, protected reads are denied, and web and shell tools ask.
+Claude decides direct edits in its plans directory. Under Approve for me, Claude file edits and Codex patches
+outside the workspace and temporary folder ask for approval. Only Full access can create, message, stop, or
+answer threads in another workspace. Any thread can read across workspaces.
 
 ```sh
 cargo run -p kratos-client -- send <thread-id> "Explain this repository"
@@ -127,7 +139,7 @@ Every Codex thread gets a `kratos` MCP server. Codex starts
 can list workspaces and threads, read a thread, create a thread, send another thread a message labelled with its own
 id, wait for a thread's turn, stop a turn, answer a question, and decide an approval.
 
-The server names the agent's thread in a `Kratos-Thread` header on every request. The engine answers 403 to that
+The server names the acting thread on HTTP tool requests. For `wait_for_turn` it subscribes to the target thread on the authenticated event socket. The engine answers 403 to that
 header on every route the tools do not call, such as a settings change, a steer, or a schedule. A new route stays
 closed to agents until it is added to `agent_routes` in `crates/kratos-engine/src/server/mod.rs`. On the open routes
 the engine checks each request against the agent's thread. A thread it creates gets at most its permission, only a Full access thread may

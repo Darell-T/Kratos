@@ -2,25 +2,29 @@
 //! approvals and questions, or answers Kratos gives itself.
 
 use kratos_codex_client::{Incoming, Notification, RequestId, types};
-use kratos_protocol::{LiveUpdate, Provider, ThreadEventBody, ThreadId, TurnId};
+use kratos_protocol::{AgentItem, LiveUpdate, Provider, ThreadEventBody, ThreadId, TurnId};
 
 use super::actor::Actor;
+use super::servers::ServerKey;
+use super::threads::{Link, Turn};
 use super::wire;
 
 impl Actor {
-    pub(super) async fn on_incoming(&mut self, incoming: Incoming) {
+    pub(super) async fn on_incoming(&mut self, key: ServerKey, incoming: Incoming) {
         match incoming {
-            Incoming::Notification(notification) => self.on_notification(notification).await,
-            Incoming::Request(request) => self.on_request(request).await,
-            Incoming::Exited(exit) => self.on_exit(exit).await,
+            Incoming::Notification(notification) => {
+                self.on_notification(&key, notification).await;
+            }
+            Incoming::Request(request) => self.on_request(&key, request).await,
+            Incoming::Exited(exit) => self.on_exit(key, exit).await,
         }
     }
 
     // #lizard forgives: one arm per notification Codex sends, each a call or two.
-    async fn on_notification(&mut self, notification: Notification) {
+    async fn on_notification(&mut self, key: &ServerKey, notification: Notification) {
         match notification {
             Notification::AgentMessageDelta(delta) => {
-                if let Some(thread_id) = self.thread_of(&delta.thread_id) {
+                if let Some(thread_id) = self.thread_of(key, &delta.thread_id) {
                     self.hub.publish(
                         &thread_id,
                         LiveUpdate::ReplyDelta {
@@ -31,25 +35,25 @@ impl Actor {
                     );
                 }
             }
-            Notification::ItemStarted(started) => self.on_item_started(started),
-            Notification::ItemCompleted(completed) => self.on_item_completed(completed).await,
+            Notification::ItemStarted(started) => self.on_item_started(key, started),
+            Notification::ItemCompleted(completed) => self.on_item_completed(key, completed).await,
             Notification::TurnCompleted(completed) => {
-                if let Some(thread_id) = self.thread_of(&completed.thread_id) {
+                if let Some(thread_id) = self.thread_of(key, &completed.thread_id) {
                     self.finish_turn(&thread_id, completed.turn).await;
+                    self.make_room_if_waited_for();
                 }
             }
-            Notification::Error(error) => self.on_error(error).await,
+            Notification::Error(error) => self.on_error(key, error).await,
             Notification::ServerRequestResolved(resolved) => {
-                self.withdraw(&RequestId::from(&resolved.request_id)).await;
+                self.withdraw(key, &RequestId::from(&resolved.request_id))
+                    .await;
             }
             Notification::ThreadClosed(closed) => {
-                if let Some(thread_id) = self.thread_of(&closed.thread_id)
-                    && let Some(thread) = self.threads.get_mut(&thread_id)
-                {
-                    thread.link = super::threads::Link::Detached;
+                if let Some(thread_id) = self.thread_of(key, &closed.thread_id) {
+                    self.on_thread_closed(&thread_id).await;
                 }
             }
-            Notification::ThreadTokenUsageUpdated(usage) => self.on_token_usage(usage),
+            Notification::ThreadTokenUsageUpdated(usage) => self.on_token_usage(key, usage),
             Notification::AccountUpdated(_) => self.usage.account_changed(Provider::Codex),
             Notification::AccountRateLimitsUpdated(updated) => {
                 self.usage
@@ -64,16 +68,29 @@ impl Actor {
         }
     }
 
-    /// The Kratos thread a Codex thread id belongs to, among the threads loaded in this server.
-    pub(super) fn thread_of(&self, native_id: &str) -> Option<ThreadId> {
-        self.threads
-            .iter()
-            .find(|(_, thread)| thread.native_id() == Some(native_id))
-            .map(|(thread_id, _)| thread_id.clone())
+    async fn on_thread_closed(&mut self, thread_id: &ThreadId) {
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
+        if matches!(thread.turn, Turn::Idle) && thread.steering.is_empty() {
+            thread.link = Link::Detached;
+            return;
+        }
+        self.detach(thread_id, "Codex closed the thread while it worked")
+            .await;
+        self.dispatch(thread_id).await;
     }
 
-    fn on_item_started(&mut self, started: types::ItemStartedNotification) {
-        let Some(thread_id) = self.thread_of(&started.thread_id) else {
+    pub(super) fn thread_of(&self, key: &ServerKey, native_id: &str) -> Option<ThreadId> {
+        let ServerKey::Thread(thread_id) = key else {
+            return None;
+        };
+        let thread = self.threads.get(thread_id)?;
+        (thread.native_id() == Some(native_id)).then(|| thread_id.clone())
+    }
+
+    fn on_item_started(&mut self, key: &ServerKey, started: types::ItemStartedNotification) {
+        let Some(thread_id) = self.thread_of(key, &started.thread_id) else {
             return;
         };
         if let types::ThreadItem::FileChange { id, changes, .. } = &started.item {
@@ -94,8 +111,12 @@ impl Actor {
         }
     }
 
-    async fn on_item_completed(&mut self, completed: types::ItemCompletedNotification) {
-        let Some(thread_id) = self.thread_of(&completed.thread_id) else {
+    async fn on_item_completed(
+        &mut self,
+        key: &ServerKey,
+        completed: types::ItemCompletedNotification,
+    ) {
+        let Some(thread_id) = self.thread_of(key, &completed.thread_id) else {
             return;
         };
         let Some(item) = wire::agent_item(&completed.item) else {
@@ -104,6 +125,9 @@ impl Actor {
         let thread = self.threads.get_mut(&thread_id).expect("found above");
         if let Some(work) = thread.turn.work_mut() {
             work.changes.record(&item);
+            if let AgentItem::Message { text, .. } = &item {
+                work.last_reply = Some(text.clone());
+            }
         }
         let turn_id = TurnId::new(completed.turn_id);
         let _ = self
@@ -114,8 +138,8 @@ impl Actor {
             .await;
     }
 
-    async fn on_error(&mut self, error: types::ErrorNotification) {
-        let Some(thread_id) = self.thread_of(&error.thread_id) else {
+    async fn on_error(&mut self, key: &ServerKey, error: types::ErrorNotification) {
+        let Some(thread_id) = self.thread_of(key, &error.thread_id) else {
             return;
         };
         let body = ThreadEventBody::ProviderError {
@@ -131,8 +155,12 @@ impl Actor {
             .await;
     }
 
-    fn on_token_usage(&mut self, usage: types::ThreadTokenUsageUpdatedNotification) {
-        let Some(thread_id) = self.thread_of(&usage.thread_id) else {
+    fn on_token_usage(
+        &mut self,
+        key: &ServerKey,
+        usage: types::ThreadTokenUsageUpdatedNotification,
+    ) {
+        let Some(thread_id) = self.thread_of(key, &usage.thread_id) else {
             return;
         };
         let context = wire::context_usage(&usage.token_usage);

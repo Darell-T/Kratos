@@ -4,8 +4,8 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, ContextLimit, Message, PauseReason, Question, RequiredText, Seq, Timestamp, TurnId,
-    WorkspaceId,
+    Approval, ContextLimit, Message, PauseReason, Question, ReportFormat, RequiredText, Seq,
+    Timestamp, TurnId, WorkspaceId,
 };
 
 string_id! {
@@ -109,6 +109,10 @@ pub struct ThreadSettings {
     /// How many tokens of context the agent may fill before the provider compacts it (D76).
     /// `None` keeps the provider's own limit. Never above the window the provider reported.
     pub context_limit_tokens: Option<ContextLimit>,
+    /// The shape the agent's final reply must take, such as a Teams reviewer's report. Plan mode
+    /// ignores it, since the plan is that turn's reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_format: Option<ReportFormat>,
 }
 
 impl Default for ThreadSettings {
@@ -118,6 +122,7 @@ impl Default for ThreadSettings {
             permission: Permission::AskMe,
             plan_mode: false,
             context_limit_tokens: None,
+            report_format: None,
         }
     }
 }
@@ -128,6 +133,21 @@ impl ThreadSettings {
             permission: self.permission,
             plan_mode: self.plan_mode,
         }
+    }
+
+    /// Checks the format before saving new settings or using settings from an older release.
+    ///
+    /// # Errors
+    /// Returns the location of an unsupported schema value.
+    pub fn validate_report_format(&self) -> Result<(), crate::ReportFormatError> {
+        self.report_format
+            .as_ref()
+            .map_or(Ok(()), ReportFormat::validate)
+    }
+
+    /// The requested output schema, except in plan mode where the reply is the plan.
+    pub fn turn_report_format(&self) -> Option<&ReportFormat> {
+        self.report_format.as_ref().filter(|_| !self.plan_mode)
     }
 
     /// These settings with no more access than `limit`.

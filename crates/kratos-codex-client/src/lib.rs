@@ -21,7 +21,8 @@ pub mod types {
 }
 
 pub use connection::{
-    Codex, ConnectError, Exit, Incoming, IncomingRequest, Launch, RequestError, RequestId, connect,
+    Codex, ConnectError, Exit, Incoming, IncomingRequest, Launch, MAX_LINE_BYTES, RequestError,
+    RequestId, connect,
 };
 pub use locate::{LocateError, locate_codex};
 pub use protocol::{Method, Notification, ServerRequest, ServerResponse, methods};

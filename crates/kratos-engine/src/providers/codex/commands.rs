@@ -10,6 +10,7 @@ use serde_json::json;
 
 use super::actor::{Actor, Command, Reply};
 use super::profiles::Profile;
+use super::servers::ServerKey;
 use super::{ProviderError, wire};
 
 impl Actor {
@@ -125,10 +126,12 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
-        let codex = match self.connection() {
+        let key = ServerKey::Thread(thread_id.clone());
+        let codex = match self.connection(&key) {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::Skills { thread_id, reply });
+                let deferred = Command::Skills { thread_id, reply };
+                self.servers.slot(&key).deferred.push(deferred);
                 return;
             }
             Err(error) => {
@@ -137,7 +140,9 @@ impl Actor {
             }
         };
         let folder = self.threads[&thread_id].folder.clone();
+        let pending_request = self.servers.request_guard(&key);
         tokio::spawn(async move {
+            let _guard = pending_request;
             let _ = reply.send(list_skills(&codex, folder).await);
         });
     }
@@ -153,15 +158,20 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
-        let codex = match self.connection() {
+        if reply.is_closed() {
+            return;
+        }
+        let key = ServerKey::Thread(thread_id.clone());
+        let codex = match self.connection(&key) {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::Run {
+                let deferred = Command::Run {
                     thread_id,
                     command,
                     timeout,
                     reply,
-                });
+                };
+                self.servers.slot(&key).deferred.push(deferred);
                 return;
             }
             Err(error) => {
@@ -172,8 +182,22 @@ impl Actor {
         let thread = &self.threads[&thread_id];
         let profile = Profile::for_settings(&thread.settings).id().to_owned();
         let folder = thread.folder.clone();
+        let pending_request = self.servers.request_guard(&key);
         tokio::spawn(async move {
-            let _ = reply.send(Ok(exec(&codex, command, folder, profile, timeout).await));
+            let _guard = pending_request;
+            let mut reply = reply;
+            let process_id = uuid::Uuid::new_v4().to_string();
+            tokio::select! {
+                result = exec(&codex, command, folder, profile, timeout, &process_id) => {
+                    let _ = reply.send(Ok(result));
+                }
+                () = reply.closed() => {
+                    let params = types::CommandExecTerminateParams { process_id };
+                    if let Err(error) = codex.request_within::<Terminate>(&params, Duration::from_secs(5)).await {
+                        eprintln!("Codex could not stop an abandoned command: {error}");
+                    }
+                }
+            }
         });
     }
 }
@@ -208,10 +232,12 @@ async fn exec(
     folder: String,
     profile: String,
     timeout: Duration,
+    process_id: &str,
 ) -> CommandResult {
     let mut params: types::CommandExecParams = wire::required(json!({ "command": command }));
     params.cwd = Some(folder);
     params.permission_profile = Some(profile);
+    params.process_id = Some(process_id.to_owned());
     params.timeout_ms = Some(i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX));
     // The runner's own deadline answers first; this one only bounds a Codex that never answers.
     let deadline = timeout + Duration::from_secs(10);
@@ -219,4 +245,13 @@ async fn exec(
         .request_within::<methods::CommandExec>(&params, deadline)
         .await;
     wire::command_outcome(result)
+}
+
+// The pinned schema exposes this operation; the shared client does not name it yet.
+struct Terminate;
+
+impl kratos_codex_client::Method for Terminate {
+    const NAME: &'static str = "command/exec/terminate";
+    type Params = types::CommandExecTerminateParams;
+    type Response = types::CommandExecTerminateResponse;
 }

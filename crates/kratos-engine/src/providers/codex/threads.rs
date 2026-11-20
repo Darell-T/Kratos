@@ -84,9 +84,12 @@ pub(super) enum Link {
 /// start's answer, until its end is recorded.
 #[derive(Default)]
 pub(super) struct TurnWork {
+    pub stop_id: Option<uuid::Uuid>,
     pub changes: ChangesRecorder,
     /// The latest context report (D76).
     pub context: Option<ContextUsage>,
+    /// The text of the turn's latest reply, which is the report under a report format.
+    pub last_reply: Option<String>,
 }
 
 pub(super) enum Turn {
@@ -102,10 +105,6 @@ pub(super) enum Turn {
     },
     Running {
         turn_id: TurnId,
-        /// Set once `turn/interrupt` is out or accepted.
-        stopping: bool,
-        /// Changes whenever the deadline is set again, so an earlier deadline's timer is ignored.
-        deadline_epoch: u64,
         work: TurnWork,
     },
 }

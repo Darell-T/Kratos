@@ -553,8 +553,9 @@ fn backs_up_each_older_version_before_migrating_it() {
                 Value::Null,
                 Value::Null,
                 Value::Null,
+                Value::Null,
             ],
-            "a thread from before migration 5 gets the default settings, unpaused and idle"
+            "a thread from before migration 5 gets the default settings, unpaused and idle, with              no report format"
         );
     }
 }

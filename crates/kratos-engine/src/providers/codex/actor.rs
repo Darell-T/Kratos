@@ -1,11 +1,5 @@
-//! The actor: its inputs, its state, and the loop that serves them one at a time.
-//!
-//! Three inputs: commands from handles, messages from Codex, and completions of the work the actor
-//! started (a request to Codex, a deadline). Each handler runs to its end before the next input,
-//! so no two handlers see a thread half changed. A handler awaits only the store, never Codex.
-
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::Duration;
+use std::collections::{BTreeMap, HashMap};
+use std::time::{Duration, Instant};
 
 use kratos_codex_client::{Codex, Incoming, RequestError, types};
 use kratos_protocol::{
@@ -18,16 +12,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::approvals::Requests;
 use super::connection::StartError;
+use super::servers::{ServerKey, Servers};
 use super::threads::ThreadState;
-use super::turns::{Delivery, Stopper};
+use super::turns::{Delivery, StartRequest, StopWaiters};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
-
-/// How many threads may wait on a `turn/start` answer at once. The rest wait their turn, so a
-/// burst of messages to many threads does not flood Codex (D85).
-pub(super) const MAX_STARTING: usize = 4;
 
 pub(super) type Reply<T> = oneshot::Sender<Result<T, ProviderError>>;
 
@@ -136,6 +127,9 @@ pub(super) enum Done {
     Account {
         plan: Option<String>,
     },
+    Quiet {
+        quiet: Result<bool, String>,
+    },
     Attached {
         thread_id: ThreadId,
         /// The context limit the thread was loaded with (D76).
@@ -144,7 +138,7 @@ pub(super) enum Done {
         result: Result<Opened, RequestError>,
     },
     StartAnswered {
-        thread_id: ThreadId,
+        request: StartRequest,
         result: Result<Box<types::Turn>, RequestError>,
     },
     /// The history read after an uncertain `turn/start` or `turn/steer`: the turn that took the
@@ -165,16 +159,11 @@ pub(super) enum Done {
         thread_id: ThreadId,
         turn_id: kratos_protocol::TurnId,
         result: Result<(), RequestError>,
-        stopper: Stopper,
+        waiters: StopWaiters,
     },
     StopExpired {
         thread_id: ThreadId,
-        turn_id: kratos_protocol::TurnId,
-    },
-    Deadline {
-        thread_id: ThreadId,
-        turn_id: kratos_protocol::TurnId,
-        epoch: u64,
+        stop_id: uuid::Uuid,
     },
     HistoryForDiscard {
         thread_id: ThreadId,
@@ -190,18 +179,25 @@ pub(super) enum Done {
 }
 
 pub(super) struct Completion {
+    key: ServerKey,
     generation: u64,
     done: Done,
 }
 
 impl Completion {
     async fn apply(self, actor: &mut Actor) {
-        if self.generation == actor.generation {
-            actor.on_done(self.done).await;
+        if self.generation == actor.servers.generation(&self.key) {
+            actor.on_done(self.key, self.done).await;
         } else {
             self.done.discard_stale().await;
         }
     }
+}
+
+pub(super) struct Frame {
+    pub key: ServerKey,
+    pub generation: u64,
+    pub incoming: Incoming,
 }
 
 fn process_exited() -> ProviderError {
@@ -218,16 +214,16 @@ impl Done {
             Done::UsageRead {
                 reply: Some(reply), ..
             } => drop(reply.send(Err(process_exited()))),
-            Done::Interrupted { stopper, .. } => stopper.tell(|| Ok(())),
+            Done::Interrupted { waiters, .. } => waiters.tell(|| Ok(())),
             Done::Connected { result: Err(_) }
             | Done::UsageRead { reply: None, .. }
             | Done::Account { .. }
+            | Done::Quiet { .. }
             | Done::Attached { .. }
             | Done::StartAnswered { .. }
             | Done::DeliveryChecked { .. }
             | Done::Steered { .. }
-            | Done::StopExpired { .. }
-            | Done::Deadline { .. } => {}
+            | Done::StopExpired { .. } => {}
         }
     }
 }
@@ -239,25 +235,14 @@ pub(super) struct Opened {
     pub is_new: bool,
 }
 
-pub(super) enum Server {
-    Down,
-    Starting,
-    Up {
-        codex: Codex,
-        incoming: mpsc::Receiver<Incoming>,
-    },
-}
-
 pub(crate) struct Actor {
     pub(super) settings: CodexSettings,
     pub(super) hub: Hub,
     pub(super) store: StoreThread,
     pub(super) usage: UsageTracker,
-    pub(super) server: Server,
-    /// Advances on each app-server start and exit; `Completion::apply` drops work from an older
-    /// generation, because the process that was to answer it is gone.
-    pub(super) generation: u64,
-    pub(super) restarts: super::connection::Restarts,
+    pub(super) servers: Servers,
+    pub(super) frames: mpsc::Receiver<Frame>,
+    pub(super) frame_sender: mpsc::Sender<Frame>,
     /// Each model's own context window, as Codex reported it with no setting of Kratos's in force
     /// (D76).
     pub(super) windows: HashMap<String, u64>,
@@ -265,10 +250,6 @@ pub(crate) struct Actor {
     pub(super) plan: Option<String>,
     pub(super) threads: HashMap<ThreadId, ThreadState>,
     pub(super) requests: Requests,
-    /// Threads waiting for a start slot, oldest first.
-    pub(super) ready: VecDeque<ThreadId>,
-    pub(super) deferred: Vec<Command>,
-    /// Threads to load once the app-server is up, so its history settles their uncertain messages.
     pub(super) reconcile: Vec<ThreadId>,
     pub(super) done: mpsc::UnboundedSender<Completion>,
     pub(super) completions: mpsc::UnboundedReceiver<Completion>,
@@ -288,6 +269,7 @@ impl Actor {
             }
         }
         self.reconcile_waiting().await;
+        let mut idle_check = tokio::time::interval(IDLE_CHECK);
         loop {
             tokio::select! {
                 command = commands.recv() => match command {
@@ -303,31 +285,39 @@ impl Actor {
                     }
                 },
                 Some(done) = self.completions.recv() => done.apply(&mut self).await,
-                incoming = next_incoming(&mut self.server) => self.on_incoming(incoming).await,
+                Some(frame) = self.frames.recv() => {
+                    if frame.generation == self.servers.generation(&frame.key) {
+                        self.on_incoming(frame.key, frame.incoming).await;
+                    }
+                }
+                _ = idle_check.tick() => self.retire_idle(Instant::now()),
             }
         }
     }
 
-    /// Starts `work` in a task of its own and hands its result back as a completion.
-    pub(super) fn spawn<F>(&self, work: F)
+    pub(super) fn spawn<F>(&self, key: &ServerKey, work: F)
     where
         F: Future<Output = Done> + Send + 'static,
     {
         let done = self.done.clone();
-        let generation = self.generation;
+        let key = key.clone();
+        let generation = self.servers.generation(&key);
         tokio::spawn(async move {
             // The actor holds the receiver for as long as it runs.
             let _ = done.send(Completion {
+                key,
                 generation,
                 done: work.await,
             });
         });
     }
 
-    async fn on_done(&mut self, done: Done) {
+    // #lizard forgives: one arm per kind of completion, each a call.
+    async fn on_done(&mut self, key: ServerKey, done: Done) {
         match done {
-            Done::Connected { result } => self.on_connected(result).await,
+            Done::Connected { result } => self.on_connected(key, result).await,
             Done::Account { plan } => self.plan = plan,
+            Done::Quiet { quiet } => self.on_quiet(key, quiet).await,
             Done::Attached {
                 thread_id,
                 context_limit,
@@ -337,8 +327,8 @@ impl Actor {
                 self.on_attached(thread_id, context_limit, access, result)
                     .await
             }
-            Done::StartAnswered { thread_id, result } => {
-                self.on_start_answered(thread_id, result).await
+            Done::StartAnswered { request, result } => {
+                self.on_start_answered(request, result).await
             }
             Done::DeliveryChecked {
                 thread_id,
@@ -359,19 +349,16 @@ impl Actor {
                 thread_id,
                 turn_id,
                 result,
-                stopper,
+                waiters,
             } => {
-                self.on_interrupted(thread_id, turn_id, result, stopper)
-                    .await
+                if let Err(error) = result {
+                    eprintln!(
+                        "Codex did not answer Stop for {thread_id:?} turn {turn_id}: {error}"
+                    );
+                }
+                waiters.tell(|| Ok(()));
             }
-            Done::StopExpired { thread_id, turn_id } => {
-                self.on_stop_expired(&thread_id, &turn_id).await
-            }
-            Done::Deadline {
-                thread_id,
-                turn_id,
-                epoch,
-            } => self.on_deadline(thread_id, turn_id, epoch).await,
+            Done::StopExpired { thread_id, stop_id } => self.on_stop_expired(&thread_id, stop_id),
             Done::HistoryForDiscard {
                 thread_id,
                 message_id,
@@ -417,30 +404,24 @@ impl Actor {
             Ok(written) => Ok(written.value),
             Err(error) if error.is_refusal() => Err(ProviderError::Store(error)),
             Err(error) => {
-                eprintln!("cannot record Codex work, so Codex stops: {error}");
-                self.stop_server(&format!("Kratos could not record Codex's work: {error}"))
-                    .await;
+                eprintln!("cannot record Codex work, so the thread's Codex stops: {error}");
+                let key = ServerKey::Thread(thread_id.clone());
+                self.stop_server(
+                    &key,
+                    &format!("Kratos could not record Codex's work: {error}"),
+                )
+                .await;
                 Err(ProviderError::Store(error))
             }
         }
     }
 
     async fn shutdown(&mut self) {
-        self.stop_server("Kratos is shutting down").await;
+        self.close_all().await;
     }
 }
 
-async fn next_incoming(server: &mut Server) -> Incoming {
-    match server {
-        Server::Up { incoming, .. } => match incoming.recv().await {
-            Some(incoming) => incoming,
-            // The connection reports its exit before it closes the channel, so this only follows
-            // an exit already handled.
-            None => std::future::pending().await,
-        },
-        Server::Down | Server::Starting => std::future::pending().await,
-    }
-}
+const IDLE_CHECK: Duration = Duration::from_secs(30);
 
 #[cfg(test)]
 mod tests;

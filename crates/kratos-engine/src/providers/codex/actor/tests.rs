@@ -11,7 +11,8 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::providers::codex::{ProtectedFolders, queue};
+use crate::providers::codex::ProtectedFolders;
+use crate::providers::queue;
 use crate::store_thread;
 
 const WAIT: Duration = Duration::from_secs(20);
@@ -48,7 +49,6 @@ impl Harness {
             env_set: Vec::new(),
             server_folder: root.path().to_owned(),
             protected: ProtectedFolders::new(root.path().join("kratos"), None, None),
-            turn_timeout: Duration::from_secs(600),
             stop_timeout: Duration::from_secs(5),
             request_timeout: WAIT,
             platform: DangerousCommandPlatform::Posix,
@@ -116,17 +116,29 @@ impl Harness {
         }
     }
 
+    fn key(&self) -> ServerKey {
+        ServerKey::Thread(self.thread_id.clone())
+    }
+
+    fn codex(&self, key: &ServerKey) -> Codex {
+        self.actor
+            .servers
+            .codex(key)
+            .expect("the fake is connected")
+    }
+
     async fn exit(&mut self) {
-        let Server::Up { codex, .. } = &self.actor.server else {
-            panic!("the fake is connected");
-        };
-        codex.close().await;
+        let key = self.key();
+        self.codex(&key).close().await;
         loop {
-            let incoming = tokio::time::timeout(WAIT, next_incoming(&mut self.actor.server))
+            let frame = tokio::time::timeout(WAIT, self.actor.frames.recv())
                 .await
-                .unwrap();
-            let exited = matches!(incoming, Incoming::Exited(_));
-            self.actor.on_incoming(incoming).await;
+                .unwrap()
+                .expect("the actor holds a sender");
+            let exited = frame.key == key && matches!(frame.incoming, Incoming::Exited(_));
+            if frame.generation == self.actor.servers.generation(&frame.key) {
+                self.actor.on_incoming(frame.key, frame.incoming).await;
+            }
             if exited {
                 return;
             }
@@ -134,10 +146,19 @@ impl Harness {
     }
 
     async fn control(&self, method: &str, params: serde_json::Value) -> serde_json::Value {
-        let Server::Up { codex, .. } = &self.actor.server else {
-            panic!("the fake is connected");
-        };
-        codex.request_value(method, params, WAIT).await.unwrap()
+        self.control_on(&self.key(), method, params).await
+    }
+
+    async fn control_on(
+        &self,
+        key: &ServerKey,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        self.codex(key)
+            .request_value(method, params, WAIT)
+            .await
+            .unwrap()
     }
 
     async fn held(&self, method: &str) {
@@ -222,92 +243,6 @@ async fn resume_and_continuation_name_the_action_for_the_blocking_message() {
 }
 
 #[tokio::test]
-async fn an_untouched_thread_waiting_for_a_slot_runs_after_codex_restarts() {
-    // Catches exit-time pauses stranding work that lost neither a start nor a running turn.
-    let mut harness = Harness::start().await;
-    let mut threads = vec![harness.thread_id.clone()];
-    let more = harness
-        .actor
-        .store
-        .call(|store| {
-            let workspace = store.list_workspaces().unwrap().remove(0).id;
-            (0..MAX_STARTING)
-                .map(|index| {
-                    let request: CreateThread = serde_json::from_value(json!({
-                "workspaceId": workspace, "title": format!("chat-{index}"), "provider": "codex",
-            })).unwrap();
-                    store.create_thread(&request).unwrap().id
-                })
-                .collect::<Vec<_>>()
-        })
-        .await;
-    threads.extend(more);
-    let message_id = MessageId::new("waiting".into());
-    for thread_id in &threads {
-        harness.send(thread_id, &message_id).await;
-        let attached = harness.attached_reply_for(thread_id).await;
-        attached.apply(&mut harness.actor).await;
-        harness.actor.dispatch(thread_id).await;
-    }
-    tokio::time::timeout(WAIT, async {
-        loop {
-            let requests = harness.control("test/turnRequests", json!({})).await;
-            if requests
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|request| request["method"] == "turn/start")
-                .count()
-                == MAX_STARTING
-            {
-                break;
-            }
-        }
-    })
-    .await
-    .unwrap();
-    let waiting_thread = threads.last().unwrap().clone();
-    assert_eq!(
-        harness
-            .actor
-            .message(&waiting_thread, &message_id)
-            .await
-            .unwrap()
-            .status,
-        MessageStatus::Queued
-    );
-    harness.actor.restarts.settled_start();
-
-    harness.exit().await;
-
-    let started = tokio::time::timeout(WAIT, async {
-        loop {
-            if harness
-                .actor
-                .message(&waiting_thread, &message_id)
-                .await
-                .unwrap()
-                .status
-                == MessageStatus::Submitting
-            {
-                break;
-            }
-            let done = harness.completion(|_| true).await;
-            done.apply(&mut harness.actor).await;
-        }
-    })
-    .await;
-    if started.is_ok() {
-        harness.held("turn/start").await;
-    }
-    harness.close().await;
-    assert!(
-        started.is_ok(),
-        "the extra queued thread never reached the replacement Codex"
-    );
-}
-
-#[tokio::test]
 async fn an_unavailable_connection_keeps_an_existing_usage_pause() {
     // Catches reconnect refusal overwriting the usage pause that owns a continuation.
     let mut harness = Harness::start().await;
@@ -328,9 +263,12 @@ async fn an_unavailable_connection_keeps_an_existing_usage_pause() {
 
     harness
         .actor
-        .on_connected(Err(StartError::Connect(
-            kratos_codex_client::ConnectError::NotFound("missing-codex".into()),
-        )))
+        .on_connected(
+            ServerKey::Thread(thread_id.clone()),
+            Err(StartError::Connect(
+                kratos_codex_client::ConnectError::NotFound("missing-codex".into()),
+            )),
+        )
         .await;
 
     let paused = harness
@@ -370,7 +308,8 @@ async fn an_old_attach_reply_does_not_detach_a_replacement_process() {
     let mut harness = Harness::start().await;
     let old_reply = harness.attached_reply().await;
     harness.exit().await;
-    harness.actor.restarts = Default::default();
+    let key = harness.key();
+    harness.actor.servers.slot(&key).restarts = Default::default();
     let new_reply = harness.attached_reply().await;
     new_reply.apply(&mut harness.actor).await;
     let native_id = harness.actor.threads[&harness.thread_id]
@@ -464,7 +403,8 @@ async fn exit_settles_a_pending_start_and_its_stop_without_waiting_for_a_reply()
         })
         .await
         .unwrap();
-    harness.actor.restarts = Default::default();
+    let key = harness.key();
+    harness.actor.servers.slot(&key).restarts = Default::default();
     let replacement = MessageId::new("after-exit".into());
     harness.send(&harness.thread_id.clone(), &replacement).await;
     let attached = harness.attached_reply().await;
@@ -665,7 +605,8 @@ async fn a_late_steer_cannot_close_a_replacement_process() {
         .completion(|done| matches!(done, Done::Steered { .. }))
         .await;
     harness.exit().await;
-    harness.actor.restarts = Default::default();
+    let key = harness.key();
+    harness.actor.servers.slot(&key).restarts = Default::default();
     let settled = message_id.clone();
     harness
         .actor
@@ -825,4 +766,74 @@ async fn a_late_discard_cannot_cancel_an_uncertain_message() {
         "{:?}",
         message.status
     );
+}
+
+#[tokio::test]
+async fn the_idle_check_asks_a_server_found_busy_again_after_another_idle_time() {
+    use crate::providers::codex::servers::{THREAD_IDLE_CLOSE, TerminalCheck};
+
+    let mut harness = Harness::start().await;
+    harness
+        .attached_reply()
+        .await
+        .apply(&mut harness.actor)
+        .await;
+    let key = harness.key();
+    let terminal = json!({ "command": "npm run dev", "cwd": "/project", "itemId": "item-1",
+                           "processId": "process-1" });
+    harness
+        .control(
+            "test/backgroundTerminals",
+            json!({ "terminals": [terminal] }),
+        )
+        .await;
+    let past_idle = || Instant::now() + THREAD_IDLE_CLOSE + Duration::from_secs(1);
+    let check = |harness: &Harness| harness.actor.servers.get(&key).map(|slot| slot.terminals);
+
+    harness.actor.retire_idle(past_idle());
+    harness
+        .completion(|done| matches!(done, Done::Quiet { .. }))
+        .await
+        .apply(&mut harness.actor)
+        .await;
+    assert_eq!(check(&harness), Some(TerminalCheck::KeepAlive));
+
+    harness
+        .actor
+        .retire_idle(Instant::now() + Duration::from_secs(60));
+    assert_eq!(
+        check(&harness),
+        Some(TerminalCheck::KeepAlive),
+        "asked again before another idle time"
+    );
+
+    harness
+        .control("test/backgroundTerminals", json!({ "terminals": [] }))
+        .await;
+    harness.actor.retire_idle(past_idle());
+    assert_eq!(
+        check(&harness),
+        Some(TerminalCheck::Asking),
+        "not asked again after another idle time"
+    );
+    let quiet = harness
+        .completion(|done| matches!(done, Done::Quiet { .. }))
+        .await;
+    assert_eq!(
+        harness
+            .control("test/backgroundTerminalLists", json!({}))
+            .await,
+        json!(2)
+    );
+    quiet.apply(&mut harness.actor).await;
+    loop {
+        let frame = tokio::time::timeout(WAIT, harness.actor.frames.recv())
+            .await
+            .expect("the quiet server closes")
+            .expect("the actor holds a sender");
+        if frame.key == key && matches!(frame.incoming, Incoming::Exited(_)) {
+            break;
+        }
+    }
+    harness.close().await;
 }

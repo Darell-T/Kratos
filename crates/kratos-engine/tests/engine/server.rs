@@ -8,7 +8,8 @@ use kratos_protocol::{Seq, Thread, Workspace};
 use serde_json::{Value, json};
 
 use crate::running_engine::{
-    RunningEngine, WAIT, expect_silence, next_seqs, next_text, post, subscribed,
+    RunningEngine, WAIT, change_model, expect_silence, next_seqs, next_text, post, post_event,
+    subscribed,
 };
 
 fn send(client: &Client, method: &str, path: &str, body: Option<Value>) -> ApiReply {
@@ -124,11 +125,10 @@ fn matches_http_api_routes_with_empty_segments_and_preserves_query_and_parameter
         )
         .unwrap();
     assert_eq!(reply.status, 201);
-    assert_eq!(reply.body["threadId"], json!(thread.id));
-    assert_eq!(reply.body["seq"], 1);
+    assert_eq!(reply.body["status"], "queued");
     assert_eq!(
-        reply.body["event"],
-        json!({ "kind": "user.message", "text": "normalized message" })
+        reply.body["input"],
+        json!([{ "type": "text", "text": "normalized message" }])
     );
 
     let malformed = client
@@ -260,7 +260,7 @@ fn creates_a_workspace_a_thread_and_messages() {
         json!([created.body])
     );
 
-    // A Claude thread keeps R2's plain message log until R4 drives Claude.
+    // A Claude thread queues its messages for the agent.
     let body = json!({ "workspaceId": workspace.id, "title": "first chat", "provider": "claude" });
     let created = client.post("/api/threads", &body).unwrap();
     assert_eq!(created.status, 201);
@@ -275,13 +275,12 @@ fn creates_a_workspace_a_thread_and_messages() {
         .post(&message, &json!({ "text": "  hello  " }))
         .unwrap();
     assert_eq!(first.status, 201);
-    assert_eq!(first.body["threadId"], json!(thread.id));
-    assert_eq!(first.body["seq"], json!(1));
+    assert_eq!(first.body["status"], "queued");
     assert_eq!(
-        first.body["event"],
-        json!({ "kind": "user.message", "text": "hello" })
+        first.body["input"],
+        json!([{ "type": "text", "text": "hello" }])
     );
-    assert_eq!(post(&client, &thread, "again").seq, Seq::new(2));
+    assert_eq!(post_event(&client, &thread, "again").seq, Seq::new(2));
 }
 
 #[test]
@@ -367,7 +366,7 @@ fn rejects_malformed_and_blank_messages_without_storing_them() {
 
     for (body, expected) in [
         (r#"{"text":"   "}"#, "text: must not be blank"),
-        ("{}", "missing field `text`"),
+        ("{}", "missing field `text` or `input`"),
         ("{nope", "Request body must be valid JSON"),
         (
             r#"{"text":"a"} trailing"#,
@@ -382,7 +381,7 @@ fn rejects_malformed_and_blank_messages_without_storing_them() {
         assert_eq!(error_text(&reply), expected, "{body:?}");
     }
 
-    assert_eq!(post(&client, &thread, "first valid").seq, Seq::new(1));
+    assert_eq!(post_event(&client, &thread, "first valid").seq, Seq::new(1));
 }
 
 #[test]
@@ -494,7 +493,7 @@ fn caps_request_bodies_at_1_mib_and_keeps_serving() {
     let reply = post_whole_body_then_read(engine.port(), &path, 8 * MIB, Some(&engine.token()));
     assert!(reply.starts_with("HTTP/1.1 413 "), "{reply}");
     assert_eq!(
-        post(&client, &thread, "after the refusals").seq,
+        post_event(&client, &thread, "after the refusals").seq,
         Seq::new(2)
     );
 }
@@ -611,36 +610,37 @@ fn replays_the_backlog_then_streams_live_events_once() {
 }
 
 #[test]
-fn loses_and_repeats_nothing_when_messages_arrive_while_subscribing() {
+fn loses_and_repeats_nothing_when_events_arrive_while_subscribing() {
     // Catches a follower that registers after its first read (an event is missed until some later
-    // post) and a replay and a live path that overlap (an event comes twice). Each round races a
-    // subscribe against posts, on a fresh thread.
+    // write) and a replay and a live path that overlap (an event comes twice). Each round races a
+    // subscribe against writes, on a fresh thread. The events are settings changes because a
+    // thread queues at most ten messages.
     const ROUNDS: usize = 20;
-    const RACING_POSTS: u64 = 25;
+    const RACING_CHANGES: u64 = 25;
     let home = tempfile::tempdir().unwrap();
     let engine = RunningEngine::start(home.path());
     let client = engine.client();
 
     for round in 0..ROUNDS {
         let thread = engine.create_thread();
-        for text in ["a", "b", "c"] {
-            post(&client, &thread, text);
+        for model in ["a", "b", "c"] {
+            change_model(&client, &thread, model);
         }
         thread::scope(|scope| {
-            let poster = scope.spawn(|| {
-                for number in 0..RACING_POSTS {
-                    post(&client, &thread, &format!("racing {number}"));
+            let writer = scope.spawn(|| {
+                for number in 0..RACING_CHANGES {
+                    change_model(&client, &thread, &format!("racing {number}"));
                 }
             });
             let mut socket = subscribed(&engine, &thread.id, 0);
-            let expected: Vec<u64> = (1..=3 + RACING_POSTS).collect();
+            let expected: Vec<u64> = (1..=3 + RACING_CHANGES).collect();
             assert_eq!(
                 next_seqs(&mut socket, expected.len()),
                 expected,
                 "round {round}"
             );
             expect_silence(&mut socket);
-            poster.join().unwrap();
+            writer.join().unwrap();
         });
     }
 }
@@ -757,4 +757,99 @@ fn closes_a_socket_whose_message_passes_64_kib_and_serves_the_next() {
 
     let mut next = subscribed(&engine, &thread.id, 0);
     assert_eq!(next_seqs(&mut next, 1), [1]);
+}
+
+#[test]
+fn a_report_format_the_providers_cannot_follow_is_refused_where_it_is_set() {
+    // Catches a bad schema accepted into a thread's settings, where it fails only later: Claude
+    // ignores a schema whose type is not a JSON type (measured), and refuses a root that is not an
+    // object with an API error.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let workspace = engine.create_workspace();
+    let create = |format: Value| {
+        send(
+            &client,
+            "POST",
+            "/api/threads",
+            Some(
+                json!({ "workspaceId": workspace.id, "title": "report", "provider": "codex",
+                "settings": { "permission": "askMe", "planMode": false, "reportFormat": format } }),
+            ),
+        )
+    };
+
+    let refused =
+        create(json!({ "type": "object", "properties": { "verdict": { "type": "text" } } }));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(
+        error_text(&refused).contains("reportFormat at /properties/verdict/type"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(create(json!({ "type": "array" })).status, 400);
+
+    let good = json!({ "type": "object", "properties": { "verdict": { "type": "string" } },
+                       "required": ["verdict"] });
+    let accepted = create(good.clone());
+    assert_eq!(accepted.status, 201, "{}", accepted.body);
+    let thread: Thread = serde_json::from_value(accepted.body).unwrap();
+    let settings = format!("/api/threads/{}/settings", thread.id);
+    let changed = send(
+        &client,
+        "PUT",
+        &settings,
+        Some(
+            json!({ "permission": "askMe", "planMode": false, "reportFormat": { "type": "objekt" } }),
+        ),
+    );
+    assert_eq!(changed.status, 400, "{}", changed.body);
+    assert!(
+        error_text(&changed).contains("reportFormat"),
+        "{}",
+        changed.body
+    );
+    let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
+    assert_eq!(details.body["settings"]["reportFormat"], good);
+}
+
+#[test]
+fn legacy_report_settings_can_be_read_and_replaced_without_losing_history() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let thread = engine.create_thread();
+    change_model(&engine.client(), &thread, "old-model");
+    drop(engine);
+    let db = rusqlite::Connection::open(home.path().join("kratos.db")).unwrap();
+    db.execute(
+        "UPDATE threads SET report_format = '{}' WHERE id = ?1",
+        [thread.id.as_str()],
+    )
+    .unwrap();
+    let updated = db.execute(
+        "UPDATE thread_events SET event = json_set(event, '$.settings.reportFormat', json('{}'))
+         WHERE thread_id = ?1 AND json_extract(event, '$.kind') = 'settings.changed'",
+        [thread.id.as_str()],
+    ).unwrap();
+    assert_eq!(updated, 1);
+    drop(db);
+
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let path = format!("/api/threads/{}", thread.id);
+    let details = client.get(&path).unwrap();
+    assert_eq!(details.status, 200);
+    assert_eq!(details.body["settings"]["reportFormat"], json!({}));
+    change_model(&client, &thread, "repaired-model");
+    let history = client.get(&format!("{path}/events")).unwrap();
+    assert_eq!(history.status, 200);
+    assert!(
+        history
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["event"]["settings"]["reportFormat"] == json!({}))
+    );
 }

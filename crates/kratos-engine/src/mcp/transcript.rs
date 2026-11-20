@@ -2,7 +2,7 @@
 //! and what the thread waits on.
 
 use kratos_protocol::{
-    AgentItem, MessageInput, MessageOrigin, PauseReason, ThreadEventBody, TurnOutcome,
+    AgentItem, CappedText, MessageInput, MessageOrigin, PauseReason, ThreadEventBody, TurnOutcome,
 };
 
 pub(crate) const MAX_TRANSCRIPT_BYTES: usize = 16 * 1024;
@@ -52,13 +52,22 @@ pub(super) fn newest(lines: &[String]) -> String {
             used <= MAX_TRANSCRIPT_BYTES
         })
         .count();
-    lines[lines.len() - kept..].join("\n")
+    match (kept, lines.last()) {
+        (0, Some(newest)) => {
+            let cut = CappedText::new(newest, MAX_TRANSCRIPT_BYTES - CUT.len());
+            format!("{}{CUT}", cut.text)
+        }
+        _ => lines[lines.len() - kept..].join("\n"),
+    }
 }
+
+const CUT: &str = " [cut]";
 
 fn item_line(item: &AgentItem) -> Option<String> {
     match item {
         AgentItem::Message { text, .. } => Some(format!("agent: {text}")),
         AgentItem::Plan { text, .. } => Some(format!("plan: {text}")),
+        AgentItem::Report { report, .. } => Some(format!("report: {report}")),
         AgentItem::Command {
             command, exit_code, ..
         } => Some(match exit_code {
@@ -157,5 +166,19 @@ mod tests {
             line(&paused).as_deref(),
             Some("paused: usage limit until 2026-10-30T12:00:00.000Z")
         );
+    }
+
+    #[test]
+    fn a_newest_line_longer_than_the_budget_is_cut_instead_of_dropped() {
+        let lines = ["older".to_owned(), "x".repeat(20 * 1024)];
+        let transcript = newest(&lines);
+        assert!(
+            transcript.len() <= MAX_TRANSCRIPT_BYTES,
+            "{}",
+            transcript.len()
+        );
+        assert!(transcript.starts_with("xxx") && transcript.ends_with(CUT));
+        assert_eq!(newest(&["a".to_owned(), "b".to_owned()]), "a\nb");
+        assert_eq!(newest(&[]), "");
     }
 }

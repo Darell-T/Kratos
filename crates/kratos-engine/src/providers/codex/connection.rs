@@ -1,11 +1,3 @@
-//! Starting the app-server when a thread needs it, loading threads into it, and what its exit
-//! ends.
-//!
-//! Codex starts on demand, never on a timer (L4, L5). Each failure in a row doubles the wait
-//! before the next start, up to a minute, so a Codex that keeps dying costs one start a minute at
-//! most. A thread Codex cannot resume stays unavailable and says why; Kratos never starts a fresh
-//! Codex thread in its place (L7).
-
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
@@ -16,12 +8,14 @@ use kratos_protocol::{ContextLimit, MessageStatus, Provider, RequiredText, Threa
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use super::actor::{Actor, Done, Opened, Server};
-use super::profiles::Profile;
+use super::actor::{Actor, Done, Frame, Opened};
+use super::profiles::{Profile, temp_folder};
 use super::recovery::{self, EndReason, EndingTurn, Unfinished};
+use super::servers::{Server, ServerKey, TerminalCheck};
 use super::threads::{Link, ThreadState, Turn};
-use super::{CodexSettings, ProviderError, policy, queue, wire};
+use super::{CodexSettings, ProviderError, policy, wire};
 use crate::mcp::{self, McpServer};
+use crate::providers::queue;
 
 const FIRST_RETRY_WAIT: Duration = Duration::from_secs(1);
 const LONGEST_RETRY_WAIT: Duration = Duration::from_secs(60);
@@ -47,13 +41,12 @@ pub(super) struct Restarts {
 }
 
 impl Restarts {
-    #[cfg(test)]
-    pub(super) fn settled_start(&mut self) {
-        self.started_at = Some(Instant::now() - SETTLED_AFTER);
+    pub(super) fn in_backoff(&self) -> bool {
+        self.may_start().is_err()
     }
 
     /// `Err` with the wait left while the last failure's backoff runs.
-    fn may_start(&self) -> Result<(), Duration> {
+    pub(super) fn may_start(&self) -> Result<(), Duration> {
         match self.not_before {
             Some(not_before) if Instant::now() < not_before => Err(not_before - Instant::now()),
             _ => Ok(()),
@@ -107,12 +100,12 @@ fn thread_config(
     (!config.is_empty()).then_some(serde_json::Value::Object(config))
 }
 
-fn launch(settings: &CodexSettings) -> Launch {
+pub(super) fn launch(settings: &CodexSettings) -> Launch {
     let mut args: Vec<OsString> = vec!["app-server".into()];
     args.extend(settings.extra_args.iter().cloned());
     #[cfg(windows)]
     args.extend(super::sandbox::launch_arguments());
-    args.extend(settings.protected.launch_arguments(&std::env::temp_dir()));
+    args.extend(settings.protected.launch_arguments(&temp_folder()));
     Launch {
         program: settings.program.clone(),
         args,
@@ -120,7 +113,7 @@ fn launch(settings: &CodexSettings) -> Launch {
         // Codex and the tools it runs get none of Kratos's own settings (L8).
         env_remove: std::env::vars_os()
             .map(|(name, _)| name)
-            .filter(|name| name.to_string_lossy().starts_with("KRATOS_"))
+            .filter(|name| is_kratos_variable(name))
             .collect(),
         env_set: settings.env_set.clone(),
         client_info: types::ClientInfo {
@@ -130,70 +123,58 @@ fn launch(settings: &CodexSettings) -> Launch {
         },
         request_timeout: settings.request_timeout,
         close_timeout: CLOSE_TIMEOUT,
+        max_line_bytes: kratos_codex_client::MAX_LINE_BYTES,
     }
 }
 
-impl Actor {
-    /// The running connection, or `None` while it starts. Starts Codex when it is down, unless the
-    /// last failure's backoff still runs.
-    pub(super) fn connection(&mut self) -> Result<Option<Codex>, ProviderError> {
-        match &self.server {
-            Server::Up { codex, .. } => return Ok(Some(codex.clone())),
-            Server::Starting => return Ok(None),
-            Server::Down => {}
-        }
-        if let Err(wait) = self.restarts.may_start() {
-            return Err(ProviderError::Unavailable(format!(
-                "Codex keeps failing to start; Kratos tries again in {} s",
-                wait.as_secs().max(1)
-            )));
-        }
-        self.generation += 1;
-        self.server = Server::Starting;
-        let launch = launch(&self.settings);
-        self.spawn(async move {
-            let capabilities = serde_json::from_value(json!({ "experimentalApi": true }))
-                .expect("the capabilities match the generated type");
-            Done::Connected {
-                result: connect_ready(launch, capabilities).await,
-            }
-        });
-        Ok(None)
-    }
+/// One of Kratos's own variables. Windows ignores the case of a variable's name, so `kratos_x`
+/// is read as `KRATOS_X` there; the check folds case on every system, as Claude's launch does.
+fn is_kratos_variable(name: &std::ffi::OsStr) -> bool {
+    name.to_string_lossy()
+        .to_ascii_uppercase()
+        .starts_with("KRATOS_")
+}
 
+impl Actor {
     pub(super) async fn on_connected(
         &mut self,
+        key: ServerKey,
         result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     ) {
         match result {
             Ok((codex, incoming)) => {
-                self.restarts.started();
-                self.server = Server::Up {
-                    codex: codex.clone(),
+                let generation = self.servers.generation(&key);
+                let slot = self.servers.slot(&key);
+                slot.restarts.started();
+                slot.server = Server::Up(codex.clone());
+                let deferred = std::mem::take(&mut slot.deferred);
+                tokio::spawn(forward(
+                    key.clone(),
+                    generation,
                     incoming,
-                };
-                self.read_account(codex);
-                for deferred in std::mem::take(&mut self.deferred) {
+                    self.frame_sender.clone(),
+                ));
+                self.read_account(&key, codex);
+                for deferred in deferred {
                     self.on_command(deferred).await;
                 }
                 self.reconcile_waiting().await;
-                let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
-                for thread_id in threads {
-                    self.dispatch(&thread_id).await;
+                if let ServerKey::Thread(thread_id) = &key {
+                    self.dispatch(thread_id).await;
                 }
             }
             Err(error) => {
-                self.restarts.failed();
-                self.server = Server::Down;
+                let slot = self.servers.slot(&key);
+                slot.restarts.failed();
+                slot.server = Server::Down;
                 let message = error.to_string();
-                for deferred in std::mem::take(&mut self.deferred) {
+                for deferred in std::mem::take(&mut slot.deferred) {
                     deferred.fail_deferred(ProviderError::Unavailable(message.clone()));
                 }
-                let threads: Vec<ThreadId> = self.threads.keys().cloned().collect();
-                for thread_id in threads {
-                    self.pause_unavailable_if_waiting(&thread_id, message.clone())
-                        .await;
+                if let ServerKey::Thread(thread_id) = &key {
+                    self.pause_unavailable_if_waiting(thread_id, message).await;
                 }
+                self.admit_waiting();
             }
         }
     }
@@ -205,6 +186,14 @@ impl Actor {
         thread_id: &ThreadId,
     ) -> Result<Option<String>, ProviderError> {
         self.load(thread_id).await?;
+        let key = ServerKey::Thread(thread_id.clone());
+        if self
+            .servers
+            .get(&key)
+            .is_some_and(|slot| matches!(slot.server, Server::Closing(_)))
+        {
+            return Ok(None);
+        }
         let thread = self.threads.get(thread_id).expect("loaded above");
         // Codex applies a context limit only when it loads the thread, so a thread loaded under
         // another limit is unloaded and loaded again.
@@ -222,7 +211,7 @@ impl Actor {
             Link::Attaching => return Ok(None),
             Link::Detached => (None, thread.turn_settings().access()),
         };
-        let Some(codex) = self.connection()? else {
+        let Some(codex) = self.connection(&key)? else {
             return Ok(None);
         };
         let native_id = self
@@ -245,7 +234,7 @@ impl Actor {
             .as_ref()
             .map(|model| model.as_str().to_owned());
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&key, async move {
             if let Some(native_id) = reload {
                 let params = types::ThreadUnsubscribeParams {
                     thread_id: native_id,
@@ -307,7 +296,14 @@ impl Actor {
             Err(error) => {
                 let message = format!("Codex could not load the thread: {error}");
                 thread.link = Link::Detached;
-                fail_discards(thread, &message);
+                if error.is_missing_rollout() {
+                    for (message_id, reply) in std::mem::take(&mut thread.discards) {
+                        self.settle_discard(&thread_id, message_id, None, reply)
+                            .await;
+                    }
+                } else {
+                    fail_discards(thread, &message);
+                }
                 self.pause_unavailable_if_waiting(&thread_id, message).await;
             }
         }
@@ -349,12 +345,13 @@ impl Actor {
             .and_then(|config| config.as_object().cloned());
         let native_id = native_id.clone();
         thread.link = Link::Attaching;
-        let Server::Up { codex, .. } = &self.server else {
-            unreachable!("the attached server has connected");
-        };
-        let codex = codex.clone();
+        let key = ServerKey::Thread(thread_id.clone());
+        let codex = self
+            .servers
+            .codex(&key)
+            .expect("an attached thread's server is up");
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&key, async move {
             let result = codex
                 .request::<methods::ThreadFork>(&params)
                 .await
@@ -387,8 +384,13 @@ impl Actor {
     /// keeps its place while Codex starts; a start that fails leaves it for the user to settle.
     pub(super) async fn reconcile_waiting(&mut self) {
         for thread_id in std::mem::take(&mut self.reconcile) {
+            let key = ServerKey::Thread(thread_id.clone());
             let waits_for_codex = matches!(self.attached(&thread_id).await, Ok(None))
-                && matches!(self.server, Server::Starting);
+                && (self
+                    .servers
+                    .get(&key)
+                    .is_some_and(|slot| matches!(slot.server, Server::Starting))
+                    || self.servers.waits(&key));
             if waits_for_codex {
                 self.reconcile.push(thread_id);
             }
@@ -427,57 +429,78 @@ impl Actor {
         .await
     }
 
-    /// Ends the generation first, so replies still in flight from this process are dropped. Then
-    /// every thread detaches and its running turn ends. A start or steer Codex never answered is
-    /// uncertain, since the process may have taken it. Waiting stops and requests are answered, and
-    /// untouched queued work requests a replacement process, respecting the restart backoff.
-    pub(super) async fn on_exit(&mut self, exit: Exit) {
-        self.generation += 1;
-        self.server = Server::Down;
-        self.restarts.exited();
-        let error = exit.to_string();
-        let thread_ids: Vec<ThreadId> = self.threads.keys().cloned().collect();
-        for thread_id in &thread_ids {
-            let thread = self.threads.get_mut(thread_id).expect("listed above");
-            thread.link = Link::Detached;
-            fail_discards(thread, &format!("Codex could not load the thread: {error}"));
-            let mut sending = std::mem::take(&mut thread.steering);
-            if let Turn::Starting { message_id, .. } = &thread.turn {
-                sending.insert(message_id.clone());
-            }
-            let mut unfinished = Unfinished {
-                sending: sending.into_iter().collect(),
-                requests: self.requests.close(thread_id, |_| true),
-                ..Unfinished::default()
-            };
-            if let Some((turn_id, work)) = thread.turn.end_running() {
-                unfinished.running_turn = Some(EndingTurn {
-                    id: turn_id,
-                    changes: work.changes.finish(),
-                    context: work.context,
-                });
-            }
-            thread.file_items.clear();
-            self.end_start(thread_id, Ok(()));
-            let reason = EndReason::Exited(error.clone());
-            let _ = self
-                .write(thread_id, move |write| {
-                    recovery::settle(write, unfinished, reason)
-                })
-                .await;
+    pub(super) async fn detach(&mut self, thread_id: &ThreadId, error: &str) {
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
+        thread.link = Link::Detached;
+        fail_discards(thread, &format!("Codex could not load the thread: {error}"));
+        let mut sending = std::mem::take(&mut thread.steering);
+        if let Turn::Starting { message_id, .. } = &thread.turn {
+            sending.insert(message_id.clone());
         }
-        self.ready.clear();
-        for thread_id in &thread_ids {
+        let mut unfinished = Unfinished {
+            sending: sending.into_iter().collect(),
+            requests: self.requests.close(thread_id, |_| true),
+            ..Unfinished::default()
+        };
+        if let Some((turn_id, work)) = thread.turn.end_running() {
+            unfinished.running_turn = Some(EndingTurn {
+                id: turn_id,
+                stopped: work.stop_id.is_some(),
+                changes: work.changes.finish(),
+                context: work.context,
+            });
+        }
+        thread.file_items.clear();
+        self.end_start(thread_id);
+        let reason = EndReason::Exited(error.to_owned());
+        let _ = self
+            .write(thread_id, move |write| {
+                recovery::settle(write, unfinished, reason)
+            })
+            .await;
+    }
+
+    pub(super) async fn on_exit(&mut self, key: ServerKey, exit: Exit) {
+        self.servers.advance_generation(&key);
+        let slot = self.servers.slot(&key);
+        let ended = std::mem::replace(&mut slot.server, Server::Down);
+        slot.terminals = TerminalCheck::NotAsked;
+        if matches!(ended, Server::Closing(_)) {
+            slot.restarts = Restarts::default();
+        } else {
+            slot.restarts.exited();
+        }
+        if !slot.deferred.is_empty() {
+            self.servers.wait(&key);
+        }
+        if let ServerKey::Thread(thread_id) = &key {
+            self.detach(thread_id, &exit.to_string()).await;
             self.dispatch(thread_id).await;
+        }
+        self.servers.forget_if_unused(&key);
+        self.admit_waiting();
+    }
+
+    pub(super) async fn stop_server(&mut self, key: &ServerKey, reason: &str) {
+        if let Some(codex) = self.servers.codex(key) {
+            eprintln!("closing Codex for {key:?}: {reason}");
+            tokio::spawn(async move { codex.close().await });
         }
     }
 
-    /// Closes the app-server and waits for it to end; its exit arrives as usual.
-    pub(super) async fn stop_server(&mut self, reason: &str) {
-        if let Server::Up { codex, .. } = &self.server {
-            eprintln!("closing Codex: {reason}");
-            codex.close().await;
-        }
+    pub(super) async fn close_all(&mut self) {
+        let closes = self.servers.keys().into_iter().filter_map(|key| {
+            match &self.servers.get(&key)?.server {
+                Server::Up(codex) | Server::Closing(codex) => {
+                    let codex = codex.clone();
+                    Some(async move { codex.close().await })
+                }
+                Server::Down | Server::Starting => None,
+            }
+        });
+        futures_util::future::join_all(closes).await;
     }
 
     /// The thread's state, read from the store the first time the actor sees the thread.
@@ -509,7 +532,7 @@ impl Actor {
     }
 }
 
-async fn connect_ready(
+pub(super) async fn connect_ready(
     launch: Launch,
     capabilities: types::InitializeCapabilities,
 ) -> Result<(Codex, mpsc::Receiver<Incoming>), StartError> {
@@ -582,6 +605,39 @@ async fn open_thread(
                 turns: started.thread.turns,
                 is_new: true,
             })
+        }
+    }
+}
+
+async fn forward(
+    key: ServerKey,
+    generation: u64,
+    mut incoming: mpsc::Receiver<Incoming>,
+    frames: mpsc::Sender<Frame>,
+) {
+    while let Some(incoming) = incoming.recv().await {
+        let frame = Frame {
+            key: key.clone(),
+            generation,
+            incoming,
+        };
+        if frames.send(frame).await.is_err() {
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kratos_variables_are_found_in_any_case() {
+        for name in ["KRATOS_HOME", "kratos_token", "Kratos_Port"] {
+            assert!(is_kratos_variable(std::ffi::OsStr::new(name)), "{name}");
+        }
+        for name in ["PATH", "KRATOSX", "MY_KRATOS_HOME"] {
+            assert!(!is_kratos_variable(std::ffi::OsStr::new(name)), "{name}");
         }
     }
 }

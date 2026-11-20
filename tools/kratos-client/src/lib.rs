@@ -1,5 +1,5 @@
-//! The measuring and comparing tools behind the `kratos-client` command: the post and turn latency
-//! benchmarks and the output normalizer. The engine's tests run the benchmarks too. The engine
+//! The measuring and comparing tools behind the `kratos-client` command: the turn latency
+//! benchmark and the output normalizer. The engine's tests run the benchmark too. The engine
 //! itself never links this crate, because the turn benchmark steers `fake-codex`.
 
 mod bench;
@@ -8,7 +8,7 @@ mod normalize;
 
 use kratos_api_client::ClientError;
 
-pub use bench::{BenchReport, bench_post};
+pub use bench::BenchReport;
 pub use bench_turns::{TurnBenchReport, bench_turns};
 pub use normalize::Normalizer;
 

@@ -49,7 +49,13 @@ pub enum ThreadEventBody {
         status: MessageStatus,
     },
     #[serde(rename = "turn.started", rename_all = "camelCase")]
-    TurnStarted { turn_id: TurnId },
+    TurnStarted {
+        turn_id: TurnId,
+        /// What started the turn. Left out for a turn the thread's messages started, so events
+        /// written before it read the same.
+        #[serde(default, skip_serializing_if = "TurnOrigin::is_messages")]
+        origin: TurnOrigin,
+    },
     #[serde(rename = "item.completed", rename_all = "camelCase")]
     ItemCompleted { turn_id: TurnId, item: AgentItem },
     #[serde(rename = "turn.completed", rename_all = "camelCase")]
@@ -121,7 +127,8 @@ pub enum ThreadEventBody {
 pub enum PauseReason {
     /// The last turn failed, so the messages behind it may no longer make sense.
     TurnFailed { turn_id: TurnId, error: String },
-    /// Kratos stopped a turn at its deadline.
+    /// An earlier engine stopped a turn at its deadline. Turns no longer have one; the variant
+    /// stays so stored pauses still read.
     TimedOut { turn_id: TurnId },
     /// The last turn did not finish before Kratos or the provider stopped.
     Interrupted,
@@ -154,4 +161,27 @@ pub struct ThreadEvent {
     /// decreases along `seq` unless the wall clock steps back.
     pub at: Timestamp,
     pub event: ThreadEventBody,
+}
+
+/// What started a turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TurnOrigin {
+    /// One or more of the thread's messages, which the turn accepts.
+    #[default]
+    Messages,
+    /// The agent continued on its own after a command it ran in the background finished. No
+    /// message of the user's started it.
+    #[serde(rename_all = "camelCase")]
+    BackgroundTask {
+        /// What the agent's CLI said of the command that finished, when it said anything.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+    },
+}
+
+impl TurnOrigin {
+    pub fn is_messages(&self) -> bool {
+        matches!(self, TurnOrigin::Messages)
+    }
 }

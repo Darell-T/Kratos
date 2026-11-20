@@ -3,17 +3,22 @@
 //! questions, and reads back what the provider sent.
 
 use std::ffi::OsString;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use fake_agents::codex_control::{self, ControlRequest};
 use futures_util::StreamExt;
 use kratos_command_safety::DangerousCommandPlatform;
+use kratos_engine::clock::{Clock, SystemClock};
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::mcp::McpServer;
-use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders, Sent};
-use kratos_engine::scheduler::{self, Clock, SchedulerHandle};
+use kratos_engine::providers::Providers;
+use kratos_engine::providers::Sent;
+use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
+use kratos_engine::scheduler::{self, SchedulerHandle};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::LimitStop;
 use kratos_engine::usage::UsageTracker;
@@ -32,7 +37,6 @@ use tokio::sync::mpsc;
 pub const WAIT: Duration = Duration::from_secs(20);
 
 pub struct Options {
-    pub turn_timeout: Duration,
     pub stop_timeout: Duration,
     pub settings: ThreadSettings,
     pub fake_args: Vec<OsString>,
@@ -42,7 +46,6 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Options {
         Options {
-            turn_timeout: Duration::from_secs(600),
             stop_timeout: Duration::from_secs(5),
             settings: ThreadSettings::default(),
             fake_args: Vec::new(),
@@ -57,6 +60,8 @@ pub struct Harness {
     pub hub: Hub,
     pub store: StoreThread,
     pub usage: UsageTracker,
+    /// The clock `usage` holds, and so the scheduler: a test points it at its own.
+    clock: Arc<SwitchClock>,
     pub provider: CodexProvider,
     /// Usage-limit stops, until a test starts the scheduler, which takes them.
     pub stops: Option<mpsc::UnboundedReceiver<LimitStop>>,
@@ -67,8 +72,52 @@ pub struct Harness {
     /// Events read from the log and not yet taken by a test.
     seen: Vec<ThreadEvent>,
     control: Option<Control>,
-    control_file: PathBuf,
+    pub control_file: PathBuf,
     next_control_id: u64,
+}
+
+/// The clock the harness's tracker holds. The tracker and the scheduler read one clock, so a test
+/// that wants its own clock points this one at it before the scheduler starts.
+pub struct SwitchClock(Mutex<Arc<dyn Clock>>);
+
+impl Default for SwitchClock {
+    fn default() -> SwitchClock {
+        SwitchClock(Mutex::new(Arc::new(SystemClock)))
+    }
+}
+
+impl SwitchClock {
+    fn current(&self) -> Arc<dyn Clock> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl Clock for SwitchClock {
+    fn now(&self) -> SystemTime {
+        self.current().now()
+    }
+
+    fn sleep_until(&self, at: SystemTime) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        self.current().sleep_until(at)
+    }
+}
+
+impl Harness {
+    /// Makes `clock` the time the tracker and a scheduler started after this read.
+    pub fn use_clock(&self, clock: Arc<dyn Clock>) {
+        *self.clock.0.lock().unwrap_or_else(PoisonError::into_inner) = clock;
+    }
+}
+
+/// The providers of a test that drives Codex alone: Claude is not running.
+pub fn codex_only(codex: CodexProvider) -> Providers {
+    Providers {
+        codex: Ok(codex),
+        claude: Err("Claude is not running in this test".to_owned()),
+    }
 }
 
 struct Control {
@@ -97,7 +146,8 @@ impl Harness {
         let (store_thread, jobs) = store_thread::channel();
         let store_runner = std::thread::spawn(move || jobs.run(store));
         let hub = Hub::new(store_thread.clone());
-        let usage = UsageTracker::default();
+        let clock = Arc::new(SwitchClock::default());
+        let usage = UsageTracker::with_clock(clock.clone());
         let control_file = root.path().join(format!("control-{}", uuid_like()));
         let server_folder = root.path().join("server");
         std::fs::create_dir_all(&server_folder).unwrap();
@@ -109,16 +159,21 @@ impl Harness {
             env_set: Vec::new(),
             server_folder,
             protected: ProtectedFolders::new(root.path().join("kratos"), None, None),
-            turn_timeout: options.turn_timeout,
             stop_timeout: options.stop_timeout,
             request_timeout: Duration::from_secs(10),
             platform: DangerousCommandPlatform::Posix,
             mcp: options.mcp,
         };
-        let (provider, stops) =
-            codex::start(settings, hub.clone(), store_thread.clone(), usage.clone())
-                .await
-                .unwrap();
+        let (limit_stops, stops) = mpsc::unbounded_channel();
+        let provider = codex::start(
+            settings,
+            hub.clone(),
+            store_thread.clone(),
+            usage.clone(),
+            limit_stops,
+        )
+        .await
+        .unwrap();
         let events = hub
             .follow(thread_id.clone(), Seq::BEFORE_FIRST)
             .await
@@ -128,6 +183,7 @@ impl Harness {
             hub,
             store: store_thread,
             usage,
+            clock,
             provider,
             stops: Some(stops),
             scheduler: None,
@@ -191,13 +247,13 @@ impl Harness {
 
     /// Starts the usage scheduler on `clock`, as the engine does after the provider.
     pub async fn start_scheduler(&mut self, clock: Arc<dyn Clock>) -> SchedulerHandle {
+        self.use_clock(clock);
         let stops = self.stops.take().expect("the scheduler starts once");
         let handle = scheduler::start(
             self.hub.clone(),
             self.store.clone(),
             self.usage.clone(),
-            self.provider.clone(),
-            clock,
+            codex_only(self.provider.clone()),
             stops,
         )
         .await
@@ -285,13 +341,41 @@ impl Harness {
         self.control.as_mut().expect("connected above")
     }
 
-    /// The held requests the fake received, oldest first, as `{method, params}`.
-    pub async fn turn_requests(&mut self) -> Vec<Value> {
-        let requests = self.control("test/turnRequests", json!({})).await;
-        requests.as_array().unwrap().clone()
+    async fn on_fake(port: u16, method: &str, params: Value) -> Option<Value> {
+        let stream = TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+        let (reader, mut writer) = stream.into_split();
+        let line = format!(
+            "{}\n",
+            json!({ "id": 1, "method": method, "params": params })
+        );
+        writer.write_all(line.as_bytes()).await.ok()?;
+        let mut answer = String::new();
+        tokio::time::timeout(WAIT, BufReader::new(reader).read_line(&mut answer))
+            .await
+            .ok()?
+            .ok()?;
+        let answer: Value = serde_json::from_str(&answer).ok()?;
+        Some(answer["result"].clone())
     }
 
-    /// Waits until the fake holds `count` requests of `method`, and returns them.
+    pub async fn turn_requests(&mut self) -> Vec<Value> {
+        let mut requests = Vec::new();
+        for port in codex_control::every_port(&self.control_file) {
+            if let Some(Value::Array(held)) =
+                Self::on_fake(port, "test/turnRequests", json!({})).await
+            {
+                requests.extend(held);
+            }
+        }
+        requests.sort_by_key(|request| {
+            request["receivedAt"]
+                .as_str()
+                .and_then(|at| at.parse::<u128>().ok())
+                .unwrap_or_default()
+        });
+        requests
+    }
+
     pub async fn held(&mut self, method: &str, count: usize) -> Vec<Value> {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
@@ -306,11 +390,67 @@ impl Harness {
             }
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the fake holds {} {method} requests, not {count}",
+                "the fakes hold {} {method} requests, not {count}",
                 matching.len()
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+    }
+
+    pub async fn fake_of(&self, message_id: &str) -> u16 {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            for port in codex_control::every_port(&self.control_file) {
+                let held = Self::on_fake(port, "test/turnRequests", json!({})).await;
+                let started = held.as_ref().and_then(Value::as_array).is_some_and(|held| {
+                    held.iter().any(|request| {
+                        request["method"] == "turn/start"
+                            && request["params"]["clientUserMessageId"] == message_id
+                    })
+                });
+                if started {
+                    return port;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no fake holds the start of {message_id}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    pub async fn control_at(&self, port: u16, request: ControlRequest) -> Value {
+        Self::on_fake(port, request.method, request.params)
+            .await
+            .expect("the fake answers")
+    }
+
+    pub async fn settle_start_everywhere(&mut self, turn_id: &str, status: &str) {
+        let arrived = |request: &Value| {
+            request["receivedAt"]
+                .as_str()
+                .and_then(|at| at.parse::<u128>().ok())
+                .unwrap_or_default()
+        };
+        let mut oldest: Option<(u128, u16)> = None;
+        for port in codex_control::every_port(&self.control_file) {
+            let held = Self::on_fake(port, "test/heldNow", json!({})).await;
+            let first = held.as_ref().and_then(Value::as_array).and_then(|held| {
+                held.iter()
+                    .filter(|request| request["method"] == "turn/start")
+                    .map(arrived)
+                    .min()
+            });
+            if let Some(at) = first
+                && oldest.is_none_or(|(oldest_at, _)| at < oldest_at)
+            {
+                oldest = Some((at, port));
+            }
+        }
+        let (_, port) = oldest.expect("a fake still holds a turn/start");
+        let request = codex_control::settle_start(turn_id, status, None);
+        Self::on_fake(port, request.method, request.params).await;
     }
 
     /// Answers the oldest held `turn/start` with a turn in `status`.

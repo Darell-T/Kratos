@@ -9,7 +9,7 @@ use kratos_api_client::Client;
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_engine::hub::{EventPages, Hub};
 use kratos_engine::providers::codex::{self, CodexProvider, CodexSettings, ProtectedFolders};
-use kratos_engine::server::{self, ClientToken, Codex, ServerState};
+use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread;
 use kratos_engine::usage::UsageTracker;
 use kratos_protocol::{Seq, Thread, ThreadEventBody, ThreadSettings, TurnOutcome};
@@ -102,16 +102,21 @@ impl Harness {
             env_set: vec![("CODEX_HOME".into(), codex_home.as_os_str().into())],
             server_folder,
             protected: ProtectedFolders::new(home.clone(), Some(codex_home), None),
-            turn_timeout: WAIT,
             stop_timeout: Duration::from_secs(10),
             request_timeout: Duration::from_secs(30),
             platform: DangerousCommandPlatform::host(),
             mcp: None,
         };
-        let (provider, _stops) =
-            codex::start(codex_settings, hub.clone(), store.clone(), usage.clone())
-                .await
-                .unwrap();
+        let (limit_stops, _stops) = tokio::sync::mpsc::unbounded_channel();
+        let provider = codex::start(
+            codex_settings,
+            hub.clone(),
+            store.clone(),
+            usage.clone(),
+            limit_stops,
+        )
+        .await
+        .unwrap();
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .unwrap();
@@ -119,10 +124,11 @@ impl Harness {
         let state = ServerState {
             store,
             hub: hub.clone(),
-            codex: Ok(Codex {
-                provider: provider.clone(),
-                scheduler: None,
-            }),
+            providers: kratos_engine::providers::Providers {
+                codex: Ok(provider.clone()),
+                claude: Err("this suite runs no Claude".to_owned()),
+            },
+            scheduler: None,
             usage,
             token,
         };

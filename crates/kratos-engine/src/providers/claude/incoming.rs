@@ -1,0 +1,220 @@
+//! What a CLI sends: messages become thread events and live updates, and controls reach Kratos
+//! permission, question, hook, and MCP handlers.
+
+use std::time::Instant;
+
+use kratos_claude_client::{Assistant, Incoming, IterationTokens, StreamEvent, StreamMessage};
+use kratos_protocol::{LiveUpdate, ThreadEventBody, ThreadId, TurnId};
+
+use super::actor::{Actor, SessionEvent};
+use super::threads::ThreadState;
+use super::{ends, wire};
+
+impl Actor {
+    pub(super) async fn on_event(&mut self, event: SessionEvent) {
+        let SessionEvent {
+            thread_id,
+            epoch,
+            incoming,
+        } = event;
+        let current = self
+            .threads
+            .get(&thread_id)
+            .is_some_and(|thread| thread.epoch == epoch && thread.open().is_some());
+        if !current {
+            // A request dropped here is answered with an error, so the old CLI is not left waiting.
+            return;
+        }
+        if let Some(open) = self
+            .threads
+            .get_mut(&thread_id)
+            .and_then(ThreadState::open_mut)
+        {
+            open.last_active = Instant::now();
+        }
+        match incoming {
+            Incoming::Message(message) => self.on_message(&thread_id, message).await,
+            Incoming::Control(control) => self.on_control(&thread_id, control).await,
+            Incoming::Cancelled { id } => {
+                self.close_requests(&thread_id, Some(&id), "Claude no longer needs an answer")
+                    .await
+            }
+            Incoming::Oversized { bytes } => {
+                let why = format!("Claude sent a line of {bytes} bytes, more than Kratos reads");
+                self.close_unread(&thread_id, why).await;
+            }
+            Incoming::Unreadable(error) => {
+                let why = format!("Claude sent a line Kratos cannot read: {error}");
+                self.close_unread(&thread_id, why).await;
+            }
+            Incoming::Exited(exit) => self.on_exit(&thread_id, exit).await,
+        }
+    }
+
+    async fn on_message(&mut self, thread_id: &ThreadId, message: StreamMessage) {
+        match message {
+            StreamMessage::Init(_) => {
+                self.mark_started(thread_id);
+                if self.threads[thread_id].pending.is_empty() {
+                    self.start_background_turn(thread_id).await;
+                }
+            }
+
+            StreamMessage::Replay { uuid } => {
+                self.mark_started(thread_id);
+                self.on_replay(thread_id, &uuid).await;
+            }
+            StreamMessage::Assistant(assistant) => self.on_assistant(thread_id, &assistant).await,
+            StreamMessage::StreamEvent(stream) => self.on_stream(thread_id, &stream),
+            StreamMessage::Result(result) => self.on_result(thread_id, result).await,
+            StreamMessage::RateLimit(event) => self.on_rate_limit(thread_id, event).await,
+            // The CLI retries by itself and Kratos sends nothing for it, but the user sees why the
+            // turn is waiting.
+            StreamMessage::ApiRetry(retry) => {
+                let status = retry
+                    .error_status
+                    .map_or_else(String::new, |status| format!(", status {status}"));
+                let message = format!(
+                    "Claude's request failed ({}{status}). Claude tries again in {} ms, attempt {} \
+                     of {}",
+                    retry.error, retry.retry_delay_ms, retry.attempt, retry.max_retries
+                );
+                self.provider_retrying(thread_id, message).await;
+            }
+            StreamMessage::Background(background) => {
+                self.on_background(thread_id, background).await;
+            }
+            StreamMessage::Unrecognized { .. } => {}
+        }
+    }
+
+    /// Claude has begun a turn, so a message it was sent is no longer certain to be unseen.
+    fn mark_started(&mut self, thread_id: &ThreadId) {
+        if let Some(open) = self
+            .threads
+            .get_mut(thread_id)
+            .and_then(|thread| thread.open_mut())
+        {
+            open.started = true;
+        }
+    }
+
+    /// Saves each reply and tool call of a completed assistant message (D88).
+    async fn on_assistant(&mut self, thread_id: &ThreadId, assistant: &Assistant) {
+        let ids = assistant.user_message_uuids.as_deref().unwrap_or_default();
+        let turn = self.assistant_turn(thread_id, ids).await;
+        if let Some(thread) = self.threads.get_mut(thread_id)
+            && let Some(model) = assistant.message["model"].as_str()
+        {
+            thread.answering_model = Some(model.to_owned());
+        }
+        let Some(turn_id) = turn else { return };
+        let items = wire::assistant_items(assistant);
+        if items.is_empty() {
+            return;
+        }
+        let _ = self
+            .write(thread_id, move |write| {
+                for item in items {
+                    write.append(ThreadEventBody::ItemCompleted {
+                        turn_id: turn_id.clone(),
+                        item,
+                    })?;
+                }
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn assistant_turn(
+        &mut self,
+        thread_id: &ThreadId,
+        message_ids: &[String],
+    ) -> Option<TurnId> {
+        let thread = self.threads.get(thread_id)?;
+        if let Some(run) = thread.running_id() {
+            return Some(run.clone());
+        }
+        let delivered = thread.messages_named(message_ids);
+        if !delivered.is_empty() {
+            return self.record_run(thread_id, delivered, None).await.ok();
+        }
+        if message_ids.is_empty() && thread.awaits_background_turn() {
+            self.start_background_turn(thread_id).await;
+            return self.threads[thread_id].running_id().cloned();
+        }
+        None
+    }
+
+    /// Shows a reply as it is written, and the context each request fills as it starts and ends
+    /// (D76), to the clients following the thread.
+    fn on_stream(&mut self, thread_id: &ThreadId, stream: &StreamEvent) {
+        let Some((turn_id, window)) = self
+            .threads
+            .get(thread_id)
+            .and_then(|thread| Some((thread.running_id().cloned()?, thread.context_window)))
+        else {
+            return;
+        };
+        if let Some((item_id, delta)) = wire::reply_delta(stream) {
+            self.hub.publish(
+                thread_id,
+                LiveUpdate::ReplyDelta {
+                    turn_id: turn_id.clone(),
+                    item_id,
+                    delta,
+                },
+            );
+        }
+        let context = IterationTokens::of_stream_event(&stream.event)
+            .and_then(|tokens| ends::context_of(tokens, window));
+        if let Some(usage) = context {
+            self.hub
+                .publish(thread_id, LiveUpdate::Context { turn_id, usage });
+        }
+    }
+
+    /// Closes a CLI that wrote a line Kratos could not read. The line may have been a request the
+    /// CLI now waits on or the result that ends the turn, and with no turn deadline nothing else
+    /// would end the wait. The exit ends the turn, with `why` as its reason.
+    async fn close_unread(&mut self, thread_id: &ThreadId, why: String) {
+        self.provider_error(thread_id, why.clone()).await;
+        self.close_session(thread_id, &why);
+    }
+
+    /// Records trouble Claude's output caused in the running turn. Outside a turn it only logs.
+    pub(super) async fn provider_error(&mut self, thread_id: &ThreadId, message: String) {
+        self.append_provider_error(thread_id, message, false).await;
+    }
+
+    /// Records a failed request that Claude retries by itself.
+    async fn provider_retrying(&mut self, thread_id: &ThreadId, message: String) {
+        self.append_provider_error(thread_id, message, true).await;
+    }
+
+    async fn append_provider_error(
+        &mut self,
+        thread_id: &ThreadId,
+        message: String,
+        will_retry: bool,
+    ) {
+        let run = self
+            .threads
+            .get(thread_id)
+            .and_then(|thread| thread.running_id().cloned());
+        let Some(turn_id): Option<TurnId> = run else {
+            eprintln!("claude: {message}");
+            return;
+        };
+        let _ = self
+            .write(thread_id, move |write| {
+                write.append(ThreadEventBody::ProviderError {
+                    turn_id,
+                    message,
+                    will_retry,
+                })?;
+                Ok(())
+            })
+            .await;
+    }
+}

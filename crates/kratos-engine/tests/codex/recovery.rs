@@ -1,7 +1,6 @@
 //! What an engine that starts again finds of the work the last one left (L1): no Codex process
 //! outlives the engine that started it.
 
-use kratos_engine::providers::codex::ProviderError;
 use kratos_protocol::{
     ApprovalOutcome, MessageStatus, PauseReason, ThreadEventBody, TurnChanges, TurnOutcome,
 };
@@ -227,18 +226,23 @@ async fn a_discard_sent_while_codex_loads_the_thread_settles_once_it_has() {
 }
 
 #[tokio::test]
-async fn a_discard_sent_while_codex_loads_the_thread_fails_when_the_load_fails() {
-    // Catches a discard left waiting for good when Codex cannot load the thread.
+async fn discard_distinguishes_a_missing_history_from_a_temporary_refusal() {
+    for option in ["--fail-resume", "--closing-on-resume"] {
+        check_discard_refusal(option).await;
+    }
+}
+
+async fn check_discard_refusal(option: &str) {
     let mut harness = Harness::start(Options::default()).await;
     harness.send("a", "first").await;
     harness.held("turn/start", 1).await;
     let (root, thread_id) = harness.stop().await;
     let options = Options {
-        fake_args: vec!["--fail-resume".into()],
+        fake_args: vec![option.into()],
         ..Options::default()
     };
 
-    let harness = Harness::start_in(root, options, Some(thread_id)).await;
+    let mut harness = Harness::start_in(root, options, Some(thread_id)).await;
     let discarded = tokio::time::timeout(
         WAIT,
         harness
@@ -247,15 +251,22 @@ async fn a_discard_sent_while_codex_loads_the_thread_fails_when_the_load_fails()
     )
     .await;
 
-    let error = discarded.expect("the discard settles").unwrap_err();
+    if option == "--closing-on-resume" {
+        assert!(discarded.expect("the request finishes").is_err());
+        assert!(matches!(
+            harness.message("a").await.status,
+            MessageStatus::Unknown { .. }
+        ));
+        assert!(harness.turn_requests().await.is_empty());
+        return;
+    }
+    let discarded = discarded.expect("the discard settles").unwrap();
+    assert_eq!(discarded.status, MessageStatus::Cancelled);
+    assert_eq!(harness.message("a").await.status, MessageStatus::Cancelled);
     assert!(
-        matches!(error, ProviderError::Unavailable(ref message) if message.contains("could not load the thread")),
-        "{error:?}"
+        harness.turn_requests().await.is_empty(),
+        "a cancelled message is never sent"
     );
-    assert!(matches!(
-        harness.message("a").await.status,
-        MessageStatus::Unknown { .. }
-    ));
 }
 
 #[tokio::test]

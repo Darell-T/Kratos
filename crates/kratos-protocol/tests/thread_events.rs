@@ -11,7 +11,7 @@ use kratos_protocol::{
     MessageInput, MessageOrigin, MessageStatus, NetworkAccess, PathAccess, PathAccessMode,
     PauseReason, Permission, Provider, Question, QuestionId, QuestionItem, QuestionOption,
     ReplySoFar, RequiredText, SendMessage, ServerMessage, ThreadEventBody, ThreadId,
-    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOutcome, UsageWait,
+    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOrigin, TurnOutcome, UsageWait,
 };
 use std::fmt::Debug;
 
@@ -119,7 +119,10 @@ fn a_queued_message_reports_its_origin_and_status_beside_its_input() {
 #[test]
 fn turn_events_keep_their_stored_shape() {
     assert_wire(
-        ThreadEventBody::TurnStarted { turn_id: turn() },
+        ThreadEventBody::TurnStarted {
+            turn_id: turn(),
+            origin: TurnOrigin::Messages,
+        },
         r#"{"kind":"turn.started","turnId":"turn-1"}"#,
     );
     assert_wire(
@@ -393,6 +396,7 @@ fn thread_and_provider_events_keep_their_stored_shape() {
                 permission: Permission::ApproveForMe,
                 plan_mode: false,
                 context_limit_tokens: ContextLimit::new(200_000),
+                report_format: None,
             },
         },
         r#"{"kind":"settings.changed","settings":{"model":"gpt-5.4-mini","permission":"approveForMe","planMode":false,"contextLimitTokens":200000}}"#,
@@ -515,6 +519,32 @@ fn thread_settings_refuse_unknown_fields() {
 }
 
 #[test]
+fn a_report_format_is_a_json_object_and_settings_from_before_it_have_none() {
+    // Catches stored settings changes written before report formats becoming unreadable, and a
+    // report format that is not a schema object reaching a provider.
+    let older: ThreadSettings = serde_json::from_str(
+        r#"{"model":null,"permission":"askMe","planMode":false,"contextLimitTokens":null}"#,
+    )
+    .unwrap();
+    assert_eq!(older.report_format, None);
+    let schema = serde_json::json!({ "type": "object", "required": ["verdict"] });
+    let settings: ThreadSettings = serde_json::from_value(serde_json::json!({
+        "permission": "askMe", "planMode": false, "reportFormat": schema
+    }))
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(settings.report_format.unwrap()).unwrap(),
+        schema
+    );
+    assert!(
+        serde_json::from_value::<ThreadSettings>(serde_json::json!({
+            "permission": "askMe", "planMode": false, "reportFormat": "verdict"
+        }))
+        .is_err()
+    );
+}
+
+#[test]
 fn narrowing_settings_keeps_what_both_sides_allow_and_nothing_more() {
     // Catches narrowing and the covers check drifting apart, which would run a message from
     // another thread with access its sender lacked, or let the access check refuse what narrowing
@@ -557,4 +587,35 @@ fn narrowing_settings_keeps_what_both_sides_allow_and_nothing_more() {
             }
         }
     }
+}
+
+#[test]
+fn a_turn_started_by_messages_keeps_its_old_shape_and_one_after_a_background_task_names_it() {
+    let older: ThreadEventBody =
+        serde_json::from_value(serde_json::json!({ "kind": "turn.started", "turnId": "t1" }))
+            .unwrap();
+    assert_eq!(
+        older,
+        ThreadEventBody::TurnStarted {
+            turn_id: TurnId::new("t1".into()),
+            origin: TurnOrigin::Messages,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&older).unwrap(),
+        serde_json::json!({ "kind": "turn.started", "turnId": "t1" })
+    );
+    let own = ThreadEventBody::TurnStarted {
+        turn_id: TurnId::new("t2".into()),
+        origin: TurnOrigin::BackgroundTask {
+            summary: Some("build finished".into()),
+        },
+    };
+    let wire = serde_json::json!({ "kind": "turn.started", "turnId": "t2",
+        "origin": { "kind": "backgroundTask", "summary": "build finished" } });
+    assert_eq!(serde_json::to_value(&own).unwrap(), wire);
+    assert_eq!(
+        serde_json::from_value::<ThreadEventBody>(wire).unwrap(),
+        own
+    );
 }

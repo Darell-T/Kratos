@@ -12,6 +12,7 @@ axum.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 kratos-api-client.workspace = true
+kratos-claude-client.workspace = true
 kratos-codex-client.workspace = true
 kratos-command-safety.workspace = true
 kratos-process.workspace = true
@@ -23,7 +24,7 @@ serde_path_to_error.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["time"] }
 tokio-stream = { workspace = true, features = ["sync"] }
-uuid.workspace = true
+uuid = { workspace = true, features = ["v5"] }
 
 # Tests run the real kratos-engine binary as a child process.
 [dev-dependencies]
