@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use kratos_engine::providers::{ProviderError, Sent};
-use kratos_protocol::{MessageStatus, PauseReason, ThreadEventBody, TurnOutcome};
+use kratos_protocol::{MessageStatus, PauseReason, ThreadEventBody, TurnId, TurnOutcome};
 use serde_json::json;
 
 use crate::harness::{Harness, Options, message_id};
@@ -492,6 +492,46 @@ async fn a_thread_codex_closes_mid_turn_ends_its_turn_as_failed() {
         matches!(&ended, ThreadEventBody::TurnCompleted { outcome: TurnOutcome::Failed { error }, .. } if error.contains("closed the thread")),
         "{ended:?}"
     );
+}
+
+#[tokio::test]
+async fn a_late_start_answer_for_a_discarded_message_leaves_the_next_message_alone() {
+    // Catches a turn/start answer credited to whichever message is starting when it arrives.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness.send("b", "second").await;
+    harness
+        .emit("thread/closed", json!({ "threadId": THREAD }))
+        .await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
+        .await;
+    harness
+        .provider
+        .discard(harness.thread_id.clone(), message_id("a"))
+        .await
+        .unwrap();
+    let held = harness.held("turn/start", 2).await;
+    assert_eq!(held[1]["params"]["clientUserMessageId"], "b");
+
+    harness.settle_start("turn-a", "inProgress").await;
+    harness.settle_start("turn-b", "inProgress").await;
+
+    let started = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
+        .await;
+    assert!(
+        matches!(&started, ThreadEventBody::TurnStarted { turn_id, .. } if turn_id.as_str() == "turn-b"),
+        "{started:?}"
+    );
+    assert_eq!(
+        harness.message("b").await.status,
+        MessageStatus::Accepted {
+            turn_id: TurnId::new("turn-b".to_owned())
+        }
+    );
+    assert_eq!(harness.message("a").await.status, MessageStatus::Cancelled);
 }
 
 #[tokio::test]

@@ -164,6 +164,7 @@ impl Actor {
             };
             Done::StartAnswered {
                 thread_id,
+                message_id,
                 result: result.map(|started| Box::new(started.turn)),
             }
         });
@@ -172,14 +173,12 @@ impl Actor {
     pub(super) async fn on_start_answered(
         &mut self,
         thread_id: ThreadId,
+        message_id: MessageId,
         result: Result<Box<types::Turn>, RequestError>,
     ) {
-        let Some(Turn::Starting { message_id, .. }) =
-            self.threads.get(&thread_id).map(|thread| &thread.turn)
-        else {
+        if !self.is_starting(&thread_id, &message_id) {
             return;
-        };
-        let message_id = message_id.clone();
+        }
         match result {
             Ok(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
             Err(RequestError::Rpc { code, message }) if rejected_before_execution(code) => {
@@ -189,6 +188,15 @@ impl Actor {
                 self.check_delivery(&thread_id, &message_id, Delivery::Start, error.to_string());
             }
         }
+    }
+
+    /// Whether `message_id` is the message the thread is starting a turn for. A `turn/start`
+    /// answer or history check for any other message belongs to a start that already ended.
+    fn is_starting(&self, thread_id: &ThreadId, message_id: &MessageId) -> bool {
+        matches!(
+            self.threads.get(thread_id).map(|thread| &thread.turn),
+            Some(Turn::Starting { message_id: starting, .. }) if starting == message_id
+        )
     }
 
     /// Codex refused the message before acting on it. It may be sent again, by the user.
@@ -356,6 +364,7 @@ impl Actor {
         found: Option<Box<types::Turn>>,
     ) {
         match delivery {
+            Delivery::Start if !self.is_starting(&thread_id, &message_id) => {}
             Delivery::Start => match found {
                 Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
                 None => {

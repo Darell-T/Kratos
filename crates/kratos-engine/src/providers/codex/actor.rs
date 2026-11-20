@@ -139,6 +139,7 @@ pub(super) enum Done {
     },
     StartAnswered {
         thread_id: ThreadId,
+        message_id: MessageId,
         result: Result<Box<types::Turn>, RequestError>,
     },
     /// The history read after an uncertain `turn/start` or `turn/steer`: the turn that took the
@@ -327,9 +328,11 @@ impl Actor {
                 self.on_attached(thread_id, context_limit, access, result)
                     .await
             }
-            Done::StartAnswered { thread_id, result } => {
-                self.on_start_answered(thread_id, result).await
-            }
+            Done::StartAnswered {
+                thread_id,
+                message_id,
+                result,
+            } => self.on_start_answered(thread_id, message_id, result).await,
             Done::DeliveryChecked {
                 thread_id,
                 message_id,
