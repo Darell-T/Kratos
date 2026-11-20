@@ -18,8 +18,6 @@ authenticated clients.
 - **Any machine.** The engine runs in the background and keeps agents working while no client is connected. Other
   machines can open the same threads.
 - **One set of skills and plugins** shared by every provider.
-- **No wasted tokens.** Helper agents run on cheaper models, nothing polls while it waits, and long threads move to a
-  fresh session from a summary instead of waiting minutes for compaction.
 
 ## Status
 
