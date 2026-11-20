@@ -242,17 +242,21 @@ impl Worktrees {
             .run(top, &["branch", "--", name, base], git::QUICK)
             .await
         {
+            // The pattern matches the branch itself and any branch in a folder of that name, such
+            // as `fix/login` for `fix`, which git also refuses.
             let reference = format!("refs/heads/{name}");
-            let taken = self
-                .git
-                .run(
-                    top,
-                    &["show-ref", "--verify", "--quiet", &reference],
-                    git::QUICK,
-                )
-                .await
-                .is_ok();
-            return if taken { Ok(false) } else { Err(error.into()) };
+            let args = [
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                &reference,
+            ];
+            let found = self.git.run(top, &args, git::QUICK).await?;
+            return if found.is_empty() {
+                Err(error.into())
+            } else {
+                Ok(false)
+            };
         }
         let path_text = text(path)?;
         let added = self

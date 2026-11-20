@@ -425,6 +425,29 @@ fn a_worktrees_folder_that_links_elsewhere_is_refused_and_nothing_is_written_the
     assert_eq!(worktree_count(&repository), 1);
 }
 
+#[test]
+fn a_title_that_names_a_folder_of_branches_moves_on_to_the_next_name() {
+    // Catches a branch name git refuses because `taken/login` exists, reported to the user as a
+    // raw git failure instead of trying `taken-2`.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    git(&repository, &["branch", "taken/login"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+
+    let thread = create(
+        &engine.client(),
+        &workspace,
+        "Taken",
+        PlaceRequest::NewWorktree,
+    );
+
+    assert_eq!(
+        worktree_of(&engine.client(), &thread).branch.as_deref(),
+        Some("taken-2")
+    );
+}
+
 #[cfg(unix)]
 fn link_folder(target: &Path, link: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
