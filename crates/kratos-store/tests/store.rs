@@ -8,8 +8,8 @@ use kratos_protocol::{
     CreateThread, CreateWorkspace, Seq, Thread, ThreadEvent, ThreadEventBody, ThreadId, WorkspaceId,
 };
 use kratos_store::{
-    BackupId, DirectoryError, NewPlace, OpenError, RestoreError, SCHEMA_VERSION, Store, StoreError,
-    restore,
+    BackupId, Checkout, DirectoryError, NewPlace, OpenError, RestoreError, SCHEMA_VERSION, Store,
+    StoreError, restore,
 };
 use rusqlite::Connection;
 use rusqlite::types::Value;
@@ -916,4 +916,55 @@ fn refuses_a_second_open_and_a_restore_while_the_directory_is_held() {
         matches!(after, RestoreError::UnknownBackup { .. }),
         "the lock was free, so restore got as far as the lookup: {after}"
     );
+}
+
+#[test]
+fn a_reserved_worktree_stays_reserved_until_a_thread_uses_it_or_git_never_made_it() {
+    // Catches a failed thread insert that drops the reservation, which would leave a worktree git
+    // made with no record of being Kratos's, or a released path that stays blocked.
+    let home = home();
+    let mut store = Store::open(home.path()).unwrap();
+    let workspace = store
+        .create_workspace(&workspace_request("repo", "/work/repo"))
+        .unwrap();
+    let checkout = Checkout {
+        path: "/work/repo/.kratos-worktrees/chat".into(),
+        repository: "/work/repo/.git".into(),
+        branch: Some("chat".into()),
+    };
+    let reserved = store.reserve_worktree(&checkout).unwrap();
+    let unknown = WorkspaceId::new("gone".into());
+
+    let failed = store.create_thread(
+        &thread_request(&unknown, "chat", "codex"),
+        &NewPlace::Created(reserved.clone()),
+    );
+    assert!(matches!(failed, Err(StoreError::UnknownWorkspace(_))));
+    assert!(matches!(
+        store.reserve_worktree(&checkout),
+        Err(StoreError::WorktreeTaken(_))
+    ));
+
+    store
+        .create_thread(
+            &thread_request(&workspace.id, "chat", "codex"),
+            &NewPlace::Created(reserved.clone()),
+        )
+        .unwrap();
+    store.release_reservation(&reserved).unwrap();
+    assert!(
+        matches!(
+            store.reserve_worktree(&checkout),
+            Err(StoreError::WorktreeTaken(_))
+        ),
+        "a worktree a thread uses is no longer a reservation to release"
+    );
+
+    let other = Checkout {
+        path: "/work/repo/.kratos-worktrees/never-made".into(),
+        ..checkout
+    };
+    let never_made = store.reserve_worktree(&other).unwrap();
+    store.release_reservation(&never_made).unwrap();
+    store.reserve_worktree(&other).unwrap();
 }
