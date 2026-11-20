@@ -4,8 +4,8 @@
 use std::io;
 use std::path::Path;
 
-use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place};
-use kratos_store::{Removal, RemovalEnd, StoreError};
+use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, WorktreeId};
+use kratos_store::{Removal, RemovalEnd, StoreError, UnfinishedWorktree};
 
 use super::git::{self, CHECKOUT};
 use super::{PlaceError, Worktrees};
@@ -22,20 +22,51 @@ impl Worktrees {
         place: &Place,
         files: LeftFiles,
     ) -> Result<Cleanup, StoreError> {
-        let worktree = match place {
+        match place {
             Place::Worktree(worktree) if worktree.ownership == Ownership::CreatedByKratos => {
-                worktree
+                self.remove_worktree(store, &worktree.id, &worktree.path, files)
+                    .await
             }
-            Place::Worktree(_) | Place::ProjectFolder => return Ok(Cleanup::NotOwned),
-        };
-        let id = worktree.id.clone();
-        let repository = match store.call(move |store| store.begin_removal(&id)).await? {
+            Place::Worktree(_) | Place::ProjectFolder => Ok(Cleanup::NotOwned),
+        }
+    }
+
+    /// Finishes what an earlier engine left, `unfinished`, read before this engine served. Files
+    /// left in a worktree keep it, since only the user may discard them.
+    pub async fn sweep(&self, store: &StoreThread, unfinished: Vec<UnfinishedWorktree>) {
+        for UnfinishedWorktree { id, path } in unfinished {
+            match self
+                .remove_worktree(store, &id, &path, LeftFiles::Keep)
+                .await
+            {
+                Ok(Cleanup::Removed | Cleanup::InUse | Cleanup::NotOwned) => {}
+                Ok(Cleanup::Kept { files }) => {
+                    println!(
+                        "Kept the worktree {path}, which holds {} files",
+                        files.len()
+                    );
+                }
+                Ok(Cleanup::Blocked { error }) => eprintln!("{error}"),
+                Err(error) => eprintln!("cannot finish removing the worktree {path}: {error}"),
+            }
+        }
+    }
+
+    async fn remove_worktree(
+        &self,
+        store: &StoreThread,
+        id: &WorktreeId,
+        path: &str,
+        files: LeftFiles,
+    ) -> Result<Cleanup, StoreError> {
+        let begin = id.clone();
+        let repository = match store.call(move |store| store.begin_removal(&begin)).await? {
             Removal::InUse => return Ok(Cleanup::InUse),
             Removal::Done => return Ok(Cleanup::Removed),
             Removal::Started { repository } => repository,
         };
         let cleanup = self
-            .remove(Path::new(&repository), &worktree.path, files)
+            .remove(Path::new(&repository), path, files)
             .await
             .unwrap_or_else(|error| Cleanup::Blocked {
                 error: error.to_string(),
@@ -45,7 +76,7 @@ impl Worktrees {
             Cleanup::Kept { .. } => RemovalEnd::Kept,
             _ => return Ok(cleanup),
         };
-        let id = worktree.id.clone();
+        let id = id.clone();
         store.call(move |store| store.end_removal(&id, end)).await?;
         Ok(cleanup)
     }

@@ -8,6 +8,7 @@ use kratos_api_client::Client;
 use kratos_protocol::{
     ArchiveThread, ArchivedThread, Cleanup, LeftFiles, PlaceRequest, Thread, ThreadDetails, routes,
 };
+use kratos_store::{Checkout, Store};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -320,4 +321,77 @@ fn a_removal_a_held_folder_blocks_is_tried_again_by_the_next_archive() {
     assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
     assert!(!Path::new(&path).exists());
     assert_eq!(worktree_count(&repository), 1);
+}
+
+/// Waits for the engine's startup sweep to remove `folder`.
+fn wait_until_gone(folder: &Path) {
+    let deadline = Instant::now() + WAIT;
+    while folder.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "{} is still there",
+            folder.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn the_next_engine_finishes_a_removal_git_could_not() {
+    // Catches a blocked removal that stays forever when no thread is archived again.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let home = root.path().join("kratos");
+    let engine = RunningEngine::start(&home);
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "stuck", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    std::fs::remove_file(folder.join(".git")).unwrap();
+    let blocked = archive(&client, &thread, LeftFiles::Keep);
+    assert!(matches!(blocked, Cleanup::Blocked { .. }), "{blocked:?}");
+    engine.kill();
+    std::fs::remove_file(folder.join("README.md")).unwrap();
+
+    let _engine = RunningEngine::start(&home);
+
+    wait_until_gone(folder);
+    assert_eq!(worktree_count(&repository), 1);
+}
+
+#[test]
+fn the_next_engine_removes_a_clean_checkout_no_thread_took_and_keeps_one_with_files() {
+    // Catches a worktree an engine made and then stopped before its thread was recorded, left
+    // behind for good, or one holding files deleted without the user's choice.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let home = root.path().join("kratos");
+    let shared = resolved(&repository.join(".git"));
+    let store = Store::open(&home).unwrap();
+    let mut checkouts = Vec::new();
+    // The sweep goes in reservation order, so once "clean" is gone it has passed "dirty".
+    for name in ["dirty", "clean"] {
+        let path = repository.join(".kratos-worktrees").join(name);
+        let checkout = Checkout {
+            path: path.to_str().unwrap().to_owned(),
+            repository: shared.to_str().unwrap().to_owned(),
+            branch: Some(name.to_owned()),
+        };
+        store.reserve_worktree(&checkout).unwrap();
+        git(
+            &repository,
+            &["worktree", "add", "--quiet", "-b", name, &checkout.path],
+        );
+        checkouts.push(path);
+    }
+    drop(store);
+    std::fs::write(checkouts[0].join("notes.txt"), "mine\n").unwrap();
+
+    let _engine = RunningEngine::start(&home);
+
+    wait_until_gone(&checkouts[1]);
+    assert!(branch_exists(&repository, "clean"));
+    assert!(checkouts[0].join("notes.txt").exists());
+    assert_eq!(worktree_count(&repository), 2);
 }

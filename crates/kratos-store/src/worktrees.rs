@@ -16,6 +16,13 @@ pub struct Checkout {
     pub branch: Option<String>,
 }
 
+/// A worktree an earlier engine left unfinished.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnfinishedWorktree {
+    pub id: WorktreeId,
+    pub path: String,
+}
+
 /// What [`Store::begin_removal`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Removal {
@@ -70,9 +77,26 @@ impl Store {
         Ok(id)
     }
 
+    /// Worktrees an earlier engine left unfinished: reserved and never given to a thread, or
+    /// being removed when git refused. Read before the engine serves, since a worktree reserved
+    /// after that may be one a request is making.
+    pub fn unfinished_worktrees(&self) -> Result<Vec<UnfinishedWorktree>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, path FROM worktrees WHERE state IN ('creating', 'removing') ORDER BY rowid",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok(UnfinishedWorktree {
+                id: WorktreeId::new(row.get(0)?),
+                path: row.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Marks a worktree Kratos made as being removed, once no thread that is not archived works
     /// in it. From then on no thread may join it. A worktree already being removed counts as
-    /// started again, so an archive can retry a removal git refused.
+    /// started again, so an archive can retry a removal git refused. So does a reservation no
+    /// thread took, which only [`Store::unfinished_worktrees`] names.
     pub fn begin_removal(&mut self, id: &WorktreeId) -> Result<Removal, StoreError> {
         let transaction = self
             .connection
@@ -93,7 +117,7 @@ impl Store {
             _ => {
                 let started = transaction.execute(
                     "UPDATE worktrees SET state = 'removing'
-                     WHERE id = ?1 AND state IN ('ready', 'removing')
+                     WHERE id = ?1 AND state IN ('creating', 'ready', 'removing')
                        AND NOT EXISTS (SELECT 1 FROM threads
                                        WHERE worktree_id = ?1 AND archived_at IS NULL)",
                     [id.as_str()],

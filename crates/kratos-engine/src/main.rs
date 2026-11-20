@@ -24,7 +24,9 @@ use kratos_api_client::{Client, ClientError};
 use kratos_claude_client::locate_claude;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
-use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
+use kratos_store::{
+    BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError, UnfinishedWorktree,
+};
 
 use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
@@ -109,6 +111,7 @@ fn serve(config: &Config) -> Result<(), StartError> {
     let port = listener.local_addr()?.port();
     let token = ClientToken::issue(&config.home).map_err(StartError::Token)?;
     let worktrees = Worktrees::open(&config.home).map_err(StartError::Hooks)?;
+    let unfinished = store.unfinished_worktrees()?;
     // The listener already accepts into its backlog, so a client may connect as soon as it reads
     // this.
     println!(
@@ -118,7 +121,14 @@ fn serve(config: &Config) -> Result<(), StartError> {
     let (store_thread, store_jobs) = store_thread::channel();
     let server_config = config.clone();
     let server = std::thread::spawn(move || {
-        run_server(listener, store_thread, &server_config, token, worktrees)
+        run_server(
+            listener,
+            store_thread,
+            &server_config,
+            token,
+            worktrees,
+            unfinished,
+        )
     });
     store_jobs.run(store);
     server.join().expect("the server thread does not panic")
@@ -130,6 +140,7 @@ fn run_server(
     config: &Config,
     token: ClientToken,
     worktrees: Worktrees,
+    unfinished: Vec<UnfinishedWorktree>,
 ) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -159,6 +170,8 @@ fn run_server(
             token,
             worktrees: Arc::new(worktrees),
         };
+        let (worktrees, sweep_store) = (state.worktrees.clone(), state.store.clone());
+        tokio::spawn(async move { worktrees.sweep(&sweep_store, unfinished).await });
         server::serve(listener, state.clone(), shutdown_signal()).await?;
         // The agents end before the store closes, so nothing they report goes unrecorded (L2).
         if let Ok(claude) = &state.providers.claude {

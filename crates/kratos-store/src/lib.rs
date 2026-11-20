@@ -35,7 +35,7 @@ pub use messages::{Enqueued, QueuePlace};
 pub use migrations::SCHEMA_VERSION;
 pub use requests::{Settle, StoredApproval, StoredQuestion};
 pub use threads::ProviderThread;
-pub use worktrees::{Checkout, NewPlace, Removal, RemovalEnd};
+pub use worktrees::{Checkout, NewPlace, Removal, RemovalEnd, UnfinishedWorktree};
 pub use write::ThreadWrite;
 
 use backups::back_up;
