@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use kratos_codex_client::{Codex, Incoming, RequestError, types};
@@ -19,10 +19,6 @@ use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
-
-/// How many threads may wait on a `turn/start` answer at once. The rest wait their turn, so a
-/// burst of messages to many threads does not flood Codex (D85).
-pub(super) const MAX_STARTING: usize = 4;
 
 pub(super) type Reply<T> = oneshot::Sender<Result<T, ProviderError>>;
 
@@ -254,8 +250,6 @@ pub(crate) struct Actor {
     pub(super) plan: Option<String>,
     pub(super) threads: HashMap<ThreadId, ThreadState>,
     pub(super) requests: Requests,
-    /// Threads waiting for a start slot, oldest first.
-    pub(super) ready: VecDeque<ThreadId>,
     pub(super) reconcile: Vec<ThreadId>,
     pub(super) done: mpsc::UnboundedSender<Completion>,
     pub(super) completions: mpsc::UnboundedReceiver<Completion>,

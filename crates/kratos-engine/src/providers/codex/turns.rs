@@ -11,7 +11,7 @@ use kratos_protocol::{
 };
 use serde_json::json;
 
-use super::actor::{Actor, Done, MAX_STARTING, Reply};
+use super::actor::{Actor, Done, Reply};
 use super::approvals::settle_closed;
 use super::profiles::Profile;
 use super::servers::ServerKey;
@@ -51,8 +51,8 @@ impl StopWaiters {
 
 impl Actor {
     /// Starts the thread's next queued message when nothing holds the queue: the turn before it is
-    /// confirmed finished (D11), no steer is out, the queue is not paused, Codex has the thread
-    /// loaded, and a start slot is free. Safe to call at any time; it does nothing otherwise.
+    /// confirmed finished (D11), no steer is out, the queue is not paused, and Codex has the thread
+    /// loaded. Safe to call at any time; it does nothing otherwise.
     pub(super) async fn dispatch(&mut self, thread_id: &ThreadId) {
         let Some(thread) = self.threads.get(thread_id) else {
             return;
@@ -84,17 +84,6 @@ impl Actor {
         if self.fork_for_access(thread_id, next.origin.limit()) {
             return;
         }
-        let starting = self
-            .threads
-            .values()
-            .filter(|thread| matches!(thread.turn, Turn::Starting { .. }))
-            .count();
-        if starting >= MAX_STARTING {
-            if !self.ready.contains(thread_id) {
-                self.ready.push_back(thread_id.clone());
-            }
-            return;
-        }
         self.start_turn(thread_id, native_id, next).await;
     }
 
@@ -113,18 +102,6 @@ impl Actor {
         match next {
             Ok((None, Some(next))) if next.status == MessageStatus::Queued => Some(next),
             _ => None,
-        }
-    }
-
-    /// Gives a freed start slot to the thread that waited longest.
-    pub(super) async fn start_ready(&mut self) {
-        while let Some(thread_id) = self.ready.pop_front() {
-            self.dispatch(&thread_id).await;
-            if self.ready.back() == Some(&thread_id) {
-                // Still no slot; it keeps its place.
-                self.ready.rotate_right(1);
-                return;
-            }
         }
     }
 
@@ -210,10 +187,8 @@ impl Actor {
             }
             Err(error) => {
                 self.check_delivery(&thread_id, &message_id, Delivery::Start, error.to_string());
-                return;
             }
         }
-        self.start_ready().await;
     }
 
     /// Codex refused the message before acting on it. It may be sent again, by the user.
@@ -381,16 +356,13 @@ impl Actor {
         found: Option<Box<types::Turn>>,
     ) {
         match delivery {
-            Delivery::Start => {
-                match found {
-                    Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
-                    None => {
-                        self.end_start(&thread_id, Ok(()));
-                        self.record_uncertain(&thread_id, message_id, error).await;
-                    }
+            Delivery::Start => match found {
+                Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
+                None => {
+                    self.end_start(&thread_id, Ok(()));
+                    self.record_uncertain(&thread_id, message_id, error).await;
                 }
-                self.start_ready().await;
-            }
+            },
             Delivery::Steer => {
                 if let Some(thread) = self.threads.get_mut(&thread_id) {
                     thread.steering.remove(&message_id);

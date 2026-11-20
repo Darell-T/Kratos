@@ -98,7 +98,6 @@ impl Actor {
             plan: None,
             threads: HashMap::new(),
             requests: Requests::default(),
-            ready: Default::default(),
             reconcile: Vec::new(),
             done,
             completions,

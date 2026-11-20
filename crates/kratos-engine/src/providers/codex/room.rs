@@ -128,10 +128,7 @@ impl Actor {
                 && thread.steering.is_empty()
                 && thread.discards.is_empty()
         });
-        quiet_slot
-            && thread_idle
-            && !self.ready.contains(thread_id)
-            && !self.requests.awaits_user(thread_id)
+        quiet_slot && thread_idle && !self.requests.awaits_user(thread_id)
     }
 
     fn retire_if_quiet(&mut self, key: &ServerKey) {
