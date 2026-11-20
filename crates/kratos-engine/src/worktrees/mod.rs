@@ -219,13 +219,18 @@ impl Worktrees {
             Err(StoreError::WorktreeTaken(_)) => return Ok(None),
             reserved => reserved?,
         };
-        match self.check_out(&repository.top, path, name, base).await {
-            Ok(true) => Ok(Some(id)),
-            made => {
-                self.release(store, id).await?;
-                made.map(|_| None)
-            }
+        let made = self.check_out(&repository.top, path, name, base).await;
+        if let Ok(true) = made {
+            return Ok(Some(id));
         }
+        // A checkout stopped partway leaves a folder, which keeps its reservation so a later
+        // start knows the folder is Kratos's.
+        if tokio::fs::symlink_metadata(path).await.is_err() {
+            store
+                .call(move |store| store.release_reservation(&id))
+                .await?;
+        }
+        made.map(|_| None)
     }
 
     /// Makes branch `name` at `base` and checks it out at `path`. `Ok(false)` when the branch name
@@ -272,13 +277,6 @@ impl Worktrees {
             return Err(error.into());
         }
         Ok(true)
-    }
-
-    async fn release(&self, store: &StoreThread, id: WorktreeId) -> Result<(), PlaceError> {
-        store
-            .call(move |store| store.release_reservation(&id))
-            .await
-            .map_err(PlaceError::Store)
     }
 
     /// The repository whose worktree the project folder is, which must be its top folder.
