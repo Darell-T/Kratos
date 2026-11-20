@@ -17,7 +17,11 @@ fn accepted_by(status: &MessageStatus, turn: &str) -> bool {
 fn turn_trail(log: &[ThreadEventBody]) -> Vec<String> {
     log.iter()
         .filter_map(|event| match event {
-            ThreadEventBody::TurnStarted { turn_id } => Some(format!("started {turn_id}")),
+            ThreadEventBody::TurnStarted { turn_id, origin } => Some(if origin.is_messages() {
+                format!("started {turn_id}")
+            } else {
+                format!("started {turn_id} on its own")
+            }),
             ThreadEventBody::TurnCompleted {
                 turn_id, outcome, ..
             } => Some(match outcome {
@@ -45,7 +49,10 @@ async fn launches_claude_lazily_and_delivers_queued_messages_one_turn_at_a_time_
         panic!("the message is queued");
     };
     let launch = harness.launch(1).await;
-    assert_eq!(launch.cwd, harness.folder().display().to_string());
+    assert_eq!(
+        std::fs::canonicalize(&launch.cwd).unwrap(),
+        std::fs::canonicalize(harness.folder()).unwrap()
+    );
     assert!(launch.has("--replay-user-messages") && launch.has("--include-partial-messages"));
     assert_eq!(launch.value("--permission-mode"), Some("default"));
     assert_eq!(launch.value("--setting-sources"), Some("user"));
@@ -57,7 +64,7 @@ async fn launches_claude_lazily_and_delivers_queued_messages_one_turn_at_a_time_
         .position(|a| a == "--disallowedTools");
     assert_eq!(
         at.map(|at| launch.arguments[at + 1].as_str()),
-        Some("Bash,PowerShell,Monitor")
+        Some("Monitor")
     );
 
     harness.wait_written(&launch, &[A]).await;
@@ -154,11 +161,8 @@ async fn records_the_plan_that_pays_for_the_session_and_never_the_account() {
 }
 
 #[tokio::test]
-async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_settles_stop_on_that_result_and_keeps_the_turn_after_a_failed_stop()
+async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_and_settles_stop_on_that_result()
  {
-    // Catches a queued message started on a stop's acknowledgement instead of the stopped turn's
-    // result, a second stop that sends a second interrupt, a stop that outlives the result that
-    // ended it, and a failed stop after which Kratos stops or pauses the turn on its own.
     let mut harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     harness.send(B, "B").await;
@@ -171,7 +175,7 @@ async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_settles
             while harness.controls(&launch, "interrupt").await == 0 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            harness.finish(&launch, &[A], interrupted()).await;
+            harness.finish(&launch, &[A], json!({})).await;
         },
     );
     first.unwrap();
@@ -190,33 +194,44 @@ async fn keeps_queued_messages_until_the_stopped_turn_reports_its_result_settles
     harness.wait_written(&launch, &[A, B]).await;
     harness.accept(&launch, B).await;
     harness.message_becomes(B, |s| accepted_by(s, B)).await;
+}
+
+#[tokio::test]
+async fn a_stop_the_cli_rejects_still_ends_the_turn_interrupted() {
+    let mut harness = Harness::start(Options {
+        stop_timeout: Duration::from_millis(400),
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
 
     harness.interrupts(&launch, "reject").await;
-    let refused = harness.provider.stop(harness.thread_id.clone()).await;
-    assert!(
-        matches!(&refused, Err(error) if error.to_string().contains("Interrupt rejected")),
-        "{refused:?}"
-    );
-    harness.interrupts(&launch, "ack").await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    harness
+        .provider
+        .stop(harness.thread_id.clone())
+        .await
+        .unwrap();
+    harness.wait_ended(&launch).await;
 
-    assert_eq!(harness.details().await.paused, None);
-    assert!(harness.is_running(&launch), "the turn still runs");
-    assert_eq!(
-        harness.controls(&launch, "interrupt").await,
-        2,
-        "only the user stops a turn"
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+                ..
+            }
+        ),
+        "{ended:?}"
     );
-    harness.finish(&launch, &[B], json!({})).await;
-    harness.message_becomes(B, |s| accepted_by(s, B)).await;
+    assert_eq!(harness.details().await.paused, None);
 }
 
 #[tokio::test]
 async fn closes_a_session_that_never_acknowledges_a_stop_and_resumes_it_for_the_next_message() {
-    // Catches a stop that waits forever on a CLI that does not answer, a closed CLI whose end
-    // leaves no reason in the records, and a relaunch that starts a new session instead of
-    // resuming the thread's own.
-    let harness = Harness::start(Options {
+    let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(400),
         ..Options::default()
     })
@@ -231,28 +246,21 @@ async fn closes_a_session_that_never_acknowledges_a_stop_and_resumes_it_for_the_
         .await
         .unwrap();
     harness.wait_ended(&first).await;
-    let message = "Claude did not stop the turn; its process was closed";
-    let paused = harness
-        .paused_for(|r| matches!(r, PauseReason::TurnFailed { .. }))
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
         .await;
 
     assert!(
-        matches!(&paused, PauseReason::TurnFailed { error, .. } if error.contains(message)),
-        "{paused:?}"
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+                ..
+            }
+        ),
+        "{ended:?}"
     );
-    let details = harness.details().await;
-    assert_eq!(
-        details.running_turn, None,
-        "no turn shows running without a process (L1)"
-    );
-    assert_eq!(details.queue.len(), 1);
-    assert_eq!(harness.message(B).await.status, MessageStatus::Queued);
-
-    harness
-        .provider
-        .resume(harness.thread_id.clone())
-        .await
-        .unwrap();
+    assert_eq!(harness.details().await.paused, None);
     let second = harness.launch(2).await;
     assert_eq!(
         second.value("--resume"),
@@ -266,20 +274,12 @@ async fn closes_a_session_that_never_acknowledges_a_stop_and_resumes_it_for_the_
 }
 
 #[tokio::test]
-async fn pauses_follow_up_messages_after_a_failed_result_even_one_that_raced_a_stop_until_the_queue_is_resumed()
- {
-    // Catches a follow-up message started after a failed turn, which may no longer make sense,
-    // and a failure's text lost when the failed result arrives after a stop.
+async fn a_failed_turn_pauses_follow_up_messages_until_the_queue_is_resumed() {
     let harness = Harness::start(Options::default()).await;
     let launch = harness.begin(A, 1).await;
     harness.send(B, "B").await;
     harness.send(C, "C").await;
 
-    harness
-        .provider
-        .stop(harness.thread_id.clone())
-        .await
-        .unwrap();
     harness
         .finish(
             &launch,
@@ -479,6 +479,36 @@ async fn an_idle_session_closes_after_the_idle_window_and_the_next_message_resum
     harness.init(&second).await;
     harness.accept(&second, B).await;
     harness.message_becomes(B, |s| accepted_by(s, B)).await;
+}
+
+#[tokio::test]
+async fn a_session_with_a_background_task_running_is_not_closed_as_idle() {
+    let mut harness = Harness::start(Options {
+        idle_close: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    let tasks = |tasks: serde_json::Value| json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": tasks });
+    harness
+        .emit(
+            &launch,
+            tasks(json!([{ "task_id": "t1", "task_type": "local_bash" }])),
+        )
+        .await;
+    harness.finish(&launch, &[A], json!({})).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(
+        harness.is_running(&launch),
+        "a CLI with a background task runs on"
+    );
+
+    harness.emit(&launch, tasks(json!([]))).await;
+    harness.wait_ended(&launch).await;
 }
 
 #[tokio::test]

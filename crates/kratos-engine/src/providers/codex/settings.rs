@@ -38,6 +38,9 @@ impl Actor {
         settings: &ThreadSettings,
         loaded_model: Option<&str>,
     ) -> Result<(), ProviderError> {
+        settings
+            .validate_report_format()
+            .map_err(|error| ProviderError::Unsupported(error.to_string()))?;
         let Some(limit) = settings.context_limit_tokens.map(ContextLimit::get) else {
             return Ok(());
         };

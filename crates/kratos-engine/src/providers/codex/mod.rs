@@ -1,14 +1,4 @@
-//! Codex threads.
-//!
-//! One actor task owns the `codex app-server` connection and every Codex thread's turn state.
-//! Handles send it commands and wait for the reply. A request to Codex runs in a task of its own
-//! and comes back to the actor as a completion, so the actor keeps reading Codex's notifications
-//! while a request is out, and a completion that arrives after its thread moved on is recognized
-//! and dropped. Nothing outside the actor changes a Codex thread's state.
-//!
-//! The two delivery rules of the TypeScript provider hold here (D11). A queued message starts only
-//! once the turn before it is confirmed finished, and a message whose delivery is uncertain is
-//! never sent again: only the provider's history or the user settles it.
+//! Each thread has its own Codex process. An uncertain delivery waits for history or an explicit user decision.
 
 mod account;
 mod actor;
@@ -20,8 +10,10 @@ pub mod policy;
 mod profiles;
 mod queue;
 mod recovery;
+mod room;
 #[cfg(windows)]
 mod sandbox;
+mod servers;
 mod settings;
 mod threads;
 mod turns;
@@ -46,26 +38,8 @@ use crate::providers::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent};
 use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 
-use profiles::Profile;
 pub use profiles::ProtectedFolders;
 pub(crate) use profiles::sandbox_may_write;
-pub(crate) use wire::OUTPUT_BYTES as COMMAND_OUTPUT_BYTES;
-
-/// The isolated profile for a Claude command, or an explicitly approved escape.
-#[derive(Clone, Debug)]
-pub(crate) enum CommandProfile {
-    Claude(ThreadSettings),
-    ApprovedOutside,
-}
-
-impl CommandProfile {
-    fn id(&self) -> &'static str {
-        match self {
-            Self::Claude(settings) => Profile::for_settings(settings).id(),
-            Self::ApprovedOutside => Profile::FullAccess.id(),
-        }
-    }
-}
 
 /// How the provider starts Codex and how long it waits on it.
 #[derive(Clone, Debug)]
@@ -80,7 +54,6 @@ pub struct CodexSettings {
     /// server's folder writable exposes nothing.
     pub server_folder: PathBuf,
     pub protected: ProtectedFolders,
-    /// How long a stopped turn may take to end before Kratos closes the app-server.
     pub stop_timeout: Duration,
     /// The deadline of an ordinary request to Codex.
     pub request_timeout: Duration,
@@ -298,25 +271,6 @@ impl CodexProvider {
     ) -> Result<CommandResult, ProviderError> {
         self.ask(|reply| actor::Command::Run {
             thread_id,
-            command,
-            timeout,
-            reply,
-        })
-        .await
-    }
-
-    /// Runs another provider's command with its frozen turn settings and root, without creating
-    /// a Codex conversation. The caller owns the permission decision before invoking this runner.
-    pub(crate) async fn run_at(
-        &self,
-        folder: String,
-        profile: CommandProfile,
-        command: Vec<String>,
-        timeout: Duration,
-    ) -> Result<CommandResult, ProviderError> {
-        self.ask(|reply| actor::Command::RunAt {
-            folder,
-            profile: profile.id().to_owned(),
             command,
             timeout,
             reply,

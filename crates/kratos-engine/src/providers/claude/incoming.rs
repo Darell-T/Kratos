@@ -40,12 +40,12 @@ impl Actor {
                     .await
             }
             Incoming::Oversized { bytes } => {
-                let message =
-                    format!("Claude sent a line of {bytes} bytes, more than Kratos reads");
-                self.provider_error(&thread_id, message).await;
+                let why = format!("Claude sent a line of {bytes} bytes, more than Kratos reads");
+                self.close_unread(&thread_id, why).await;
             }
             Incoming::Unreadable(error) => {
-                self.provider_error(&thread_id, error.to_string()).await;
+                let why = format!("Claude sent a line Kratos cannot read: {error}");
+                self.close_unread(&thread_id, why).await;
             }
             Incoming::Exited(exit) => self.on_exit(&thread_id, exit).await,
         }
@@ -53,7 +53,13 @@ impl Actor {
 
     async fn on_message(&mut self, thread_id: &ThreadId, message: StreamMessage) {
         match message {
-            StreamMessage::Init(_) => self.mark_started(thread_id),
+            StreamMessage::Init(_) => {
+                self.mark_started(thread_id);
+                if self.threads[thread_id].pending.is_empty() {
+                    self.start_background_turn(thread_id).await;
+                }
+            }
+
             StreamMessage::Replay { uuid } => {
                 self.mark_started(thread_id);
                 self.on_replay(thread_id, &uuid).await;
@@ -75,6 +81,9 @@ impl Actor {
                 );
                 self.provider_retrying(thread_id, message).await;
             }
+            StreamMessage::Background(background) => {
+                self.on_background(thread_id, background).await;
+            }
             StreamMessage::Unrecognized { .. } => {}
         }
     }
@@ -92,26 +101,18 @@ impl Actor {
 
     /// Saves each reply and tool call of a completed assistant message (D88).
     async fn on_assistant(&mut self, thread_id: &ThreadId, assistant: &Assistant) {
+        let ids = assistant.user_message_uuids.as_deref().unwrap_or_default();
+        let turn = self.assistant_turn(thread_id, ids).await;
         if let Some(thread) = self.threads.get_mut(thread_id)
             && let Some(model) = assistant.message["model"].as_str()
         {
             thread.answering_model = Some(model.to_owned());
         }
+        let Some(turn_id) = turn else { return };
         let items = wire::assistant_items(assistant);
-        let Some(head) = self.threads.get(thread_id).and_then(|thread| {
-            thread
-                .pending
-                .first()
-                .map(|flight| flight.message_id.clone())
-        }) else {
-            return;
-        };
         if items.is_empty() {
             return;
         }
-        let Ok(turn_id) = self.record_run(thread_id, vec![head], None).await else {
-            return;
-        };
         let _ = self
             .write(thread_id, move |write| {
                 for item in items {
@@ -125,13 +126,33 @@ impl Actor {
             .await;
     }
 
+    async fn assistant_turn(
+        &mut self,
+        thread_id: &ThreadId,
+        message_ids: &[String],
+    ) -> Option<TurnId> {
+        let thread = self.threads.get(thread_id)?;
+        if let Some(run) = thread.running_id() {
+            return Some(run.clone());
+        }
+        let delivered = thread.messages_named(message_ids);
+        if !delivered.is_empty() {
+            return self.record_run(thread_id, delivered, None).await.ok();
+        }
+        if message_ids.is_empty() && thread.awaits_background_turn() {
+            self.start_background_turn(thread_id).await;
+            return self.threads[thread_id].running_id().cloned();
+        }
+        None
+    }
+
     /// Shows a reply as it is written, and the context each request fills as it starts and ends
     /// (D76), to the clients following the thread.
     fn on_stream(&mut self, thread_id: &ThreadId, stream: &StreamEvent) {
         let Some((turn_id, window)) = self
             .threads
             .get(thread_id)
-            .and_then(|thread| Some((thread.run.clone()?, thread.context_window)))
+            .and_then(|thread| Some((thread.running_id().cloned()?, thread.context_window)))
         else {
             return;
         };
@@ -153,6 +174,14 @@ impl Actor {
         }
     }
 
+    /// Closes a CLI that wrote a line Kratos could not read. The line may have been a request the
+    /// CLI now waits on or the result that ends the turn, and with no turn deadline nothing else
+    /// would end the wait. The exit ends the turn, with `why` as its reason.
+    async fn close_unread(&mut self, thread_id: &ThreadId, why: String) {
+        self.provider_error(thread_id, why.clone()).await;
+        self.close_session(thread_id, &why);
+    }
+
     /// Records trouble Claude's output caused in the running turn. Outside a turn it only logs.
     pub(super) async fn provider_error(&mut self, thread_id: &ThreadId, message: String) {
         self.append_provider_error(thread_id, message, false).await;
@@ -172,7 +201,7 @@ impl Actor {
         let run = self
             .threads
             .get(thread_id)
-            .and_then(|thread| thread.run.clone());
+            .and_then(|thread| thread.running_id().cloned());
         let Some(turn_id): Option<TurnId> = run else {
             eprintln!("claude: {message}");
             return;

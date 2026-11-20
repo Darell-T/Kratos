@@ -4,8 +4,8 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, ContextLimit, Message, PauseReason, Question, RequiredText, Seq, Timestamp, TurnId,
-    WorkspaceId,
+    Approval, ContextLimit, Message, PauseReason, Question, ReportFormat, RequiredText, Seq,
+    Timestamp, TurnId, WorkspaceId,
 };
 
 string_id! {
@@ -115,23 +115,6 @@ pub struct ThreadSettings {
     pub report_format: Option<ReportFormat>,
 }
 
-/// A JSON Schema object the agent's final reply must match. A completed turn under one ends with
-/// an [`AgentItem::Report`](crate::AgentItem::Report) holding the parsed reply, whichever provider
-/// ran it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ReportFormat(serde_json::Map<String, serde_json::Value>);
-
-impl ReportFormat {
-    pub fn new(schema: serde_json::Map<String, serde_json::Value>) -> ReportFormat {
-        ReportFormat(schema)
-    }
-
-    pub fn schema(&self) -> &serde_json::Map<String, serde_json::Value> {
-        &self.0
-    }
-}
-
 impl Default for ThreadSettings {
     fn default() -> ThreadSettings {
         ThreadSettings {
@@ -152,8 +135,17 @@ impl ThreadSettings {
         }
     }
 
-    /// The report format a turn under these settings follows. Plan mode has none, since the plan
-    /// is that turn's reply.
+    /// Checks the format before saving new settings or using settings from an older release.
+    ///
+    /// # Errors
+    /// Returns the location of an unsupported schema value.
+    pub fn validate_report_format(&self) -> Result<(), crate::ReportFormatError> {
+        self.report_format
+            .as_ref()
+            .map_or(Ok(()), ReportFormat::validate)
+    }
+
+    /// The requested output schema, except in plan mode where the reply is the plan.
     pub fn turn_report_format(&self) -> Option<&ReportFormat> {
         self.report_format.as_ref().filter(|_| !self.plan_mode)
     }

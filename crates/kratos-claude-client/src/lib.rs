@@ -15,14 +15,14 @@ pub use connection::{
 pub use launch::{Launch, PermissionMode, SettingSource};
 pub use locate::{LocateError, locate_claude};
 pub use protocol::{
-    Account, Assistant, CanUseTool, ControlRequest, Elicitation, HookCallback, HookMatcher,
-    Initialize, Initialized, McpServer, Model, ParseError, RateLimitEvent, RateLimitInfo,
-    SessionInit, SlashCommand, StreamEvent, StreamMessage, TurnOutcome, TurnResult, UnifiedWindows,
-    UsageWindow,
+    Account, Assistant, Background, CanUseTool, ControlRequest, Elicitation, HookCallback,
+    HookMatcher, Initialize, Initialized, McpServer, Model, ParseError, RateLimitEvent,
+    RateLimitInfo, SessionInit, SlashCommand, StreamEvent, StreamMessage, TurnOutcome, TurnResult,
+    UnifiedWindows, UsageWindow,
 };
 pub use release::{
-    Latest, ParseVersionError, ReleaseError, Version, check_native, installed_version,
-    latest_version, update,
+    Latest, ParseVersionError, ReleaseError, UPDATE_LIMIT, Version, check_native,
+    installed_version, latest_version, update,
 };
 pub use transcript::{
     DeliveredMessages, SessionId, SessionStart, TranscriptError, delivered_message_ids,

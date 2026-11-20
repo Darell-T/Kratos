@@ -53,7 +53,7 @@ enum Verdict {
 fn verdict(native: &str, delivered: &DeliveredMessages, started: bool) -> Verdict {
     if delivered.ids.contains(native) {
         Verdict::Delivered
-    } else if !delivered.torn_tail && !started {
+    } else if !delivered.incomplete && !started {
         Verdict::NeverTaken
     } else {
         Verdict::Uncertain
@@ -114,6 +114,8 @@ impl Actor {
                     })
                     .collect(),
                 run: work.running,
+                // An earlier engine's process may have begun a turn, so a message its transcript
+                // does not hold is uncertain, even when there is no transcript at all.
                 started: true,
                 reason: RESTARTED.to_owned(),
             };
@@ -146,8 +148,6 @@ impl Actor {
         Ok(Actor::new(settings, hub, store, usage, limit_stops))
     }
 
-    /// A CLI ended. The turn it ran ends as failed and the queue behind it pauses. A message it was
-    /// sent is settled from its transcript, so none is sent again that Claude may have taken.
     pub(super) async fn on_exit(&mut self, thread_id: &ThreadId, exit: Exit) {
         self.close_requests(thread_id, None, "Claude exited").await;
         let Some(thread) = self.threads.get_mut(thread_id) else {
@@ -158,7 +158,7 @@ impl Actor {
         };
         thread.epoch += 1;
         thread.stop_epoch += 1;
-        thread.stopping = false;
+        let stopped = std::mem::replace(&mut thread.stopping, false);
         let reason = thread
             .close_reason
             .take()
@@ -171,9 +171,9 @@ impl Actor {
         for waiter in std::mem::take(&mut thread.stop_waiters) {
             let _ = waiter.send(Ok(()));
         }
-        let run = thread.run.take();
+        let run = thread.run.take().map(|turn| turn.id().clone());
         let sent = std::mem::take(&mut thread.pending);
-        if sent.is_empty() {
+        if sent.is_empty() && run.is_none() {
             return;
         }
         let settling = Settling {
@@ -192,7 +192,14 @@ impl Actor {
         .finish();
         let ended = self
             .write(thread_id, move |write| match run {
-                Some(turn_id) => end_turn(write, turn_id, TurnEnd::failed(reason), changes),
+                Some(turn_id) => {
+                    let end = if stopped {
+                        TurnEnd::interrupted()
+                    } else {
+                        TurnEnd::failed(reason)
+                    };
+                    end_turn(write, turn_id, end, changes)
+                }
                 // No turn started, but messages were in flight, so the user must hear why the
                 // process ended.
                 None => write
@@ -201,6 +208,13 @@ impl Actor {
             })
             .await;
         if ended.is_err() {
+            return;
+        }
+        self.settle_from_transcript(thread_id, settling);
+    }
+
+    fn settle_from_transcript(&mut self, thread_id: &ThreadId, settling: Settling) {
+        if settling.sent.is_empty() {
             return;
         }
         let path = self.transcript_of(thread_id);
@@ -235,7 +249,7 @@ impl Actor {
                     eprintln!("claude: cannot read the transcript: {error}");
                     DeliveredMessages {
                         ids: HashSet::new(),
-                        torn_tail: true,
+                        incomplete: true,
                     }
                 });
                 let _ = self
@@ -298,10 +312,6 @@ fn unfinished_claude_work(store: &mut Store) -> Result<BTreeMap<ThreadId, Unfini
     Ok(unfinished)
 }
 
-/// The transcript of an unfinished thread. One that cannot be read, or does not parse as a
-/// session, is treated as cut off: nothing it holds is proof either way. A thread whose session
-/// the store never recorded reads its first session, and a missing transcript there means Claude
-/// took no message, since Claude writes it when it takes the first.
 async fn read_transcript(
     claude_home: &Path,
     thread_id: &ThreadId,
@@ -309,7 +319,7 @@ async fn read_transcript(
 ) -> DeliveredMessages {
     let cut_off = DeliveredMessages {
         ids: HashSet::new(),
-        torn_tail: true,
+        incomplete: true,
     };
     let session = match work.session.as_deref().map(str::parse::<SessionId>) {
         Some(Ok(stored)) => stored,
@@ -317,8 +327,5 @@ async fn read_transcript(
         None => wire::first_session(thread_id),
     };
     let path = transcript_path(claude_home, Path::new(&work.folder), session);
-    if work.session.is_none() && !tokio::fs::try_exists(&path).await.unwrap_or(true) {
-        return DeliveredMessages::default();
-    }
     delivered_message_ids(&path).await.unwrap_or(cut_off)
 }

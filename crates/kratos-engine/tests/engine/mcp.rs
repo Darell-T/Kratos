@@ -968,3 +968,155 @@ fn a_question_answer_cannot_exceed_the_senders_or_the_receivers_turn_permission(
         );
     }
 }
+
+#[test]
+fn a_thread_below_full_access_creates_and_messages_threads_only_in_its_own_workspace() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let own = workspace(&engine);
+    let other = workspace(&engine);
+    let sender = thread(&engine, &own, Provider::Codex, Permission::ApproveForMe);
+    let elsewhere = thread(&engine, &other, Provider::Codex, Permission::ApproveForMe);
+    let mut mcp = Mcp::start(&engine, &sender);
+
+    let (created, refused) = mcp.tool(
+        "create_thread",
+        json!({ "title": "elsewhere", "workspaceId": other.as_str() }),
+    );
+    assert!(
+        refused && created.to_string().contains("own workspace"),
+        "{created}"
+    );
+    let (sent, refused) = mcp.tool(
+        "send_message",
+        json!({ "threadId": elsewhere.id, "text": "Change this repository." }),
+    );
+    assert!(
+        refused && sent.to_string().contains("own workspace"),
+        "{sent}"
+    );
+    let events = engine
+        .client()
+        .get(&format!("/api/threads/{}/events", elsewhere.id))
+        .unwrap();
+    assert_eq!(
+        events.body,
+        json!([]),
+        "nothing reached the other workspace"
+    );
+    let threads = engine
+        .client()
+        .get(&format!("/api/threads?workspaceId={}", other.as_str()))
+        .unwrap();
+    assert_eq!(
+        threads.body.as_array().map(Vec::len),
+        Some(1),
+        "{}",
+        threads.body
+    );
+
+    let (created, refused) = mcp.tool("create_thread", json!({ "title": "beside me" }));
+    assert!(!refused, "{created}");
+}
+
+#[test]
+fn a_full_access_thread_creates_and_messages_threads_in_any_workspace() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let own = workspace(&engine);
+    let other = workspace(&engine);
+    let sender = thread(&engine, &own, Provider::Codex, Permission::FullAccess);
+    let elsewhere = thread(&engine, &other, Provider::Codex, Permission::AskMe);
+    let mut mcp = Mcp::start(&engine, &sender);
+
+    let (created, refused) = mcp.tool(
+        "create_thread",
+        json!({ "title": "elsewhere", "workspaceId": other.as_str() }),
+    );
+    assert!(!refused, "{created}");
+    assert!(created.to_string().contains(other.as_str()), "{created}");
+    let (sent, refused) = mcp.tool(
+        "send_message",
+        json!({ "threadId": elsewhere.id, "text": "Change this repository." }),
+    );
+    assert!(!refused, "{sent}");
+    engine.fake_codex_held("turn/start", 1);
+}
+
+#[test]
+fn a_thread_below_full_access_stops_and_answers_threads_only_in_its_own_workspace() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let own = workspace(&engine);
+    let other = workspace(&engine);
+    let receiver = thread(&engine, &other, Provider::Codex, Permission::AskMe);
+    let sender = thread(&engine, &own, Provider::Codex, Permission::ApproveForMe);
+    let path = format!("/api/threads/{}", receiver.id);
+    engine
+        .client()
+        .post(&format!("{path}/messages"), &json!({ "text": "work" }))
+        .unwrap();
+    engine.start_turn();
+    engine.fake_codex_request(codex_control::ask(
+        Some("question-1".into()),
+        "item/tool/requestUserInput",
+        json!({ "threadId": "thread-A", "turnId": "turn-1", "itemId": "q1", "isBlocking": false,
+                "questions": [{ "id": "color", "header": "Color", "question": "Which color?",
+                                "options": [{ "label": "Red", "description": "Red" }] }] }),
+    ));
+    let deadline = Instant::now() + WAIT;
+    let question = loop {
+        let details = engine.client().get(&path).unwrap();
+        if let Some(id) = details.body["questions"][0]["id"].as_str() {
+            break id.to_owned();
+        }
+        assert!(Instant::now() < deadline, "the question did not arrive");
+        std::thread::yield_now();
+    };
+    let mut mcp = Mcp::start(&engine, &sender);
+
+    let (answered, refused) = mcp.tool(
+        "answer_question",
+        json!({ "questionId": question, "answers": { "color": ["Red"] } }),
+    );
+    assert!(
+        refused && answered.to_string().contains("own workspace"),
+        "{answered}"
+    );
+    let (stopped, refused) = mcp.tool("stop_thread", json!({ "threadId": receiver.id }));
+    assert!(
+        refused && stopped.to_string().contains("own workspace"),
+        "{stopped}"
+    );
+
+    let details = engine.client().get(&path).unwrap();
+    assert_eq!(
+        details.body["questions"][0]["id"], question,
+        "the question still waits on the user"
+    );
+    let client = engine.client();
+    let stop_path = format!("{path}/stop");
+    let stop = std::thread::spawn(move || client.post(&stop_path, &json!({})).unwrap());
+    assert_eq!(
+        engine.fake_codex_held("turn/interrupt", 1).len(),
+        1,
+        "only the user requested Stop"
+    );
+    engine.fake_codex_request(codex_control::settle("turn/interrupt", json!({}), None));
+    let response = stop.join().unwrap();
+    assert_eq!(response.status, 200, "{}", response.body);
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "interrupted"));
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let details = engine.client().get(&path).unwrap();
+        if details.body["runningTurn"].is_null() {
+            assert_eq!(details.body["questions"], json!([]));
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the interrupted turn did not close"
+        );
+        std::thread::yield_now();
+    }
+}

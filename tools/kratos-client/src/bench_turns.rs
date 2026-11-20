@@ -18,7 +18,7 @@ use crate::bench::temp_workspace;
 use crate::{BenchError, BenchReport};
 
 const WAIT: Duration = Duration::from_secs(10);
-const THREADS: usize = 10;
+const THREADS: usize = 8;
 const TURNS: usize = 200;
 
 #[derive(Debug, Serialize)]
@@ -31,34 +31,56 @@ pub struct TurnBenchReport {
     pub measurement: &'static str,
 }
 
-/// Measures 200 sequential turns on ten threads against an engine running fake-codex.
-/// Both intervals include local transport, so they upper-bound engine overhead without adding
-/// instrumentation to production. All timestamps come from this process's monotonic clock.
 pub fn bench_turns(client: &Client, control_file: &Path) -> Result<TurnBenchReport, BenchError> {
     client.get(routes::USAGE)?.parse::<Value>()?;
-    let mut fake = Control::connect(control_file)?;
-    let observer = Observer::start(&mut fake)?;
     let threads = create_threads(client)?;
     let mut socket = client.connect_events(&[])?;
     for thread in &threads {
         socket.subscribe(&thread.id, Seq::BEFORE_FIRST)?;
     }
-    let mut dispatch = Vec::with_capacity(THREADS + TURNS);
-    let mut completion = Vec::with_capacity(THREADS + TURNS);
-    for number in 0..THREADS + TURNS {
+    let mut fakes = warm_sessions(client, control_file, &threads, &mut socket)?;
+    let mut dispatch = Vec::with_capacity(TURNS);
+    let mut completion = Vec::with_capacity(TURNS);
+    for number in THREADS..THREADS + TURNS {
         let thread = &threads[number % THREADS];
+        let (control, observer) = &mut fakes[number % THREADS];
         let (sent, completed) =
-            measure_turn(client, thread, number, &observer, &mut fake, &mut socket)?;
+            measure_turn(client, thread, number, observer, control, &mut socket)?;
         dispatch.push(sent);
         completion.push(completed);
     }
     Ok(TurnBenchReport {
         threads: THREADS,
         warmup_turns: THREADS,
-        dispatch: BenchReport::from_latencies(dispatch.split_off(THREADS)),
-        completion: BenchReport::from_latencies(completion.split_off(THREADS)),
-        measurement: "Upper bounds: client POST to fake turn/start receipt; completion injection to client event. Includes localhost transport; excludes model time and ten warmup turns.",
+        dispatch: BenchReport::from_latencies(dispatch),
+        completion: BenchReport::from_latencies(completion),
+        measurement: "Upper bounds: client POST to fake turn/start receipt; completion injection to client event. Includes localhost transport; excludes model time and eight warmup turns.",
     })
+}
+
+fn warm_sessions(
+    client: &Client,
+    control_file: &Path,
+    threads: &[Thread],
+    socket: &mut EventSocket,
+) -> Result<Vec<(Control, Observer)>, BenchError> {
+    let mut fakes = Vec::with_capacity(threads.len());
+    for (number, thread) in threads.iter().enumerate() {
+        fakes.push(warm_up(client, control_file, thread, number, socket)?);
+    }
+    for (control, _) in &mut fakes {
+        control
+            .call(ControlRequest {
+                method: "test/echo",
+                params: json!({}),
+            })
+            .map_err(|error| {
+                BenchError::Failed(format!(
+                    "a warmed Codex process exited before measurement: {error}"
+                ))
+            })?;
+    }
+    Ok(fakes)
 }
 
 fn create_threads(client: &Client) -> Result<Vec<Thread>, BenchError> {
@@ -75,6 +97,69 @@ fn create_threads(client: &Client) -> Result<Vec<Thread>, BenchError> {
         })
         .collect::<Result<_, _>>()
         .map_err(BenchError::from)
+}
+
+fn warm_up(
+    client: &Client,
+    control_file: &Path,
+    thread: &Thread,
+    number: usize,
+    socket: &mut EventSocket,
+) -> Result<(Control, Observer), BenchError> {
+    let known = codex_control::every_port(control_file);
+    let message_id = format!("bench-{number}");
+    client
+        .post(
+            &routes::thread_messages(&thread.id),
+            &json!({ "messageId": message_id, "text": message_id }),
+        )?
+        .parse::<Value>()?;
+    let (mut fake, request) = started_fake(control_file, &known, &message_id)?;
+    let native_id = started_thread(&request, &message_id)?.to_owned();
+    let turn_id = format!("bench-turn-{number}");
+    fake.call(codex_control::settle_start(
+        &turn_id,
+        "inProgress",
+        Some(&native_id),
+    ))?;
+    fake.call(codex_control::complete(&native_id, &turn_id, "completed"))?;
+    await_completion(socket, &thread.id, &turn_id)?;
+    let observer = Observer::start(&mut fake)?;
+    Ok((fake, observer))
+}
+
+fn started_fake(
+    control_file: &Path,
+    known: &[u16],
+    message_id: &str,
+) -> Result<(Control, Value), BenchError> {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let started = codex_control::every_port(control_file)
+            .into_iter()
+            .filter(|port| !known.contains(port))
+            .find_map(|port| {
+                let mut fake = Control::at(port).ok()?;
+                let held = fake.call(ControlRequest {
+                    method: "test/turnRequests",
+                    params: json!({}),
+                });
+                let request = held
+                    .ok()?
+                    .as_array()?
+                    .iter()
+                    .find(|request| started_thread(request, message_id).is_ok())?
+                    .clone();
+                Some((fake, request))
+            });
+        if let Some(started) = started {
+            return Ok(started);
+        }
+        if Instant::now() >= deadline {
+            return Err(ClientError::TimedOut(WAIT).into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn measure_turn(
@@ -177,9 +262,7 @@ fn await_completion(
 struct Control(BufReader<TcpStream>);
 
 impl Control {
-    fn connect(control_file: &Path) -> Result<Self, BenchError> {
-        let port = codex_control::wait_for_port(control_file, WAIT)
-            .map_err(|error| BenchError::Failed(error.to_string()))?;
+    fn at(port: u16) -> Result<Self, BenchError> {
         let stream = TcpStream::connect(("127.0.0.1", port))?;
         stream.set_nodelay(true)?;
         stream.set_read_timeout(Some(WAIT))?;
@@ -262,23 +345,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn control_waits_for_a_fake_codex_that_starts_late() {
-        // Catches a benchmark that fails when Codex has not yet written its control port, because
-        // it read the port file once.
+    fn the_benchmark_waits_for_a_thread_s_fake_codex_that_starts_late() {
         let dir = tempfile::tempdir().unwrap();
         let control_file = dir.path().join("fake-codex-control");
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        let late_file = control_file.clone();
+        let late_file = dir.path().join("fake-codex-control.4242");
         let starter = thread::spawn(move || {
             thread::sleep(Duration::from_millis(300));
             codex_control::write_port(&late_file, port).unwrap();
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            let held = json!({ "id": 1, "result": [{ "method": "turn/start",
+                "params": { "threadId": "t1", "input": [{ "text": "bench-0" }] } }] });
+            writeln!(reader.get_mut(), "{held}").unwrap();
         });
 
-        let connected = Control::connect(&control_file);
+        let started = started_fake(&control_file, &[], "bench-0");
 
         starter.join().unwrap();
-        assert!(connected.is_ok(), "{:?}", connected.err());
+        let (_, request) = started.expect("the late fake is found");
+        assert_eq!(request["params"]["threadId"], "t1");
     }
 
     #[test]

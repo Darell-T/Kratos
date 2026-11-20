@@ -11,7 +11,6 @@ async fn launches_in_native_plan_mode_denies_exit_plan_mode_asks_before_tools_an
  {
     // Catches a planning agent disabling its own guard or a mid-turn settings change weakening a running turn.
     let mut harness = Harness::start(Options {
-        tools: true,
         settings: ThreadSettings {
             permission: Permission::FullAccess,
             plan_mode: true,
@@ -112,7 +111,6 @@ async fn launches_in_native_plan_mode_denies_exit_plan_mode_asks_before_tools_an
     let restored = Harness::start_in(
         root,
         Options {
-            tools: true,
             ..Options::default()
         },
         Some(id),
@@ -144,7 +142,7 @@ async fn hook(
     input: Value,
 ) -> Value {
     harness.call(launch, "test/ask", json!({ "requestId": id, "request": {
-        "subtype": "hook_callback", "callback_id": if event == "PostToolUse" { "kratos-post" } else { "kratos-failed" },
+        "subtype": "hook_callback", "callback_id": match event { "PreToolUse" => "kratos-pre", "PostToolUse" => "kratos-post", _ => "kratos-failed" },
         "input": { "hook_event_name": event, "tool_name": name, "tool_input": input }
     }})).await;
     response(harness, launch, id).await
@@ -154,7 +152,6 @@ async fn hook(
 async fn reports_the_files_each_turn_edited_and_whether_one_changed_after_the_last_command() {
     // Catches failed edits counted as writes, repeated file names, and edit state leaking between turns.
     let mut harness = Harness::start(Options {
-        tools: true,
         ..Options::default()
     })
     .await;
@@ -176,8 +173,8 @@ async fn reports_the_files_each_turn_edited_and_whether_one_changed_after_the_la
         &launch,
         "command",
         "PostToolUse",
-        "mcp__kratos__run_command",
-        json!({ "commandLine": "npm test" }),
+        "Bash",
+        json!({ "command": "npm test" }),
     )
     .await;
     hook(
@@ -251,8 +248,8 @@ async fn reports_the_files_each_turn_edited_and_whether_one_changed_after_the_la
         &launch,
         "failed-command",
         "PostToolUseFailure",
-        "mcp__kratos__run_command",
-        json!({ "commandLine": "npm test" }),
+        "PowerShell",
+        json!({ "command": "npm test" }),
     )
     .await;
     harness.finish(&launch, &[B], json!({})).await;
@@ -361,4 +358,77 @@ async fn reports_the_files_each_turn_edited_and_whether_one_changed_after_the_la
     };
     assert!(changes.files.is_empty());
     assert!(!changes.edited_since_command && !changes.ran_command);
+}
+
+#[tokio::test]
+async fn the_pre_tool_hook_sends_every_tool_to_the_permission_callback() {
+    let harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    for (index, (name, input)) in [
+        ("Bash", json!({ "command": "ls" })),
+        ("PowerShell", json!({ "command": "Get-ChildItem" })),
+        ("Read", json!({ "file_path": "notes.txt" })),
+        ("Glob", json!({ "pattern": "*.txt" })),
+        ("Write", json!({ "file_path": "new.txt" })),
+        ("mcp__other__tool", json!({})),
+        ("Agent", json!({ "prompt": "go" })),
+        ("EnterWorktree", json!({})),
+        ("ToolSearch", json!({ "query": "select:ExitPlanMode" })),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let answer = hook(
+            &harness,
+            &launch,
+            &format!("pre-{index}"),
+            "PreToolUse",
+            name,
+            input,
+        )
+        .await;
+        assert_eq!(
+            answer["hookSpecificOutput"]["permissionDecision"], "ask",
+            "{name}: {answer}"
+        );
+        assert_eq!(answer["continue"], true, "{name}: {answer}");
+    }
+}
+
+#[tokio::test]
+async fn in_plan_mode_the_cli_writes_its_own_plan_file_without_asking_the_user() {
+    for plan_mode in [true, false] {
+        let harness = Harness::start(Options {
+            settings: ThreadSettings {
+                plan_mode,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+        let plans = harness.claude_home().join(".claude").join("plans");
+        for (index, path, exempt) in [
+            (0, plans.join("plan.md"), plan_mode),
+            (1, plans.join("..").join("settings.json"), false),
+            (2, plans.join("deeper").join("plan.md"), false),
+            (
+                3,
+                harness.claude_home().join(".claude").join("settings.json"),
+                false,
+            ),
+        ] {
+            let answer = hook(
+                &harness,
+                &launch,
+                &format!("plan-{index}"),
+                "PreToolUse",
+                "Write",
+                json!({ "file_path": path, "content": "plan" }),
+            )
+            .await;
+            let asked = answer["hookSpecificOutput"]["permissionDecision"] == "ask";
+            assert_eq!(asked, !exempt, "plan mode {plan_mode}, {path:?}: {answer}");
+        }
+    }
 }

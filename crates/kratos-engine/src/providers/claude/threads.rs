@@ -71,6 +71,9 @@ impl Waiter {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ReportId(pub uuid::Uuid);
+
 pub(super) struct OpenSession {
     pub claude: Claude,
     pub config: SessionConfig,
@@ -83,12 +86,73 @@ pub(super) struct OpenSession {
     pub commands: Vec<kratos_claude_client::SlashCommand>,
     /// When the process last sent a frame or served a request.
     pub last_active: Instant,
+    pub background_tasks: usize,
+    pub report: Option<DueReport>,
+}
+
+/// A turn Claude owes to report background commands that finished.
+pub(super) struct DueReport {
+    pub id: ReportId,
+    pub finished_tasks: Vec<String>,
+    /// Messages wait for the report until the report wait passes. After that Claude may still
+    /// send it, and it is still recorded as its own turn.
+    pub holds_queue: bool,
+}
+
+impl OpenSession {
+    pub(super) fn message_wait_reason(&self, wanted: &SessionConfig) -> Option<&'static str> {
+        if self
+            .report
+            .as_ref()
+            .is_some_and(|report| report.holds_queue)
+        {
+            return Some(
+                "Claude is finishing a background command report. This message will start afterward.",
+            );
+        }
+        (self.background_tasks > 0 && &self.config != wanted).then_some(super::background::WAITING)
+    }
+
+    pub(super) fn note(
+        &mut self,
+        background: kratos_claude_client::Background,
+    ) -> Option<ReportId> {
+        match background {
+            kratos_claude_client::Background::Running(running) => {
+                self.background_tasks = running;
+                None
+            }
+            kratos_claude_client::Background::Ended { summary } => {
+                let id = ReportId(uuid::Uuid::new_v4());
+                let mut finished_tasks = self
+                    .report
+                    .take()
+                    .map(|report| report.finished_tasks)
+                    .unwrap_or_default();
+                finished_tasks.extend(summary);
+                self.report = Some(DueReport {
+                    id,
+                    finished_tasks,
+                    holds_queue: true,
+                });
+                Some(id)
+            }
+        }
+    }
+
+    pub(super) fn holds_background_work(&self) -> bool {
+        self.background_tasks > 0
+            || self
+                .report
+                .as_ref()
+                .is_some_and(|report| report.holds_queue)
+    }
 }
 
 pub(super) enum Session {
     Closed,
     Opening,
-    Open(OpenSession),
+    Open(Box<OpenSession>),
 }
 
 /// A message written to the CLI that no result has reported yet. The thread is busy while any
@@ -167,11 +231,22 @@ impl Restarts {
     }
 }
 
+pub(super) enum ActiveTurn {
+    Messages(TurnId),
+    Background(TurnId),
+}
+
+impl ActiveTurn {
+    pub fn id(&self) -> &TurnId {
+        match self {
+            Self::Messages(id) | Self::Background(id) => id,
+        }
+    }
+}
+
 pub(super) struct ThreadState {
-    pub commands: std::collections::HashMap<String, AbortHandle>,
     pub turn_settings: Option<ThreadSettings>,
     pub changes: crate::providers::changes::ChangesRecorder,
-    pub command_grants: Vec<super::tools::CommandArgs>,
     pub folder: String,
     pub settings: ThreadSettings,
     /// The session Claude keeps the thread's history in: the stored one, or the thread's first
@@ -185,7 +260,7 @@ pub(super) struct ThreadState {
     pub pending: Vec<InFlight>,
     /// The turn the log shows running. It ends at a result, and messages still in flight after it
     /// start the next turn when Claude takes them.
-    pub run: Option<TurnId>,
+    pub run: Option<ActiveTurn>,
     pub stopping: bool,
     /// Stops asked for, answered when Claude acknowledges the interrupt or the stopped turn ends.
     pub stop_waiters: Vec<Reply<()>>,
@@ -214,10 +289,8 @@ impl ThreadState {
         recorded: bool,
     ) -> ThreadState {
         ThreadState {
-            commands: std::collections::HashMap::new(),
             turn_settings: None,
             changes: crate::providers::changes::ChangesRecorder::default(),
-            command_grants: Vec::new(),
             folder,
             settings,
             recorded,
@@ -239,37 +312,45 @@ impl ThreadState {
     }
 
     pub(super) fn is_busy(&self) -> bool {
-        !self.pending.is_empty() || matches!(self.session, Session::Opening)
+        !self.pending.is_empty() || self.run.is_some() || matches!(self.session, Session::Opening)
     }
 
-    /// The thread has a message in flight, a process starting, a stop, or a command running.
-    pub(super) fn is_working(&self) -> bool {
-        self.is_busy() || self.stopping || !self.commands.is_empty()
+    pub(super) fn runs_own_turn(&self) -> bool {
+        matches!(self.run, Some(ActiveTurn::Background(_)))
+    }
+
+    pub(super) fn awaits_background_turn(&self) -> bool {
+        self.run.is_none() && self.open().is_some_and(|open| open.report.is_some())
+    }
+
+    pub(super) fn messages_named(&self, ids: &[String]) -> Vec<MessageId> {
+        self.pending
+            .iter()
+            .filter(|flight| ids.contains(&flight.native))
+            .map(|flight| flight.message_id.clone())
+            .collect()
+    }
+
+    pub fn running_id(&self) -> Option<&TurnId> {
+        self.run.as_ref().map(ActiveTurn::id)
+    }
+
+    pub(super) fn is_busy_or_stopping(&self) -> bool {
+        self.is_busy() || self.stopping
+    }
+
+    pub(super) fn holds_background_work(&self) -> bool {
+        self.open().is_some_and(OpenSession::holds_background_work)
     }
 
     /// When the open process last did anything, if it has nothing to do.
     pub(super) fn idle_since(&self) -> Option<Instant> {
         let open = self.open()?;
-        (!self.is_working()).then_some(open.last_active)
+        (!self.is_busy_or_stopping() && !self.holds_background_work()).then_some(open.last_active)
     }
 
     pub(super) fn turn_settings(&self) -> &ThreadSettings {
         self.turn_settings.as_ref().unwrap_or(&self.settings)
-    }
-
-    pub(super) fn cancel_commands(&mut self, control_id: Option<&str>) {
-        match control_id {
-            Some(id) => {
-                if let Some(command) = self.commands.remove(id) {
-                    command.abort();
-                }
-            }
-            None => {
-                for (_, command) in self.commands.drain() {
-                    command.abort();
-                }
-            }
-        }
     }
 
     pub(super) fn open(&self) -> Option<&OpenSession> {

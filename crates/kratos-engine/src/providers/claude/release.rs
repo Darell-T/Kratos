@@ -3,11 +3,15 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use kratos_claude_client::{
-    Latest, ReleaseError, Version, check_native, installed_version, latest_version, update,
+    Latest, ReleaseError, UPDATE_LIMIT, Version, check_native, installed_version, latest_version,
+    update,
 };
 use kratos_protocol::{CliRelease, CliUpdate};
+use tokio::sync::watch;
+use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::providers::ProviderError;
 
@@ -21,9 +25,108 @@ pub(super) struct Release {
     pub env_set: Vec<(OsString, OsString)>,
     /// Where the native install's updater reads the newest release on each channel.
     pub feed: String,
+    pub updating: Mutex<Updating>,
+}
+
+#[derive(Default)]
+pub(super) enum Updating {
+    #[default]
+    Idle,
+    Preparing {
+        task: AbortHandle,
+        ended: watch::Receiver<()>,
+    },
+    /// The updater or the version check after it runs. Stopping it midway can leave a broken CLI,
+    /// so shutdown waits for it.
+    Installing {
+        ended: watch::Receiver<()>,
+    },
+    ShuttingDown,
+}
+
+struct Running {
+    release: Arc<Release>,
+    _sender: watch::Sender<()>,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        self.release.finished();
+    }
 }
 
 impl Release {
+    fn updating(&self) -> MutexGuard<'_, Updating> {
+        self.updating.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub fn spawn_update<T: Send + 'static>(
+        self: &Arc<Self>,
+        update: impl Future<Output = T> + Send + 'static,
+    ) -> Result<JoinHandle<T>, ProviderError> {
+        let mut updating = self.updating();
+        match *updating {
+            Updating::Idle => {}
+            Updating::ShuttingDown => return Err(ProviderError::Stopped),
+            _ => {
+                return Err(ProviderError::Conflict(
+                    "Claude Code is already updating".to_owned(),
+                ));
+            }
+        }
+        let (sender, ended) = watch::channel(());
+        let running = Running {
+            release: Arc::clone(self),
+            _sender: sender,
+        };
+        let task = tokio::spawn(async move {
+            let _running = running;
+            update.await
+        });
+        *updating = Updating::Preparing {
+            task: task.abort_handle(),
+            ended,
+        };
+        Ok(task)
+    }
+
+    pub fn begin_install(&self) -> bool {
+        let mut updating = self.updating();
+        let Updating::Preparing { ended, .. } = &*updating else {
+            return false;
+        };
+        let ended = ended.clone();
+        *updating = Updating::Installing { ended };
+        true
+    }
+
+    fn finished(&self) {
+        let mut updating = self.updating();
+        if !matches!(*updating, Updating::ShuttingDown) {
+            *updating = Updating::Idle;
+        }
+    }
+
+    pub async fn settle_for_shutdown(&self) {
+        let taken = std::mem::replace(&mut *self.updating(), Updating::ShuttingDown);
+        match taken {
+            Updating::Preparing { task, mut ended } => {
+                task.abort();
+                let _ = ended.changed().await;
+            }
+            Updating::Installing { mut ended } => {
+                eprintln!("Kratos waits for the Claude Code update to finish before it stops");
+                if tokio::time::timeout(UPDATE_LIMIT, ended.changed())
+                    .await
+                    .is_err()
+                {
+                    eprintln!("the Claude Code update ran past {UPDATE_LIMIT:?}, and Kratos stops");
+                }
+            }
+            Updating::Idle | Updating::ShuttingDown => {}
+        }
+    }
+
     pub async fn status(&self) -> CliRelease {
         let installed = installed_version(&self.program, &self.env_set).await;
         let update = match &installed {

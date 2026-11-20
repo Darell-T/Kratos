@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use kratos_process::OwnedChild;
+use kratos_process::output::{self, Line};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -52,7 +53,13 @@ pub struct Launch {
     /// How long [`Codex::close`] waits for the server to exit once its input closes, before it ends
     /// the process tree.
     pub close_timeout: Duration,
+    /// The longest line Kratos reads from the server. A longer one ends the server, since the
+    /// reply or request it held would never be answered. [`MAX_LINE_BYTES`] by default.
+    pub max_line_bytes: usize,
 }
+
+/// A whole thread history arrives in one reply. Codex 0.166 returned 3,195,219 bytes for a 13,658,700-byte session file.
+pub const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 
 /// A JSON-RPC id. Kratos numbers its own requests; the server may use strings for its own.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -242,6 +249,15 @@ pub enum RequestError {
     Unreadable { method: String, error: String },
 }
 
+impl RequestError {
+    /// Codex 0.159.1's response when the requested thread has no stored rollout.
+    pub fn is_missing_rollout(&self) -> bool {
+        matches!(self, Self::Rpc { code: crate::INVALID_REQUEST, message }
+            if message.strip_prefix("no rollout found for thread id ").is_some_and(|id|
+                !id.is_empty() && !id.contains(char::is_whitespace)))
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConnectError {
     #[error(
@@ -287,9 +303,13 @@ pub async fn connect(
     tokio::spawn(write_lines(stdin, writes));
     tokio::spawn(keep_stderr(stderr, stderr_lines.clone()));
     let (exited_sender, exited) = oneshot::channel();
+    let (unreadable_sender, unreadable) = oneshot::channel();
     tokio::spawn(keep(
         child,
-        close_requested,
+        Ending {
+            close_requested,
+            unreadable,
+        },
         tree_ended_sender,
         exited_sender,
     ));
@@ -300,7 +320,11 @@ pub async fn connect(
             stderr_lines,
         },
         stdout,
-        exited,
+        Keeper {
+            unreadable: unreadable_sender,
+            exited,
+        },
+        launch.max_line_bytes,
     ));
 
     let codex = Codex {
@@ -419,6 +443,15 @@ impl Codex {
     /// whole process tree. Returns once no process of the tree runs, even while the consumer has
     /// not read the server's last messages; calling it again only waits.
     pub async fn close(&self) {
+        self.close_within(self.shared.close_timeout).await;
+    }
+
+    /// Ends the process tree immediately after the caller's graceful stop deadline expires.
+    pub async fn terminate(&self) {
+        self.close_within(Duration::ZERO).await;
+    }
+
+    async fn close_within(&self, timeout: Duration) {
         let close = self
             .close
             .lock()
@@ -426,7 +459,7 @@ impl Codex {
             .take();
         if let Some(close) = close {
             let _ = self.shared.writer.send(Write::Close);
-            let _ = close.send(self.shared.close_timeout);
+            let _ = close.send(timeout);
         }
         let mut tree_ended = self.shared.tree_ended.clone();
         let _ = tree_ended.wait_for(|ended| *ended).await;
@@ -456,16 +489,27 @@ async fn keep_stderr(stderr: ChildStderr, kept: Arc<Mutex<VecDeque<String>>>) {
     }
 }
 
-/// Owns the process. Ends the tree once the server exits on its own, or after a requested close
-/// once the server exits or the close timeout passes.
+struct Ending {
+    close_requested: oneshot::Receiver<Duration>,
+    unreadable: oneshot::Receiver<()>,
+}
+
 async fn keep(
     mut child: OwnedChild,
-    close_requested: oneshot::Receiver<Duration>,
+    ending: Ending,
     tree_ended: watch::Sender<bool>,
     exited: oneshot::Sender<Option<i32>>,
 ) {
+    let Ending {
+        close_requested,
+        unreadable,
+    } = ending;
     let status = tokio::select! {
         status = child.wait() => status,
+        Ok(()) = unreadable => {
+            let _ = child.end_tree();
+            child.wait().await
+        }
         requested = close_requested => {
             match requested {
                 Ok(timeout) => match tokio::time::timeout(timeout, child.wait()).await {
@@ -496,17 +540,58 @@ struct Reader {
     stderr_lines: Arc<Mutex<VecDeque<String>>>,
 }
 
-async fn read(reader: Reader, stdout: ChildStdout, exited: oneshot::Receiver<Option<i32>>) {
-    let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
-        // The server logs to stderr, but a stray line on stdout must not end the connection.
-        let Ok(message) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        reader.dispatch(message).await;
+struct Keeper {
+    unreadable: oneshot::Sender<()>,
+    exited: oneshot::Receiver<Option<i32>>,
+}
+
+async fn read(reader: Reader, stdout: ChildStdout, keeper: Keeper, max_line_bytes: usize) {
+    let mut stdout = BufReader::new(stdout);
+    loop {
+        match Next::of(output::read_line(&mut stdout, max_line_bytes).await) {
+            Next::Message(message) => reader.dispatch(message).await,
+            Next::NotJson => {}
+            Next::Unreadable(why) => {
+                eprintln!("codex: {why}");
+                let _ = keeper.unreadable.send(());
+                break;
+            }
+            Next::End => break,
+        }
     }
-    let code = exited.await.unwrap_or(None);
+    let code = keeper.exited.await.unwrap_or(None);
     reader.finish(code).await;
+}
+
+enum Next {
+    Message(Value),
+    /// The server logs to stderr, but a stray line on stdout must not end the connection.
+    NotJson,
+    End,
+    Unreadable(String),
+}
+
+impl Next {
+    fn of(line: io::Result<Line>) -> Next {
+        let line = match line {
+            Ok(Line::Data(line)) => line,
+            Ok(Line::Eof) => return Next::End,
+            Ok(Line::Oversized(bytes)) => {
+                return Next::Unreadable(format!(
+                    "the server wrote a line of {bytes} bytes, more than Kratos reads"
+                ));
+            }
+            Err(error) => {
+                return Next::Unreadable(format!("cannot read the server's output: {error}"));
+            }
+        };
+        match std::str::from_utf8(&line) {
+            Err(error) => Next::Unreadable(format!(
+                "the server wrote a line that is not UTF-8: {error}"
+            )),
+            Ok(text) => serde_json::from_str(text).map_or(Next::NotJson, Next::Message),
+        }
+    }
 }
 
 impl Reader {

@@ -18,7 +18,6 @@ async fn protected_native_reads_are_denied_until_the_thread_has_unsandboxed_full
         (Permission::FullAccess, true, "deny"),
     ] {
         let harness = Harness::start(Options {
-            tools: true,
             settings: ThreadSettings {
                 permission,
                 plan_mode,
@@ -65,7 +64,6 @@ async fn protected_native_reads_are_denied_until_the_thread_has_unsandboxed_full
 async fn recursive_and_absolute_searches_cannot_reach_protected_data_from_an_allowed_folder() {
     // Catches Grep of a parent folder and Glob patterns escaping an otherwise safe search root.
     let harness = Harness::start(Options {
-        tools: true,
         settings: ThreadSettings {
             permission: Permission::ApproveForMe,
             ..ThreadSettings::default()
@@ -74,7 +72,7 @@ async fn recursive_and_absolute_searches_cannot_reach_protected_data_from_an_all
     })
     .await;
     let launch = harness.begin(A, 1).await;
-    for (id, tool, input) in [
+    let mut searches = vec![
         (
             "parent-grep",
             "Grep",
@@ -91,7 +89,23 @@ async fn recursive_and_absolute_searches_cannot_reach_protected_data_from_an_all
             json!({ "pattern": harness.root.path().join("kratos/*") }),
         ),
         ("relative-glob", "Glob", json!({ "pattern": "../kratos/*" })),
-    ] {
+    ];
+    // On Windows `C:..` names a folder relative to that drive's current folder, not the thread's.
+    if cfg!(windows) {
+        searches.extend([
+            (
+                "drive-relative-read",
+                "Read",
+                json!({ "file_path": r"C:..\kratos\client-token" }),
+            ),
+            (
+                "drive-relative-glob",
+                "Glob",
+                json!({ "pattern": r"C:..\kratos\*" }),
+            ),
+        ]);
+    }
+    for (id, tool, input) in searches {
         send(&harness, &launch, id, tool, input).await;
         assert_eq!(
             response(&harness, &launch, id).await["behavior"],

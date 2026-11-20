@@ -9,15 +9,12 @@ use std::time::{Duration, Instant};
 use kratos_claude_client::{Incoming, Launch, SessionId, SessionStart, SettingSource, connect};
 use kratos_protocol::{Provider, ThreadId};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 
 use super::actor::{Actor, Connected, Done, Reply, SessionEvent};
 use super::threads::{OpenSession, Session, SessionConfig, Start, ThreadState, Waiter};
 use super::{ClaudeSettings, ProviderError, hooks, permissions, release, wire};
 
-/// The tools Claude Code runs commands with. Kratos runs commands itself, in the sandbox of the
-/// thread's permission (D17), so the CLI cannot use its native command tools.
-const DISALLOWED_TOOLS: [&str; 3] = ["Bash", "PowerShell", "Monitor"];
+const DISALLOWED_TOOLS: [&str; 1] = ["Monitor"];
 
 impl Actor {
     /// The thread's state, read from the store the first time the actor sees the thread.
@@ -95,7 +92,6 @@ impl Actor {
         thread.session = Session::Opening;
         let epoch = thread.epoch;
         let thread_id = thread_id.clone();
-        let enabled = self.settings.tools.is_some();
         let report_format = config.report_format.clone();
         let program = self.settings.program.clone();
         let env_set = self.settings.env_set.clone();
@@ -104,8 +100,8 @@ impl Actor {
                 Err(why) => Err(why),
                 Ok(()) => connect(
                     launch,
-                    hooks::initialize(enabled, report_format),
-                    move |control| permissions::startup(control, enabled),
+                    hooks::initialize(report_format),
+                    permissions::startup,
                 )
                 .await
                 .map_err(|error| error.to_string()),
@@ -129,7 +125,7 @@ impl Actor {
     /// Runs `waiter` once the thread's CLI is up, starting one when none runs. A CLI that cannot
     /// start answers the waiter with why.
     pub(super) async fn when_open(&mut self, thread_id: &ThreadId, waiter: Waiter) {
-        if self.updating {
+        if !matches!(self.update_hold, super::actor::UpdateHold::Open) {
             waiter.reject(ProviderError::Conflict(
                 "Claude Code is updating. Ask again once it finishes".to_owned(),
             ));
@@ -223,7 +219,8 @@ impl Actor {
         });
         if !waiting {
             if let Ok(connected) = result {
-                tokio::spawn(async move { connected.claude.close().await });
+                self.retiring
+                    .spawn(async move { connected.claude.close().await });
             }
             return;
         }
@@ -238,7 +235,7 @@ impl Actor {
                 let commands = initialized.commands;
                 self.note_plan(plan.as_deref());
                 let thread = self.threads.get_mut(&thread_id).expect("checked above");
-                thread.session = Session::Open(OpenSession {
+                thread.session = Session::Open(Box::new(OpenSession {
                     claude,
                     config,
                     started: false,
@@ -246,7 +243,9 @@ impl Actor {
                     plan,
                     commands,
                     last_active: Instant::now(),
-                });
+                    background_tasks: 0,
+                    report: None,
+                }));
                 tokio::spawn(forward(
                     thread_id.clone(),
                     epoch,
@@ -279,50 +278,62 @@ impl Actor {
 
     /// Ends the thread's CLI while it is idle, so the next message starts one with the settings
     /// then in force. Its exit is not heard.
-    pub(super) fn retire_session(&mut self, thread_id: &ThreadId) -> Option<JoinHandle<()>> {
-        let thread = self.threads.get_mut(thread_id)?;
+    pub(super) fn retire_session(&mut self, thread_id: &ThreadId) {
+        let Some(thread) = self.threads.get_mut(thread_id) else {
+            return;
+        };
         thread.epoch += 1;
-        match std::mem::replace(&mut thread.session, Session::Closed) {
-            Session::Open(open) => Some(tokio::spawn(async move { open.claude.close().await })),
-            _ => None,
+        if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
+            self.retiring
+                .spawn(async move { open.claude.close().await });
         }
     }
 
-    /// Clears the way for Claude Code's updater, which must not replace files a running CLI
-    /// loads. It refuses while any thread works, since its turn would be cut off. Otherwise it
-    /// closes every session, holds new ones off, and answers once the processes have exited. The
-    /// threads lose nothing: their next messages resume their sessions after the update.
+    /// The native updater replaces files the CLI may still have open.
     pub(super) fn hold_for_update(&mut self, reply: Reply<()>) {
-        if self.updating {
+        if !matches!(self.update_hold, super::actor::UpdateHold::Open) {
             let _ = reply.send(Err(ProviderError::Conflict(
                 "Claude Code is already updating".to_owned(),
             )));
             return;
         }
-        if self.threads.values().any(ThreadState::is_working) {
+        if self.threads.values().any(ThreadState::is_busy_or_stopping) {
             let _ = reply.send(Err(ProviderError::Conflict(
                 "Claude Code cannot update while a Claude thread is working. Update once its turn ends"
                     .to_owned(),
             )));
             return;
         }
-        self.updating = true;
-        let thread_ids: Vec<ThreadId> = self.threads.keys().cloned().collect();
-        let closing: Vec<JoinHandle<()>> = thread_ids
-            .iter()
-            .filter_map(|thread_id| self.retire_session(thread_id))
-            .collect();
-        tokio::spawn(async move {
-            for close in closing {
-                let _ = close.await;
-            }
-            let _ = reply.send(Ok(()));
-        });
+        if self
+            .threads
+            .values()
+            .any(ThreadState::holds_background_work)
+        {
+            let _ = reply.send(Err(ProviderError::Conflict(
+                "Claude Code cannot update while a Claude thread runs a background command, which \
+                 closing its CLI would end. Update once the command ends"
+                    .to_owned(),
+            )));
+            return;
+        }
+        self.update_hold = super::actor::UpdateHold::Closing(reply);
+        for thread_id in self.threads.keys().cloned().collect::<Vec<_>>() {
+            self.retire_session(&thread_id);
+        }
+        self.release_updater_when_idle();
     }
 
-    /// Closes every session with no turn running that nobody has used for `idle_for`. Its thread
-    /// loses nothing: the next message resumes the session, as Zeron does for a warm session
-    /// nobody comes back to.
+    pub(super) fn release_updater_when_idle(&mut self) {
+        use super::actor::UpdateHold;
+        if self.retiring.is_empty()
+            && matches!(self.update_hold, UpdateHold::Closing(_))
+            && let UpdateHold::Closing(reply) =
+                std::mem::replace(&mut self.update_hold, UpdateHold::Held)
+        {
+            let _ = reply.send(Ok(()));
+        }
+    }
+
     pub(super) fn close_sessions_idle_for(&mut self, idle_for: Duration) {
         let now = Instant::now();
         let idle: Vec<ThreadId> = self
@@ -384,6 +395,7 @@ fn launch(
     launch.disallowed_tools = DISALLOWED_TOOLS.map(str::to_owned).to_vec();
     launch.env_set = settings.env_set.clone();
     launch.control_timeout = settings.control_timeout;
+    launch.max_line_bytes = settings.max_line_bytes;
     Ok(launch)
 }
 

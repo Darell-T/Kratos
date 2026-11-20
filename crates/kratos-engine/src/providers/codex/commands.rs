@@ -10,6 +10,7 @@ use serde_json::json;
 
 use super::actor::{Actor, Command, Reply};
 use super::profiles::Profile;
+use super::servers::ServerKey;
 use super::{ProviderError, wire};
 
 impl Actor {
@@ -106,15 +107,6 @@ impl Actor {
                 timeout,
                 reply,
             } => self.run_command(thread_id, command, timeout, reply).await,
-            Command::RunAt {
-                folder,
-                profile,
-                command,
-                timeout,
-                reply,
-            } => {
-                self.run_at(folder, profile, command, timeout, reply).await;
-            }
             Command::RefreshUsage { reply } => self.refresh_usage(reply),
             Command::Continue {
                 thread_id,
@@ -134,10 +126,12 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
-        let codex = match self.connection() {
+        let key = ServerKey::Thread(thread_id.clone());
+        let codex = match self.connection(&key) {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::Skills { thread_id, reply });
+                let deferred = Command::Skills { thread_id, reply };
+                self.servers.slot(&key).deferred.push(deferred);
                 return;
             }
             Err(error) => {
@@ -146,7 +140,9 @@ impl Actor {
             }
         };
         let folder = self.threads[&thread_id].folder.clone();
+        let pending_request = self.servers.request_guard(&key);
         tokio::spawn(async move {
+            let _guard = pending_request;
             let _ = reply.send(list_skills(&codex, folder).await);
         });
     }
@@ -162,38 +158,20 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
-        let thread = &self.threads[&thread_id];
-        self.run_at(
-            thread.folder.clone(),
-            Profile::for_settings(&thread.settings).id().to_owned(),
-            command,
-            timeout,
-            reply,
-        )
-        .await;
-    }
-
-    async fn run_at(
-        &mut self,
-        folder: String,
-        profile: String,
-        command: Vec<String>,
-        timeout: Duration,
-        reply: Reply<CommandResult>,
-    ) {
         if reply.is_closed() {
             return;
         }
-        let codex = match self.connection() {
+        let key = ServerKey::Thread(thread_id.clone());
+        let codex = match self.connection(&key) {
             Ok(Some(codex)) => codex,
             Ok(None) => {
-                self.deferred.push(Command::RunAt {
-                    folder,
-                    profile,
+                let deferred = Command::Run {
+                    thread_id,
                     command,
                     timeout,
                     reply,
-                });
+                };
+                self.servers.slot(&key).deferred.push(deferred);
                 return;
             }
             Err(error) => {
@@ -201,7 +179,12 @@ impl Actor {
                 return;
             }
         };
+        let thread = &self.threads[&thread_id];
+        let profile = Profile::for_settings(&thread.settings).id().to_owned();
+        let folder = thread.folder.clone();
+        let pending_request = self.servers.request_guard(&key);
         tokio::spawn(async move {
+            let _guard = pending_request;
             let mut reply = reply;
             let process_id = uuid::Uuid::new_v4().to_string();
             tokio::select! {

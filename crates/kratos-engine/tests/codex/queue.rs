@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use kratos_engine::providers::{ProviderError, Sent};
-use kratos_protocol::{MessageStatus, PauseReason, ThreadEventBody, TurnOutcome};
+use kratos_protocol::{MessageStatus, PauseReason, ThreadEventBody, TurnId, TurnOutcome};
 use serde_json::json;
 
 use crate::harness::{Harness, Options, message_id};
@@ -195,7 +195,7 @@ async fn a_delivery_the_history_shows_is_recorded_as_accepted() {
         .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
         .await;
     assert!(
-        matches!(started, ThreadEventBody::TurnStarted { turn_id } if turn_id.as_str() == "turn-1")
+        matches!(started, ThreadEventBody::TurnStarted { turn_id, origin: kratos_protocol::TurnOrigin::Messages } if turn_id.as_str() == "turn-1")
     );
     assert!(matches!(
         harness.message("a").await.status,
@@ -363,8 +363,42 @@ async fn a_long_turn_is_never_stopped_by_kratos_and_the_queue_runs_after_it() {
 }
 
 #[tokio::test]
-async fn a_turn_that_stops_on_request_but_never_ends_closes_codex() {
-    // Catches a turn stuck after an accepted stop, which would hold the queue forever.
+async fn a_limit_failure_after_stop_is_interrupted_and_does_not_pause() {
+    let mut harness = Harness::start(Options::default()).await;
+    harness.running_turn("a", "t1").await;
+    let provider = harness.provider.clone();
+    let id = harness.thread_id.clone();
+    let stop = tokio::spawn(async move { provider.stop(id).await });
+    harness.held("turn/interrupt", 1).await;
+    harness.settle("turn/interrupt", json!({})).await;
+    stop.await.unwrap().unwrap();
+    harness
+        .emit(
+            "turn/completed",
+            json!({
+                "threadId": THREAD, "turn": {"id":"t1","items":[],"status":"failed",
+                "error":{"message":"limit","codexErrorInfo":"usageLimitExceeded"}}
+            }),
+        )
+        .await;
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(matches!(
+        ended,
+        ThreadEventBody::TurnCompleted {
+            outcome: TurnOutcome::Interrupted,
+            ..
+        }
+    ));
+    assert!(harness.details().await.paused.is_none());
+    assert!(matches!(
+        harness.stops.as_mut().unwrap().try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+async fn stop_a_turn_codex_does_not_end(answer: &str) -> ThreadEventBody {
     let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(300),
         ..Options::default()
@@ -381,22 +415,37 @@ async fn a_turn_that_stops_on_request_but_never_ends_closes_codex() {
     let thread_id = harness.thread_id.clone();
     let stop = tokio::spawn(async move { provider.stop(thread_id).await });
     harness.held("turn/interrupt", 1).await;
-    harness.settle("turn/interrupt", json!({})).await;
-    stop.await.unwrap().unwrap();
+    match answer {
+        "accept" => harness.settle("turn/interrupt", json!({})).await,
+        "refuse" => harness.refuse("turn/interrupt", -32603, "busy").await,
+        _ => {}
+    }
+    tokio::time::timeout(Duration::from_secs(3), async {
+        stop.await.unwrap().unwrap();
 
-    let ended = harness
-        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
-        .await;
-    assert!(
-        matches!(
-            ended,
-            ThreadEventBody::TurnCompleted {
-                outcome: TurnOutcome::Failed { .. },
-                ..
-            }
-        ),
-        "{ended:?}"
-    );
+        harness
+            .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+            .await
+    })
+    .await
+    .expect("interrupt RPC timeout must not postpone the stop deadline")
+}
+
+#[tokio::test]
+async fn a_stopped_turn_codex_does_not_end_closes_codex_and_ends_interrupted() {
+    for answer in ["accept", "refuse", "silent"] {
+        let ended = stop_a_turn_codex_does_not_end(answer).await;
+        assert!(
+            matches!(
+                ended,
+                ThreadEventBody::TurnCompleted {
+                    outcome: TurnOutcome::Interrupted,
+                    ..
+                }
+            ),
+            "{answer}: {ended:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -420,4 +469,191 @@ async fn codex_exiting_mid_start_leaves_the_message_uncertain() {
             )
         })
         .await;
+}
+
+#[tokio::test]
+async fn a_thread_codex_closes_mid_turn_ends_its_turn_as_failed() {
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness.settle_start("turn-1", "inProgress").await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
+        .await;
+
+    harness
+        .emit("thread/closed", json!({ "threadId": THREAD }))
+        .await;
+
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(&ended, ThreadEventBody::TurnCompleted { outcome: TurnOutcome::Failed { error }, .. } if error.contains("closed the thread")),
+        "{ended:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_late_start_answer_for_a_discarded_message_leaves_the_next_message_alone() {
+    // Catches a turn/start answer credited to whichever message is starting when it arrives.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness.send("b", "second").await;
+    harness
+        .emit("thread/closed", json!({ "threadId": THREAD }))
+        .await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
+        .await;
+    harness
+        .provider
+        .discard(harness.thread_id.clone(), message_id("a"))
+        .await
+        .unwrap();
+    let held = harness.held("turn/start", 2).await;
+    assert_eq!(held[1]["params"]["clientUserMessageId"], "b");
+
+    harness.settle_start("turn-a", "inProgress").await;
+    harness.settle_start("turn-b", "inProgress").await;
+
+    let started = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnStarted { .. }))
+        .await;
+    assert!(
+        matches!(&started, ThreadEventBody::TurnStarted { turn_id, .. } if turn_id.as_str() == "turn-b"),
+        "{started:?}"
+    );
+    assert_eq!(
+        harness.message("b").await.status,
+        MessageStatus::Accepted {
+            turn_id: TurnId::new("turn-b".to_owned())
+        }
+    );
+    assert_eq!(harness.message("a").await.status, MessageStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn a_refused_start_for_a_discarded_message_is_not_sent_again() {
+    // Catches the one retry of a refused turn/start going out after the user discarded the
+    // message, so Codex runs work Kratos shows as cancelled.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness
+        .emit("thread/closed", json!({ "threadId": THREAD }))
+        .await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
+        .await;
+    let discarded = harness
+        .provider
+        .discard(harness.thread_id.clone(), message_id("a"))
+        .await
+        .unwrap();
+    assert_eq!(discarded.status, MessageStatus::Cancelled);
+
+    harness
+        .refuse("turn/start", -32600, "thread not found")
+        .await;
+    harness.send("b", "second").await;
+
+    let started = harness.held("turn/start", 2).await;
+    assert_eq!(
+        started[1]["params"]["clientUserMessageId"], "b",
+        "the discarded message was sent again"
+    );
+    assert_eq!(harness.message("a").await.status, MessageStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn a_stop_codex_ignores_ends_only_its_own_thread_s_turn() {
+    let mut harness = Harness::start(Options {
+        stop_timeout: Duration::from_millis(300),
+        ..Options::default()
+    })
+    .await;
+    let other = harness.another_thread("other").await;
+    harness.send("a", "stuck").await;
+    harness.held("turn/start", 1).await;
+    harness
+        .settle_start_everywhere("turn-1", "inProgress")
+        .await;
+    harness
+        .provider
+        .send(
+            other.clone(),
+            message_id("b"),
+            crate::harness::text_input("finishes"),
+            kratos_protocol::MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+    harness.held("turn/start", 2).await;
+    harness
+        .settle_start_everywhere("turn-2", "inProgress")
+        .await;
+    let (stuck, finishing) = (harness.fake_of("a").await, harness.fake_of("b").await);
+    assert_ne!(stuck, finishing, "each thread runs a server of its own");
+
+    let provider = harness.provider.clone();
+    let thread_id = harness.thread_id.clone();
+    let stop = tokio::spawn(async move { provider.stop(thread_id).await });
+    harness.held("turn/interrupt", 1).await;
+    harness
+        .control_at(
+            stuck,
+            fake_agents::codex_control::settle("turn/interrupt", json!({}), None),
+        )
+        .await;
+    stop.await.unwrap().unwrap();
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Interrupted,
+                ..
+            }
+        ),
+        "{ended:?}"
+    );
+
+    harness
+        .control_at(
+            finishing,
+            fake_agents::codex_control::complete(THREAD, "turn-2", "completed"),
+        )
+        .await;
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    let finished = loop {
+        let other = other.clone();
+        let events = harness
+            .store
+            .call(move |store| {
+                store.events_after(&other, kratos_protocol::Seq::BEFORE_FIRST, usize::MAX)
+            })
+            .await
+            .unwrap();
+        let finished = events.into_iter().find_map(|event| match event.event {
+            ThreadEventBody::TurnCompleted { outcome, .. } => Some(outcome),
+            _ => None,
+        });
+        if let Some(finished) = finished {
+            break finished;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the other thread's turn never ended"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert_eq!(
+        finished,
+        TurnOutcome::Completed,
+        "the other thread's turn finishes normally, untouched by the stop"
+    );
 }

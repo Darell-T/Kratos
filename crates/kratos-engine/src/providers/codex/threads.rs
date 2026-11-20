@@ -84,6 +84,7 @@ pub(super) enum Link {
 /// start's answer, until its end is recorded.
 #[derive(Default)]
 pub(super) struct TurnWork {
+    pub stop_id: Option<uuid::Uuid>,
     pub changes: ChangesRecorder,
     /// The latest context report (D76).
     pub context: Option<ContextUsage>,
@@ -104,8 +105,6 @@ pub(super) enum Turn {
     },
     Running {
         turn_id: TurnId,
-        /// Set once `turn/interrupt` is out or accepted.
-        stopping: bool,
         work: TurnWork,
     },
 }

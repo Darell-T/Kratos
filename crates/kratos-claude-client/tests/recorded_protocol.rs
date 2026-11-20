@@ -313,7 +313,7 @@ async fn native_transcript_reconciliation_includes_user_rows_and_folded_attachme
     let delivered = delivered_message_ids(&recordings().join("native-fold.jsonl"))
         .await
         .unwrap();
-    assert!(!delivered.torn_tail);
+    assert!(!delivered.incomplete);
     let ids = delivered.ids;
     assert_eq!(ids.len(), 3);
     assert!(ids.contains("00000000-0000-4000-8000-00000000005f"));
@@ -333,7 +333,7 @@ async fn a_torn_last_line_keeps_the_earlier_ids_and_says_delivery_may_be_unknown
     )
     .unwrap();
     let delivered = delivered_message_ids(&path).await.unwrap();
-    assert!(delivered.torn_tail);
+    assert!(delivered.incomplete);
     assert_eq!(delivered.ids, HashSet::from(["first".to_owned()]));
 
     std::fs::write(
@@ -342,37 +342,33 @@ async fn a_torn_last_line_keeps_the_earlier_ids_and_says_delivery_may_be_unknown
 ",
     )
     .unwrap();
-    assert!(!delivered_message_ids(&path).await.unwrap().torn_tail);
+    assert!(!delivered_message_ids(&path).await.unwrap().incomplete);
 
     std::fs::write(&path, "{\"type\":\"user\",\"uuid\":\"first\"}").unwrap();
     let unterminated = delivered_message_ids(&path).await.unwrap();
-    assert!(!unterminated.torn_tail, "a complete row needs no newline");
+    assert!(!unterminated.incomplete, "a complete row needs no newline");
     assert_eq!(unterminated.ids.len(), 1);
 }
 
 #[tokio::test]
-async fn a_malformed_line_before_the_tail_still_fails() {
-    // Catches treating corruption in the middle of a transcript as a harmless torn tail.
+async fn a_malformed_line_before_the_tail_marks_the_evidence_incomplete_and_later_rows_still_count()
+{
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.jsonl");
     std::fs::write(
         &path,
         "{\"type\":\"user\",\"uuid\":\"first\"}
 {\"type\":\"user\",\"uu
+{\"type\":\"user\"}
 {\"type\":\"user\",\"uuid\":\"third\"}
 ",
     )
     .unwrap();
-    assert!(delivered_message_ids(&path).await.is_err());
-    std::fs::write(
-        &path,
-        "{\"type\":\"user\",\"uu
-",
-    )
-    .unwrap();
-    assert!(
-        delivered_message_ids(&path).await.is_err(),
-        "a newline-terminated bad line is not a torn tail"
+    let delivered = delivered_message_ids(&path).await.unwrap();
+    assert!(delivered.incomplete);
+    assert_eq!(
+        delivered.ids,
+        HashSet::from(["first".to_owned(), "third".to_owned()])
     );
 }
 
@@ -449,7 +445,8 @@ fn future_message_types_survive_but_known_malformed_messages_are_errors() {
 }
 
 #[tokio::test]
-async fn malformed_delivery_markers_fail_instead_of_reporting_non_delivery() {
+async fn malformed_delivery_markers_mark_the_evidence_incomplete_instead_of_reporting_non_delivery()
+{
     // Catches resending accepted work because a malformed native marker was silently skipped.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("session.jsonl");
@@ -460,9 +457,24 @@ async fn malformed_delivery_markers_fail_instead_of_reporting_non_delivery() {
         json!({"type":"attachment", "attachment":{"type":"queued_command"}}),
     ] {
         std::fs::write(&path, format!("{row}\n")).unwrap();
-        assert!(
-            delivered_message_ids(&path).await.is_err(),
-            "invalid delivery marker: {row}"
-        );
+        let delivered = delivered_message_ids(&path).await.unwrap();
+        assert!(delivered.incomplete, "invalid delivery marker: {row}");
+        assert!(delivered.ids.is_empty(), "invalid delivery marker: {row}");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_reached_through_a_symbolic_link_names_the_project_of_its_physical_path() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let linked = root.path().join("linked");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+    let id: SessionId = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+
+    assert_eq!(
+        transcript_path(root.path(), &linked, id),
+        transcript_path(root.path(), &std::fs::canonicalize(&real).unwrap(), id)
+    );
 }

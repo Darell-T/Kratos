@@ -62,6 +62,8 @@ pub struct Launch {
     pub env_set: Vec<(OsString, OsString)>,
     pub control_timeout: Duration,
     pub close_timeout: Duration,
+    /// The longest line Kratos reads from the CLI. A longer one is reported, not read.
+    pub max_line_bytes: usize,
 }
 
 impl Launch {
@@ -79,6 +81,7 @@ impl Launch {
             env_set: Vec::new(),
             control_timeout: Duration::from_secs(30),
             close_timeout: Duration::from_secs(5),
+            max_line_bytes: crate::MAX_LINE_BYTES,
         }
     }
 }

@@ -2,20 +2,18 @@
 
 use kratos_protocol::{AskReason, Permission, ThreadSettings};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Destination {
-    Inside,
-    Outside,
-    Protected(String),
-}
+use crate::providers::writes;
+pub(super) use crate::providers::writes::Destination;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Action {
     File(Destination),
-    Command { flagged: bool, outside: bool },
+    Command { flagged: bool },
     Read,
+    Fetch,
     ProtectedRead,
-    ExternalTool,
+    Free,
+    Unchecked,
     Question,
     ExitPlan,
     Invalid,
@@ -32,19 +30,17 @@ pub(super) enum Decision {
 pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
     match (action, settings.plan_mode, settings.permission) {
         (Action::Question, _, _) => Decision::Question,
+        (Action::File(destination), _, _) => {
+            writes::asks(settings, destination).map_or(Decision::Allow, Decision::Ask)
+        }
+        (Action::Free, _, _) => Decision::Allow,
         (Action::ProtectedRead, false, Permission::FullAccess) => Decision::Allow,
         (Action::Invalid | Action::ProtectedRead, _, _) => Decision::Deny,
-        (Action::ExitPlan | Action::Command { outside: true, .. }, true, _) => Decision::Deny,
-        (Action::File(Destination::Protected(path)), _, _) => {
-            Decision::Ask(AskReason::ProtectedFolder { path })
-        }
-        (Action::Command { flagged: true, .. }, _, _) => Decision::Ask(AskReason::Dangerous),
-        (Action::Command { outside: true, .. }, _, _) => Decision::Ask(AskReason::Escalation),
-        (Action::ExternalTool, _, _) => Decision::Ask(AskReason::Unchecked),
+        (Action::ExitPlan, true, _) => Decision::Deny,
+        (Action::Command { flagged: true }, _, _) => Decision::Ask(AskReason::Dangerous),
+        (Action::Unchecked, _, _) => Decision::Ask(AskReason::Unchecked),
+        (Action::Read, true, _) => Decision::Allow,
         (_, true, _) | (_, _, Permission::AskMe) => Decision::Ask(AskReason::AskEveryAction),
-        (Action::File(Destination::Outside), false, Permission::ApproveForMe) => {
-            Decision::Ask(AskReason::Escalation)
-        }
         _ => Decision::Allow,
     }
 }
@@ -52,50 +48,6 @@ pub(super) fn decide(settings: &ThreadSettings, action: Action) -> Decision {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn outside_file_writes_need_approval_unless_the_turn_has_unsandboxed_full_access() {
-        // Catches the older D93 wording widening sandboxed file writes beyond workspace and temp.
-        for (permission, plan_mode, expected) in [
-            (
-                Permission::ApproveForMe,
-                false,
-                Decision::Ask(AskReason::Escalation),
-            ),
-            (
-                Permission::AskMe,
-                false,
-                Decision::Ask(AskReason::AskEveryAction),
-            ),
-            (Permission::FullAccess, false, Decision::Allow),
-            (
-                Permission::ApproveForMe,
-                true,
-                Decision::Ask(AskReason::AskEveryAction),
-            ),
-            (
-                Permission::AskMe,
-                true,
-                Decision::Ask(AskReason::AskEveryAction),
-            ),
-            (
-                Permission::FullAccess,
-                true,
-                Decision::Ask(AskReason::AskEveryAction),
-            ),
-        ] {
-            let settings = ThreadSettings {
-                permission,
-                plan_mode,
-                ..ThreadSettings::default()
-            };
-            assert_eq!(
-                decide(&settings, Action::File(Destination::Outside)),
-                expected,
-                "{permission:?}, plan {plan_mode}"
-            );
-        }
-    }
 
     #[test]
     fn every_permission_and_plan_mode_obeys_the_complete_tool_table() {
@@ -112,13 +64,21 @@ mod tests {
                 } else {
                     Decision::Allow
                 };
+                let read = if plan_mode || permission != Permission::AskMe {
+                    Decision::Allow
+                } else {
+                    Decision::Ask(AskReason::AskEveryAction)
+                };
+                assert_eq!(
+                    decide(&settings, Action::Read),
+                    read,
+                    "{permission:?}, plan {plan_mode}"
+                );
+                assert_eq!(decide(&settings, Action::Free), Decision::Allow);
                 for action in [
-                    Action::Read,
+                    Action::Fetch,
                     Action::File(Destination::Inside),
-                    Action::Command {
-                        flagged: false,
-                        outside: false,
-                    },
+                    Action::Command { flagged: false },
                 ] {
                     assert_eq!(
                         decide(&settings, action.clone()),
@@ -137,7 +97,7 @@ mod tests {
                     }
                 );
                 assert_eq!(
-                    decide(&settings, Action::ExternalTool),
+                    decide(&settings, Action::Unchecked),
                     Decision::Ask(AskReason::Unchecked)
                 );
                 assert_eq!(
@@ -150,13 +110,7 @@ mod tests {
                     })
                 );
                 assert_eq!(
-                    decide(
-                        &settings,
-                        Action::Command {
-                            flagged: true,
-                            outside: false
-                        }
-                    ),
+                    decide(&settings, Action::Command { flagged: true }),
                     Decision::Ask(AskReason::Dangerous)
                 );
                 assert_eq!(
@@ -165,34 +119,6 @@ mod tests {
                         Decision::Deny
                     } else {
                         ordinary.clone()
-                    }
-                );
-                assert_eq!(
-                    decide(
-                        &settings,
-                        Action::Command {
-                            flagged: true,
-                            outside: true
-                        }
-                    ),
-                    if plan_mode {
-                        Decision::Deny
-                    } else {
-                        Decision::Ask(AskReason::Dangerous)
-                    }
-                );
-                assert_eq!(
-                    decide(
-                        &settings,
-                        Action::Command {
-                            flagged: false,
-                            outside: true
-                        }
-                    ),
-                    if plan_mode {
-                        Decision::Deny
-                    } else {
-                        Decision::Ask(AskReason::Escalation)
                     }
                 );
             }

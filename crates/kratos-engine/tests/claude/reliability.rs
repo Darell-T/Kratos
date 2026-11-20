@@ -251,10 +251,13 @@ async fn relaunches_an_idle_session_when_its_settings_change_and_never_launches_
     // Catches a changed model that runs in the old process, a settings change that restarts a
     // turn that is running (D87), a launch that bypasses permissions before Kratos's own rules
     // exist, and a plan setting that does not reach the process.
-    let harness = Harness::start(Options::default()).await;
+    let mut harness = Harness::start(Options::default()).await;
     let first = harness.begin(A, 1).await;
     harness.finish(&first, &[A], json!({})).await;
     harness.message_becomes(A, |s| accepted_by(s, A)).await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
     let settings = |model: &str, permission, plan_mode| ThreadSettings {
         model: kratos_protocol::RequiredText::new(model),
         permission,
@@ -385,10 +388,7 @@ async fn rejects_unknown_threads_shares_duplicate_sends_and_closes_every_thread_
 }
 
 #[tokio::test]
-async fn starts_a_session_with_initialize_first_and_registers_no_hooks_or_tool_servers() {
-    // Catches a prompt written before Claude is initialized, and an initialize that registers
-    // hooks or SDK MCP servers before Kratos can answer them. The plan recorded without the
-    // account (D22, D24) is checked by `turns::records_the_plan_that_pays_for_the_session_and_never_the_account`.
+async fn starts_a_session_with_initialize_first_and_registers_only_kratos_hooks() {
     let harness = Harness::start(Options::default()).await;
     harness.send(A, "A").await;
     let launch = harness.launch(1).await;
@@ -397,7 +397,7 @@ async fn starts_a_session_with_initialize_first_and_registers_no_hooks_or_tool_s
     let received = harness.received(&launch).await;
 
     assert_eq!(received[0]["type"], "control_request");
-    assert_eq!(received[0]["request"], json!({ "subtype": "initialize" }));
+    assert_eq!(received[0]["request"], crate::harness::initialize());
     // The usage read and the message are written together once Claude is up, in either order.
     let mut after: Vec<_> = received[1..]
         .iter()
@@ -412,4 +412,116 @@ async fn starts_a_session_with_initialize_first_and_registers_no_hooks_or_tool_s
     after.sort();
     let read = json!({ "subtype": "get_usage", "skip_behaviors": true }).to_string();
     assert_eq!(after, ["user".to_owned(), read], "nothing else was written");
+}
+
+#[tokio::test]
+async fn a_line_kratos_cannot_read_ends_the_turn_instead_of_leaving_claude_waiting() {
+    let limit = 128 * 1024;
+    let oversized = json!({ "type": "control_request", "request_id": "big", "request": {
+        "subtype": "can_use_tool", "tool_name": "Write",
+        "input": { "file_path": "big.txt", "content": "x".repeat(2 * limit) } } });
+    let unparsable = json!({ "type": "result", "subtype": "success", "user_message_uuids": [A] });
+    for (label, line, reason) in [
+        ("oversized", oversized, "more than Kratos reads"),
+        ("unparsable", unparsable, "cannot read"),
+    ] {
+        let mut harness = Harness::start(Options {
+            max_line_bytes: limit,
+            ..Options::default()
+        })
+        .await;
+        let launch = harness.begin(A, 1).await;
+
+        harness.emit(&launch, line).await;
+        harness.wait_ended(&launch).await;
+
+        let ended = harness
+            .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+            .await;
+        assert!(
+            matches!(&ended, ThreadEventBody::TurnCompleted { outcome: TurnOutcome::Failed { error }, .. } if error.contains(reason)),
+            "{label}: {ended:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_transcript_with_a_bad_line_in_the_middle_still_lets_the_user_discard() {
+    let harness = Harness::start(Options::default()).await;
+    let first = harness.begin(A, 1).await;
+    harness.send(E, "E").await;
+    harness
+        .provider
+        .steer(harness.thread_id.clone(), message_id(E))
+        .await
+        .unwrap();
+    harness.wait_written(&first, &[A, E]).await;
+    let path = kratos_claude_client::transcript_path(
+        &harness.claude_home(),
+        &harness.folder(),
+        first.session(),
+    );
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str("{\"type\":\"user\",\"uu\n{\"type\":\"assistant\"}\n");
+    std::fs::write(&path, text).unwrap();
+
+    harness.exit(&first, 3).await;
+    harness
+        .message_becomes(E, |s| matches!(s, MessageStatus::Unknown { .. }))
+        .await;
+    let discarded = harness
+        .provider
+        .discard(harness.thread_id.clone(), message_id(E))
+        .await
+        .unwrap();
+
+    assert_eq!(discarded.status, MessageStatus::Cancelled);
+}
+
+#[tokio::test]
+async fn editing_a_large_file_does_not_end_the_session() {
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = harness.begin(A, 1).await;
+    let original = "x".repeat(3 * 1024 * 1024);
+    harness
+        .call(
+            &launch,
+            "test/ask",
+            json!({ "requestId": "edited", "request": {
+        "subtype": "hook_callback", "callback_id": "kratos-post",
+        "input": { "hook_event_name": "PostToolUse", "tool_name": "Edit",
+            "tool_input": { "file_path": "big.txt", "old_string": "a", "new_string": "b" },
+            "tool_response": { "originalFile": original } } } }),
+        )
+        .await;
+
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    loop {
+        let answered = harness.received(&launch).await.into_iter().any(|frame| {
+            frame["response"]["request_id"] == "edited"
+                && frame["response"]["response"]["continue"] == true
+        });
+        if answered {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the edit hook was never answered"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    harness.finish(&launch, &[A], json!({})).await;
+    let ended = harness
+        .wait_for(|event| matches!(event, ThreadEventBody::TurnCompleted { .. }))
+        .await;
+    assert!(
+        matches!(
+            ended,
+            ThreadEventBody::TurnCompleted {
+                outcome: TurnOutcome::Completed,
+                ..
+            }
+        ),
+        "{ended:?}"
+    );
 }

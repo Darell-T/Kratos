@@ -1,14 +1,13 @@
-//! Steering a running turn, stopping one before Codex named it, settling a refused message, and
-//! sharing Codex's start slots between threads.
+//! Steering a running turn, stopping one before Codex named it, settling a refused message,
+//! starting turns in many threads at once, and closing their app-servers together.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use futures_util::StreamExt;
 use kratos_engine::providers::ProviderError;
 use kratos_protocol::{
-    AccessLimit, MessageOrigin, MessageStatus, PauseReason, Permission, Seq, ThreadEventBody,
+    AccessLimit, MessageOrigin, MessageStatus, PauseReason, Permission, ThreadEventBody,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::harness::{Harness, Options, WAIT, message_id, text_input};
 
@@ -176,6 +175,57 @@ async fn a_stop_sent_before_codex_names_the_turn_stops_it_once_named() {
 }
 
 #[tokio::test]
+async fn a_stop_before_codex_refuses_the_start_sends_no_retry() {
+    // Catches the one retry of a refused turn/start going out after the user asked to stop.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+
+    let provider = harness.provider.clone();
+    let thread_id = harness.thread_id.clone();
+    let stop = tokio::spawn(async move { provider.stop(thread_id).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    harness
+        .refuse("turn/start", -32600, "thread not found")
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        harness.turn_requests().await.len(),
+        1,
+        "a start was sent after the stop"
+    );
+    stop.await.unwrap().unwrap();
+    assert!(matches!(
+        harness.message("a").await.status,
+        MessageStatus::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_stop_while_the_retry_is_out_interrupts_the_turn_it_starts() {
+    // Catches a retried start that runs on after the user asked to stop it.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness
+        .refuse("turn/start", -32600, "thread not found")
+        .await;
+    harness.held("turn/start", 2).await;
+
+    let provider = harness.provider.clone();
+    let thread_id = harness.thread_id.clone();
+    let stop = tokio::spawn(async move { provider.stop(thread_id).await });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    harness.settle_start("turn-1", "inProgress").await;
+
+    let interrupt = &harness.held("turn/interrupt", 1).await[0]["params"];
+    assert_eq!(interrupt["turnId"], "turn-1");
+    harness.settle("turn/interrupt", json!({})).await;
+    stop.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn a_refused_message_sent_again_runs_and_lifts_the_pause() {
     // Catches a retry that leaves the queue paused, or one that skips ahead of the messages
     // queued after it.
@@ -228,48 +278,44 @@ async fn removing_a_refused_message_lets_the_next_one_run() {
 }
 
 #[tokio::test]
-async fn at_most_four_threads_wait_on_codex_to_start_a_turn() {
-    // Catches a burst of messages to many threads flooding Codex with starts (D85), and a waiting
-    // thread that never gets the slot a finished start frees.
+async fn threads_start_their_turns_without_waiting_on_each_other() {
     let mut harness = Harness::start(Options::default()).await;
-    let mut threads = vec![harness.thread_id.clone()];
-    for n in 2..=5 {
-        threads.push(harness.another_thread(&format!("project-{n}")).await);
-    }
-
-    for (n, thread_id) in threads.iter().enumerate() {
-        harness
-            .provider
-            .send(
-                thread_id.clone(),
-                message_id(&format!("m{n}")),
-                text_input("go"),
-                MessageOrigin::User,
-            )
-            .await
-            .unwrap();
-    }
-
-    harness.held("turn/start", 4).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(harness.turn_requests().await.len(), 4);
-    harness.settle_start("turn-1", "inProgress").await;
-    harness.held("turn/start", 5).await;
+    start_turns_in_threads(&mut harness, 8).await;
 }
 
 #[tokio::test]
-async fn waiting_threads_take_freed_start_slots_in_order() {
-    let mut harness = Harness::start(Options::default()).await;
+async fn shutdown_waits_for_slow_app_servers_together_not_one_after_another() {
+    let exit_delay = Duration::from_millis(1500);
+    let mut harness = Harness::start(Options {
+        fake_args: vec![
+            "--exit-delay-ms".into(),
+            exit_delay.as_millis().to_string().into(),
+        ],
+        ..Options::default()
+    })
+    .await;
+    start_turns_in_threads(&mut harness, 4).await;
+
+    let started = Instant::now();
+    harness.provider.shutdown().await;
+    let took = started.elapsed();
+
+    assert!(
+        took >= exit_delay,
+        "shutdown returned before Codex exited: {took:?}"
+    );
+    assert!(
+        took < exit_delay * 2,
+        "four app-servers took {took:?} to close, so they closed one after another"
+    );
+}
+
+async fn start_turns_in_threads(harness: &mut Harness, count: usize) {
     let mut threads = vec![harness.thread_id.clone()];
-    for n in 2..=7 {
+    for n in 2..=count {
         threads.push(harness.another_thread(&format!("project-{n}")).await);
     }
     for (n, thread_id) in threads.iter().enumerate() {
-        let mut events = harness
-            .hub
-            .follow(thread_id.clone(), Seq::BEFORE_FIRST)
-            .await
-            .unwrap();
         harness
             .provider
             .send(
@@ -280,38 +326,218 @@ async fn waiting_threads_take_freed_start_slots_in_order() {
             )
             .await
             .unwrap();
-        tokio::time::timeout(WAIT, async {
-            loop {
-                let page = events.next().await.unwrap().unwrap();
-                if page
-                    .iter()
-                    .any(|event| matches!(event.event, ThreadEventBody::ProviderSession { .. }))
-                {
-                    break;
-                }
-            }
-        })
-        .await
-        .expect("the thread attaches to Codex");
-        // The session is recorded before dispatch; a later actor command waits for dispatch too.
-        harness.provider.access(thread_id.clone()).await.unwrap();
-        if n < 4 {
-            harness.held("turn/start", n + 1).await;
-        }
     }
+    harness.held("turn/start", count).await;
+}
 
-    for count in 5..=7 {
+#[tokio::test]
+async fn at_the_server_limit_a_thread_waits_with_a_note_until_a_working_thread_finishes() {
+    let mut harness = Harness::start(Options::default()).await;
+    let mut threads = vec![harness.thread_id.clone()];
+    for n in 2..=9 {
+        threads.push(harness.another_thread(&format!("project-{n}")).await);
+    }
+    for (n, thread_id) in threads.iter().take(8).enumerate() {
         harness
-            .settle_start(&format!("turn-{count}"), "inProgress")
+            .provider
+            .send(
+                thread_id.clone(),
+                message_id(&format!("m{n}")),
+                text_input("work"),
+                MessageOrigin::User,
+            )
+            .await
+            .unwrap();
+        harness.held("turn/start", n + 1).await;
+        harness
+            .settle_start_everywhere(&format!("turn-{n}"), "inProgress")
             .await;
-        harness.held("turn/start", count).await;
     }
-    let started = harness.turn_requests().await;
-    harness.provider.shutdown().await;
+    let waiting = threads[8].clone();
+    let (_, mut live) = harness.hub.watch_live(&waiting);
 
-    let order: Vec<_> = started
-        .iter()
-        .map(|request| request["params"]["clientUserMessageId"].as_str().unwrap())
-        .collect();
-    assert_eq!(order, ["m0", "m1", "m2", "m3", "m4", "m5", "m6"]);
+    harness
+        .provider
+        .send(
+            waiting.clone(),
+            message_id("m8"),
+            text_input("waits"),
+            MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+
+    let note = tokio::time::timeout(WAIT, async {
+        loop {
+            if let kratos_protocol::LiveUpdate::Waiting { reason } = live.recv().await.unwrap() {
+                return reason;
+            }
+        }
+    })
+    .await
+    .expect("the waiting thread is told why");
+    assert!(note.contains("8 threads"), "{note}");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        harness.turn_requests().await.len(),
+        8,
+        "no ninth server runs while all eight work"
+    );
+
+    let first = harness.fake_of("m0").await;
+    let second = harness.fake_of("m1").await;
+    harness
+        .control_at(
+            first,
+            fake_agents::codex_control::complete("thread-A", "turn-0", "completed"),
+        )
+        .await;
+
+    harness.fake_of("m8").await;
+    assert!(
+        harness
+            .control_at(
+                second,
+                fake_agents::codex_control::ControlRequest {
+                    method: "test/echo",
+                    params: json!({}),
+                },
+            )
+            .await
+            .is_object(),
+        "only the finished thread's idle server closed"
+    );
+    harness.send("again", "return to the evicted thread").await;
+    harness
+        .control_at(
+            second,
+            fake_agents::codex_control::complete("thread-A", "turn-1", "completed"),
+        )
+        .await;
+    harness.fake_of("again").await;
+    assert!(harness.details().await.paused.is_none());
+}
+
+#[tokio::test]
+async fn a_waiting_thread_asks_an_idle_server_with_a_background_terminal_once_per_change() {
+    let mut harness = Harness::start(Options::default()).await;
+    let mut threads = vec![harness.thread_id.clone()];
+    for n in 2..=9 {
+        threads.push(harness.another_thread(&format!("project-{n}")).await);
+    }
+    for (n, thread_id) in threads.iter().take(8).enumerate() {
+        harness
+            .provider
+            .send(
+                thread_id.clone(),
+                message_id(&format!("m{n}")),
+                text_input("work"),
+                MessageOrigin::User,
+            )
+            .await
+            .unwrap();
+        harness.held("turn/start", n + 1).await;
+        harness
+            .settle_start_everywhere(&format!("turn-{n}"), "inProgress")
+            .await;
+    }
+    let dev_server = harness.fake_of("m0").await;
+    let ask = |method: &'static str, params: Value| fake_agents::codex_control::ControlRequest {
+        method,
+        params,
+    };
+    harness
+        .control_at(
+            dev_server,
+            ask(
+                "test/backgroundTerminals",
+                json!({ "terminals": [{
+                    "command": "npm run dev",
+                    "cwd": "/project",
+                    "itemId": "item-1",
+                    "processId": "process-1",
+                }] }),
+            ),
+        )
+        .await;
+    harness
+        .control_at(
+            dev_server,
+            fake_agents::codex_control::complete("thread-A", "turn-0", "completed"),
+        )
+        .await;
+    harness
+        .provider
+        .send(
+            threads[8].clone(),
+            message_id("m8"),
+            text_input("waits"),
+            MessageOrigin::User,
+        )
+        .await
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while harness
+        .control_at(dev_server, ask("test/backgroundTerminalLists", json!({})))
+        .await
+        == json!(0)
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the waiting thread never asked the idle server"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let asked = harness
+        .control_at(dev_server, ask("test/backgroundTerminalLists", json!({})))
+        .await;
+    assert_eq!(
+        asked,
+        json!(1),
+        "the server with a dev server running was asked again with nothing changed"
+    );
+    assert_eq!(
+        harness.turn_requests().await.len(),
+        8,
+        "the waiting thread starts no ninth server"
+    );
+
+    let second = harness.fake_of("m1").await;
+    harness
+        .control_at(
+            second,
+            fake_agents::codex_control::complete("thread-A", "turn-1", "completed"),
+        )
+        .await;
+    harness.fake_of("m8").await;
+}
+
+#[tokio::test]
+async fn a_usage_read_with_no_thread_running_uses_an_account_only_server() {
+    let harness = Harness::start(Options::default()).await;
+
+    let read = harness.provider.refresh_usage().await;
+    assert!(
+        matches!(&read, Err(ProviderError::Unavailable(error)) if error.contains("Codex did not report")),
+        "{read:?}"
+    );
+
+    let account = fake_agents::codex_control::every_port(&harness.control_file);
+    assert_eq!(account.len(), 1, "one account-only server answered");
+    let loaded = harness
+        .control_at(
+            account[0],
+            fake_agents::codex_control::ControlRequest {
+                method: "test/threadRequests",
+                params: json!({}),
+            },
+        )
+        .await;
+    assert_eq!(loaded, json!([]), "the account's server loads no thread");
+
+    harness.send("a", "work").await;
+    let own = harness.fake_of("a").await;
+    assert_ne!(own, account[0], "the thread runs on a server of its own");
 }

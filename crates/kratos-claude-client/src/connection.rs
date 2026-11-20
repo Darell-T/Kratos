@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use kratos_process::OwnedChild;
+use kratos_process::output::{self, Line};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch};
 use tokio::time::Instant;
@@ -19,9 +20,8 @@ use crate::{
     ControlRequest, Initialize, Initialized, Launch, ParseError, StreamMessage, UsageRead,
 };
 
-/// Largest of 1,089 messages in 34 spike recordings was 50,630 UTF-8 bytes without newline,
-/// s8-settings-isolation/b-user-project-local/wire.jsonl:6. 128 KiB gives 2.59 times headroom.
-pub const MAX_LINE_BYTES: usize = 128 * 1024;
+/// Claude Code 2.1.322 sent a 3,082,014-byte line for an edit to a 3,025,002-byte file.
+pub const MAX_LINE_BYTES: usize = 256 * 1024 * 1024;
 const QUEUE_CAPACITY: usize = 256;
 const STDERR_BYTES_KEPT: usize = 16 * 1024;
 const STDERR_LINES_KEPT: usize = 20;
@@ -236,6 +236,7 @@ struct Shared {
     exited: watch::Receiver<Option<Exit>>,
     control_timeout: Duration,
     close_timeout: Duration,
+    max_line_bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -379,6 +380,7 @@ pub async fn connect(
         exited,
         control_timeout: launch.control_timeout,
         close_timeout: launch.close_timeout,
+        max_line_bytes: launch.max_line_bytes,
     });
     let claude = Claude {
         shared: shared.clone(),
@@ -632,48 +634,10 @@ async fn keep(
     exited.send_replace(Some(exit));
 }
 
-enum Line {
-    Data(Vec<u8>),
-    Oversized(usize),
-    Eof,
-}
-
-async fn bounded_line(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<Line> {
-    let mut kept = Vec::new();
-    let mut bytes = 0usize;
-    loop {
-        let buffer = reader.fill_buf().await?;
-        if buffer.is_empty() {
-            break;
-        }
-        let newline = buffer.iter().position(|byte| *byte == b'\n');
-        let count = newline.unwrap_or(buffer.len());
-        bytes = bytes.saturating_add(count);
-        if bytes <= MAX_LINE_BYTES {
-            kept.extend_from_slice(&buffer[..count]);
-        }
-        reader.consume(count + usize::from(newline.is_some()));
-        if newline.is_some() {
-            return if bytes > MAX_LINE_BYTES {
-                Ok(Line::Oversized(bytes))
-            } else {
-                Ok(Line::Data(kept))
-            };
-        }
-    }
-    if bytes > MAX_LINE_BYTES {
-        Ok(Line::Oversized(bytes))
-    } else if bytes == 0 {
-        Ok(Line::Eof)
-    } else {
-        Ok(Line::Data(kept))
-    }
-}
-
 async fn read(shared: Arc<Shared>, stdout: ChildStdout, incoming: mpsc::Sender<Incoming>) {
     let mut reader = BufReader::new(stdout);
     loop {
-        let event = match bounded_line(&mut reader).await {
+        let event = match output::read_line(&mut reader, shared.max_line_bytes).await {
             Ok(Line::Eof) => break,
             Ok(Line::Oversized(bytes)) => Some(Incoming::Oversized { bytes }),
             Ok(Line::Data(line)) => match serde_json::from_slice::<Value>(&line) {

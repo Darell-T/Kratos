@@ -76,6 +76,9 @@ pub enum LiveUpdate {
         turn_id: TurnId,
         usage: ContextUsage,
     },
+    /// The thread's next message waits for the provider, and `reason` says why. Not kept in the
+    /// log: it holds only while the wait lasts.
+    Waiting { reason: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

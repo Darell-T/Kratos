@@ -13,9 +13,8 @@ use kratos_claude_client::{
     Claude, DeliveredMessages, Incoming, Initialized, RequestError, TranscriptError, UsageRead,
 };
 use kratos_protocol::{
-    AccessLimit, AgentItem, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message,
-    MessageId, MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadEventBody, ThreadId,
-    ThreadSettings,
+    AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, ContinuationId, Message, MessageId,
+    MessageInput, MessageOrigin, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
 use kratos_store::{StoreError, ThreadWrite};
 use tokio::sync::{mpsc, oneshot};
@@ -151,12 +150,6 @@ pub(super) enum TranscriptWork {
 /// Finished work that changes actor state. Work for a session that has ended carries its `epoch`
 /// and is dropped.
 pub(super) enum Done {
-    CommandFinished {
-        thread_id: ThreadId,
-        epoch: u64,
-        control_id: String,
-        item: AgentItem,
-    },
     Opened {
         thread_id: ThreadId,
         epoch: u64,
@@ -182,6 +175,11 @@ pub(super) enum Done {
     },
     /// The wait after a CLI failure ended.
     RestartDue { thread_id: ThreadId },
+    ReportOverdue {
+        thread_id: ThreadId,
+        epoch: u64,
+        report_id: super::threads::ReportId,
+    },
     Transcript {
         thread_id: ThreadId,
         work: TranscriptWork,
@@ -196,6 +194,12 @@ pub(super) enum Done {
         result: Result<UsageRead, RequestError>,
         reply: Option<Reply<()>>,
     },
+}
+
+pub(super) enum UpdateHold {
+    Open,
+    Closing(Reply<()>),
+    Held,
 }
 
 pub(crate) struct Actor {
@@ -213,7 +217,8 @@ pub(crate) struct Actor {
     /// Set when a write failed: no CLI runs after that, because its work would go unrecorded (L2).
     pub(super) parked: Option<String>,
     /// Set while Claude Code's updater runs. No CLI starts, and queued messages wait.
-    pub(super) updating: bool,
+    pub(super) update_hold: UpdateHold,
+    pub(super) retiring: tokio::task::JoinSet<()>,
     pub(super) done: mpsc::UnboundedSender<Done>,
     completions: mpsc::UnboundedReceiver<Done>,
     pub(super) frames: mpsc::Sender<SessionEvent>,
@@ -240,7 +245,8 @@ impl Actor {
             limit_stops,
             threads: HashMap::new(),
             parked: None,
-            updating: false,
+            update_hold: UpdateHold::Open,
+            retiring: tokio::task::JoinSet::new(),
             done,
             completions,
             frames,
@@ -266,6 +272,10 @@ impl Actor {
                     }
                 },
                 Some(done) = self.completions.recv() => self.on_done(done).await,
+                Some(closed) = self.retiring.join_next(), if !self.retiring.is_empty() => {
+                    closed.expect("Claude session close task panicked");
+                    self.release_updater_when_idle();
+                }
                 Some(event) = self.incoming.recv() => self.on_event(event).await,
                 _ = idle_check.tick() => self.close_sessions_idle_for(self.settings.idle_close),
             }
@@ -287,28 +297,6 @@ impl Actor {
     // #lizard forgives: one arm per kind of completion, each a call.
     async fn on_done(&mut self, done: Done) {
         match done {
-            Done::CommandFinished {
-                thread_id,
-                epoch,
-                control_id,
-                item,
-            } => {
-                let Some(thread) = self.threads.get_mut(&thread_id) else {
-                    return;
-                };
-                if thread.epoch != epoch {
-                    return;
-                }
-                thread.commands.remove(&control_id);
-                if let Some(turn_id) = thread.run.clone() {
-                    let _ = self
-                        .write(&thread_id, move |write| {
-                            write.append(ThreadEventBody::ItemCompleted { turn_id, item })?;
-                            Ok(())
-                        })
-                        .await;
-                }
-            }
             Done::Opened {
                 thread_id,
                 epoch,
@@ -335,6 +323,11 @@ impl Actor {
                 stop_epoch,
             } => self.on_stop_expired(&thread_id, stop_epoch),
             Done::RestartDue { thread_id } => self.on_restart_due(thread_id).await,
+            Done::ReportOverdue {
+                thread_id,
+                epoch,
+                report_id,
+            } => self.on_report_overdue(&thread_id, epoch, report_id).await,
             Done::Transcript {
                 thread_id,
                 work,
@@ -380,11 +373,11 @@ impl Actor {
             return;
         }
         for thread in self.threads.values_mut() {
-            thread.cancel_commands(None);
             thread.epoch += 1;
             thread.restarts.cancel_timer();
             if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
-                tokio::spawn(async move { open.claude.close().await });
+                self.retiring
+                    .spawn(async move { open.claude.close().await });
             }
             thread.pending.clear();
             thread.run = None;
@@ -412,16 +405,17 @@ impl Actor {
             self.close_requests(&id, None, "Kratos is shutting down")
                 .await;
         }
-        let mut closing = Vec::new();
+
         for thread in self.threads.values_mut() {
             thread.epoch += 1;
             thread.restarts.cancel_timer();
             if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
-                closing.push(tokio::spawn(async move { open.claude.close().await }));
+                self.retiring
+                    .spawn(async move { open.claude.close().await });
             }
         }
-        for closed in closing {
-            let _ = closed.await;
+        while let Some(closed) = self.retiring.join_next().await {
+            closed.expect("Claude session close task panicked");
         }
     }
 }

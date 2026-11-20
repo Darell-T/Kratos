@@ -63,7 +63,6 @@ async fn question(harness: &mut Harness) -> Question {
 async fn routes_tool_approvals_to_kratos_and_answers_each_request_exactly_once() {
     // Catches repeated execution decisions, session rules that bypass Kratos, and requests left open on withdrawal or result.
     let mut harness = Harness::start(Options {
-        tools: true,
         ..Options::default()
     })
     .await;
@@ -216,7 +215,6 @@ async fn routes_tool_approvals_to_kratos_and_answers_each_request_exactly_once()
 async fn answers_questions_and_elicitations_and_never_stops_the_turn_while_any_are_pending() {
     // Catches Kratos interrupting a user who is answering, duplicate answers, or an answer lost before reaching Claude.
     let mut harness = Harness::start(Options {
-        tools: true,
         ..Options::default()
     })
     .await;
@@ -303,7 +301,6 @@ async fn answers_questions_and_elicitations_and_never_stops_the_turn_while_any_a
 async fn a_cli_exit_closes_both_kinds_of_user_request_and_later_answers_return_that_outcome() {
     // Catches disconnected clients still showing a request whose CLI can never receive its answer.
     let mut harness = Harness::start(Options {
-        tools: true,
         ..Options::default()
     })
     .await;
@@ -347,7 +344,6 @@ async fn a_cli_exit_closes_both_kinds_of_user_request_and_later_answers_return_t
 async fn accepting_an_approval_after_stop_cannot_restart_the_stopped_action() {
     // Catches a late user decision allowing a file tool or command after the user has stopped its turn.
     let mut harness = Harness::start(Options {
-        tools: true,
         ..Options::default()
     })
     .await;

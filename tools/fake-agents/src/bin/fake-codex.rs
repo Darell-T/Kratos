@@ -7,12 +7,14 @@
 //!
 //! Flags: `--hang-initialize` never answers `initialize`; `--bad-initialize` answers it with `{}`;
 //! `--fail-resume` answers every `thread/resume` with an error; `--sleep` makes the process sleep
-//! for an hour, for `test/spawnChild`; `--control-file <path>` also takes `test/*` requests on a
-//! localhost TCP port, written to `<path>`, for a test whose client under test owns stdio;
-//! `--state-file <path>` starts with the `threads` and `rateLimits` of the JSON object in `<path>`,
-//! as a Codex restarted on an existing history does. The variables `FAKE_CODEX_CONTROL_FILE` and
-//! `FAKE_CODEX_STATE_FILE` stand in for the two flags when the fake is started by an engine, which
-//! passes its own variables on but not its own flags.
+//! for an hour, for `test/spawnChild`; `--exit-delay-ms <n>` waits `n` milliseconds after its
+//! input closes before it exits, as a Codex that cleans up does; `--control-file <path>` also
+//! takes `test/*` requests on a localhost TCP port, written to `<path>`, for a test whose client
+//! under test owns stdio; `--state-file <path>` starts with the `threads` and `rateLimits` of the
+//! JSON object in `<path>`, as a Codex restarted on an existing history does. The variables
+//! `FAKE_CODEX_EXIT_DELAY_MS`, `FAKE_CODEX_CONTROL_FILE`, and `FAKE_CODEX_STATE_FILE` stand in for
+//! those three flags when the fake is started by an engine, which passes its own variables on but
+//! not its own flags.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -32,6 +34,7 @@ fn main() {
     }
     let fake = Arc::new(Mutex::new(Fake {
         initialize: InitializeMode::from_arguments(&arguments),
+        closing_on_resume: arguments.iter().any(|arg| arg == "--closing-on-resume"),
         fail_resume: arguments.iter().any(|argument| argument == "--fail-resume"),
         ..Fake::default()
     }));
@@ -52,9 +55,11 @@ fn main() {
     if let Some(path) = flag_or_variable(&arguments, "--control-file", "FAKE_CODEX_CONTROL_FILE") {
         serve_control(fake.clone(), &path);
     }
+    let exit_delay = flag_or_variable(&arguments, "--exit-delay-ms", "FAKE_CODEX_EXIT_DELAY_MS")
+        .map(|millis| Duration::from_millis(millis.parse().expect("the exit delay is a number")));
     let stdin = std::io::stdin();
     for line in stdin.lock().lines() {
-        let Ok(line) = line else { return };
+        let Ok(line) = line else { break };
         let message: Value = serde_json::from_str(&line).expect("the client sends JSON lines");
         let out = lock(&fake).receive(message);
         for out in out {
@@ -62,6 +67,9 @@ fn main() {
                 Out::Client(message) | Out::Caller(message) => send(&message),
             }
         }
+    }
+    if let Some(delay) = exit_delay {
+        std::thread::sleep(delay);
     }
 }
 
@@ -84,6 +92,8 @@ fn serve_control(fake: Arc<Mutex<Fake>>, path: &str) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("a localhost port is free");
     let port = listener.local_addr().expect("the port is known").port();
     codex_control::write_port(Path::new(path), port).expect("the control file is writable");
+    codex_control::write_port(&codex_control::own_control_file(Path::new(path)), port)
+        .expect("the control folder is writable");
     lock(&fake).control_file = Some(path.into());
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
@@ -149,12 +159,15 @@ struct Fake {
     turn_observer: Option<TcpStream>,
     initialize: InitializeMode,
     fail_resume: bool,
+    closing_on_resume: bool,
     fail_next_fork: bool,
     initialized: bool,
     /// Every held request, in arrival order, for `test/turnRequests`.
     held_log: Vec<Value>,
     /// Requests not yet settled, in arrival order.
     held: Vec<Held>,
+    background_terminals: Vec<Value>,
+    background_terminal_lists: u64,
     /// Every `thread/start`, `thread/resume`, and `thread/unsubscribe`, for `test/threadRequests`.
     thread_log: Vec<Value>,
     threads: BTreeMap<String, Value>,
@@ -177,6 +190,7 @@ struct Held {
     id: Value,
     method: String,
     params: Value,
+    received_at: String,
 }
 
 /// Requests the fake keeps until `test/settleTurn` answers them.
@@ -239,12 +253,17 @@ impl Fake {
                 )
                 .expect("the benchmark observer stays connected");
             }
-            self.held_log
-                .push(json!({ "method": method, "params": params }));
+            let received_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos());
+            self.held_log.push(
+                json!({ "method": method, "params": params, "receivedAt": received_at.to_string() }),
+            );
             self.held.push(Held {
                 id,
                 method: method.to_owned(),
                 params: params.clone(),
+                received_at: received_at.to_string(),
             });
             return;
         }
@@ -268,6 +287,11 @@ impl Fake {
                 self.thread_log
                     .push(json!({ "method": "thread/unsubscribe", "params": params }));
                 self.reply(&id, json!({ "status": "unsubscribed" }));
+            }
+            "thread/backgroundTerminals/list" => {
+                self.background_terminal_lists += 1;
+                let data = Value::Array(self.background_terminals.clone());
+                self.reply(&id, json!({ "data": data }));
             }
             "model/list" => self.models(&id, params),
             "skills/list" => {
@@ -345,10 +369,23 @@ impl Fake {
     fn resume_thread(&mut self, id: &Value, params: &Value) {
         self.thread_log
             .push(json!({ "method": "thread/resume", "params": params }));
-        if self.fail_resume {
-            return self.fail(id, -32600, "no rollout found for the thread");
-        }
         let thread_id = params["threadId"].as_str().unwrap_or_default().to_owned();
+        if self.closing_on_resume {
+            return self.fail(
+                id,
+                -32600,
+                &format!(
+                    "thread {thread_id} is closing; retry thread/resume after the thread is closed"
+                ),
+            );
+        }
+        if self.fail_resume {
+            return self.fail(
+                id,
+                -32600,
+                &format!("no rollout found for thread id {thread_id}"),
+            );
+        }
         let mut thread = self.thread(&thread_id, params["cwd"].as_str());
         if let Some(model) = params["model"].as_str() {
             thread["model"] = json!(model);
@@ -460,9 +497,32 @@ impl Fake {
                 self.send(json!({ "method": "test/notified", "params": params }));
                 self.reply(id, Value::Null);
             }
+            "test/heldNow" => {
+                let held: Vec<Value> = self
+                    .held
+                    .iter()
+                    .map(|held| {
+                        json!({ "method": held.method, "params": held.params, "receivedAt": held.received_at })
+                    })
+                    .collect();
+                self.reply(id, Value::Array(held));
+            }
+            "test/backgroundTerminalLists" => {
+                self.reply(id, json!(self.background_terminal_lists));
+            }
+            "test/backgroundTerminals" => {
+                self.background_terminals =
+                    params["terminals"].as_array().cloned().unwrap_or_default();
+                self.reply(id, Value::Null);
+            }
             "test/noise" => {
                 self.send(json!("this is not json"));
                 self.reply(id, json!("still alive"));
+            }
+            "test/notUtf8" => {
+                let mut stdout = std::io::stdout().lock();
+                let _ = stdout.write_all(b"\xff\xfe not text\n");
+                let _ = stdout.flush();
             }
             "test/pid" => self.reply(id, json!(std::process::id())),
             codex_control::ASK => {
@@ -490,6 +550,7 @@ impl Fake {
     fn exit(&self, code: i32) -> ! {
         if let Some(path) = &self.control_file {
             let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(codex_control::own_control_file(path));
         }
         std::process::exit(code)
     }

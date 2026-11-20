@@ -14,7 +14,7 @@ fn schema() -> Value {
 fn reporting(plan_mode: bool) -> ThreadSettings {
     ThreadSettings {
         plan_mode,
-        report_format: Some(ReportFormat::new(schema().as_object().unwrap().clone())),
+        report_format: Some(ReportFormat::new(schema().as_object().unwrap().clone()).unwrap()),
         ..ThreadSettings::default()
     }
 }

@@ -39,6 +39,7 @@ mod cli;
 mod context_limit;
 mod events;
 mod messages;
+mod report_format;
 pub mod routes;
 mod skills;
 mod socket;
@@ -59,17 +60,18 @@ pub use approvals::{
 };
 pub use cli::{CliRelease, CliUpdate};
 pub use context_limit::ContextLimit;
-pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody};
+pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody, TurnOrigin};
 pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
     PostMessage, QueueFull, SendMessage,
 };
+pub use report_format::{ReportFormat, ReportFormatError};
 pub use skills::{Skill, SlashCommand, ThreadSkills};
 pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};
 pub use text::{RequiredText, is_javascript_whitespace};
 pub use threads::{
     AccessLimit, CreateThread, ListEvents, ListThreads, OutsideWrites, Permission, Provider,
-    ReportFormat, Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
+    Thread, ThreadDetails, ThreadId, ThreadSandbox, ThreadSettings,
 };
 pub use time::{Timestamp, TimestampError};
 pub use turns::{

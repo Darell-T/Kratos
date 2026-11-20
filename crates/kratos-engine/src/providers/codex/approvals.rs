@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use super::actor::Actor;
 use super::policy::{self, CommandRequest, Verdict};
+use super::servers::ServerKey;
 use super::{ProviderError, wire};
 
 /// A request that waits on the user. `A` is what an approval's answer is built from; a question
@@ -78,29 +79,39 @@ impl Requests {
         }
     }
 
-    /// The thread whose request Codex withdrew, and that request's ids.
-    pub(super) fn withdraw(&mut self, codex_id: &RequestId) -> Option<(ThreadId, Closed)> {
-        let approval = find_id(&self.approvals, codex_id);
-        let question = find_id(&self.questions, codex_id);
-        let thread_id = approval
-            .as_ref()
-            .and_then(|id| self.approvals.get(id))
-            .map(|waiting| waiting.thread_id.clone())
-            .or_else(|| {
-                question
-                    .as_ref()
-                    .and_then(|id| self.questions.get(id))
-                    .map(|waiting| waiting.thread_id.clone())
-            })?;
-        approval.as_ref().map(|id| self.approvals.remove(id));
-        question.as_ref().map(|id| self.questions.remove(id));
-        Some((
-            thread_id,
-            Closed {
-                approvals: approval.into_iter().collect(),
-                questions: question.into_iter().collect(),
-            },
-        ))
+    pub(super) fn awaits_user(&self, thread_id: &ThreadId) -> bool {
+        self.approvals
+            .values()
+            .any(|waiting| &waiting.thread_id == thread_id)
+            || self
+                .questions
+                .values()
+                .any(|waiting| &waiting.thread_id == thread_id)
+    }
+
+    /// The ids of the request Codex withdrew, or `None` when none of `thread_id`'s waits. Each
+    /// server numbers its own requests, so `thread_id`, the thread of the server that withdrew
+    /// it, picks the request among those of the same number.
+    pub(super) fn withdraw(
+        &mut self,
+        thread_id: &ThreadId,
+        codex_id: &RequestId,
+    ) -> Option<Closed> {
+        let approval = find_id(&self.approvals, thread_id, codex_id);
+        let question = find_id(&self.questions, thread_id, codex_id);
+        if approval.is_none() && question.is_none() {
+            return None;
+        }
+        if let Some(id) = &approval {
+            self.approvals.remove(id);
+        }
+        if let Some(id) = &question {
+            self.questions.remove(id);
+        }
+        Some(Closed {
+            approvals: approval.into_iter().collect(),
+            questions: question.into_iter().collect(),
+        })
     }
 }
 
@@ -119,26 +130,33 @@ fn take_where<K: Clone + Eq + std::hash::Hash, A>(
     ids
 }
 
-fn find_id<K: Clone, A>(map: &HashMap<K, Waiting<A>>, codex_id: &RequestId) -> Option<K> {
+fn find_id<K: Clone, A>(
+    map: &HashMap<K, Waiting<A>>,
+    thread_id: &ThreadId,
+    codex_id: &RequestId,
+) -> Option<K> {
     map.iter()
-        .find(|(_, waiting)| &waiting.request.id == codex_id)
+        .find(|(_, waiting)| &waiting.thread_id == thread_id && &waiting.request.id == codex_id)
         .map(|(id, _)| id.clone())
 }
 
 impl Actor {
     /// Codex no longer needs an answer: the request closes, and an answer sent later is dropped.
-    pub(super) async fn withdraw(&mut self, codex_id: &RequestId) {
-        if let Some((thread_id, closed)) = self.requests.withdraw(codex_id) {
+    pub(super) async fn withdraw(&mut self, key: &ServerKey, codex_id: &RequestId) {
+        let ServerKey::Thread(thread_id) = key else {
+            return;
+        };
+        if let Some(closed) = self.requests.withdraw(thread_id, codex_id) {
             let _ = self
-                .write(&thread_id, move |write| {
+                .write(thread_id, move |write| {
                     settle_closed(write, &closed, "Codex no longer needs an answer")
                 })
                 .await;
         }
     }
 
-    pub(super) async fn on_request(&mut self, request: IncomingRequest) {
-        let Some(thread_id) = self.thread_of(request.request.thread_id()) else {
+    pub(super) async fn on_request(&mut self, key: &ServerKey, request: IncomingRequest) {
+        let Some(thread_id) = self.thread_of(key, request.request.thread_id()) else {
             // A thread Kratos does not run cannot be granted anything.
             refuse(request);
             return;

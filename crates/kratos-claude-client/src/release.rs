@@ -29,6 +29,9 @@ const READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// The native updater downloads a whole release without printing progress, and stopping it
 /// midway can leave a broken CLI, so it gets as long as a slow link needs.
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// The most [`update`] can take: `doctor`, the updater, then `--version`, each within its limit.
+pub const UPDATE_LIMIT: Duration =
+    Duration::from_secs(READ_TIMEOUT.as_secs() + UPDATE_TIMEOUT.as_secs() + READ_TIMEOUT.as_secs());
 /// How much of a failed command's output an error keeps.
 const OUTPUT_KEPT: usize = 2_000;
 

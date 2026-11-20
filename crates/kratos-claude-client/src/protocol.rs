@@ -251,6 +251,26 @@ pub struct RateLimitEvent {
     pub metadata: BTreeMap<String, Value>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Background {
+    /// How many run now. Each report gives the whole set, so the latest count is the current one.
+    Running(usize),
+    /// The CLI may follow a finished task with a report turn. It supplies the summary when available.
+    Ended { summary: Option<String> },
+}
+
+impl Background {
+    fn of(raw: &Value) -> Option<Background> {
+        match raw["subtype"].as_str()? {
+            "background_tasks_changed" => Some(Background::Running(raw["tasks"].as_array()?.len())),
+            "task_notification" => Some(Background::Ended {
+                summary: raw["summary"].as_str().map(str::to_owned),
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Messages forwarded to the engine. Unknown kinds remain available as their original JSON.
 #[derive(Clone, Debug, PartialEq)]
 pub enum StreamMessage {
@@ -264,6 +284,9 @@ pub enum StreamMessage {
     RateLimit(RateLimitEvent),
     /// The CLI's request failed and the CLI retries by itself.
     ApiRetry(ApiRetry),
+    /// News of the CLI's background tasks, such as a shell command started with
+    /// `run_in_background`.
+    Background(Background),
     Unrecognized {
         kind: String,
         raw: Value,
@@ -308,6 +331,9 @@ impl StreamMessage {
                     raw,
                 },
             });
+        }
+        if let Some(background) = Background::of(&raw) {
+            return Ok(Self::Background(background));
         }
         if raw["subtype"] != "init" {
             return Ok(Self::Unrecognized {

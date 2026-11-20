@@ -758,3 +758,98 @@ fn closes_a_socket_whose_message_passes_64_kib_and_serves_the_next() {
     let mut next = subscribed(&engine, &thread.id, 0);
     assert_eq!(next_seqs(&mut next, 1), [1]);
 }
+
+#[test]
+fn a_report_format_the_providers_cannot_follow_is_refused_where_it_is_set() {
+    // Catches a bad schema accepted into a thread's settings, where it fails only later: Claude
+    // ignores a schema whose type is not a JSON type (measured), and refuses a root that is not an
+    // object with an API error.
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let workspace = engine.create_workspace();
+    let create = |format: Value| {
+        send(
+            &client,
+            "POST",
+            "/api/threads",
+            Some(
+                json!({ "workspaceId": workspace.id, "title": "report", "provider": "codex",
+                "settings": { "permission": "askMe", "planMode": false, "reportFormat": format } }),
+            ),
+        )
+    };
+
+    let refused =
+        create(json!({ "type": "object", "properties": { "verdict": { "type": "text" } } }));
+    assert_eq!(refused.status, 400, "{}", refused.body);
+    assert!(
+        error_text(&refused).contains("reportFormat at /properties/verdict/type"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(create(json!({ "type": "array" })).status, 400);
+
+    let good = json!({ "type": "object", "properties": { "verdict": { "type": "string" } },
+                       "required": ["verdict"] });
+    let accepted = create(good.clone());
+    assert_eq!(accepted.status, 201, "{}", accepted.body);
+    let thread: Thread = serde_json::from_value(accepted.body).unwrap();
+    let settings = format!("/api/threads/{}/settings", thread.id);
+    let changed = send(
+        &client,
+        "PUT",
+        &settings,
+        Some(
+            json!({ "permission": "askMe", "planMode": false, "reportFormat": { "type": "objekt" } }),
+        ),
+    );
+    assert_eq!(changed.status, 400, "{}", changed.body);
+    assert!(
+        error_text(&changed).contains("reportFormat"),
+        "{}",
+        changed.body
+    );
+    let details = client.get(&format!("/api/threads/{}", thread.id)).unwrap();
+    assert_eq!(details.body["settings"]["reportFormat"], good);
+}
+
+#[test]
+fn legacy_report_settings_can_be_read_and_replaced_without_losing_history() {
+    let home = tempfile::tempdir().unwrap();
+    let engine = RunningEngine::start(home.path());
+    let thread = engine.create_thread();
+    change_model(&engine.client(), &thread, "old-model");
+    drop(engine);
+    let db = rusqlite::Connection::open(home.path().join("kratos.db")).unwrap();
+    db.execute(
+        "UPDATE threads SET report_format = '{}' WHERE id = ?1",
+        [thread.id.as_str()],
+    )
+    .unwrap();
+    let updated = db.execute(
+        "UPDATE thread_events SET event = json_set(event, '$.settings.reportFormat', json('{}'))
+         WHERE thread_id = ?1 AND json_extract(event, '$.kind') = 'settings.changed'",
+        [thread.id.as_str()],
+    ).unwrap();
+    assert_eq!(updated, 1);
+    drop(db);
+
+    let engine = RunningEngine::start(home.path());
+    let client = engine.client();
+    let path = format!("/api/threads/{}", thread.id);
+    let details = client.get(&path).unwrap();
+    assert_eq!(details.status, 200);
+    assert_eq!(details.body["settings"]["reportFormat"], json!({}));
+    change_model(&client, &thread, "repaired-model");
+    let history = client.get(&format!("{path}/events")).unwrap();
+    assert_eq!(history.status, 200);
+    assert!(
+        history
+            .body
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["event"]["settings"]["reportFormat"] == json!({}))
+    );
+}

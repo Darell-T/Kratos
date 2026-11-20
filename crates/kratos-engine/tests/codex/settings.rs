@@ -410,7 +410,7 @@ async fn a_report_format_reaches_each_codex_turn_except_a_planning_one() {
     // Catches a schema Codex never receives, and a plan forced into a report's shape.
     let schema = json!({ "type": "object", "required": ["verdict"] });
     let reporting = ThreadSettings {
-        report_format: Some(ReportFormat::new(schema.as_object().unwrap().clone())),
+        report_format: Some(ReportFormat::new(schema.as_object().unwrap().clone()).unwrap()),
         ..ThreadSettings::default()
     };
     let mut harness = Harness::start(Options {
@@ -464,9 +464,9 @@ async fn a_codex_turn_under_a_report_format_ends_with_its_reply_as_a_report() {
     // of the history needs to know which provider ran the turn, and a reply that is not JSON
     // recorded as a report.
     let reporting = ThreadSettings {
-        report_format: Some(ReportFormat::new(
-            json!({ "type": "object" }).as_object().unwrap().clone(),
-        )),
+        report_format: Some(
+            ReportFormat::new(json!({ "type": "object" }).as_object().unwrap().clone()).unwrap(),
+        ),
         ..ThreadSettings::default()
     };
     let mut harness = Harness::start(Options {

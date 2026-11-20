@@ -1,13 +1,12 @@
-//! Requests a thread's agent makes through Kratos's tools. The `Kratos-Thread` header names that
-//! thread, and a request without it comes from the user. Such a request reaches only the routes the
-//! tools call, may give no thread more access than the acting thread has, and may not act on the
-//! acting thread itself.
+//! Only Full access permits thread tools to act across workspaces. All threads may read across workspaces.
 
 use axum::extract::Request;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use kratos_protocol::{ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings};
+use kratos_protocol::{
+    ACTING_THREAD_HEADER, AccessLimit, MessageOrigin, ThreadId, ThreadSettings, WorkspaceId,
+};
 use kratos_store::StoreError;
 
 use super::{ApiError, ServerState};
@@ -23,6 +22,7 @@ pub(super) async fn refuse_agents(request: Request, next: Next) -> Response {
 
 pub(super) struct Acting {
     thread_id: ThreadId,
+    workspace_id: WorkspaceId,
     pub(super) access: AccessLimit,
 }
 
@@ -57,6 +57,7 @@ impl Acting {
             .await?;
         Ok(Some(Acting {
             thread_id: thread.thread.id,
+            workspace_id: thread.thread.workspace_id,
             access,
         }))
     }
@@ -68,6 +69,31 @@ impl Acting {
             ));
         }
         Ok(())
+    }
+
+    pub(super) fn check_workspace_access(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<(), ApiError> {
+        if self.access != AccessLimit::FULL && self.workspace_id != *workspace_id {
+            return Err(forbidden(
+                "Below Full access, Kratos's tools act only on threads in your own workspace. Ask the user to act in another one.",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) async fn reaches(
+        &self,
+        state: &ServerState,
+        thread_id: &ThreadId,
+    ) -> Result<(), ApiError> {
+        let target = thread_id.clone();
+        let thread = state
+            .store
+            .call(move |store| store.provider_thread(&target))
+            .await?;
+        self.check_workspace_access(&thread.thread.workspace_id)
     }
 
     /// A thread it creates gets no more access than it has.

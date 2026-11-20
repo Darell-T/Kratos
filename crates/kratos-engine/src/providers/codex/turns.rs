@@ -11,9 +11,10 @@ use kratos_protocol::{
 };
 use serde_json::json;
 
-use super::actor::{Actor, Done, MAX_STARTING, Reply};
+use super::actor::{Actor, Done, Reply};
 use super::approvals::settle_closed;
 use super::profiles::Profile;
+use super::servers::ServerKey;
 use super::threads::{Turn, TurnWork};
 use super::{ProviderError, policy, wire};
 use crate::providers::{queue, report_item};
@@ -36,6 +37,23 @@ pub(super) enum Delivery {
     Steer,
 }
 
+/// A `turn/start` sent for a message. Its answer changes nothing unless the message is still the
+/// one the thread is starting.
+pub(super) struct StartRequest {
+    pub(super) thread_id: ThreadId,
+    pub(super) message_id: MessageId,
+    pub(super) params: Box<types::TurnStartParams>,
+    pub(super) attempt: StartTry,
+}
+
+/// Codex may refuse a start before running it. The actor then sends it once more, on the
+/// `Last` try.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum StartTry {
+    First,
+    Last,
+}
+
 /// The users who asked Codex to stop a turn. They hear whether Codex stopped it, and may ask
 /// again.
 pub(super) struct StopWaiters(pub(super) Vec<Reply<()>>);
@@ -50,8 +68,8 @@ impl StopWaiters {
 
 impl Actor {
     /// Starts the thread's next queued message when nothing holds the queue: the turn before it is
-    /// confirmed finished (D11), no steer is out, the queue is not paused, Codex has the thread
-    /// loaded, and a start slot is free. Safe to call at any time; it does nothing otherwise.
+    /// confirmed finished (D11), no steer is out, the queue is not paused, and Codex has the thread
+    /// loaded. Safe to call at any time; it does nothing otherwise.
     pub(super) async fn dispatch(&mut self, thread_id: &ThreadId) {
         let Some(thread) = self.threads.get(thread_id) else {
             return;
@@ -62,6 +80,14 @@ impl Actor {
         let Some(next) = self.next_to_start(thread_id).await else {
             return;
         };
+        if let Err(error) = self.threads[thread_id].settings.validate_report_format() {
+            self.pause_unavailable_if_waiting(
+                thread_id,
+                format!("{error}. Replace or clear the report format, then resume the thread."),
+            )
+            .await;
+            return;
+        }
         let native_id = match self.attached(thread_id).await {
             Ok(Some(native_id)) => native_id,
             // Loading; the load's completion dispatches again.
@@ -73,17 +99,6 @@ impl Actor {
             }
         };
         if self.fork_for_access(thread_id, next.origin.limit()) {
-            return;
-        }
-        let starting = self
-            .threads
-            .values()
-            .filter(|thread| matches!(thread.turn, Turn::Starting { .. }))
-            .count();
-        if starting >= MAX_STARTING {
-            if !self.ready.contains(thread_id) {
-                self.ready.push_back(thread_id.clone());
-            }
             return;
         }
         self.start_turn(thread_id, native_id, next).await;
@@ -107,20 +122,12 @@ impl Actor {
         }
     }
 
-    /// Gives a freed start slot to the thread that waited longest.
-    pub(super) async fn start_ready(&mut self) {
-        while let Some(thread_id) = self.ready.pop_front() {
-            self.dispatch(&thread_id).await;
-            if self.ready.back() == Some(&thread_id) {
-                // Still no slot; it keeps its place.
-                self.ready.rotate_right(1);
-                return;
-            }
-        }
-    }
-
     async fn start_turn(&mut self, thread_id: &ThreadId, native_id: String, message: Message) {
-        let Some(codex) = self.connection().ok().flatten() else {
+        let Some(codex) = self
+            .connection(&ServerKey::Thread(thread_id.clone()))
+            .ok()
+            .flatten()
+        else {
             return;
         };
         let message_id = message.id.clone();
@@ -163,34 +170,46 @@ impl Actor {
         *access = thread.settings.access();
         let mut params = turn_start_params(native_id, &message, thread.model(), &thread.settings);
         params.runtime_workspace_roots = Some(vec![types::AbsolutePathBuf(thread.folder.clone())]);
-        let thread_id = thread_id.clone();
-        self.spawn(async move {
-            let result = match codex.request::<methods::TurnStart>(&params).await {
-                // Refused before it ran, so a second try cannot run it twice.
-                Err(RequestError::Rpc { code, .. }) if rejected_before_execution(code) => {
-                    codex.request::<methods::TurnStart>(&params).await
-                }
-                result => result,
-            };
-            Done::StartAnswered {
-                thread_id,
-                result: result.map(|started| Box::new(started.turn)),
-            }
+        let request = StartRequest {
+            thread_id: thread_id.clone(),
+            message_id,
+            params: Box::new(params),
+            attempt: StartTry::First,
+        };
+        self.request_start(codex, request);
+    }
+
+    fn request_start(&self, codex: Codex, request: StartRequest) {
+        self.spawn(&ServerKey::Thread(request.thread_id.clone()), async move {
+            let result = codex
+                .request::<methods::TurnStart>(&request.params)
+                .await
+                .map(|started| Box::new(started.turn));
+            Done::StartAnswered { request, result }
         });
     }
 
     pub(super) async fn on_start_answered(
         &mut self,
-        thread_id: ThreadId,
+        request: StartRequest,
         result: Result<Box<types::Turn>, RequestError>,
     ) {
-        let Some(Turn::Starting { message_id, .. }) =
-            self.threads.get(&thread_id).map(|thread| &thread.turn)
-        else {
+        let (thread_id, message_id) = (request.thread_id.clone(), request.message_id.clone());
+        if !self.is_starting(&thread_id, &message_id) {
             return;
-        };
-        let message_id = message_id.clone();
+        }
+        if self.may_retry_start(&request, &result)
+            && let Some(codex) = self.servers.codex(&ServerKey::Thread(thread_id.clone()))
+        {
+            let request = StartRequest {
+                attempt: StartTry::Last,
+                ..request
+            };
+            self.request_start(codex, request);
+            return;
+        }
         match result {
+            // A Stop asked for meanwhile interrupts the turn once it is accepted.
             Ok(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
             Err(RequestError::Rpc { code, message }) if rejected_before_execution(code) => {
                 self.refuse_start(&thread_id, &message_id, message).await;
@@ -199,17 +218,39 @@ impl Actor {
                 self.check_delivery(&thread_id, &message_id, Delivery::Start, error.to_string());
             }
         }
-        self.start_ready().await;
+    }
+
+    /// A refused start is sent once more only when the refusal proves the first try never ran,
+    /// the same message is still the one starting, and the user has not asked to stop it.
+    fn may_retry_start(
+        &self,
+        request: &StartRequest,
+        result: &Result<Box<types::Turn>, RequestError>,
+    ) -> bool {
+        let never_ran = matches!(
+            result,
+            Err(RequestError::Rpc { code, .. }) if rejected_before_execution(*code)
+        );
+        let still_wanted = matches!(
+            self.threads.get(&request.thread_id).map(|thread| &thread.turn),
+            Some(Turn::Starting { message_id, work, .. })
+                if *message_id == request.message_id && work.stop_id.is_none()
+        );
+        never_ran && still_wanted && matches!(request.attempt, StartTry::First)
+    }
+
+    /// Whether `message_id` is the message the thread is starting a turn for. A `turn/start`
+    /// answer or history check for any other message belongs to a start that already ended.
+    fn is_starting(&self, thread_id: &ThreadId, message_id: &MessageId) -> bool {
+        matches!(
+            self.threads.get(thread_id).map(|thread| &thread.turn),
+            Some(Turn::Starting { message_id: starting, .. }) if starting == message_id
+        )
     }
 
     /// Codex refused the message before acting on it. It may be sent again, by the user.
     async fn refuse_start(&mut self, thread_id: &ThreadId, message_id: &MessageId, error: String) {
-        self.end_start(
-            thread_id,
-            Err(ProviderError::Conflict(format!(
-                "Codex refused the message: {error}"
-            ))),
-        );
+        self.end_start(thread_id);
         let message_id = message_id.clone();
         let _ = self
             .write(thread_id, move |write| {
@@ -228,7 +269,7 @@ impl Actor {
         let (
             Turn::Running {
                 turn_id,
-                stopping: false,
+                work: TurnWork { stop_id: None, .. },
                 ..
             },
             Some(native_id),
@@ -251,7 +292,7 @@ impl Actor {
             ));
         }
         let codex = self
-            .connection()?
+            .connection(&ServerKey::Thread(thread_id.clone()))?
             .ok_or_else(|| ProviderError::Unavailable("Codex is starting".into()))?;
         let submitting = self
             .set_message_status(thread_id, &message_id, MessageStatus::Submitting)
@@ -270,7 +311,7 @@ impl Actor {
             thread_id: native_id,
         };
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
             let result = codex
                 .request::<methods::TurnSteer>(&params)
                 .await
@@ -331,15 +372,12 @@ impl Actor {
         error: String,
     ) {
         let (thread_id, message_id) = (thread_id.clone(), message_id.clone());
-        let codex = match &self.server {
-            super::actor::Server::Up { codex, .. } => Some(codex.clone()),
-            _ => None,
-        };
+        let codex = self.servers.codex(&ServerKey::Thread(thread_id.clone()));
         let native_id = self
             .threads
             .get(&thread_id)
             .and_then(|thread| thread.native_id().map(str::to_owned));
-        self.spawn(async move {
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
             let found = match (codex, native_id) {
                 (Some(codex), Some(native_id)) => read_history(&codex, &native_id)
                     .await
@@ -370,10 +408,11 @@ impl Actor {
         found: Option<Box<types::Turn>>,
     ) {
         match delivery {
+            Delivery::Start if !self.is_starting(&thread_id, &message_id) => {}
             Delivery::Start => match found {
                 Some(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
                 None => {
-                    self.end_start(&thread_id, Ok(()));
+                    self.end_start(&thread_id);
                     self.record_uncertain(&thread_id, message_id, error).await;
                 }
             },
@@ -432,7 +471,7 @@ impl Actor {
                             turn_id: turn_id.clone(),
                         },
                     )?;
-                    write.start_turn(turn_id)
+                    write.start_turn(turn_id, kratos_protocol::TurnOrigin::Messages)
                 }
             })
             .await;
@@ -448,7 +487,6 @@ impl Actor {
         };
         thread.turn = Turn::Running {
             turn_id: turn_id.clone(),
-            stopping: false,
             work,
         };
         if recorded.is_err() {
@@ -470,18 +508,15 @@ impl Actor {
         }
     }
 
-    /// Leaves the starting state, answering any stop that waited for the start.
-    pub(super) fn end_start(&mut self, thread_id: &ThreadId, for_stop: Result<(), ProviderError>) {
+    /// Leaves the starting state. No turn runs, so any stop that waited for the start succeeded.
+    pub(super) fn end_start(&mut self, thread_id: &ThreadId) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
         if let Turn::Starting { stop_waiters, .. } = std::mem::replace(&mut thread.turn, Turn::Idle)
         {
             for waiter in stop_waiters {
-                let _ = waiter.send(match &for_stop {
-                    Ok(()) => Ok(()),
-                    Err(error) => Err(ProviderError::Conflict(error.to_string())),
-                });
+                let _ = waiter.send(Ok(()));
             }
         }
     }
@@ -507,16 +542,21 @@ impl Actor {
             return;
         }
         let (turn_id, work) = thread.turn.end_running().expect("the turn runs");
-        let outcome = wire::turn_outcome(&turn).unwrap_or(TurnOutcome::Failed {
-            error: "Codex reported the turn finished while still in progress".to_owned(),
-        });
+        let outcome = if work.stop_id.is_some() {
+            TurnOutcome::Interrupted
+        } else {
+            wire::turn_outcome(&turn).unwrap_or(TurnOutcome::Failed {
+                error: "Codex reported the turn finished while still in progress".to_owned(),
+            })
+        };
         // Whether the turn stopped because the account ran out of its included usage (D39).
-        let at_limit = matches!(
-            turn.error
-                .as_ref()
-                .and_then(|error| error.codex_error_info.as_ref()),
-            Some(types::CodexErrorInfo::UsageLimitExceeded)
-        );
+        let at_limit = work.stop_id.is_none()
+            && matches!(
+                turn.error
+                    .as_ref()
+                    .and_then(|error| error.codex_error_info.as_ref()),
+                Some(types::CodexErrorInfo::UsageLimitExceeded)
+            );
         let after = match &outcome {
             _ if at_limit => After::Pause(PauseReason::UsageLimit {
                 turn_id: turn_id.clone(),
@@ -560,6 +600,7 @@ impl Actor {
             changes,
             context,
             last_reply,
+            ..
         } = work;
         let changes = changes.finish();
         // Codex holds the final reply to the format, so a reply that is not JSON means the turn
@@ -604,6 +645,7 @@ impl Actor {
             let _ = reply.send(Err(error));
             return;
         }
+        self.arm_stop_deadline(thread_id);
         let thread = self.threads.get_mut(thread_id).expect("loaded above");
         match &mut thread.turn {
             Turn::Idle => drop(reply.send(Ok(()))),
@@ -613,28 +655,47 @@ impl Actor {
         }
     }
 
+    fn arm_stop_deadline(&mut self, thread_id: &ThreadId) {
+        let thread = self
+            .threads
+            .get_mut(thread_id)
+            .expect("stop loaded this thread");
+        let Some(work) = thread.turn.work_mut() else {
+            return;
+        };
+        if work.stop_id.is_some() {
+            return;
+        }
+        let stop_id = uuid::Uuid::new_v4();
+        work.stop_id = Some(stop_id);
+        let deadline = tokio::time::Instant::now() + self.settings.stop_timeout;
+        let thread_id = thread_id.clone();
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
+            tokio::time::sleep_until(deadline).await;
+            Done::StopExpired { thread_id, stop_id }
+        });
+    }
+
     pub(super) fn interrupt(&mut self, thread_id: &ThreadId, waiters: StopWaiters) {
         let Some(thread) = self.threads.get_mut(thread_id) else {
             return;
         };
-        let Turn::Running {
-            turn_id, stopping, ..
-        } = &mut thread.turn
-        else {
+        let Turn::Running { turn_id, .. } = &mut thread.turn else {
             waiters.tell(|| Ok(()));
             return;
         };
-        *stopping = true;
         let turn_id = turn_id.clone();
         let (Some(native_id), Some(codex)) = (
             thread.native_id().map(str::to_owned),
-            self.connection().ok().flatten(),
+            self.connection(&ServerKey::Thread(thread_id.clone()))
+                .ok()
+                .flatten(),
         ) else {
             waiters.tell(|| Err(ProviderError::Unavailable("Codex is not running".into())));
             return;
         };
         let thread_id = thread_id.clone();
-        self.spawn(async move {
+        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
             let params = types::TurnInterruptParams {
                 thread_id: native_id,
                 turn_id: turn_id.as_str().to_owned(),
@@ -652,57 +713,16 @@ impl Actor {
         });
     }
 
-    pub(super) async fn on_interrupted(
-        &mut self,
-        thread_id: ThreadId,
-        turn_id: TurnId,
-        result: Result<(), RequestError>,
-        waiters: StopWaiters,
-    ) {
-        let still_running = self
+    pub(super) fn on_stop_expired(&mut self, thread_id: &ThreadId, stop_id: uuid::Uuid) {
+        let current = self
             .threads
-            .get(&thread_id)
-            .and_then(|thread| thread.turn.running_id())
-            == Some(&turn_id);
-        match result {
-            Ok(()) => {
-                if still_running {
-                    let timeout = self.settings.stop_timeout;
-                    self.spawn(async move {
-                        tokio::time::sleep(timeout).await;
-                        Done::StopExpired { thread_id, turn_id }
-                    });
-                }
-                waiters.tell(|| Ok(()));
+            .get_mut(thread_id)
+            .and_then(|thread| thread.turn.work_mut());
+        if current.is_some_and(|work| work.stop_id == Some(stop_id)) {
+            let key = ServerKey::Thread(thread_id.clone());
+            if let Some(codex) = self.servers.begin_close(&key) {
+                tokio::spawn(async move { codex.terminate().await });
             }
-            Err(error) => {
-                if still_running
-                    && let Some(Turn::Running { stopping, .. }) = self
-                        .threads
-                        .get_mut(&thread_id)
-                        .map(|thread| &mut thread.turn)
-                {
-                    // Another stop may try again; the queue stays where it is.
-                    *stopping = false;
-                }
-                waiters.tell(|| {
-                    Err(ProviderError::Unavailable(format!(
-                        "Codex did not stop the turn: {error}"
-                    )))
-                });
-            }
-        }
-    }
-
-    /// Codex accepted the stop but the turn did not end in time: Codex is closed, which ends the
-    /// turn as failed.
-    pub(super) async fn on_stop_expired(&mut self, thread_id: &ThreadId, turn_id: &TurnId) {
-        let still_stopping = matches!(
-            self.threads.get(thread_id).map(|thread| &thread.turn),
-            Some(Turn::Running { turn_id: running, stopping: true, .. }) if running == turn_id
-        );
-        if still_stopping {
-            self.stop_server("a stopped turn did not end").await;
         }
     }
 }

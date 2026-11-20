@@ -11,6 +11,7 @@ use kratos_protocol::{
 use kratos_store::{Enqueued, QueuePlace};
 
 use super::actor::{Actor, Command, Done, Reply};
+use super::servers::ServerKey;
 use super::threads::{Link, Turn};
 use super::turns::read_history;
 use super::{Continued, MAX_PENDING_MESSAGES, ProviderError, Sent, wire};
@@ -105,11 +106,13 @@ impl Actor {
                 if matches!(thread.link, Link::Attaching) {
                     thread.discards.push((message_id, reply));
                 } else {
-                    self.deferred.push(Command::Discard {
+                    let key = ServerKey::Thread(thread_id.clone());
+                    let deferred = Command::Discard {
                         thread_id,
                         message_id,
                         reply,
-                    });
+                    };
+                    self.servers.slot(&key).deferred.push(deferred);
                 }
                 return;
             }
@@ -118,12 +121,14 @@ impl Actor {
                 return;
             }
         };
+        let key = ServerKey::Thread(thread_id.clone());
         let codex = self
-            .connection()
-            .ok()
-            .flatten()
-            .expect("attached implies connected");
-        self.spawn(async move {
+            .servers
+            .codex(&key)
+            .expect("an attached thread's server is up");
+        let pending_request = self.servers.request_guard(&key);
+        self.spawn(&key, async move {
+            let _guard = pending_request;
             let result = read_history(&codex, &native_id).await.map(Box::new);
             Done::HistoryForDiscard {
                 thread_id,
@@ -179,8 +184,19 @@ impl Actor {
         }
         let found = wire::turn_with_message(&history.turns, message_id.as_str())
             .map(|turn| kratos_protocol::TurnId::new(turn.id.clone()));
+        self.settle_discard(&thread_id, message_id, found, reply)
+            .await;
+    }
+
+    pub(super) async fn settle_discard(
+        &mut self,
+        thread_id: &ThreadId,
+        message_id: MessageId,
+        found: Option<kratos_protocol::TurnId>,
+        reply: Reply<Message>,
+    ) {
         let settled = self
-            .write(&thread_id, move |write| {
+            .write(thread_id, move |write| {
                 // Discarding prevents a replay; it cannot undo work Codex may have done.
                 let status = match found {
                     Some(turn_id) => MessageStatus::Accepted { turn_id },
@@ -192,7 +208,7 @@ impl Actor {
             })
             .await;
         let _ = reply.send(settled);
-        self.dispatch(&thread_id).await;
+        self.dispatch(thread_id).await;
     }
 
     /// Lets a paused queue run again. See [`resume_queue`].

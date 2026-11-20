@@ -8,7 +8,7 @@ use kratos_claude_client::{
 use kratos_protocol::{ContextUsage, PauseReason, ThreadEventBody, Timestamp, TurnId, TurnOutcome};
 use kratos_store::{StoreError, ThreadWrite};
 
-use super::threads::Rejection;
+use super::threads::{Rejection, ThreadState};
 use crate::providers::queue::pause_if_waiting;
 use crate::providers::report_item;
 
@@ -33,11 +33,38 @@ pub(super) struct TurnEnd {
     pub report: Option<serde_json::Value>,
 }
 
+impl ThreadState {
+    pub(super) fn reported_end(&mut self, result: &TurnResult) -> TurnEnd {
+        let rejection = self.rejection.take();
+        let model = self.answering_model.as_deref();
+        if self.stopping {
+            return TurnEnd {
+                context: context_usage(&result.context, model),
+                ..TurnEnd::interrupted()
+            };
+        }
+        TurnEnd::of(
+            result,
+            rejection.as_ref().filter(|r| !r.is_using_overage),
+            model,
+        )
+    }
+}
+
 impl TurnEnd {
     /// A turn that ended because its process did.
     pub(super) fn failed(error: String) -> TurnEnd {
         TurnEnd {
             outcome: TurnOutcome::Failed { error },
+            context: None,
+            stop: Stop::Ordinary,
+            report: None,
+        }
+    }
+
+    pub(super) fn interrupted() -> TurnEnd {
+        TurnEnd {
+            outcome: TurnOutcome::Interrupted,
             context: None,
             stop: Stop::Ordinary,
             report: None,

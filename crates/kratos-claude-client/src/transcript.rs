@@ -73,9 +73,20 @@ impl SessionStart {
 }
 
 /// The pinned layout under the user's home directory, not an already appended `.claude` folder.
+///
+/// The CLI names the project after its working folder as the system reports it. On macOS and
+/// Linux that is the physical path, with symbolic links resolved (`/var` is `/private/var` on
+/// macOS), so `cwd` is resolved the same way. Windows reports the folder as it was given.
 #[must_use]
 pub fn transcript_path(claude_home: &Path, cwd: &Path, id: SessionId) -> PathBuf {
-    let project: String = cwd
+    let physical = if cfg!(windows) {
+        None
+    } else {
+        std::fs::canonicalize(cwd).ok()
+    };
+    let project: String = physical
+        .as_deref()
+        .unwrap_or(cwd)
         .to_string_lossy()
         .chars()
         .map(|character| {
@@ -98,17 +109,19 @@ pub fn transcript_path(claude_home: &Path, cwd: &Path, id: SessionId) -> PathBuf
 pub struct DeliveredMessages {
     /// UUIDs of messages the CLI durably accepted.
     pub ids: HashSet<String>,
-    /// The last line was cut mid-write, so a message accepted just before a crash may be missing
-    /// from `ids`. Treat any message not in `ids` as unknown, never as undelivered.
-    pub torn_tail: bool,
+    /// A row could not be read, such as a line cut mid-write by a crash, so a message Claude
+    /// accepted may be missing from `ids`. Treat any message not in `ids` as unknown, never as
+    /// undelivered.
+    pub incomplete: bool,
 }
 
 /// Reads accepted user UUIDs, including folded messages saved as queued-command attachments.
-/// A missing file means no durable evidence of delivery.
+/// A missing file means no durable evidence of delivery. A row that is not JSON, or a delivery
+/// marker without a UUID, marks the evidence incomplete, and the rows after it are still read: a
+/// line torn by a crash is followed by the rows a resumed CLI appends.
 ///
 /// # Errors
-/// Returns an error for unreadable data, a malformed row that is not the unterminated last line,
-/// or a delivery marker without a UUID.
+/// Returns an error when the file cannot be read.
 pub async fn delivered_message_ids(path: &Path) -> Result<DeliveredMessages, TranscriptError> {
     let read_error = |source| TranscriptError::Read {
         path: path.to_owned(),
@@ -134,24 +147,15 @@ pub async fn delivered_message_ids(path: &Path) -> Result<DeliveredMessages, Tra
         {
             return Ok(delivered);
         }
-        let terminated = line.last() == Some(&b'\n');
-        let row: Value = match serde_json::from_slice(&line) {
-            Ok(row) => row,
-            Err(_) if !terminated => {
-                delivered.torn_tail = true;
-                return Ok(delivered);
+        let id = serde_json::from_slice::<Value>(&line)
+            .map_err(drop)
+            .and_then(|row| delivery_id(&row).map(|id| id.map(str::to_owned)));
+        match id {
+            Ok(Some(id)) => {
+                delivered.ids.insert(id);
             }
-            Err(source) => {
-                return Err(TranscriptError::Json {
-                    path: path.to_owned(),
-                    source,
-                });
-            }
-        };
-        if let Some(id) = delivery_id(&row).map_err(|()| TranscriptError::InvalidDelivery {
-            path: path.to_owned(),
-        })? {
-            delivered.ids.insert(id.to_owned());
+            Ok(None) => {}
+            Err(()) => delivered.incomplete = true,
         }
     }
 }
@@ -174,8 +178,6 @@ fn delivery_id(row: &Value) -> Result<Option<&str>, ()> {
 /// A failure with a session id or a transcript file, including delivery evidence read from it.
 #[derive(Debug, thiserror::Error)]
 pub enum TranscriptError {
-    #[error("Claude transcript {} has a delivery marker without a nonempty uuid", .path.display())]
-    InvalidDelivery { path: PathBuf },
     #[error("invalid Claude session id: {0}")]
     InvalidId(#[source] uuid::Error),
     #[error("Claude transcript is not a file: {}", .0.display())]
@@ -185,11 +187,5 @@ pub enum TranscriptError {
         path: PathBuf,
         #[source]
         source: io::Error,
-    },
-    #[error("cannot parse Claude transcript {}: {source}", .path.display())]
-    Json {
-        path: PathBuf,
-        #[source]
-        source: serde_json::Error,
     },
 }

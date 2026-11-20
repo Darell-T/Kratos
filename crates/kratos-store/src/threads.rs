@@ -1,7 +1,7 @@
 use kratos_protocol::{
     ContextLimit, ContextUsage, CreateThread, PauseReason, Permission, Provider, RequiredText,
     Thread, ThreadDetails, ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, TurnChanges,
-    TurnId, TurnOutcome, WorkspaceId,
+    TurnId, TurnOrigin, TurnOutcome, WorkspaceId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use uuid::Uuid;
@@ -176,12 +176,12 @@ impl ThreadWrite<'_> {
 
     /// Records that `turn_id` started. It stays the thread's running turn until
     /// [`ThreadWrite::complete_turn`].
-    pub fn start_turn(&mut self, turn_id: TurnId) -> Result<(), StoreError> {
+    pub fn start_turn(&mut self, turn_id: TurnId, origin: TurnOrigin) -> Result<(), StoreError> {
         self.transaction.execute(
             "UPDATE threads SET running_turn = ?1 WHERE id = ?2",
             params![turn_id.as_str(), self.thread_id().as_str()],
         )?;
-        self.append(ThreadEventBody::TurnStarted { turn_id })?;
+        self.append(ThreadEventBody::TurnStarted { turn_id, origin })?;
         Ok(())
     }
 

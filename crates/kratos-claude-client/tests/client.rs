@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use kratos_claude_client::{
     Claude, ConnectError, Control, ControlRequest, ExitCause, Incoming, IncomingControl,
-    Initialize, Initialized, Launch, MAX_LINE_BYTES, PermissionMode, RequestError, SessionId,
-    SessionStart, SettingSource, StreamMessage, TurnOutcome, connect,
+    Initialize, Initialized, Launch, PermissionMode, RequestError, SessionId, SessionStart,
+    SettingSource, StreamMessage, TurnOutcome, connect,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -557,15 +557,13 @@ async fn process_exit_settles_requests_even_when_the_event_queue_is_full() {
 #[tokio::test]
 async fn oversized_and_malformed_lines_are_reported_and_the_next_frame_survives() {
     // Catches an oversized line exhausting memory or terminating parsing before the next valid frame.
-    let (claude, mut incoming, _) = fake().await;
-    command(
-        &claude,
-        "test/oversized",
-        json!({"bytes":MAX_LINE_BYTES + 73}),
-    )
-    .await;
+    let limit = 128 * 1024;
+    let mut bounded = launch();
+    bounded.max_line_bytes = limit;
+    let (claude, mut incoming, _) = connect(bounded, Initialize::default(), drop).await.unwrap();
+    command(&claude, "test/oversized", json!({"bytes":limit + 73})).await;
     assert!(
-        matches!(next(&mut incoming).await, Incoming::Oversized { bytes } if bytes == MAX_LINE_BYTES + 73)
+        matches!(next(&mut incoming).await, Incoming::Oversized { bytes } if bytes == limit + 73)
     );
     assert!(
         matches!(next(&mut incoming).await, Incoming::Message(StreamMessage::Replay { uuid }) if uuid == "after-oversize")

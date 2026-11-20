@@ -1,31 +1,9 @@
-//! Claude threads.
-//!
-//! One actor task owns every Claude thread's state, as the Codex actor does, but each thread has a
-//! `claude` process of its own instead of sharing one server. Handles send the actor commands and
-//! wait for the reply. Work that waits on a process, such as starting it or writing a message,
-//! runs in a task of its own and comes back to the actor as a completion, so the actor keeps
-//! reading frames while it is out, and a completion for a process that has ended is recognized and
-//! dropped. Nothing outside the actor changes a Claude thread's state.
-//!
-//! The two delivery rules hold here (D11). A queued message is written to Claude only once every
-//! message before it has a result, and a message whose delivery is uncertain is never sent again:
-//! only Claude's transcript or the user settles it. Claude accepts a message only when it echoes
-//! it back, and a turn ends only on its result.
-//!
-//! A CLI starts when a message needs one, or when the usage scheduler or the skills route (D97)
-//! asks a thread's session something.
-//!
-//! The account's usage reaches the shared tracker (D38) from the CLI's rate limit events and from
-//! a `get_usage` read after each session starts and whenever the scheduler asks. Only a turn's
-//! result decides a stop at the usage limit (D39): a failed result after a rejected event pauses
-//! the thread and reports the stop, and anything else, including a turn the CLI waited out,
-//! sends nothing.
-//!
-//! Kratos decides each tool request and records approvals and questions through the shared Hub.
-//! Every command uses the Codex runner. No thread launches in a mode that skips the ask.
+//! Each Claude thread owns one CLI. Queued messages wait for the preceding result. Uncertain delivery is reconciled against the transcript.
+//! Claude runs native shell tools as the user, without a sandbox.
 
 mod account;
 mod actor;
+mod background;
 mod commands;
 mod ends;
 mod hooks;
@@ -40,8 +18,8 @@ mod release;
 mod requests;
 mod session;
 mod settings;
+mod shell;
 mod threads;
-mod tools;
 mod turns;
 mod wire;
 
@@ -72,8 +50,8 @@ pub use wire::native_id;
 /// How the provider starts Claude and how long it waits on it.
 #[derive(Clone, Debug)]
 pub struct ClaudeSettings {
-    /// The command and permission boundary. Without it, every tool request is refused.
-    pub tools: Option<ClaudeTools>,
+    /// The folders a Claude tool may not read or write without the rules for protected folders.
+    pub protected: super::codex::ProtectedFolders,
     /// The native `claude` executable, found as the user's shell finds it (L8).
     pub program: PathBuf,
     /// Where Claude Code's native updater reads the newest release on each channel.
@@ -86,28 +64,17 @@ pub struct ClaudeSettings {
     pub stop_timeout: Duration,
     /// A session nobody used for this long is closed, and the thread's next message resumes it.
     pub idle_close: Duration,
+    /// How long after a background command ends Kratos waits for the turn the CLI starts to
+    /// report it, before closing the CLI for a message that needs it started again.
+    pub report_turn_wait: Duration,
     /// The deadline of a control request to the CLI, such as an interrupt.
     pub control_timeout: Duration,
+    /// The longest line Kratos reads from a CLI. A longer one ends that CLI's session.
+    pub max_line_bytes: usize,
     /// The wait after a CLI's first failure to run. Each failure in a row doubles it (L4).
     pub restart_wait: Duration,
     /// Failures in a row after which only the user may start the CLI again (L4).
     pub max_restarts: u32,
-}
-
-/// Dependencies that let Claude execute tools under Kratos's policy.
-#[derive(Clone)]
-pub struct ClaudeTools {
-    pub runner: super::codex::CodexProvider,
-    pub protected: super::codex::ProtectedFolders,
-}
-
-impl std::fmt::Debug for ClaudeTools {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ClaudeTools")
-            .field("protected", &self.protected)
-            .finish_non_exhaustive()
-    }
 }
 
 /// Commands that may wait for the actor. A burst of requests waits for room instead of growing
@@ -140,6 +107,7 @@ pub async fn start(
         program: settings.program.clone(),
         env_set: settings.env_set.clone(),
         feed: settings.release_feed.clone(),
+        updating: std::sync::Mutex::default(),
     });
     let actor = actor::Actor::recover(settings, hub, store, usage, limit_stops).await?;
     tokio::spawn(actor.run(inbox));
@@ -344,23 +312,24 @@ impl ClaudeProvider {
     /// thread works, and every idle session closes first. Messages sent meanwhile wait, then start
     /// on the new release.
     pub async fn update_cli(&self) -> Result<CliRelease, ProviderError> {
-        // A task of its own, so a client that disconnects mid-update never stops the updater
-        // halfway through replacing the CLI.
         let provider = self.clone();
-        tokio::spawn(async move {
+        let task = self.release.spawn_update(async move {
             provider.release.check_native().await?;
             provider
                 .ask(|reply| actor::Command::HoldForUpdate { reply })
                 .await?;
-            let updated = provider.release.update().await;
+            let updated = if provider.release.begin_install() {
+                provider.release.update().await
+            } else {
+                Err(ProviderError::Stopped)
+            };
             provider
                 .ask(|reply| actor::Command::EndUpdateHold { reply })
                 .await?;
             updated?;
             Ok(provider.release.status().await)
-        })
-        .await
-        .map_err(|_| ProviderError::Stopped)?
+        })?;
+        task.await.map_err(|_| ProviderError::Stopped)?
     }
 
     /// The slash commands the thread's session reports, opening one when none runs (D97).
@@ -381,8 +350,9 @@ impl ClaudeProvider {
             .await
     }
 
-    /// Closes every CLI and ends the actor.
+    /// Settles an update in flight, then closes every CLI and ends the actor.
     pub async fn shutdown(&self) {
+        self.release.settle_for_shutdown().await;
         let (reply, done) = oneshot::channel();
         if self
             .commands

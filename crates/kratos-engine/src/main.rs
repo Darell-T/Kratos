@@ -39,11 +39,12 @@ use kratos_engine::usage::{LimitStop, UsageTracker};
 /// How long a request to Codex may take, from the TypeScript provider. A turn has no deadline: a
 /// live CLI is working, and every way it can die reports its own error.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// How long a turn Codex agreed to stop may take to end before Kratos closes Codex.
-const STOP_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a Claude process may sit unused before Kratos closes it, Zeron's 30 minutes. A warm
-/// process starts the next turn at once; past this, holding its memory costs more than a resume.
+const CLAUDE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Leaves one second of the five-second Stop budget for process exit and recording the turn.
+const CODEX_INTERRUPT_GRACE: Duration = Duration::from_secs(4);
 const SESSION_IDLE_CLOSE: Duration = Duration::from_secs(30 * 60);
+/// Claude Code 2.1.322 can start a report turn after its background task list empties.
+const REPORT_TURN_WAIT: Duration = Duration::from_secs(10);
 /// The feed `claude update` reads for a native install: `{feed}/latest` names the newest release.
 const CLAUDE_RELEASES: &str = "https://downloads.claude.ai/claude-code-releases";
 /// The wait after a Claude process's first failure, doubled by each failure in a row (L4), and the
@@ -135,7 +136,7 @@ fn run_server(
         let port = listener.local_addr()?.port();
         let (limit_stops, stops) = mpsc::unbounded_channel();
         let codex = start_codex(config, port, &hub, &store, &usage, limit_stops.clone()).await?;
-        let claude = start_claude(config, &hub, &store, &codex, &usage, limit_stops).await?;
+        let claude = start_claude(config, &hub, &store, &usage, limit_stops).await?;
         let providers = Providers { codex, claude };
         let scheduler = if providers.none_running() {
             None
@@ -192,20 +193,11 @@ async fn start_claude(
     config: &Config,
     hub: &Hub,
     store: &StoreThread,
-    codex: &Result<CodexProvider, String>,
     usage: &UsageTracker,
     limit_stops: mpsc::UnboundedSender<LimitStop>,
 ) -> Result<Result<ClaudeProvider, String>, StoreError> {
     match claude_settings(config) {
-        Ok(mut settings) => {
-            settings.tools = codex.as_ref().ok().map(|codex| claude::ClaudeTools {
-                runner: codex.clone(),
-                protected: ProtectedFolders::new(
-                    config.home.clone(),
-                    config.codex_home.clone(),
-                    config.user_home.clone(),
-                ),
-            });
+        Ok(settings) => {
             let (hub, store, usage) = (hub.clone(), store.clone(), usage.clone());
             Ok(Ok(
                 claude::start(settings, hub, store, usage, limit_stops).await?
@@ -225,14 +217,20 @@ fn claude_settings(config: &Config) -> Result<ClaudeSettings, ClaudeMissing> {
         .clone()
         .ok_or(ClaudeMissing::NoHomeFolder)?;
     Ok(ClaudeSettings {
-        tools: None,
+        protected: ProtectedFolders::new(
+            config.home.clone(),
+            config.codex_home.clone(),
+            config.user_home.clone(),
+        ),
         program,
         release_feed: CLAUDE_RELEASES.to_owned(),
         claude_home,
         env_set: Vec::new(),
-        stop_timeout: STOP_TIMEOUT,
+        stop_timeout: CLAUDE_STOP_TIMEOUT,
         idle_close: SESSION_IDLE_CLOSE,
+        report_turn_wait: REPORT_TURN_WAIT,
         control_timeout: REQUEST_TIMEOUT,
+        max_line_bytes: kratos_claude_client::MAX_LINE_BYTES,
         restart_wait: RESTART_WAIT,
         max_restarts: MAX_RESTARTS,
     })
@@ -252,7 +250,7 @@ fn codex_settings(config: &Config, port: u16) -> Result<CodexSettings, CodexMiss
             config.codex_home.clone(),
             config.user_home.clone(),
         ),
-        stop_timeout: STOP_TIMEOUT,
+        stop_timeout: CODEX_INTERRUPT_GRACE,
         request_timeout: REQUEST_TIMEOUT,
         platform: DangerousCommandPlatform::host(),
         mcp: Some(McpServer {
