@@ -35,7 +35,7 @@ impl ThreadWrite<'_> {
     /// Adds a message to the thread's queue, unless the id is already in the thread or the queue
     /// already holds `max_pending` undelivered messages (D85). Both checks run inside this write,
     /// so two sends of one id store one message. `Err(MessageIdTaken)` when the thread holds the id
-    /// with another message.
+    /// with another message, and `Err(ThreadArchived)` for a new message to an archived thread.
     pub fn enqueue_message(
         &mut self,
         id: &MessageId,
@@ -49,6 +49,9 @@ impl ThreadWrite<'_> {
                 return Err(StoreError::MessageIdTaken(id.clone()));
             }
             return Ok(Enqueued::Existing(existing));
+        }
+        if self.provider_thread()?.archived_at.is_some() {
+            return Err(StoreError::ThreadArchived(self.thread_id().clone()));
         }
         let (pending, position) = self.queue_slot(place)?;
         if pending >= max_pending {

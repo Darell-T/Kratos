@@ -118,6 +118,11 @@ pub(super) enum Command {
         thread_id: ThreadId,
         reply: Reply<AccessLimit>,
     },
+    /// Ends the thread's process and answers once it exited. Sent for an archived thread only.
+    Close {
+        thread_id: ThreadId,
+        reply: Reply<()>,
+    },
     Shutdown {
         reply: oneshot::Sender<()>,
     },

@@ -114,6 +114,7 @@ impl Actor {
                 });
                 let _ = reply.send(access);
             }
+            Command::Close { thread_id, reply } => self.close_archived(&thread_id, reply),
             Command::Shutdown { reply } => drop(reply.send(())),
         }
     }

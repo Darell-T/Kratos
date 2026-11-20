@@ -95,6 +95,7 @@ pub(super) fn wait(
             | ThreadEventBody::QuestionAnswered { .. }
             | ThreadEventBody::QuestionClosed { .. }
             | ThreadEventBody::ThreadResumed
+            | ThreadEventBody::ThreadArchived
             | ThreadEventBody::SettingsChanged { .. }
             | ThreadEventBody::ProviderError { .. }
             | ThreadEventBody::ContinuationChanged { .. }

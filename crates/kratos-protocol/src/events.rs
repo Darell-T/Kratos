@@ -96,6 +96,9 @@ pub enum ThreadEventBody {
     },
     #[serde(rename = "thread.resumed")]
     ThreadResumed,
+    /// The user archived the thread. It takes no more messages.
+    #[serde(rename = "thread.archived")]
+    ThreadArchived,
     #[serde(rename = "settings.changed")]
     SettingsChanged { settings: ThreadSettings },
     /// The provider reported trouble in a turn. `will_retry` is the provider retrying on its own.

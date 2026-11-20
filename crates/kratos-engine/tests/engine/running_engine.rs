@@ -507,7 +507,11 @@ fn console_helper_preparation_does_not_use_the_engine_startup_deadline() {
     engine.shutdown();
 }
 
-fn fake_codex_at(port: u16, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+pub fn fake_codex_at(
+    port: u16,
+    method: &str,
+    params: serde_json::Value,
+) -> Option<serde_json::Value> {
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream.set_read_timeout(Some(WAIT)).ok()?;
     let request = json!({ "id": 1, "method": method, "params": params });

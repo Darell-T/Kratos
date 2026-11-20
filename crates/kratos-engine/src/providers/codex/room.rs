@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
 use kratos_codex_client::{Codex, methods, types};
+use kratos_protocol::ThreadId;
 use serde_json::json;
 
 use super::ProviderError;
-use super::actor::{Actor, Done};
+use super::actor::{Actor, Done, Reply};
 use super::connection::{connect_ready, launch};
 use super::servers::{MAX_SERVERS, Server, ServerKey, TerminalCheck};
 use super::threads::Turn;
@@ -97,6 +98,22 @@ impl Actor {
         };
         self.retire_if_quiet(&key);
         true
+    }
+
+    /// Ends an archived thread's server and answers once its processes exited, so none holds the
+    /// thread's folder. Nothing starts it again: the store refuses an archived thread's messages.
+    pub(super) fn close_archived(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
+        let key = ServerKey::Thread(thread_id.clone());
+        let closing = match self.servers.get(&key).map(|slot| &slot.server) {
+            Some(Server::Closing(codex)) => Some(codex.clone()),
+            _ => self.servers.begin_close(&key),
+        };
+        tokio::spawn(async move {
+            if let Some(codex) = closing {
+                codex.close().await;
+            }
+            let _ = reply.send(Ok(()));
+        });
     }
 
     /// Codex can finish a background terminal without notifying the engine.

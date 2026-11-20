@@ -13,7 +13,7 @@ use tempfile::TempDir;
 
 use super::running_engine::{RunningEngine, post};
 
-fn git(folder: &Path, args: &[&str]) -> String {
+pub(super) fn git(folder: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(folder)
@@ -29,7 +29,7 @@ fn git(folder: &Path, args: &[&str]) -> String {
 }
 
 /// A repository on branch `main` with one commit, at its resolved path.
-fn new_repository(root: &TempDir) -> PathBuf {
+pub(super) fn new_repository(root: &TempDir) -> PathBuf {
     let path = root.path().join("repo");
     std::fs::create_dir(&path).unwrap();
     git(&path, &["init", "--quiet", "--initial-branch=main"]);
@@ -42,13 +42,13 @@ fn new_repository(root: &TempDir) -> PathBuf {
     resolved(&path)
 }
 
-fn resolved(path: &Path) -> PathBuf {
+pub(super) fn resolved(path: &Path) -> PathBuf {
     let path = path.canonicalize().unwrap();
     let text = path.to_str().unwrap();
     PathBuf::from(text.strip_prefix(r"\\?\").unwrap_or(text))
 }
 
-fn workspace_at(engine: &RunningEngine, folder: &Path) -> Workspace {
+pub(super) fn workspace_at(engine: &RunningEngine, folder: &Path) -> Workspace {
     let request = CreateWorkspace {
         name: RequiredText::new("repo").unwrap(),
         path: RequiredText::new(folder.to_str().unwrap()).unwrap(),
@@ -66,19 +66,24 @@ fn request(workspace: &Workspace, title: &str, place: PlaceRequest) -> CreateThr
     }
 }
 
-fn create(client: &Client, workspace: &Workspace, title: &str, place: PlaceRequest) -> Thread {
+pub(super) fn create(
+    client: &Client,
+    workspace: &Workspace,
+    title: &str,
+    place: PlaceRequest,
+) -> Thread {
     client
         .create_thread(&request(workspace, title, place))
         .unwrap()
 }
 
-fn existing(path: &Path) -> PlaceRequest {
+pub(super) fn existing(path: &Path) -> PlaceRequest {
     PlaceRequest::ExistingWorktree {
         path: RequiredText::new(path.to_str().unwrap()).unwrap(),
     }
 }
 
-fn place_of(client: &Client, thread: &Thread) -> Place {
+pub(super) fn place_of(client: &Client, thread: &Thread) -> Place {
     let details: ThreadDetails = client
         .get(&routes::thread(&thread.id))
         .unwrap()
@@ -95,7 +100,7 @@ fn threads_in(client: &Client, workspace: &Workspace) -> Vec<Thread> {
         .unwrap()
 }
 
-fn worktree_of(client: &Client, thread: &Thread) -> Worktree {
+pub(super) fn worktree_of(client: &Client, thread: &Thread) -> Worktree {
     match place_of(client, thread) {
         Place::Worktree(worktree) => worktree,
         Place::ProjectFolder => panic!("{} works in its project folder", thread.title),
@@ -117,14 +122,14 @@ fn codex_folder(engine: &RunningEngine, thread: &Thread) -> PathBuf {
     PathBuf::from(cwd)
 }
 
-fn worktree_count(repository: &Path) -> usize {
+pub(super) fn worktree_count(repository: &Path) -> usize {
     git(repository, &["worktree", "list", "--porcelain"])
         .lines()
         .filter(|line| line.starts_with("worktree "))
         .count()
 }
 
-fn refusal(error: ClientError) -> (u16, String) {
+pub(super) fn refusal(error: ClientError) -> (u16, String) {
     match error {
         ClientError::Unexpected { status, body } => {
             (status, body["error"].as_str().unwrap().to_owned())

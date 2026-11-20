@@ -51,3 +51,52 @@ pub enum Ownership {
     /// It existed before Kratos used it, so Kratos never removes it.
     Borrowed,
 }
+
+/// `POST /api/threads/{id}/archive`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArchiveThread {
+    #[serde(default)]
+    pub files: LeftFiles,
+}
+
+/// What happens to files a worktree removal would delete: changed and untracked files, and files
+/// git ignores, such as `node_modules` (D16).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LeftFiles {
+    /// Keep the worktree when it holds any.
+    #[default]
+    Keep,
+    /// Remove the worktree and the files with it.
+    Discard,
+}
+
+/// The answer to an archive. The thread is archived whatever happened to its worktree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedThread {
+    pub cleanup: Cleanup,
+}
+
+/// What archiving did with the thread's folder.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum Cleanup {
+    /// The thread worked in its project folder or a borrowed worktree, which Kratos never removes.
+    NotOwned,
+    /// Another thread still works in the worktree.
+    InUse,
+    /// Kratos removed the worktree. Its branch stays.
+    Removed,
+    /// Kratos kept the worktree because removing it would delete these files, each as
+    /// `git status --porcelain` prints it. Archive again with [`LeftFiles::Discard`] to remove it.
+    Kept { files: Vec<String> },
+    /// Git could not remove the worktree, for example because a program holds a file in it. No
+    /// thread may start there until an archive of one of its threads removes it.
+    Blocked { error: String },
+}

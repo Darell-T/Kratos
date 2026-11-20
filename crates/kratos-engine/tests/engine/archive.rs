@@ -1,0 +1,280 @@
+//! Archiving a thread (R5, D16, D27), against real git in temporary repositories.
+
+use std::path::Path;
+use std::time::Instant;
+
+use fake_agents::codex_control;
+use kratos_api_client::Client;
+use kratos_protocol::{
+    ArchiveThread, ArchivedThread, Cleanup, LeftFiles, PlaceRequest, Thread, ThreadDetails, routes,
+};
+use serde_json::json;
+use tempfile::TempDir;
+
+use super::running_engine::{RunningEngine, WAIT, fake_codex_at, post};
+use super::thread_places::{
+    create, existing, git, new_repository, resolved, workspace_at, worktree_count, worktree_of,
+};
+
+fn archive(client: &Client, thread: &Thread, files: LeftFiles) -> Cleanup {
+    let reply = client
+        .post(
+            &routes::thread_archive(&thread.id),
+            &ArchiveThread { files },
+        )
+        .unwrap();
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    reply.parse::<ArchivedThread>().unwrap().cleanup
+}
+
+fn details(client: &Client, thread: &Thread) -> ThreadDetails {
+    client
+        .get(&routes::thread(&thread.id))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+fn wait_for_turn(client: &Client, thread: &Thread, running: bool) {
+    let deadline = Instant::now() + WAIT;
+    while details(client, thread).running_turn.is_some() != running {
+        assert!(Instant::now() < deadline, "running stayed {}", !running);
+        std::thread::yield_now();
+    }
+}
+
+fn branch_exists(repository: &Path, branch: &str) -> bool {
+    !git(repository, &["branch", "--list", branch]).is_empty()
+}
+
+#[test]
+fn archiving_waits_for_the_turn_then_ends_the_threads_process_and_refuses_new_messages() {
+    // Catches an archive that strands a running turn, leaves the agent's process running in the
+    // thread's folder, lets a message start the thread again, or touches the project folder.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    std::fs::write(repository.join("notes.txt"), "mine\n").unwrap();
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
+    post(&client, &thread, "hello");
+    engine.start_turn();
+    wait_for_turn(&client, &thread, true);
+    let port = codex_control::read_port(&engine.fake_codex_control_file()).unwrap();
+
+    let refused = client
+        .post(
+            &routes::thread_archive(&thread.id),
+            &ArchiveThread::default(),
+        )
+        .unwrap();
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    let message = refused.body["error"].as_str().unwrap();
+    assert!(message.contains("a turn runs"), "{message}");
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+    wait_for_turn(&client, &thread, false);
+    assert!(fake_codex_at(port, "test/answers", json!({})).is_some());
+
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Discard),
+        Cleanup::NotOwned
+    );
+    assert!(
+        fake_codex_at(port, "test/answers", json!({})).is_none(),
+        "the thread's Codex still runs"
+    );
+    assert!(details(&client, &thread).archived_at.is_some());
+    let again = client
+        .post(
+            &routes::thread_messages(&thread.id),
+            &json!({ "text": "again" }),
+        )
+        .unwrap();
+    assert_eq!(again.status, 409, "{}", again.body);
+    let message = again.body["error"].as_str().unwrap();
+    assert!(message.contains("archived"), "{message}");
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Keep),
+        Cleanup::NotOwned
+    );
+    assert_eq!(
+        std::fs::read_to_string(repository.join("notes.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[test]
+fn an_unused_clean_worktree_is_removed_and_its_branch_kept() {
+    // Catches a worktree left behind once its only thread is archived, or a removal that deletes
+    // the branch and the commits on it.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "Fix it", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    std::fs::write(folder.join("fix.txt"), "fixed\n").unwrap();
+    git(folder, &["add", "fix.txt"]);
+    git(folder, &["commit", "--quiet", "--message", "fix"]);
+
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+
+    assert!(!folder.exists());
+    assert_eq!(worktree_count(&repository), 1);
+    assert_eq!(
+        git(&repository, &["show", "fix-it:fix.txt"]),
+        "fixed",
+        "the branch keeps the thread's commit"
+    );
+}
+
+#[test]
+fn a_worktree_holding_files_a_removal_would_delete_stays_until_the_user_discards_them() {
+    // Catches a removal that deletes files git ignores, which `git worktree remove` does without
+    // `--force`, or changed and untracked files, before the user chose to.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    std::fs::write(repository.join(".gitignore"), "*.log\n").unwrap();
+    git(&repository, &["add", ".gitignore"]);
+    git(
+        &repository,
+        &["commit", "--quiet", "--message", "ignore logs"],
+    );
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "dirty", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    std::fs::write(folder.join("build.log"), "output\n").unwrap();
+
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Keep),
+        Cleanup::Kept {
+            files: vec!["!! build.log".into()]
+        }
+    );
+    std::fs::write(folder.join("README.md"), "changed\n").unwrap();
+    std::fs::write(folder.join("notes.txt"), "new\n").unwrap();
+    let Cleanup::Kept { files } = archive(&client, &thread, LeftFiles::Keep) else {
+        panic!("the changed worktree was not kept");
+    };
+    assert_eq!(files, [" M README.md", "?? notes.txt", "!! build.log"]);
+    assert!(folder.join("build.log").exists());
+    assert_eq!(worktree_count(&repository), 2);
+
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Discard),
+        Cleanup::Removed
+    );
+    assert!(!folder.exists());
+    assert!(branch_exists(&repository, "dirty"));
+}
+
+#[test]
+fn a_worktree_stays_while_another_thread_works_in_it() {
+    // Catches a removal that pulls the folder out from under a thread still working in it.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let first = create(&client, &workspace, "shared", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &first).path;
+    let second = create(&client, &workspace, "helper", existing(Path::new(&path)));
+
+    assert_eq!(archive(&client, &first, LeftFiles::Discard), Cleanup::InUse);
+    assert!(Path::new(&path).exists());
+    assert_eq!(archive(&client, &second, LeftFiles::Keep), Cleanup::Removed);
+    assert!(!Path::new(&path).exists());
+}
+
+#[test]
+fn a_borrowed_worktree_is_never_removed() {
+    // Catches Kratos deleting a worktree the user made, even when asked to discard files.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let theirs = root.path().join("feature");
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "feature",
+            theirs.to_str().unwrap(),
+        ],
+    );
+    let theirs = resolved(&theirs);
+    std::fs::write(theirs.join("wip.txt"), "mine\n").unwrap();
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "borrow", existing(&theirs));
+
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Discard),
+        Cleanup::NotOwned
+    );
+
+    assert!(theirs.join("wip.txt").exists());
+    assert_eq!(worktree_count(&repository), 2);
+}
+
+#[test]
+fn a_folder_that_is_no_longer_a_worktree_is_removed_only_while_empty() {
+    // Catches git run in a folder that lost its `.git` file, which reads the project's repository
+    // instead, and a leftover folder deleted with the files still in it.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "orphan", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    std::fs::remove_file(folder.join(".git")).unwrap();
+
+    let blocked = archive(&client, &thread, LeftFiles::Discard);
+
+    assert!(matches!(blocked, Cleanup::Blocked { .. }), "{blocked:?}");
+    assert!(folder.join("README.md").exists());
+    std::fs::remove_file(folder.join("README.md")).unwrap();
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    assert!(!folder.exists());
+    assert_eq!(worktree_count(&repository), 1);
+}
+
+/// Windows refuses to remove a folder that a running program works in.
+#[cfg(windows)]
+#[test]
+fn a_removal_a_held_folder_blocks_is_tried_again_by_the_next_archive() {
+    // Catches a blocked removal reported as done, or one that stays blocked after the folder is
+    // free again.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "held", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let mut holder = std::process::Command::new("ping")
+        .args(["-n", "60", "127.0.0.1"])
+        .current_dir(&path)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let blocked = archive(&client, &thread, LeftFiles::Keep);
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+
+    assert!(matches!(blocked, Cleanup::Blocked { .. }), "{blocked:?}");
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    assert!(!Path::new(&path).exists());
+    assert_eq!(worktree_count(&repository), 1);
+}

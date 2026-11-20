@@ -5,6 +5,7 @@ use kratos_protocol::{
     AccessLimit, ApprovalDecision, ApprovalId, ApprovalOutcome, Message, MessageId, MessageInput,
     MessageOrigin, Provider, QuestionId, QuestionOutcome, ThreadId, ThreadSettings,
 };
+use kratos_store::StoreError;
 
 use super::{ApiError, ServerState};
 use crate::providers::{Agent, ProviderError, Sent};
@@ -34,15 +35,18 @@ impl ServerState {
         }
     }
 
-    /// The provider of `thread_id`. 404 for a thread that does not exist.
+    /// The provider of `thread_id`. 404 for a thread that does not exist, and 409 for an archived
+    /// one, whose agent takes no more work.
     pub(super) async fn provider_of(&self, thread_id: &ThreadId) -> Result<Provider, ApiError> {
         let lookup = thread_id.clone();
-        Ok(self
+        let thread = self
             .store
             .call(move |store| store.provider_thread(&lookup))
-            .await?
-            .thread
-            .provider)
+            .await?;
+        if thread.archived_at.is_some() {
+            return Err(StoreError::ThreadArchived(thread_id.clone()).into());
+        }
+        Ok(thread.thread.provider)
     }
 
     /// The agent of `provider`. 503 saying why when it cannot run.

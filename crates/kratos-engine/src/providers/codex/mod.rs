@@ -225,6 +225,12 @@ impl CodexProvider {
             .await
     }
 
+    /// Ends an archived thread's process. Returns once it exited.
+    pub async fn close_archived(&self, thread_id: ThreadId) -> Result<(), ProviderError> {
+        self.ask(|reply| actor::Command::Close { thread_id, reply })
+            .await
+    }
+
     /// Records the first decision on an approval and sends it to Codex. A later decision gets the
     /// recorded outcome (D83).
     pub async fn decide(

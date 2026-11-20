@@ -24,7 +24,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use kratos_protocol::routes::{
     APPROVAL, CLAUDE_CLI, CLAUDE_CLI_UPDATE, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE,
-    MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_EVENTS,
+    MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_ARCHIVE, THREAD_EVENTS,
     THREAD_MESSAGES, THREAD_RESUME, THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE,
     WORKSPACES,
 };
@@ -190,6 +190,7 @@ fn user_routes() -> Router<ServerState> {
         .route(MESSAGE_RETRY, post(agents::retry_message))
         .route(MESSAGE_DISCARD, post(agents::discard_message))
         .route(THREAD_RESUME, post(agents::resume))
+        .route(THREAD_ARCHIVE, post(threads::archive_thread))
         .route(THREAD_SETTINGS, put(agents::put_settings))
         .route(THREAD_SKILLS, get(agents::skills))
         .route(CONTINUATION_SCHEDULE, post(agents::schedule))
@@ -297,6 +298,7 @@ impl From<PlaceError> for ApiError {
             PlaceError::Store(error) => error.into(),
             failed @ (PlaceError::Git(_)
             | PlaceError::Io { .. }
+            | PlaceError::CannotRemove { .. }
             | PlaceError::UnreadableGit { .. }) => {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
             }

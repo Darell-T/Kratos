@@ -2,6 +2,7 @@
 //! `allow(dead_code)`: each file uses a different part of it.
 
 mod agents;
+mod archive;
 mod caller_errors;
 mod claude_threads;
 mod codex_process;

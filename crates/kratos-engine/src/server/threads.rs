@@ -9,7 +9,8 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, AccessLimit, CreateThread, ListEvents, ListThreads, Seq, ThreadId,
+    ACTING_THREAD_HEADER, AccessLimit, ArchiveThread, ArchivedThread, Cleanup, CreateThread,
+    ListEvents, ListThreads, Ownership, Place, Seq, ThreadId,
 };
 use kratos_store::NewPlace;
 
@@ -82,6 +83,37 @@ async fn prepare_place(
         .worktrees
         .prepare(&state.store, project, &place, title)
         .await?)
+}
+
+/// `POST /api/threads/{id}/archive`: 200 with what happened to the thread's folder, once the
+/// thread is archived and its process has exited. 409 while a turn runs or anything waits in the
+/// thread. Archiving an archived thread tries its worktree's removal again.
+pub(super) async fn archive_thread(
+    State(state): State<ServerState>,
+    id: ThreadPath,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let thread_id = path(id)?;
+    let ArchiveThread { files } = read_json(body).await?;
+    let thread = state
+        .hub
+        .write(thread_id.clone(), |write| write.archive())
+        .await?
+        .value;
+    // A provider that cannot run has no process to end.
+    if let Ok(agent) = state.providers.agent(thread.thread.provider) {
+        agent.close_archived(thread_id).await?;
+    }
+    let cleanup = match &thread.place {
+        Place::Worktree(worktree) if worktree.ownership == Ownership::CreatedByKratos => {
+            state
+                .worktrees
+                .clean_up(&state.store, worktree, files)
+                .await?
+        }
+        Place::Worktree(_) | Place::ProjectFolder => Cleanup::NotOwned,
+    };
+    Ok(json_reply(StatusCode::OK, &ArchivedThread { cleanup }))
 }
 
 /// `GET /api/threads/{id}`: 200 with the thread, its settings, its queue, and what waits on the

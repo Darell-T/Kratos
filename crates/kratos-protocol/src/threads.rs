@@ -245,6 +245,8 @@ pub struct ThreadDetails {
     #[serde(flatten)]
     pub thread: Thread,
     pub place: Place,
+    /// When the user archived the thread, after which it takes no more messages.
+    pub archived_at: Option<Timestamp>,
     pub settings: ThreadSettings,
     pub paused: Option<PauseReason>,
     pub running_turn: Option<TurnId>,

@@ -1,14 +1,15 @@
 use kratos_protocol::{
-    ContextLimit, ContextUsage, CreateThread, PauseReason, Permission, Place, Provider,
-    RequiredText, Thread, ThreadDetails, ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings,
-    TurnChanges, TurnId, TurnOrigin, TurnOutcome, WorkspaceId, WorktreeId,
+    ContextLimit, ContextUsage, ContinuationState, CreateThread, PauseReason, Permission, Place,
+    Provider, RequiredText, Thread, ThreadDetails, ThreadEventBody, ThreadId, ThreadSandbox,
+    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOrigin, TurnOutcome, WorkspaceId,
+    WorktreeId,
 };
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::columns::{
-    from_column, from_stored_name, permission_name, provider_name, timestamp_column, to_column,
-    unreadable,
+    from_column, from_stored_name, optional_timestamp_column, permission_name, provider_name,
+    timestamp_column, to_column, unreadable,
 };
 use crate::worktrees::{NewPlace, attach, place_from_row};
 use crate::{Store, StoreError, ThreadWrite};
@@ -20,6 +21,7 @@ pub struct ProviderThread {
     /// The folder the agent works in: its worktree's, or else its project folder.
     pub folder: String,
     pub place: Place,
+    pub archived_at: Option<Timestamp>,
     pub settings: ThreadSettings,
     pub sandbox: Option<ThreadSandbox>,
     pub paused: Option<PauseReason>,
@@ -111,6 +113,7 @@ impl Store {
         Ok(ThreadDetails {
             thread: thread.thread,
             place: thread.place,
+            archived_at: thread.archived_at,
             settings: thread.settings,
             paused: thread.paused,
             running_turn: thread.running_turn,
@@ -185,6 +188,56 @@ impl ThreadWrite<'_> {
         }
         self.append(ThreadEventBody::ThreadResumed)?;
         Ok(true)
+    }
+
+    /// Archives the thread and cancels its open continuation, so nothing starts in it again, and
+    /// returns it as archived. Refused while a turn runs or anything waits: a message, an
+    /// approval, or a question. Archiving an archived thread changes nothing.
+    pub fn archive(&mut self) -> Result<ProviderThread, StoreError> {
+        let thread = self.provider_thread()?;
+        if thread.archived_at.is_some() {
+            return Ok(thread);
+        }
+        let refusals = [
+            (thread.running_turn.is_some(), "a turn runs; stop it first"),
+            (
+                !self.pending_messages()?.is_empty(),
+                "messages wait in its queue; remove or discard them first",
+            ),
+            (
+                self.waits_on_user()?,
+                "an approval or a question waits on you",
+            ),
+        ];
+        if let Some(&(_, why)) = refusals.iter().find(|(refused, _)| *refused) {
+            return Err(StoreError::ArchiveRefused {
+                thread_id: self.thread_id().clone(),
+                why,
+            });
+        }
+        if let Some(open) = self.open_continuation()? {
+            let reason = "The thread was archived".to_owned();
+            self.update_continuation(
+                &open.id,
+                open.resets_at,
+                ContinuationState::Cancelled { reason },
+            )?;
+        }
+        self.transaction.execute(
+            "UPDATE threads SET archived_at = ?1 WHERE id = ?2",
+            params![self.at().as_str(), self.thread_id().as_str()],
+        )?;
+        self.append(ThreadEventBody::ThreadArchived)?;
+        self.provider_thread()
+    }
+
+    fn waits_on_user(&self) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM approvals WHERE thread_id = ?1 AND settled_at IS NULL)
+               OR EXISTS (SELECT 1 FROM questions WHERE thread_id = ?1 AND settled_at IS NULL)",
+            [self.thread_id().as_str()],
+            |row| row.get(0),
+        )?)
     }
 
     /// Records that `turn_id` started. It stays the thread's running turn until
@@ -264,7 +317,8 @@ fn provider_thread(
                 WHERE thread_id = threads.id AND ended_at IS NULL
                 ORDER BY started_at DESC LIMIT 1),
                threads.report_format,
-               worktrees.id, worktrees.path, worktrees.branch, worktrees.ownership
+               worktrees.id, worktrees.path, worktrees.branch, worktrees.ownership,
+               threads.archived_at
              FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
                LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
              WHERE threads.id = ?1",
@@ -280,6 +334,7 @@ fn provider_thread_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderThread> {
         thread: thread_from_row(row)?,
         folder: row.get(6)?,
         place: place_from_row(row, 16)?,
+        archived_at: optional_timestamp_column(row, 20, "archived_at")?,
         settings: settings_from_row(row)?,
         sandbox: from_column(row, 11)?,
         paused: from_column(row, 12)?,

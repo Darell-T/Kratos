@@ -35,7 +35,7 @@ pub use messages::{Enqueued, QueuePlace};
 pub use migrations::SCHEMA_VERSION;
 pub use requests::{Settle, StoredApproval, StoredQuestion};
 pub use threads::ProviderThread;
-pub use worktrees::{Checkout, NewPlace};
+pub use worktrees::{Checkout, NewPlace, Removal, RemovalEnd};
 pub use write::ThreadWrite;
 
 use backups::back_up;
@@ -149,6 +149,15 @@ pub enum StoreError {
     /// Kratos is making or removing a worktree at the path, so no thread may start in it now.
     #[error("Kratos is still setting up or removing the worktree at {0}; try again in a moment")]
     WorktreeTaken(String),
+    /// The thread is archived, so it takes no more messages.
+    #[error("Thread {0} is archived, so it takes no more messages")]
+    ThreadArchived(ThreadId),
+    /// The thread still has work in flight, so archiving it now would strand that work.
+    #[error("Thread {thread_id} cannot be archived while {why}")]
+    ArchiveRefused {
+        thread_id: ThreadId,
+        why: &'static str,
+    },
     /// A caller asked for a status change the queue's rules forbid, such as resending a message
     /// whose delivery is uncertain (D11). Nothing was written.
     #[error(
@@ -203,7 +212,9 @@ impl StoreError {
             | StoreError::UnknownWorktree(_) => Some(Refusal::Unknown),
             StoreError::MessageTransition { .. }
             | StoreError::MessageIdTaken(_)
-            | StoreError::WorktreeTaken(_) => Some(Refusal::Conflict),
+            | StoreError::WorktreeTaken(_)
+            | StoreError::ThreadArchived(_)
+            | StoreError::ArchiveRefused { .. } => Some(Refusal::Conflict),
             StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => None,
         }
     }

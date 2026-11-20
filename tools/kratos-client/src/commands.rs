@@ -35,6 +35,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   discard <thread-id> <message-id>
   stop <thread-id>
   resume <thread-id>
+  archive <thread-id> [--files keep|discard]
   settings <thread-id> <settings-json>
   skills <thread-id>
   approve <approval-id> <decision>
@@ -53,6 +54,9 @@ Schema object the final reply must match), such as
 '{\"model\":\"claude-haiku-5-5\",\"permission\":\"askMe\",\"planMode\":false,\"contextLimitTokens\":null}'.
 Without --worktree the thread works in the project folder. --worktree new makes a worktree on a new
 branch named after the title, and --worktree <path> uses that existing worktree of the project.
+archive removes a worktree Kratos made once none of its threads is left. With --files discard it
+also deletes the changed, untracked, and ignored files a removal would lose; it keeps them by
+default.
 The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
 engine wrote to $KRATOS_HOME/client-token (default ~/.kratos/client-token), when there is one.
 --normalize replaces ids and times, so two engines' output compares with a plain diff.
@@ -101,7 +105,7 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 26] = [
+const COMMANDS: [Command; 27] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
@@ -120,6 +124,7 @@ const COMMANDS: [Command; 26] = [
     Command { name: "discard", positional: 2, options: &[], run: discard },
     Command { name: "stop", positional: 1, options: &[], run: stop },
     Command { name: "resume", positional: 1, options: &[], run: resume },
+    Command { name: "archive", positional: 1, options: &["--files"], run: archive },
     Command { name: "settings", positional: 2, options: &[], run: settings },
     Command { name: "skills", positional: 1, options: &[], run: skills },
     Command { name: "approve", positional: 2, options: &[], run: approve },
@@ -370,6 +375,12 @@ fn stop(session: &mut Session, args: &Args) -> Result<(), Failure> {
 
 fn resume(session: &mut Session, args: &Args) -> Result<(), Failure> {
     session.post(&routes::thread_resume(&thread_id(args)), &json!({}))
+}
+
+fn archive(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let files = args.option("--files").unwrap_or("keep");
+    let body = json!({ "files": files });
+    session.post(&routes::thread_archive(&thread_id(args)), &body)
 }
 
 fn settings(session: &mut Session, args: &Args) -> Result<(), Failure> {

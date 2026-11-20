@@ -8,8 +8,8 @@ use kratos_protocol::{
     CreateThread, CreateWorkspace, Seq, Thread, ThreadEvent, ThreadEventBody, ThreadId, WorkspaceId,
 };
 use kratos_store::{
-    BackupId, Checkout, DirectoryError, NewPlace, OpenError, RestoreError, SCHEMA_VERSION, Store,
-    StoreError, restore,
+    BackupId, Checkout, DirectoryError, NewPlace, OpenError, Removal, RemovalEnd, RestoreError,
+    SCHEMA_VERSION, Store, StoreError, restore,
 };
 use rusqlite::Connection;
 use rusqlite::types::Value;
@@ -576,8 +576,9 @@ fn backs_up_each_older_version_before_migrating_it() {
                 Value::Null,
                 Value::Null,
                 Value::Null,
+                Value::Null,
             ],
-            "a thread from before migration 5 gets the default settings, unpaused and idle, with              no report format, in its project folder"
+            "a thread from before migration 5 gets the default settings, unpaused and idle, with              no report format, in its project folder, and not archived"
         );
     }
 }
@@ -967,4 +968,53 @@ fn a_reserved_worktree_stays_reserved_until_a_thread_uses_it_or_git_never_made_i
     let never_made = store.reserve_worktree(&other).unwrap();
     store.release_reservation(&never_made).unwrap();
     store.reserve_worktree(&other).unwrap();
+}
+
+#[test]
+fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_joins_meanwhile() {
+    // Catches a removal that starts while a thread still works in the worktree, a thread that
+    // joins a worktree being removed, or a removed worktree whose path stays blocked.
+    let home = home();
+    let mut store = Store::open(home.path()).unwrap();
+    let workspace = store
+        .create_workspace(&workspace_request("repo", "/work/repo"))
+        .unwrap();
+    let checkout = Checkout {
+        path: "/work/repo/.kratos-worktrees/chat".into(),
+        repository: "/work/repo/.git".into(),
+        branch: Some("chat".into()),
+    };
+    let id = store.reserve_worktree(&checkout).unwrap();
+    let thread = store
+        .create_thread(
+            &thread_request(&workspace.id, "chat", "codex"),
+            &NewPlace::Created(id.clone()),
+        )
+        .unwrap();
+
+    assert_eq!(store.begin_removal(&id).unwrap(), Removal::InUse);
+    let mut write = store.write_thread(&thread.id).unwrap();
+    write.archive().unwrap();
+    write.commit().unwrap();
+    let started = Removal::Started {
+        repository: checkout.repository.clone(),
+    };
+    assert_eq!(store.begin_removal(&id).unwrap(), started);
+    let joining = store.create_thread(
+        &thread_request(&workspace.id, "late", "codex"),
+        &NewPlace::Borrowed(checkout.clone()),
+    );
+    assert!(
+        matches!(joining, Err(StoreError::WorktreeTaken(_))),
+        "{joining:?}"
+    );
+    assert_eq!(
+        store.begin_removal(&id).unwrap(),
+        started,
+        "a removal git refused starts again"
+    );
+
+    store.end_removal(&id, RemovalEnd::Removed).unwrap();
+    assert_eq!(store.begin_removal(&id).unwrap(), Removal::Done);
+    store.reserve_worktree(&checkout).unwrap();
 }

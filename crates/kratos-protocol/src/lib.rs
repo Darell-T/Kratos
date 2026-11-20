@@ -66,7 +66,10 @@ pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
     PostMessage, QueueFull, SendMessage,
 };
-pub use places::{Ownership, Place, PlaceRequest, Worktree, WorktreeId};
+pub use places::{
+    ArchiveThread, ArchivedThread, Cleanup, LeftFiles, Ownership, Place, PlaceRequest, Worktree,
+    WorktreeId,
+};
 pub use report_format::{ReportFormat, ReportFormatError};
 pub use skills::{Skill, SlashCommand, ThreadSkills};
 pub use socket::{ClientMessage, LiveUpdate, ReplySoFar, ServerMessage};

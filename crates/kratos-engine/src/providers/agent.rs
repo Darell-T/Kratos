@@ -70,6 +70,14 @@ impl Agent<'_> {
         })
     }
 
+    /// Ends an archived thread's process. Returns once it exited, so nothing holds its folder.
+    pub(crate) async fn close_archived(&self, thread_id: ThreadId) -> Result<(), ProviderError> {
+        match self {
+            Agent::Codex(codex) => codex.close_archived(thread_id).await,
+            Agent::Claude(claude) => claude.close_archived(thread_id).await,
+        }
+    }
+
     /// Queues a continuation's message ahead of the thread's waiting messages and lets the queue
     /// run (D39). Called by the usage scheduler only.
     pub(crate) async fn continue_thread(

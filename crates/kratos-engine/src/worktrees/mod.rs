@@ -4,6 +4,7 @@
 //! start together still get different names without the lock: `git branch` refuses a taken name,
 //! and the store refuses a second record at one path.
 
+mod cleanup;
 mod git;
 
 use std::collections::HashMap;
@@ -66,7 +67,8 @@ pub(crate) enum PlaceError {
     #[error("Every branch name from {0} to {0}-{MAX_NAME_TRIES} is taken. Rename the thread.")]
     NoFreeName(String),
     #[error(
-        "{0} is a link to another folder, so Kratos will not make worktrees through it. Remove the          link, or start the thread in the project folder."
+        "{0} is a link to another folder, so Kratos will not make worktrees through it. Remove the \
+         link, or start the thread in the project folder."
     )]
     LinkedFolder(String),
     #[error("Kratos cannot read what git answered to `git {command}`: {output}")]
@@ -77,6 +79,15 @@ pub(crate) enum PlaceError {
     Git(#[from] GitError),
     #[error(transparent)]
     Store(#[from] StoreError),
+    #[error(
+        "Kratos could not remove {path}: {source}. Close any program working in it, then archive \
+         the thread again."
+    )]
+    CannotRemove {
+        path: String,
+        #[source]
+        source: io::Error,
+    },
     #[error("Kratos could not prepare {path}: {source}")]
     Io {
         path: String,
