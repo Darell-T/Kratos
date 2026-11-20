@@ -147,6 +147,15 @@ impl Store {
         Ok(())
     }
 
+    /// The folders of the worktrees Kratos made that it has not removed.
+    pub fn kratos_worktree_paths(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT path FROM worktrees WHERE ownership = 'createdByKratos' AND state != 'removed'",
+        )?;
+        let paths = statement.query_map([], |row| row.get(0))?;
+        Ok(paths.collect::<Result<_, _>>()?)
+    }
+
     /// Forgets a reservation that git never turned into a worktree.
     pub fn release_reservation(&self, id: &WorktreeId) -> Result<(), StoreError> {
         self.connection.execute(

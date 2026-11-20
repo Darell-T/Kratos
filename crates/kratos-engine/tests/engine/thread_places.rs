@@ -5,8 +5,8 @@ use std::process::Command;
 
 use kratos_api_client::{Client, ClientError};
 use kratos_protocol::{
-    CreateThread, CreateWorkspace, Ownership, Place, PlaceRequest, Provider, RequiredText, Thread,
-    ThreadDetails, Workspace, Worktree, routes,
+    CreateThread, CreateWorkspace, Ownership, Place, PlaceRequest, ProjectWorktree, Provider,
+    RequiredText, Thread, ThreadDetails, Workspace, Worktree, routes,
 };
 use serde_json::json;
 use tempfile::TempDir;
@@ -468,4 +468,51 @@ fn link_folder(target: &Path, link: &Path) {
         .output()
         .unwrap();
     assert!(made.status.success(), "{made:?}");
+}
+
+#[test]
+fn the_project_lists_every_worktree_of_its_repository_and_a_thread_can_start_in_any() {
+    // Catches a list that leaves out worktrees the user made, shows the project folder or a
+    // worktree whose folder is gone, or claims a user's worktree as Kratos's own.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let theirs = root.path().join("feature");
+    let gone = root.path().join("gone");
+    for (name, folder) in [("feature/login", &theirs), ("gone", &gone)] {
+        let folder = folder.to_str().unwrap();
+        git(
+            &repository,
+            &["worktree", "add", "--quiet", "-b", name, folder],
+        );
+    }
+    std::fs::remove_dir_all(&gone).unwrap();
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let made = create(&client, &workspace, "Made", PlaceRequest::NewWorktree);
+
+    let mut listed: Vec<ProjectWorktree> = client
+        .get(&routes::workspace_worktrees(&workspace.id))
+        .unwrap()
+        .parse()
+        .unwrap();
+    listed.sort_by(|a, b| a.path.cmp(&b.path));
+
+    let theirs = resolved(&theirs);
+    let mut expected = vec![
+        ProjectWorktree {
+            path: theirs.to_str().unwrap().to_owned(),
+            branch: Some("feature/login".into()),
+            ownership: Ownership::Borrowed,
+        },
+        ProjectWorktree {
+            path: worktree_of(&client, &made).path,
+            branch: Some("made".into()),
+            ownership: Ownership::CreatedByKratos,
+        },
+    ];
+    expected.sort_by(|a, b| a.path.cmp(&b.path));
+    assert_eq!(listed, expected);
+    let thread = create(&client, &workspace, "work there", existing(&theirs));
+    assert_eq!(PathBuf::from(worktree_of(&client, &thread).path), theirs);
 }

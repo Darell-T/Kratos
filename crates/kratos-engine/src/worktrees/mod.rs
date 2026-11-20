@@ -6,6 +6,7 @@
 
 mod cleanup;
 mod git;
+mod list;
 
 use std::collections::HashMap;
 use std::io;

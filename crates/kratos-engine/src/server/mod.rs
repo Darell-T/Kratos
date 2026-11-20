@@ -26,7 +26,7 @@ use kratos_protocol::routes::{
     APPROVAL, CLAUDE_CLI, CLAUDE_CLI_UPDATE, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE,
     MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_ARCHIVE, THREAD_EVENTS,
     THREAD_MESSAGES, THREAD_RESUME, THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE,
-    WORKSPACES,
+    WORKSPACE_WORKTREES, WORKSPACES,
 };
 use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
 use kratos_store::{Refusal, StoreError};
@@ -185,6 +185,7 @@ fn user_routes() -> Router<ServerState> {
     Router::new()
         .route(HEALTH, get(health))
         .route(WORKSPACES, post(workspaces::create_workspace))
+        .route(WORKSPACE_WORKTREES, get(workspaces::list_worktrees))
         .route(MESSAGE, delete(agents::remove_message))
         .route(MESSAGE_STEER, post(agents::steer))
         .route(MESSAGE_RETRY, post(agents::retry_message))

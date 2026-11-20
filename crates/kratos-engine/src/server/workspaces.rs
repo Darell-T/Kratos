@@ -1,13 +1,15 @@
 use std::path::Path as FilePath;
 
 use axum::body::Body;
+use axum::extract::Path;
 use axum::extract::State;
+use axum::extract::rejection::PathRejection;
 use axum::http::StatusCode;
 use axum::response::Response;
-use kratos_protocol::CreateWorkspace;
+use kratos_protocol::{CreateWorkspace, Ownership, ProjectWorktree, WorkspaceId};
 
 use super::json::read_json;
-use super::{ApiError, ServerState, json_reply};
+use super::{ApiError, ServerState, json_reply, path};
 
 /// `GET /api/workspaces`: 200 with every workspace, oldest first.
 pub(super) async fn list_workspaces(
@@ -30,6 +32,38 @@ pub(super) async fn create_workspace(
         .call(move |store| store.create_workspace(&request))
         .await?;
     Ok(json_reply(StatusCode::CREATED, &workspace))
+}
+
+/// `GET /api/workspaces/{id}/worktrees`: 200 with the worktrees of the project's repository other
+/// than the project folder, for a new thread to work in. 404 for an unknown workspace, and 400 when
+/// the project folder is not the top folder of a git repository.
+pub(super) async fn list_worktrees(
+    State(state): State<ServerState>,
+    id: Result<Path<WorkspaceId>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let workspace_id = path(id)?;
+    let workspace = state
+        .store
+        .call(move |store| store.workspace(&workspace_id))
+        .await?;
+    let listed = state.worktrees.list(FilePath::new(&workspace.path)).await?;
+    let ours = state
+        .store
+        .call(|store| store.kratos_worktree_paths())
+        .await?;
+    let worktrees: Vec<ProjectWorktree> = listed
+        .into_iter()
+        .map(|listed| ProjectWorktree {
+            ownership: if ours.contains(&listed.path) {
+                Ownership::CreatedByKratos
+            } else {
+                Ownership::Borrowed
+            },
+            path: listed.path,
+            branch: listed.branch,
+        })
+        .collect();
+    Ok(json_reply(StatusCode::OK, &worktrees))
 }
 
 /// On Windows `Path::is_absolute` refuses `\folder` and `/folder`, which Node accepts as absolute

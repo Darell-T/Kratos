@@ -42,6 +42,20 @@ pub struct Worktree {
     pub ownership: Ownership,
 }
 
+/// A worktree of a project's repository, from `GET /api/workspaces/{id}/worktrees`. A new thread
+/// may work in it with [`PlaceRequest::ExistingWorktree`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectWorktree {
+    /// The worktree's top folder, with links resolved.
+    pub path: String,
+    /// `None` when the worktree has no branch checked out.
+    pub branch: Option<String>,
+    /// [`Ownership::CreatedByKratos`] for a worktree Kratos made, which it removes once its last
+    /// thread is archived. Any other is borrowed, and Kratos never removes it.
+    pub ownership: Ownership,
+}
+
 /// Whether Kratos may delete a worktree once no thread uses it (D16).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

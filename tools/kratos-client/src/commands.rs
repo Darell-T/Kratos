@@ -24,6 +24,7 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   workspaces
   create-workspace <name> <path>
   threads <workspace-id>
+  worktrees <workspace-id>
   create-thread <workspace-id> <title> <provider> [--settings <settings-json>]
                 [--worktree new|<path>]
   post <thread-id> <text>
@@ -105,11 +106,12 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 27] = [
+const COMMANDS: [Command; 28] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
     Command { name: "threads", positional: 1, options: &[], run: threads },
+    Command { name: "worktrees", positional: 1, options: &[], run: worktrees },
     Command {
         name: "create-thread", positional: 3, options: &["--settings", "--worktree"], run: create_thread,
     },
@@ -289,6 +291,11 @@ fn create_workspace(session: &mut Session, args: &Args) -> Result<(), Failure> {
 fn threads(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let workspace_id = WorkspaceId::new(args.positional[0].clone());
     session.get(&routes::threads_in(&workspace_id))
+}
+
+fn worktrees(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let workspace_id = WorkspaceId::new(args.positional[0].clone());
+    session.get(&routes::workspace_worktrees(&workspace_id))
 }
 
 fn create_thread(session: &mut Session, args: &Args) -> Result<(), Failure> {

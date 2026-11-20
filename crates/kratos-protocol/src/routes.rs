@@ -9,6 +9,7 @@ pub const USAGE: &str = "/api/usage";
 pub const CLAUDE_CLI: &str = "/api/agents/claude/cli";
 pub const CLAUDE_CLI_UPDATE: &str = "/api/agents/claude/cli/update";
 pub const WORKSPACES: &str = "/api/workspaces";
+pub const WORKSPACE_WORKTREES: &str = "/api/workspaces/{id}/worktrees";
 pub const THREADS: &str = "/api/threads";
 pub const THREAD: &str = "/api/threads/{id}";
 pub const THREAD_EVENTS: &str = "/api/threads/{id}/events";
@@ -28,6 +29,10 @@ pub const CONTINUATION_SCHEDULE: &str = "/api/continuations/{id}/schedule";
 
 pub fn threads_in(workspace_id: &WorkspaceId) -> String {
     format!("{THREADS}?workspaceId={}", encode(workspace_id.as_str()))
+}
+
+pub fn workspace_worktrees(id: &WorkspaceId) -> String {
+    fill(WORKSPACE_WORKTREES, &[id.as_str()])
 }
 
 pub fn thread(id: &ThreadId) -> String {
