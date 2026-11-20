@@ -14,7 +14,7 @@ use super::approvals::Requests;
 use super::connection::StartError;
 use super::servers::{ServerKey, Servers};
 use super::threads::ThreadState;
-use super::turns::{Delivery, StopWaiters};
+use super::turns::{Delivery, StartRequest, StopWaiters};
 use super::{CodexSettings, Continued, ProviderError, Sent};
 use crate::hub::Hub;
 use crate::store_thread::StoreThread;
@@ -138,8 +138,7 @@ pub(super) enum Done {
         result: Result<Opened, RequestError>,
     },
     StartAnswered {
-        thread_id: ThreadId,
-        message_id: MessageId,
+        request: StartRequest,
         result: Result<Box<types::Turn>, RequestError>,
     },
     /// The history read after an uncertain `turn/start` or `turn/steer`: the turn that took the
@@ -328,11 +327,9 @@ impl Actor {
                 self.on_attached(thread_id, context_limit, access, result)
                     .await
             }
-            Done::StartAnswered {
-                thread_id,
-                message_id,
-                result,
-            } => self.on_start_answered(thread_id, message_id, result).await,
+            Done::StartAnswered { request, result } => {
+                self.on_start_answered(request, result).await
+            }
             Done::DeliveryChecked {
                 thread_id,
                 message_id,

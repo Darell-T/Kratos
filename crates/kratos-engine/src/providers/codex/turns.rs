@@ -37,6 +37,23 @@ pub(super) enum Delivery {
     Steer,
 }
 
+/// A `turn/start` sent for a message. Its answer changes nothing unless the message is still the
+/// one the thread is starting.
+pub(super) struct StartRequest {
+    pub(super) thread_id: ThreadId,
+    pub(super) message_id: MessageId,
+    pub(super) params: Box<types::TurnStartParams>,
+    pub(super) attempt: StartTry,
+}
+
+/// Codex may refuse a start before running it. The actor then sends it once more, on the
+/// `Last` try.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum StartTry {
+    First,
+    Last,
+}
+
 /// The users who asked Codex to stop a turn. They hear whether Codex stopped it, and may ask
 /// again.
 pub(super) struct StopWaiters(pub(super) Vec<Reply<()>>);
@@ -153,38 +170,52 @@ impl Actor {
         *access = thread.settings.access();
         let mut params = turn_start_params(native_id, &message, thread.model(), &thread.settings);
         params.runtime_workspace_roots = Some(vec![types::AbsolutePathBuf(thread.folder.clone())]);
-        let thread_id = thread_id.clone();
-        self.spawn(&ServerKey::Thread(thread_id.clone()), async move {
-            let result = match codex.request::<methods::TurnStart>(&params).await {
-                // Refused before it ran, so a second try cannot run it twice.
-                Err(RequestError::Rpc { code, .. }) if rejected_before_execution(code) => {
-                    codex.request::<methods::TurnStart>(&params).await
-                }
-                result => result,
-            };
-            Done::StartAnswered {
-                thread_id,
-                message_id,
-                result: result.map(|started| Box::new(started.turn)),
-            }
+        let request = StartRequest {
+            thread_id: thread_id.clone(),
+            message_id,
+            params: Box::new(params),
+            attempt: StartTry::First,
+        };
+        self.request_start(codex, request);
+    }
+
+    fn request_start(&self, codex: Codex, request: StartRequest) {
+        self.spawn(&ServerKey::Thread(request.thread_id.clone()), async move {
+            let result = codex
+                .request::<methods::TurnStart>(&request.params)
+                .await
+                .map(|started| Box::new(started.turn));
+            Done::StartAnswered { request, result }
         });
     }
 
     pub(super) async fn on_start_answered(
         &mut self,
-        thread_id: ThreadId,
-        message_id: MessageId,
+        request: StartRequest,
         result: Result<Box<types::Turn>, RequestError>,
     ) {
+        let (thread_id, message_id) = (request.thread_id.clone(), request.message_id.clone());
         if !self.is_starting(&thread_id, &message_id) {
             return;
         }
-        match result {
-            Ok(turn) => self.accept_start(&thread_id, &message_id, *turn).await,
-            Err(RequestError::Rpc { code, message }) if rejected_before_execution(code) => {
+        match (result, request.attempt) {
+            (Ok(turn), _) => self.accept_start(&thread_id, &message_id, *turn).await,
+            // Refused before it ran, so a second try cannot run it twice.
+            (Err(RequestError::Rpc { code, .. }), StartTry::First)
+                if rejected_before_execution(code)
+                    && let Some(codex) =
+                        self.servers.codex(&ServerKey::Thread(thread_id.clone())) =>
+            {
+                let request = StartRequest {
+                    attempt: StartTry::Last,
+                    ..request
+                };
+                self.request_start(codex, request);
+            }
+            (Err(RequestError::Rpc { code, message }), _) if rejected_before_execution(code) => {
                 self.refuse_start(&thread_id, &message_id, message).await;
             }
-            Err(error) => {
+            (Err(error), _) => {
                 self.check_delivery(&thread_id, &message_id, Delivery::Start, error.to_string());
             }
         }

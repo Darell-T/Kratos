@@ -535,6 +535,39 @@ async fn a_late_start_answer_for_a_discarded_message_leaves_the_next_message_alo
 }
 
 #[tokio::test]
+async fn a_refused_start_for_a_discarded_message_is_not_sent_again() {
+    // Catches the one retry of a refused turn/start going out after the user discarded the
+    // message, so Codex runs work Kratos shows as cancelled.
+    let mut harness = Harness::start(Options::default()).await;
+    harness.send("a", "first").await;
+    harness.held("turn/start", 1).await;
+    harness
+        .emit("thread/closed", json!({ "threadId": THREAD }))
+        .await;
+    harness
+        .wait_for(|event| matches!(event, ThreadEventBody::ThreadPaused { .. }))
+        .await;
+    let discarded = harness
+        .provider
+        .discard(harness.thread_id.clone(), message_id("a"))
+        .await
+        .unwrap();
+    assert_eq!(discarded.status, MessageStatus::Cancelled);
+
+    harness
+        .refuse("turn/start", -32600, "thread not found")
+        .await;
+    harness.send("b", "second").await;
+
+    let started = harness.held("turn/start", 2).await;
+    assert_eq!(
+        started[1]["params"]["clientUserMessageId"], "b",
+        "the discarded message was sent again"
+    );
+    assert_eq!(harness.message("a").await.status, MessageStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn a_stop_codex_ignores_ends_only_its_own_thread_s_turn() {
     let mut harness = Harness::start(Options {
         stop_timeout: Duration::from_millis(300),
