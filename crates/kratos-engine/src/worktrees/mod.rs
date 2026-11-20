@@ -65,6 +65,10 @@ pub(crate) enum PlaceError {
     IsProjectFolder(String),
     #[error("Every branch name from {0} to {0}-{MAX_NAME_TRIES} is taken. Rename the thread.")]
     NoFreeName(String),
+    #[error(
+        "{0} is a link to another folder, so Kratos will not make worktrees through it. Remove the          link, or start the thread in the project folder."
+    )]
+    LinkedFolder(String),
     #[error("Kratos cannot use the path {0}, because it is not valid Unicode.")]
     NotUnicode(String),
     #[error(transparent)]
@@ -340,7 +344,14 @@ async fn ignore_everything_in(folder: &Path) -> Result<(), PlaceError> {
         path: folder.display().to_string(),
         source,
     };
-    tokio::fs::create_dir_all(folder).await.map_err(io_error)?;
+    if tokio::fs::symlink_metadata(folder).await.is_ok() {
+        // A repository can commit the folder as a link, and git would check out through it.
+        if resolved(folder).await.ok().as_deref() != Some(folder) {
+            return Err(PlaceError::LinkedFolder(folder.display().to_string()));
+        }
+    } else {
+        tokio::fs::create_dir(folder).await.map_err(io_error)?;
+    }
     let ignore = folder.join(".gitignore");
     if tokio::fs::symlink_metadata(&ignore).await.is_err() {
         tokio::fs::write(&ignore, "*\n").await.map_err(io_error)?;

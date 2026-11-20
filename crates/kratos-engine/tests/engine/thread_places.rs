@@ -400,3 +400,44 @@ fn an_agent_below_full_access_can_start_threads_only_where_it_works() {
     assert_eq!(threads_in(&user, &workspace).len(), 2);
     assert_eq!(worktree_count(&repository), 2);
 }
+
+#[test]
+fn a_worktrees_folder_that_links_elsewhere_is_refused_and_nothing_is_written_there() {
+    // Catches Kratos following a `.kratos-worktrees` link, which a cloned repository can commit,
+    // and checking out the project into a folder outside it.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let outside = root.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    link_folder(&outside, &repository.join(".kratos-worktrees"));
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+
+    let refused = engine
+        .client()
+        .create_thread(&request(&workspace, "linked", PlaceRequest::NewWorktree))
+        .unwrap_err();
+
+    let (status, message) = refusal(refused);
+    assert_eq!(status, 400, "{message}");
+    assert!(message.contains("is a link"), "{message}");
+    assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+    assert_eq!(worktree_count(&repository), 1);
+}
+
+#[cfg(unix)]
+fn link_folder(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+/// A junction, which Windows lets any user make, unlike a symbolic link.
+#[cfg(windows)]
+fn link_folder(target: &Path, link: &Path) {
+    let made = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(made.status.success(), "{made:?}");
+}
