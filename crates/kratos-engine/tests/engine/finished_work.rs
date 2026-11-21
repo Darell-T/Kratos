@@ -225,6 +225,40 @@ fn a_commit_at_the_top_of_the_repository_concludes_a_merge() {
 }
 
 #[test]
+fn a_commit_at_the_top_concludes_a_merge_that_changes_no_file() {
+    // Catches the check for staged changes refusing a merge whose result equals HEAD, as when
+    // both branches made the same change, which git still records as a commit with two parents.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    git(&repository, &["switch", "--quiet", "--create", "feature"]);
+    std::fs::write(repository.join("same.txt"), "same\n").unwrap();
+    git(&repository, &["add", "same.txt"]);
+    git(&repository, &["commit", "--quiet", "--message", "feature"]);
+    git(&repository, &["switch", "--quiet", "main"]);
+    std::fs::write(repository.join("same.txt"), "same\n").unwrap();
+    git(&repository, &["add", "same.txt"]);
+    git(&repository, &["commit", "--quiet", "--message", "main"]);
+    git(
+        &repository,
+        &["merge", "--quiet", "--no-ff", "--no-commit", "feature"],
+    );
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "merge", PlaceRequest::default());
+
+    let reply = commit(&client, &thread, "Merge the feature");
+
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    let parents = git(
+        &repository,
+        &["rev-list", "--parents", "--max-count=1", "HEAD"],
+    );
+    assert_eq!(parents.split(' ').count(), 3, "{parents}");
+    assert!(!repository.join(".git").join("MERGE_HEAD").exists());
+}
+
+#[test]
 fn commits_sent_together_make_one_commit_and_the_rest_find_nothing_to_commit() {
     // Catches two git commands racing for the repository's index lock, which git answers with an
     // error that tells the user to delete the lock file.

@@ -122,7 +122,10 @@ impl Worktrees {
         let is_whole_checkout = resolved(folder)
             .await
             .is_ok_and(|folder| folder == repository.top);
-        if !is_whole_checkout && let Some(underway) = self.underway(folder).await? {
+        let underway = self.underway(folder).await?;
+        if let Some(underway) = underway
+            && !is_whole_checkout
+        {
             return Err(PlaceError::PartialCommitDuring(underway));
         }
         let index = self.scratch_index(folder).await?;
@@ -131,7 +134,7 @@ impl Worktrees {
         let committed = async {
             self.stage(store, folder, &repository.top, is_whole_checkout, &index)
                 .await?;
-            self.commit_index(folder, &index, message).await
+            self.commit_index(folder, &index, message, underway).await
         }
         .await;
         let _ = tokio::fs::remove_file(&index).await;
@@ -164,12 +167,14 @@ impl Worktrees {
         Ok(())
     }
 
-    /// Commits what `index` holds, and returns the new commit.
+    /// Commits what `index` holds, and returns the new commit. A merge `underway` goes in even
+    /// when it changes no file, as git records it with both parents.
     async fn commit_index(
         &self,
         folder: &Path,
         index: &Path,
         message: &str,
+        underway: Option<Underway>,
     ) -> Result<String, PlaceError> {
         let staged = ["diff", "--cached", "--quiet"];
         match self
@@ -177,6 +182,7 @@ impl Worktrees {
             .run_in_index(folder, &staged, git::QUICK, index)
             .await
         {
+            Ok(_) if matches!(underway, Some(Underway::Merge)) => {}
             Ok(_) => return Err(PlaceError::NothingToCommit),
             Err(error) if error.exited_with(1) => {}
             Err(error) => return Err(error.into()),
