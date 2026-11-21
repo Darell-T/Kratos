@@ -472,20 +472,64 @@ fn a_pull_request_from_the_default_branch_is_refused_before_anything_is_pushed()
 }
 
 #[test]
+fn a_pull_request_to_an_origin_with_no_branches_is_refused_before_anything_is_pushed() {
+    // Catches a push to an empty origin, which names no default branch to compare with: the push
+    // publishes the thread's branch as origin's first branch, which GitHub makes the default.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let remote = root.path().join("remote.git");
+    let remote_text = remote.to_str().unwrap();
+    git(
+        root.path(),
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            remote_text,
+        ],
+    );
+    git(&repository, &["remote", "add", "origin", remote_text]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
+
+    let reply = client
+        .post(
+            &routes::thread_pull_request(&thread.id),
+            &CreatePullRequest {
+                title: RequiredText::new("Proposed change").unwrap(),
+                body: String::new(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert_eq!(git(&remote, &["for-each-ref"]), "");
+    assert!(engine.fake_gh_runs().is_empty());
+}
+
+#[test]
 fn a_pull_request_pushes_the_branch_and_gives_gh_each_value_as_its_own_argument() {
     // Catches a branch never pushed, or a title or body that a shell or `gh` itself would read as
     // code or a flag.
     let root = TempDir::new().unwrap();
     let repository = new_repository(&root);
     let remote = root.path().join("remote.git");
+    let remote_text = remote.to_str().unwrap();
     git(
         root.path(),
-        &["init", "--quiet", "--bare", remote.to_str().unwrap()],
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            remote_text,
+        ],
     );
-    git(
-        &repository,
-        &["remote", "add", "origin", remote.to_str().unwrap()],
-    );
+    git(&repository, &["remote", "add", "origin", remote_text]);
+    git(&repository, &["push", "--quiet", "origin", "main"]);
     let engine = RunningEngine::start(&root.path().join("kratos"));
     let workspace = workspace_at(&engine, &repository);
     let client = engine.client();

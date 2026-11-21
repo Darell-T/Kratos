@@ -97,6 +97,11 @@ pub(crate) enum PlaceError {
     )]
     OnDefaultBranch(String),
     #[error(
+        "origin has no default branch yet, so a pull request has no branch to be reviewed \
+         against. Push the repository's main branch to origin, then open the pull request."
+    )]
+    NoDefaultBranch,
+    #[error(
         "Kratos could not run gh. Install the GitHub CLI and sign in with `gh auth login`. ({0})"
     )]
     NoGh(#[source] io::Error),

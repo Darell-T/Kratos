@@ -152,7 +152,7 @@ impl Worktrees {
             .branch_of(folder)
             .await?
             .ok_or_else(|| PlaceError::NoBranch(folder.display().to_string()))?;
-        if self.default_branch(folder).await?.as_ref() == Some(&branch) {
+        if self.default_branch(folder).await? == branch {
             return Err(PlaceError::OnDefaultBranch(branch));
         }
         let lock = self.lock_of_folder(folder).await?;
@@ -171,17 +171,21 @@ impl Worktrees {
         Ok(created.lines().last().unwrap_or_default().trim().to_owned())
     }
 
-    /// The branch `origin`'s `HEAD` names, which `gh` opens a pull request against, or `None` when
-    /// the remote names none, as an empty one does.
-    async fn default_branch(&self, folder: &Path) -> Result<Option<String>, PlaceError> {
+    /// The branch `origin`'s `HEAD` names, which `gh` opens a pull request against. A remote that
+    /// names none, as an empty one does, is refused: a push there would publish the thread's
+    /// branch as its first branch, which GitHub makes the default.
+    async fn default_branch(&self, folder: &Path) -> Result<String, PlaceError> {
         let args = ["ls-remote", "--symref", "origin", "HEAD"];
         let listed = self.git.run(folder, &args, CHECKOUT).await?;
-        Ok(listed.lines().find_map(|line| {
-            let branch = line
-                .strip_prefix("ref: refs/heads/")?
-                .strip_suffix("\tHEAD")?;
-            Some(branch.to_owned())
-        }))
+        listed
+            .lines()
+            .find_map(|line| {
+                let branch = line
+                    .strip_prefix("ref: refs/heads/")?
+                    .strip_suffix("\tHEAD")?;
+                Some(branch.to_owned())
+            })
+            .ok_or(PlaceError::NoDefaultBranch)
     }
 
     async fn gh(&self, folder: &Path, args: &[String]) -> Result<String, PlaceError> {
