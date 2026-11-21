@@ -176,10 +176,15 @@ struct ChildOutput {
 /// once it writes more. Standard error is read at the same time, so the child never waits on a
 /// full pipe.
 async fn read_child(mut child: Child, max_bytes: usize) -> io::Result<ChildOutput> {
-    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");
     let out = async {
+        let mut stdout = stdout;
         let read = read_capped(&mut stdout, max_bytes).await?;
+        // The kill reaches only the child. Closing the pipe also stops a process it started that
+        // writes there, such as the git that Git for Windows' launcher runs, which would otherwise
+        // hold standard error open while it waits on a pipe nobody reads.
+        drop(stdout);
         if read.1 {
             child.start_kill()?;
         }
@@ -239,6 +244,54 @@ mod tests {
             .unwrap();
 
         assert_eq!((read.0.len(), read.1), (1000, true));
+    }
+
+    #[tokio::test]
+    async fn a_child_started_through_a_launcher_still_stops_at_the_limit() {
+        // Catches stopping only the launcher, as Git for Windows' `cmd\git.exe` is: the git it
+        // started keeps the pipes open, blocked on output nobody reads, until the budget ends.
+        let repository = tempfile::TempDir::new().unwrap();
+        let folder = repository.path();
+        std::fs::write(folder.join("big.txt"), "x".repeat(1024 * 1024)).unwrap();
+        let identity = ["-c", "user.name=Test", "-c", "user.email=test@example.com"];
+        for args in [
+            &["init", "--quiet"][..],
+            &["add", "big.txt"],
+            &[&identity[..], &["commit", "--quiet", "--message", "big"]].concat(),
+        ] {
+            let mut setup = std::process::Command::new("git");
+            setup.arg("-C").arg(folder).args(args);
+            assert!(setup.status().unwrap().success(), "git {args:?}");
+        }
+        let mut launcher = launcher_of(folder);
+        launcher.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let child = launcher.spawn().unwrap();
+        let read = tokio::time::timeout(Duration::from_secs(10), read_child(child, 1000))
+            .await
+            .expect("reading stops once the launcher's git wrote past the limit")
+            .unwrap();
+
+        assert_eq!((read.stdout.len(), read.is_cut), (1000, true));
+    }
+
+    /// A shell that runs git as its own child and waits for it, as a launcher does.
+    fn launcher_of(folder: &Path) -> Command {
+        if cfg!(windows) {
+            let mut shell = Command::new("cmd");
+            shell
+                .args(["/C", "git", "-C"])
+                .arg(folder)
+                .args(["cat-file", "blob", "HEAD:big.txt"]);
+            shell
+        } else {
+            let mut shell = Command::new("sh");
+            // The `:` after git keeps the shell from replacing itself with git.
+            shell
+                .args(["-c", "git -C \"$0\" cat-file blob HEAD:big.txt; :"])
+                .arg(folder);
+            shell
+        }
     }
 
     #[tokio::test]
