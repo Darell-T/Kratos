@@ -1,6 +1,7 @@
 //! Git's lock on a worktree's index, which a commit holds as git's own commit does. Git commands
 //! that stage files or make a commit take the same lock, so none runs while Kratos commits.
 
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -15,8 +16,6 @@ const WAIT: Duration = Duration::from_secs(2);
 
 const RETRY: Duration = Duration::from_millis(20);
 
-/// Win32 `ERROR_SHARING_VIOLATION`, returned when another process holds a file open without
-/// `FILE_SHARE_DELETE`.
 #[cfg(windows)]
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
@@ -28,14 +27,18 @@ pub(super) struct IndexLock {
     is_held: bool,
 }
 
-/// An [`IndexLock`] whose lock file already holds the replacement index bytes and (on Windows)
-/// holds `DELETE` share-check handles on both the target index and the lock file so a reader
-/// without `FILE_SHARE_DELETE` cannot block the rename after `git commit` advances `HEAD`.
 pub(super) struct PreparedReplacement {
-    // Dropped before `lock` so file handles are released before any teardown.
     lock_guard: Option<tokio::fs::File>,
     replace_guard: Option<tokio::fs::File>,
     lock: IndexLock,
+}
+
+impl Drop for PreparedReplacement {
+    fn drop(&mut self) {
+        // Release Windows DELETE share-check handles before `IndexLock::drop` removes `index.lock`.
+        self.lock_guard = None;
+        self.replace_guard = None;
+    }
 }
 
 impl IndexLock {
@@ -73,9 +76,6 @@ impl IndexLock {
         }
     }
 
-    /// Stages `updated` into the lock file (preserving its modified time for git's racy-index
-    /// check) and reserves both the target index and the lock file for replacement before `git
-    /// commit` advances `HEAD`.
     pub(super) async fn prepare_replacement(
         self,
         updated: &Path,
@@ -96,22 +96,31 @@ impl PreparedReplacement {
         &self.lock.lock
     }
 
-    /// Atomically renames the prepared lock file into the index's place and releases the lock.
     pub(super) async fn commit(mut self) -> io::Result<()> {
-        drop(self.lock_guard.take());
-        drop(self.replace_guard.take());
-        let deadline = Instant::now() + WAIT;
-        loop {
-            match tokio::fs::rename(&self.lock.lock, &self.lock.index).await {
-                // Windows refuses to replace a file another program has open without
-                // `FILE_SHARE_DELETE`. Retry briefly before reporting the failure.
-                Err(error) if is_index_busy(&error) && Instant::now() < deadline => {
-                    tokio::time::sleep(RETRY).await;
-                }
-                renamed => {
-                    self.lock.is_held = renamed.is_err();
-                    return renamed;
-                }
+        self.lock_guard = None;
+        self.replace_guard = None;
+        // Take ownership of cleanup before entering the blocking pool so cancellation cannot race
+        // `IndexLock::drop` against an in-flight rename.
+        self.lock.is_held = false;
+        let lock_path = self.lock.lock.clone();
+        let index_path = self.lock.index.clone();
+        tokio::task::spawn_blocking(move || commit_rename_sync(&lock_path, &index_path))
+            .await
+            .map_err(io::Error::other)?
+    }
+}
+
+fn commit_rename_sync(lock_path: &Path, index_path: &Path) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        match std::fs::rename(lock_path, index_path) {
+            Ok(()) => return Ok(()),
+            Err(error) if is_index_busy(&error) && std::time::Instant::now() < deadline => {
+                std::thread::sleep(RETRY);
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(lock_path);
+                return Err(error);
             }
         }
     }
@@ -119,8 +128,7 @@ impl PreparedReplacement {
 
 impl Drop for IndexLock {
     fn drop(&mut self) {
-        // Once the lock file became the index, the name may already be another git command's
-        // lock.
+        // Once the lock file became the index, the name may already be another git command's lock.
         if self.is_held {
             let _ = std::fs::remove_file(&self.lock);
         }
@@ -128,31 +136,76 @@ impl Drop for IndexLock {
 }
 
 /// Copies `from` to `to` while keeping `from`'s modified time, so git's racy-index check stays
-/// active on Linux where plain `fs::copy` writes a fresh timestamp. Returns `Ok(false)` when
-/// `from` does not exist yet.
-pub(super) async fn copy_preserving_mtime(from: &Path, to: &Path) -> Result<bool, PlaceError> {
+/// active on Linux where plain `fs::copy` writes a fresh timestamp.
+pub(super) async fn copy_preserving_mtime(from: &Path, to: &Path) -> Result<(), PlaceError> {
+    copy_mtime_inner(from, to, MissingSource::Error).await
+}
+
+/// Like [`copy_preserving_mtime`], returning `Ok(())` when `from` does not exist yet.
+pub(super) async fn copy_preserving_mtime_if_present(
+    from: &Path,
+    to: &Path,
+) -> Result<(), PlaceError> {
+    copy_mtime_inner(from, to, MissingSource::Skip).await
+}
+
+#[derive(Clone, Copy)]
+enum MissingSource {
+    Error,
+    Skip,
+}
+
+async fn copy_mtime_inner(
+    from: &Path,
+    to: &Path,
+    missing: MissingSource,
+) -> Result<(), PlaceError> {
     let from = from.to_owned();
     let to = to.to_owned();
     let dest = to.display().to_string();
-    tokio::task::spawn_blocking(move || -> io::Result<bool> {
-        let modified = match std::fs::metadata(&from) {
-            Ok(meta) => meta.modified()?,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(error),
-        };
-        std::fs::copy(&from, &to)?;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&to)?
-            .set_modified(modified)?;
-        Ok(true)
+    tokio::task::spawn_blocking(move || copy_mtime_sync(&from, &to, missing))
+        .await
+        .map_err(|error| PlaceError::Io {
+            path: dest,
+            source: io::Error::other(error),
+        })?
+}
+
+fn copy_mtime_sync(from: &Path, to: &Path, missing: MissingSource) -> Result<(), PlaceError> {
+    let mut src = match File::open(from) {
+        Ok(file) => file,
+        Err(error)
+            if matches!(missing, MissingSource::Skip)
+                && error.kind() == io::ErrorKind::NotFound =>
+        {
+            return Ok(());
+        }
+        Err(source) => {
+            return Err(PlaceError::Io {
+                path: from.display().to_string(),
+                source,
+            });
+        }
+    };
+    let modified = src
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .map_err(|source| PlaceError::Io {
+            path: from.display().to_string(),
+            source,
+        })?;
+    let mut dst = File::create(to).map_err(|source| PlaceError::Io {
+        path: to.display().to_string(),
+        source,
+    })?;
+    io::copy(&mut src, &mut dst).map_err(|source| PlaceError::Io {
+        path: to.display().to_string(),
+        source,
+    })?;
+    dst.set_modified(modified).map_err(|source| PlaceError::Io {
+        path: to.display().to_string(),
+        source,
     })
-    .await
-    .map_err(|error| PlaceError::Io {
-        path: dest.clone(),
-        source: io::Error::other(error),
-    })?
-    .map_err(|source| PlaceError::Io { path: dest, source })
 }
 
 /// On Windows, opens `path` with `DELETE` access and full sharing so any existing reader without
@@ -194,13 +247,13 @@ async fn reserve_for_replace(_path: &Path) -> Result<Option<tokio::fs::File>, Pl
     Ok(None)
 }
 
+#[cfg(windows)]
 fn is_index_busy(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::PermissionDenied {
-        return true;
-    }
-    #[cfg(windows)]
-    if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
-        return true;
-    }
+    error.kind() == io::ErrorKind::PermissionDenied
+        || error.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
+}
+
+#[cfg(not(windows))]
+fn is_index_busy(_error: &io::Error) -> bool {
     false
 }

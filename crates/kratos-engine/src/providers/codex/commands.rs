@@ -185,9 +185,7 @@ impl Actor {
             }
         };
         let thread = &self.threads[&thread_id];
-        let profile_kind = Profile::for_settings(&thread.settings);
-        let npm_cache = NpmCache::for_profile(profile_kind);
-        let profile = profile_kind.id().to_owned();
+        let profile = Profile::for_settings(&thread.settings);
         let folder = thread.folder.clone();
         let pending_request = self.servers.request_guard(&key);
         tokio::spawn(async move {
@@ -195,7 +193,7 @@ impl Actor {
             let mut reply = reply;
             let process_id = uuid::Uuid::new_v4().to_string();
             tokio::select! {
-                result = exec(&codex, command, folder, profile, npm_cache, timeout, &process_id) => {
+                result = exec(&codex, command, folder, profile, timeout, &process_id) => {
                     let _ = reply.send(Ok(result));
                 }
                 () = reply.closed() => {
@@ -237,15 +235,14 @@ async fn exec(
     codex: &Codex,
     command: Vec<String>,
     folder: String,
-    profile: String,
-    npm_cache: NpmCache,
+    profile: Profile,
     timeout: Duration,
     process_id: &str,
 ) -> CommandResult {
     let mut params: types::CommandExecParams = wire::required(json!({ "command": command }));
     params.cwd = Some(folder);
-    params.permission_profile = Some(profile);
-    if let Some(cache) = npm_cache.path() {
+    params.permission_profile = Some(profile.id().to_owned());
+    if let Some(cache) = NpmCache::for_profile(profile).path() {
         params.env = Some(HashMap::from([(
             "npm_config_cache".to_owned(),
             Some(cache.to_string_lossy().into_owned()),

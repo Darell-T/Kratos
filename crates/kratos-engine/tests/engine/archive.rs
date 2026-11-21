@@ -1414,23 +1414,19 @@ fn an_open_directory_save_after_keep_check_survives_in_trash() {
     let ready = root.path().join("writer-ready");
     let trigger = root.path().join("writer-go");
     let done = root.path().join("writer-done");
-    let script = format!(
-        "import os, time\n\
-         fd = os.open({path:?}, os.O_RDONLY | os.O_DIRECTORY)\n\
-         open({ready:?}, 'w').close()\n\
-         while not os.path.exists({trigger:?}): time.sleep(0.01)\n\
-         for name, body in [('README.md', b'late tracked save\\n'), ('saved.local', b'late ignored save\\n')]:\n\
-             f = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, dir_fd=fd)\n\
-             with os.fdopen(f, 'wb') as out: out.write(body)\n\
-         os.close(fd)\n\
-         open({done:?}, 'w').close()\n",
-        path = wt.path,
-        ready = ready.to_str().unwrap(),
-        trigger = trigger.to_str().unwrap(),
-        done = done.to_str().unwrap(),
-    );
-    let mut writer = std::process::Command::new("python3")
-        .args(["-c", &script])
+    let mut writer = std::process::Command::new("sh")
+        .current_dir(&wt.path)
+        .args([
+            "-c",
+            "touch \"$1\"; while [ ! -f \"$2\" ]; do sleep 0.01; done; \
+             printf 'late tracked save\\n' > README.md; \
+             printf 'late ignored save\\n' > saved.local; \
+             touch \"$3\"",
+            "open-dir-writer",
+            ready.to_str().unwrap(),
+            trigger.to_str().unwrap(),
+            done.to_str().unwrap(),
+        ])
         .spawn()
         .unwrap();
     let deadline = Instant::now() + WAIT;

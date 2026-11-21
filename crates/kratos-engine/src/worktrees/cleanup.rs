@@ -12,30 +12,23 @@ use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError, UnfinishedWo
 use serde::{Deserialize, Serialize};
 
 use super::git;
+use super::index_lock::copy_preserving_mtime_if_present;
 use super::{
     PlaceError, TRASH_FOLDER, WORKTREES_FOLDER, Worktrees, ensure_our_lock, ignore_everything_in,
     is_same_checkout_at, is_same_checkout_dir, resolved,
 };
 use crate::store_thread::StoreThread;
 
-/// How long a trashed worktree waits before startup sweep deletes it (measured from both trash
-/// time and the newest file modification inside the trashed checkout).
-const TRASH_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const TRASH_RETENTION: Duration = Duration::from_hours(7 * 24);
+const TRASH_SLOT_LEN: usize = WORKTREES_FOLDER.len() - TRASH_FOLDER.len() + 1;
+const GITLINK_MODE: &[u8] = b"160000";
 
-/// Length of each deterministic trash slot name inside [`TRASH_FOLDER`]. Because `.kratos-trash`
-/// is four characters shorter than `.kratos-worktrees`, a five-character slot keeps every trashed
-/// path no longer than even a one-character worktree name.
-const TRASH_SLOT_LEN: usize = 5;
-
-/// Outcome of checking whether a worktree may be archived under [`LeftFiles::Keep`].
 enum KeepCheck {
     Clean,
     Dirty(Vec<String>),
     HasSubmodule,
 }
 
-/// Metadata written beside a trashed worktree (`<trash>/<slot>.json`) so restarts recognize it
-/// after git's admin folder is gone and the user can locate and restore it.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TrashedWorktree {
@@ -45,7 +38,6 @@ struct TrashedWorktree {
     trashed_at: Timestamp,
 }
 
-/// A slot inside `<repo>/.kratos-trash/` and its sibling metadata file.
 struct TrashSlot {
     dir: PathBuf,
     meta: PathBuf,
@@ -134,7 +126,6 @@ impl Worktrees {
         Ok(cleanup)
     }
 
-    /// Reconciles disk, trash, and git's admin record for `recorded` under the repository lock.
     async fn remove(
         &self,
         repository: &Path,
@@ -174,13 +165,9 @@ impl Worktrees {
                 .remove_registered_live(folder, trash_dir, admin, recorded, files)
                 .await;
         }
-        if self.is_live_checkout(folder).await? {
-            remove_tree(admin).await?;
-            return Ok(Cleanup::NotOwned);
-        }
-        remove_empty_dir(folder).await?;
+        let outcome = self.remove_unregistered(folder).await?;
         remove_tree(admin).await?;
-        Ok(Cleanup::Removed)
+        Ok(outcome)
     }
 
     async fn remove_registered_live(
@@ -227,7 +214,7 @@ impl Worktrees {
         // Write metadata before moving so a crash right after rename stays identifiable even if a
         // replacement checkout overwrites git's admin folder at the vacated path.
         write_trash_meta(&slot.meta, recorded, branch).await?;
-        match rename_long(folder, &slot.dir).await {
+        match tokio::fs::rename(folder, &slot.dir).await {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 let _ = remove_file_if_present(&slot.meta).await;
@@ -306,8 +293,6 @@ impl Worktrees {
             .is_some_and(|worktree| worktree.top == folder))
     }
 
-    /// Checks whether `folder` has any file or initialized submodule that [`LeftFiles::Keep`] must
-    /// preserve. Runs `ls-files` before `status` so `status` is the final scan right before moving.
     async fn check_clean_for_keep(&self, folder: &Path) -> Result<KeepCheck, PlaceError> {
         let listed = self
             .git
@@ -356,8 +341,7 @@ impl Worktrees {
     }
 
     /// Edits `git status` does not show because the file is marked assume-unchanged or
-    /// skip-worktree. Compares in an mtime-preserved scratch index copy so racy-git checks stay
-    /// active and mode/type changes show as git reports them.
+    /// skip-worktree.
     async fn overlooked_edits(
         &self,
         folder: &Path,
@@ -378,7 +362,9 @@ impl Worktrees {
         if on_disk.is_empty() {
             return Ok(edited);
         }
-        let index = self.scratch_index(folder).await?;
+        let own = self.index_of(folder).await?;
+        let index = self.scratch_name();
+        copy_preserving_mtime_if_present(&own, &index).await?;
         let changed = self.changed_once_unmarked(folder, &index, &on_disk).await;
         let _ = tokio::fs::remove_file(&index).await;
         edited.extend(changed?);
@@ -419,16 +405,24 @@ impl Worktrees {
         };
         let mut seen = HashSet::new();
         for workspace in workspaces {
-            let trash_dir = Path::new(&workspace.path).join(TRASH_FOLDER);
-            if !seen.insert(trash_dir.clone()) {
-                continue;
-            }
-            let Ok(meta) = tokio::fs::symlink_metadata(&trash_dir).await else {
+            let Ok(root) = resolved(Path::new(&workspace.path)).await else {
                 continue;
             };
-            if !meta.file_type().is_symlink() && meta.is_dir() {
-                empty_expired_in(&trash_dir, retention).await;
+            let trash_dir = root.join(TRASH_FOLDER);
+            if resolved(&trash_dir).await.ok().as_deref() != Some(trash_dir.as_path())
+                || !seen.insert(trash_dir.clone())
+            {
+                continue;
             }
+            let repo_lock = match self.locate(&root).await {
+                Ok(Some(repo)) => Some(self.lock_of(&repo.shared)),
+                _ => None,
+            };
+            let _one_at_a_time = match &repo_lock {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
+            empty_expired_in(&trash_dir, retention).await;
         }
     }
 }
@@ -441,42 +435,73 @@ async fn empty_expired_in(trash_dir: &Path, retention: Duration) {
         return;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
-        let meta_path = entry.path();
-        if meta_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
-            continue;
-        }
-        let Ok(bytes) = tokio::fs::read(&meta_path).await else {
+        let Some(slot) = expired_trash_slot(trash_dir, &entry, cutoff).await else {
             continue;
         };
-        let Ok(meta) = serde_json::from_slice::<TrashedWorktree>(&bytes) else {
-            continue;
-        };
-        if meta.trashed_at.instant() > cutoff {
-            continue;
-        }
-        let dir = meta_path.with_extension("");
-        if has_entry_newer_than(&dir, cutoff).await {
-            continue;
-        }
-        if remove_tree(&dir).await.is_ok() {
-            let _ = tokio::fs::remove_file(&meta_path).await;
-        }
+        expire_trash_slot(&slot, cutoff).await;
     }
 }
 
-/// Whether `dir` contains any file modified after `cutoff`, protecting late saves from expiry.
+async fn expired_trash_slot(
+    trash_dir: &Path,
+    entry: &tokio::fs::DirEntry,
+    cutoff: SystemTime,
+) -> Option<TrashSlot> {
+    if !entry.file_type().await.is_ok_and(|kind| kind.is_file()) {
+        return None;
+    }
+    let meta = entry.path();
+    let stem = meta
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".json"))?;
+    if !is_valid_trash_slot(stem) {
+        return None;
+    }
+    let dir = trash_dir.join(stem);
+    let bytes = tokio::fs::read(&meta).await.ok()?;
+    let parsed: TrashedWorktree = serde_json::from_slice(&bytes).ok()?;
+    (parsed.trashed_at.instant() <= cutoff).then_some(TrashSlot { dir, meta })
+}
+
+async fn expire_trash_slot(slot: &TrashSlot, cutoff: SystemTime) {
+    match tokio::fs::symlink_metadata(&slot.dir).await {
+        Ok(meta) if !meta.file_type().is_symlink() && meta.is_dir() => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let _ = tokio::fs::remove_file(&slot.meta).await;
+            return;
+        }
+        _ => return,
+    }
+    if !has_entry_newer_than(&slot.dir, cutoff).await && remove_tree(&slot.dir).await.is_ok() {
+        let _ = tokio::fs::remove_file(&slot.meta).await;
+    }
+}
+
+fn is_valid_trash_slot(stem: &str) -> bool {
+    stem.len() == TRASH_SLOT_LEN
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+}
+
 async fn has_entry_newer_than(dir: &Path, cutoff: SystemTime) -> bool {
-    let dir = long_path(dir);
+    let dir = dir.to_path_buf();
     tokio::task::spawn_blocking(move || has_entry_newer_than_sync(&dir, cutoff))
         .await
         .unwrap_or(true)
 }
 
 fn has_entry_newer_than_sync(dir: &Path, cutoff: SystemTime) -> bool {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
     };
-    for entry in entries.flatten() {
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
         let Ok(meta) = entry.metadata() else {
             return true;
         };
@@ -494,9 +519,6 @@ fn has_entry_newer_than_sync(dir: &Path, cutoff: SystemTime) -> bool {
     false
 }
 
-/// Finds the git worktree admin folder under `repository/worktrees` carrying `recorded`'s Kratos
-/// id whose lexically normalized `gitdir` (handling relative `..` links offline) matches
-/// `recorded.path/.git`.
 async fn find_our_admin(
     repository: &Path,
     recorded: &KratosWorktree,
@@ -525,7 +547,8 @@ async fn find_our_admin(
         let Ok(gitdir) = tokio::fs::read_to_string(record.join("gitdir")).await else {
             continue;
         };
-        let resolved_gitdir = normalize_lexical(&record.join(gitdir.trim()));
+        let resolved_gitdir =
+            normalize_lexical(&record.join(gitdir.trim_end_matches(['\r', '\n'])));
         if same_lexical_path(&resolved_gitdir, &expected) {
             return Ok(Some(record));
         }
@@ -547,29 +570,32 @@ fn trash_root(folder: &Path) -> Result<PathBuf, PlaceError> {
 }
 
 fn slot_candidates(id: &WorktreeId) -> Vec<String> {
-    let alnum: String = id
+    let mut alnum: String = id
         .as_str()
         .chars()
         .filter(char::is_ascii_alphanumeric)
         .map(|ch| ch.to_ascii_lowercase())
         .collect();
-    let mut slots = Vec::new();
-    for chunk in alnum.as_bytes().chunks(TRASH_SLOT_LEN) {
-        if chunk.len() == TRASH_SLOT_LEN {
-            slots.push(String::from_utf8_lossy(chunk).into_owned());
-        }
-    }
-    if slots.is_empty() {
-        let mut padded = alnum;
-        while padded.len() < TRASH_SLOT_LEN {
-            padded.push('0');
-        }
-        slots.push(padded);
-    }
-    slots
+    alnum.extend(std::iter::repeat_n(
+        '0',
+        TRASH_SLOT_LEN.saturating_sub(alnum.len()),
+    ));
+    alnum
+        .as_bytes()
+        .as_chunks::<TRASH_SLOT_LEN>()
+        .0
+        .iter()
+        .map(|chunk| String::from_utf8_lossy(chunk).into_owned())
+        .collect()
 }
 
 async fn is_our_trash_meta(meta: &Path, recorded: &KratosWorktree) -> bool {
+    if !tokio::fs::symlink_metadata(meta)
+        .await
+        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_file())
+    {
+        return false;
+    }
     tokio::fs::read(meta)
         .await
         .ok()
@@ -583,7 +609,10 @@ async fn find_trashed_entry(
 ) -> Result<Option<TrashSlot>, PlaceError> {
     for slot in slot_candidates(&recorded.id) {
         let dir = trash_dir.join(&slot);
-        if tokio::fs::symlink_metadata(&dir).await.is_err() {
+        let Ok(dir_meta) = tokio::fs::symlink_metadata(&dir).await else {
+            continue;
+        };
+        if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
             continue;
         }
         let meta = trash_dir.join(format!("{slot}.json"));
@@ -601,10 +630,15 @@ async fn pick_free_trash_slot(
     for slot in slot_candidates(&recorded.id) {
         let dir = trash_dir.join(&slot);
         let meta = trash_dir.join(format!("{slot}.json"));
-        if tokio::fs::symlink_metadata(&dir).await.is_err()
-            && (tokio::fs::symlink_metadata(&meta).await.is_err()
-                || is_our_trash_meta(&meta, recorded).await)
-        {
+        let dir_absent = matches!(
+            tokio::fs::symlink_metadata(&dir).await,
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        );
+        let meta_absent = matches!(
+            tokio::fs::symlink_metadata(&meta).await,
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        );
+        if dir_absent && (meta_absent || is_our_trash_meta(&meta, recorded).await) {
             return Ok(TrashSlot { dir, meta });
         }
     }
@@ -639,7 +673,7 @@ async fn write_trash_meta(
 }
 
 async fn remove_empty_dir(folder: &Path) -> Result<(), PlaceError> {
-    match tokio::fs::remove_dir(long_path(folder)).await {
+    match tokio::fs::remove_dir(folder).await {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::CannotRemove {
             path: folder.display().to_string(),
             source: error,
@@ -649,7 +683,7 @@ async fn remove_empty_dir(folder: &Path) -> Result<(), PlaceError> {
 }
 
 async fn remove_file_if_present(path: &Path) -> Result<(), PlaceError> {
-    match tokio::fs::remove_file(long_path(path)).await {
+    match tokio::fs::remove_file(path).await {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::Io {
             path: path.display().to_string(),
             source: error,
@@ -658,39 +692,29 @@ async fn remove_file_if_present(path: &Path) -> Result<(), PlaceError> {
     }
 }
 
-async fn rename_long(from: &Path, to: &Path) -> io::Result<()> {
-    tokio::fs::rename(long_path(from), long_path(to)).await
-}
-
-/// Removes `path` recursively using Kratos's own filesystem calls (with extended-length paths and
-/// read-only clearing on Windows), avoiding git's 260-character path limit.
+/// Removes `path` recursively through Rust's filesystem calls (with read-only clearing), avoiding
+/// Git for Windows's 260-character path limit when `core.longpaths` is false.
 async fn remove_tree(path: &Path) -> Result<(), PlaceError> {
-    let shown = path.display().to_string();
-    let target = long_path(path);
+    let target = path.to_path_buf();
     tokio::task::spawn_blocking(move || remove_tree_sync(&target))
         .await
-        .map_err(|error| PlaceError::CannotRemove {
-            path: shown.clone(),
-            source: io::Error::other(error),
-        })?
+        .unwrap_or_else(|error| Err(io::Error::other(error)))
         .map_err(|source| PlaceError::CannotRemove {
-            path: shown,
+            path: path.display().to_string(),
             source,
         })
 }
 
 fn remove_tree_sync(target: &Path) -> io::Result<()> {
-    match std::fs::remove_dir_all(target) {
-        Ok(()) => Ok(()),
+    let remove = || match std::fs::remove_dir_all(target) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(_) => {
-            clear_readonly_recursive(target);
-            match std::fs::remove_dir_all(target) {
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-                result => result,
-            }
-        }
+        result => result,
+    };
+    if remove().is_ok() {
+        return Ok(());
     }
+    clear_readonly_recursive(target);
+    remove()
 }
 
 fn clear_readonly_recursive(path: &Path) {
@@ -735,30 +759,6 @@ fn make_owner_writable(path: &Path, meta: &std::fs::Metadata) {
     }
 }
 
-#[cfg(windows)]
-fn long_path(path: &Path) -> PathBuf {
-    if !path.is_absolute() {
-        return path.to_path_buf();
-    }
-    let Some(text) = path.to_str() else {
-        return path.to_path_buf();
-    };
-    if text.starts_with(r"\\?\") || text.starts_with(r"\\.\") {
-        return path.to_path_buf();
-    }
-    let normalized = text.replace('/', "\\");
-    if let Some(unc) = normalized.strip_prefix(r"\\") {
-        PathBuf::from(format!(r"\\?\UNC\{unc}"))
-    } else {
-        PathBuf::from(format!(r"\\?\{normalized}"))
-    }
-}
-
-#[cfg(not(windows))]
-fn long_path(path: &Path) -> PathBuf {
-    path.to_path_buf()
-}
-
 /// Resolves `.` and `..` without touching the filesystem so relative `gitdir` entries match while
 /// the worktree folder is offline.
 fn normalize_lexical(path: &Path) -> PathBuf {
@@ -766,13 +766,13 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     for component in path.components() {
         match component {
             Component::CurDir => {}
-            Component::ParentDir => {
-                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
                     out.pop();
-                } else {
-                    out.push(component);
                 }
-            }
+                Some(Component::RootDir | Component::Prefix(_)) => {}
+                _ => out.push(component),
+            },
             other => out.push(other),
         }
     }
@@ -791,8 +791,8 @@ fn same_lexical_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Whether `listed` (`git ls-files -v -s -z`) names any gitlink (`160000`) whose folder in
-/// `folder` is non-empty, matching `git worktree remove`'s submodule refusal.
+/// Whether `listed` (`git ls-files -v -s -z`) names any gitlink whose folder in `folder` is
+/// non-empty, matching `git worktree remove`'s submodule refusal.
 async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
     for path in submodules(listed) {
         let Some(dir) = file_in(folder, path) else {
@@ -807,15 +807,18 @@ async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
     false
 }
 
-/// The path of each gitlink (submodule, mode `160000`) in `git ls-files -v -s -z` output.
-fn submodules(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
+fn ls_files_entries(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8], &[u8])> {
     listed.split(|&byte| byte == 0).filter_map(|entry| {
         let tab = entry.iter().position(|&byte| byte == b'\t')?;
         let mut fields = entry[..tab].split(|&byte| byte == b' ');
-        let _tag = fields.next()?;
+        let tag = fields.next()?;
         let mode = fields.next()?;
-        (mode == b"160000").then_some(&entry[tab + 1..])
+        Some((tag, mode, &entry[tab + 1..]))
     })
+}
+
+fn submodules(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
+    ls_files_entries(listed).filter_map(|(_, mode, path)| (mode == GITLINK_MODE).then_some(path))
 }
 
 /// Whether an unarchived thread works at `worktree` or in a folder inside it.
@@ -832,14 +835,10 @@ async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, St
     Ok(false)
 }
 
-/// The path of each index entry in `git ls-files -v -s -z` output marked assume-unchanged or
-/// skip-worktree.
 fn overlooked(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
-    listed.split(|&byte| byte == 0).filter_map(|entry| {
-        let tab = entry.iter().position(|&byte| byte == b'\t')?;
-        let tag = entry[..tab].split(|&byte| byte == b' ').next()?;
+    ls_files_entries(listed).filter_map(|(tag, _, path)| {
         let is_overlooked = tag == b"S" || tag.iter().all(u8::is_ascii_lowercase);
-        is_overlooked.then_some(&entry[tab + 1..])
+        is_overlooked.then_some(path)
     })
 }
 
@@ -902,6 +901,7 @@ mod tests {
         let target = normalize_lexical(&admin.join("../../../.kratos-worktrees/portable/.git"));
         let expected = normalize_lexical(Path::new("/tmp/repo/.kratos-worktrees/portable/.git"));
         assert!(same_lexical_path(&target, &expected));
+        assert_eq!(normalize_lexical(Path::new("/../repo")), Path::new("/repo"));
     }
 
     #[test]
@@ -914,6 +914,43 @@ mod tests {
             "{} > {}",
             slot.display(),
             folder.display()
+        );
+    }
+
+    #[test]
+    fn trash_slot_validator_rejects_path_traversal_and_non_slot_names() {
+        assert!(is_valid_trash_slot("fb5c5"));
+        for bad in [
+            "..", ".", "../a", "ab/cd", "ABCDE", "fb5c", "fb5c56", ".....",
+        ] {
+            assert!(!is_valid_trash_slot(bad), "accepted {bad}");
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_expired_in_ignores_dotdot_json_traversal_payload() {
+        // Catches `Path::with_extension("")` turning `.kratos-trash/...json` into `<trash>/..`
+        // (the repository root) and wiping the repository on startup.
+        let root = tempfile::tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let trash = repo.join(TRASH_FOLDER);
+        std::fs::create_dir_all(&trash).unwrap();
+        std::fs::write(repo.join("keep.txt"), "repo file\n").unwrap();
+        let payload = serde_json::json!({
+            "worktreeId": "00000000-0000-0000-0000-000000000000",
+            "originalPath": repo.join(WORKTREES_FOLDER).join("w"),
+            "branch": "w",
+            "trashedAt": "2020-01-01T00:00:00.000Z"
+        })
+        .to_string();
+        std::fs::write(trash.join("...json"), &payload).unwrap();
+        std::fs::write(trash.join("..json"), &payload).unwrap();
+
+        empty_expired_in(&trash, TRASH_RETENTION).await;
+
+        assert_eq!(
+            std::fs::read_to_string(repo.join("keep.txt")).unwrap(),
+            "repo file\n"
         );
     }
 }

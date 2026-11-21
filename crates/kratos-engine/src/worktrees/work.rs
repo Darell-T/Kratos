@@ -12,7 +12,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use super::git::{self, CHECKOUT, Capped};
-use super::index_lock::{IndexLock, PreparedReplacement, copy_preserving_mtime};
+use super::index_lock::{IndexLock, PreparedReplacement, copy_preserving_mtime_if_present};
 use super::{PlaceError, Worktrees, check_still_there, resolved};
 use crate::store_thread::StoreThread;
 
@@ -23,8 +23,6 @@ const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 /// The number of the event that started each thread's last turn, when a commit looked.
 type Seen = HashMap<ThreadId, u64>;
 
-/// Where `HEAD` points in a worktree: either a symbolic branch (possibly unborn) or a detached
-/// commit.
 #[derive(Debug, PartialEq, Eq)]
 enum HeadTarget {
     Branch {
@@ -43,16 +41,12 @@ impl HeadTarget {
     }
 }
 
-/// A git commit operation in progress together with its target OIDs (`MERGE_HEAD`,
-/// `CHERRY_PICK_HEAD`, or `REVERT_HEAD`).
 #[derive(Debug, PartialEq, Eq)]
 struct PendingCommit {
     kind: Underway,
     heads: Vec<String>,
 }
 
-/// What a commit goes on top of: `HEAD` (symbolic branch or detached commit, plus OID) and any
-/// pending merge, cherry-pick, or revert with its target OIDs.
 #[derive(Debug, PartialEq, Eq)]
 struct Tip {
     head: HeadTarget,
@@ -71,17 +65,13 @@ impl Tip {
     }
 }
 
-/// Worktree state captured before preparing a commit and re-verified under git's index lock before
-/// publication.
 struct CommitBase {
     tip: Tip,
     whole_index: Vec<u8>,
 }
 
-/// The private scratch index and tree prepared before acquiring git's `index.lock`.
-struct PreparedCommit {
-    staged: PathBuf,
-    updated: PathBuf,
+struct PreparedCommit<'a> {
+    staged: &'a Path,
     tree: String,
 }
 
@@ -153,8 +143,11 @@ impl Worktrees {
         index: &Path,
     ) -> Result<Capped, PlaceError> {
         if let Some(head) = head {
-            self.git
-                .run_in_index(folder, &["read-tree", head], git::QUICK, index)
+            let listed = self
+                .git
+                .run_bytes(folder, &["ls-files", "-v", "-z"], git::QUICK)
+                .await?;
+            self.seed_private_index(folder, head, &listed, index)
                 .await?;
         }
         self.git
@@ -178,24 +171,10 @@ impl Worktrees {
             .await?)
     }
 
-    /// A scratch copy of `folder`'s worktree index with its original modified time preserved, for
-    /// inspecting overlooked (`assume-unchanged` / `skip-worktree`) files without hiding racy-git
-    /// edits.
-    pub(super) async fn scratch_index(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
-        let own = self.index_of(folder).await?;
-        let copy = self.scratch_name();
-        copy_preserving_mtime(&own, &copy).await?;
-        Ok(copy)
-    }
-
-    fn scratch_name(&self) -> PathBuf {
+    pub(super) fn scratch_name(&self) -> PathBuf {
         self.scratch.join(format!("index-{}", Uuid::new_v4()))
     }
 
-    /// Commits everything in `folder` as the user's git identity, with `message` and nothing
-    /// added to it, and returns the new commit. Builds the commit tree in a fresh private index
-    /// and publishes only if `HEAD`, pending operations, and the whole real index stay unchanged
-    /// under git's index lock.
     pub(crate) async fn commit(
         &self,
         store: &StoreThread,
@@ -215,23 +194,19 @@ impl Worktrees {
             .capture_commit_base(folder, &resolved_folder, &repository.top, is_whole_checkout)
             .await?;
         let staged = self.scratch_name();
-        let updated = self.scratch_name();
         let committed = async {
             let tree = self
-                .prepare_commit_tree(store, thread, &repository.top, &base.tip, &staged)
+                .prepare_commit_tree(store, thread, &repository.top, &base, &staged)
                 .await?;
             let prepared = PreparedCommit {
-                staged: staged.clone(),
-                updated: updated.clone(),
+                staged: &staged,
                 tree,
             };
             self.publish_commit(store, thread, &repository.top, &base, &prepared, message)
                 .await
         }
         .await;
-        for scratch in [&staged, &updated] {
-            let _ = tokio::fs::remove_file(scratch).await;
-        }
+        let _ = tokio::fs::remove_file(&staged).await;
         committed
     }
 
@@ -243,7 +218,11 @@ impl Worktrees {
         is_whole_checkout: bool,
     ) -> Result<CommitBase, PlaceError> {
         let tip = self.tip(folder).await?;
-        refuse_partial_during(tip.underway(), is_whole_checkout)?;
+        if let Some(underway) = tip.underway()
+            && !is_whole_checkout
+        {
+            return Err(PlaceError::PartialCommitDuring(underway));
+        }
         let whole_index = self.whole_index(top).await?;
         if !is_whole_checkout && has_staged_ancestor(&whole_index, resolved_folder, top) {
             return Err(PlaceError::StagedAncestorConflict(
@@ -253,21 +232,18 @@ impl Worktrees {
         Ok(CommitBase { tip, whole_index })
     }
 
-    /// Stages `folder` into a fresh private index rooted at `tip`'s `HEAD` while no overlapping
-    /// thread edits it, then writes and returns the resulting tree OID.
     async fn prepare_commit_tree(
         &self,
         store: &StoreThread,
         thread: &ProviderThread,
         top: &Path,
-        tip: &Tip,
+        base: &CommitBase,
         staged: &Path,
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
         let seen = self.refuse_while_edited(store, folder, top, None).await?;
-        if let Some(head_oid) = tip.head.oid() {
-            self.git
-                .run_in_index(top, &["read-tree", head_oid], git::QUICK, staged)
+        if let Some(head_oid) = base.tip.head.oid() {
+            self.seed_private_index(top, head_oid, &base.whole_index, staged)
                 .await?;
         }
         self.git
@@ -276,7 +252,7 @@ impl Worktrees {
         self.refuse_while_edited(store, folder, top, Some(&seen))
             .await?;
         check_still_there(store, &thread.place).await?;
-        self.refuse_unless_staged(folder, staged, tip.has_merge())
+        self.refuse_unless_staged(folder, staged, base.tip.has_merge())
             .await?;
         Ok(self
             .git
@@ -284,15 +260,35 @@ impl Worktrees {
             .await?)
     }
 
-    /// Acquires git's native `index.lock`, re-verifies that neither the tip nor any entry or flag
-    /// in the whole index changed while preparing, and prepares the updated index replacement.
+    /// Populates `index` from `head` and reapplies any `skip-worktree` bits from `listed` so
+    /// sparse-checkout files absent on disk are not treated as deletions by `git add --all`.
+    async fn seed_private_index(
+        &self,
+        cwd: &Path,
+        head: &str,
+        listed: &[u8],
+        index: &Path,
+    ) -> Result<(), PlaceError> {
+        self.git
+            .run_in_index(cwd, &["read-tree", head], git::QUICK, index)
+            .await?;
+        let skip_paths = skip_worktree_input(listed);
+        if !skip_paths.is_empty() {
+            let args = ["update-index", "--skip-worktree", "-z", "--stdin"];
+            self.git
+                .run_in_index_with_input(cwd, &args, skip_paths, git::QUICK, index)
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn prepare_locked_index(
         &self,
         store: &StoreThread,
         thread: &ProviderThread,
         top: &Path,
         base: &CommitBase,
-        prepared: &PreparedCommit,
+        prepared: &PreparedCommit<'_>,
     ) -> Result<(PathBuf, PreparedReplacement), PlaceError> {
         let folder = Path::new(&thread.folder);
         let own = self.index_of(folder).await?;
@@ -301,28 +297,31 @@ impl Worktrees {
             return Err(PlaceError::ChangedMeanwhile);
         }
         check_still_there(store, &thread.place).await?;
-        copy_preserving_mtime(&own, &prepared.updated).await?;
-        self.git
-            .run_in_index(
-                folder,
-                &["reset", "--quiet", &prepared.tree, "--", "."],
-                git::QUICK,
-                &prepared.updated,
-            )
-            .await?;
-        let replacement = index_lock.prepare_replacement(&prepared.updated).await?;
-        Ok((own, replacement))
+        let updated = self.scratch_name();
+        let replacement = async {
+            copy_preserving_mtime_if_present(&own, &updated).await?;
+            self.git
+                .run_in_index(
+                    folder,
+                    &["reset", "--quiet", &prepared.tree, "--", "."],
+                    git::QUICK,
+                    &updated,
+                )
+                .await?;
+            index_lock.prepare_replacement(&updated).await
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&updated).await;
+        Ok((own, replacement?))
     }
 
-    /// Publishes the commit through `prepared.staged` while holding git's `index.lock`, then
-    /// atomically installs the prepared index replacement.
     async fn publish_commit(
         &self,
         store: &StoreThread,
         thread: &ProviderThread,
         top: &Path,
         base: &CommitBase,
-        prepared: &PreparedCommit,
+        prepared: &PreparedCommit<'_>,
         message: &str,
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
@@ -335,24 +334,27 @@ impl Worktrees {
                 folder,
                 &["commit", "--quiet", "--message", message],
                 git::QUICK,
-                &prepared.staged,
+                prepared.staged,
             )
             .await?;
-        let committed = self
-            .git
-            .run(folder, &["rev-parse", "HEAD"], git::QUICK)
-            .await?;
-        replacement
-            .commit()
-            .await
-            .map_err(|source| PlaceError::IndexNotUpdatedAfterCommit {
-                commit: committed.clone(),
+        if let Err(source) = replacement.commit().await {
+            let commit = self
+                .git
+                .run(folder, &["rev-parse", "HEAD"], git::QUICK)
+                .await
+                .unwrap_or_else(|_| "HEAD".to_owned());
+            return Err(PlaceError::IndexNotUpdatedAfterCommit {
+                commit,
                 path: own.display().to_string(),
                 lock: lock_path,
                 folder: folder.display().to_string(),
                 source,
-            })?;
-        Ok(committed)
+            });
+        }
+        Ok(self
+            .git
+            .run(folder, &["rev-parse", "HEAD"], git::QUICK)
+            .await?)
     }
 
     /// Snapshot of every entry, stage, and flag in the checkout's real index, immune to stat-only
@@ -439,7 +441,6 @@ impl Worktrees {
             .is_some_and(|found| found.top == top))
     }
 
-    /// The pending commit operations in `folder`'s worktree together with their target OIDs.
     async fn pending_commits(&self, folder: &Path) -> Result<Vec<PendingCommit>, PlaceError> {
         let mut args = vec!["rev-parse", "--path-format=absolute"];
         for (_, file) in Underway::FILES {
@@ -469,22 +470,13 @@ impl Worktrees {
         Ok(pending)
     }
 
-    /// What a commit in `folder`'s worktree goes on top of: both the symbolic branch (or detached
-    /// state) and commit OID of `HEAD`, plus every pending merge, cherry-pick, or revert and its
-    /// target OIDs.
     async fn tip(&self, folder: &Path) -> Result<Tip, PlaceError> {
-        let symref = ["symbolic-ref", "--quiet", "HEAD"];
-        let reference = match self.git.run(folder, &symref, git::QUICK).await {
-            Ok(reference) => Some(reference),
-            Err(error) if error.exited_with(1) => None,
-            Err(error) => return Err(error.into()),
-        };
-        let rev = ["rev-parse", "--verify", "--quiet", "HEAD"];
-        let oid = match self.git.run(folder, &rev, git::QUICK).await {
-            Ok(head) => Some(head),
-            Err(error) if error.exited_with(1) => None,
-            Err(error) => return Err(error.into()),
-        };
+        let reference = self
+            .run_optional(folder, &["symbolic-ref", "--quiet", "HEAD"])
+            .await?;
+        let oid = self
+            .run_optional(folder, &["rev-parse", "--verify", "--quiet", "HEAD"])
+            .await?;
         let head = match (reference, oid) {
             (Some(reference), oid) => HeadTarget::Branch { reference, oid },
             (None, Some(oid)) => HeadTarget::Detached(oid),
@@ -501,8 +493,20 @@ impl Worktrees {
         })
     }
 
+    async fn run_optional(
+        &self,
+        folder: &Path,
+        args: &[&str],
+    ) -> Result<Option<String>, PlaceError> {
+        match self.git.run(folder, args, git::QUICK).await {
+            Ok(output) => Ok(Some(output)),
+            Err(error) if error.exited_with(1) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// The worktree's own index file.
-    async fn index_of(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
+    pub(super) async fn index_of(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
         let args = ["rev-parse", "--path-format=absolute", "--git-path", "index"];
         Ok(PathBuf::from(
             self.git.run(folder, &args, git::QUICK).await?,
@@ -588,20 +592,27 @@ async fn resolved_or_given(path: &Path) -> PathBuf {
     resolved(path).await.unwrap_or_else(|_| path.to_owned())
 }
 
-/// Refuses a commit of only a folder while git is in the middle of a commit `underway`, which the
-/// commit would conclude without the rest of its changes.
-fn refuse_partial_during(
-    underway: Option<Underway>,
-    is_whole_checkout: bool,
-) -> Result<(), PlaceError> {
-    match underway {
-        Some(underway) if !is_whole_checkout => Err(PlaceError::PartialCommitDuring(underway)),
-        _ => Ok(()),
+/// NUL-delimited paths marked `skip-worktree` (`S` or `s`) in `git ls-files -v [-s] -z` output.
+fn skip_worktree_input(listed: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for record in listed.split(|&byte| byte == 0) {
+        let Some(&tag) = record.first() else {
+            continue;
+        };
+        if tag != b'S' && tag != b's' {
+            continue;
+        }
+        let path = match record.iter().position(|&byte| byte == b'\t') {
+            Some(tab) => &record[tab + 1..],
+            None if record.get(1) == Some(&b' ') => &record[2..],
+            None => continue,
+        };
+        out.extend_from_slice(path);
+        out.push(0);
     }
+    out
 }
 
-/// Whether `whole_index` (`git ls-files --full-name -v --stage -z`) stages a file at `folder`
-/// itself or at any ancestor directory between `top` and `folder`.
 fn has_staged_ancestor(whole_index: &[u8], folder: &Path, top: &Path) -> bool {
     let Ok(relative) = folder.strip_prefix(top) else {
         return false;
@@ -677,5 +688,14 @@ mod tests {
             !message.contains("`git reset`"),
             "must never advise a repository-wide git reset: {message}"
         );
+    }
+
+    #[test]
+    fn skip_worktree_input_extracts_sparse_paths_with_or_without_stage_fields() {
+        let staged =
+            b"H 100644 111 0\ta.txt\0S 100644 222 0\tsparse/b.txt\0s 100644 333 0\tc.txt\0";
+        assert_eq!(skip_worktree_input(staged), b"sparse/b.txt\0c.txt\0");
+        let short = b"H a.txt\0S sparse/b.txt\0h assumed.txt\0";
+        assert_eq!(skip_worktree_input(short), b"sparse/b.txt\0");
     }
 }

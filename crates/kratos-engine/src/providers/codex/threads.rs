@@ -78,7 +78,6 @@ pub(super) enum Link {
         context_limit: Option<ContextLimit>,
         /// The access under which this session may have cached approval grants.
         access: AccessLimit,
-        /// Whether Codex loaded this thread with the sandboxed temp npm cache.
         npm_cache: NpmCache,
     },
 }

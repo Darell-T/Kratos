@@ -633,7 +633,6 @@ pub(crate) async fn is_same_checkout(worktree: &KratosWorktree) -> bool {
     is_same_checkout_at(Path::new(&worktree.path), worktree).await
 }
 
-/// Whether the checkout at `folder` is the one Kratos recorded as `worktree`.
 pub(super) async fn is_same_checkout_at(folder: &Path, worktree: &KratosWorktree) -> bool {
     let Some(git_dir) = git_dir_of(folder).await else {
         return false;
@@ -641,7 +640,6 @@ pub(super) async fn is_same_checkout_at(folder: &Path, worktree: &KratosWorktree
     is_same_checkout_dir(&git_dir, worktree).await
 }
 
-/// Whether `git_dir` carries `worktree`'s Kratos ownership id.
 pub(super) async fn is_same_checkout_dir(git_dir: &Path, worktree: &KratosWorktree) -> bool {
     tokio::fs::read_to_string(git_dir.join(WORKTREE_ID_FILE))
         .await

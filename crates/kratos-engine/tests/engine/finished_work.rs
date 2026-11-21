@@ -1685,3 +1685,44 @@ fn a_pull_request_pushes_the_branch_and_gives_gh_each_value_as_its_own_argument(
         ]]
     );
 }
+
+#[test]
+fn diff_and_commit_preserve_sparse_checkout_skip_worktree_files() {
+    // Catches building the private index from plain `read-tree HEAD` without re-applying
+    // `skip-worktree`, which causes `git add --all` to treat sparse-excluded files as deletions.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    std::fs::create_dir_all(repository.join("included")).unwrap();
+    std::fs::create_dir_all(repository.join("excluded")).unwrap();
+    std::fs::write(repository.join("included").join("a.txt"), "one\n").unwrap();
+    std::fs::write(repository.join("excluded").join("b.txt"), "keep sparse\n").unwrap();
+    git(&repository, &["add", "included", "excluded"]);
+    git(&repository, &["commit", "--quiet", "--message", "two dirs"]);
+    git(
+        &repository,
+        &["update-index", "--skip-worktree", "excluded/b.txt"],
+    );
+    std::fs::remove_file(repository.join("excluded").join("b.txt")).unwrap();
+    std::fs::write(repository.join("included").join("a.txt"), "two\n").unwrap();
+
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "sparse", PlaceRequest::default());
+
+    let patch = diff(&client, &thread);
+    assert!(patch.patch.contains("included/a.txt"), "{}", patch.patch);
+    assert!(
+        !patch.patch.contains("excluded/b.txt"),
+        "sparse-excluded file must not appear deleted in diff: {}",
+        patch.patch
+    );
+
+    let reply = commit(&client, &thread, "edit included only");
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(git(&repository, &["show", "HEAD:included/a.txt"]), "two");
+    assert_eq!(
+        git(&repository, &["show", "HEAD:excluded/b.txt"]),
+        "keep sparse"
+    );
+}
