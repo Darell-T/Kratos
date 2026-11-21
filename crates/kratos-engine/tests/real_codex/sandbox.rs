@@ -235,3 +235,84 @@ async fn plan_mode_real_codex_sandbox_refuses_a_write_after_a_successful_read() 
     );
     harness.stop().await;
 }
+
+#[cfg(windows)]
+const WRITES: [&str; 2] = [
+    "Set-Content -LiteralPath control.txt -Value KRATOS_WORKSPACE_WRITE",
+    "Set-Content -LiteralPath .git/hooks/pre-commit -Value planted",
+];
+#[cfg(not(windows))]
+const WRITES: [&str; 2] = [
+    "echo KRATOS_WORKSPACE_WRITE > control.txt",
+    "echo planted > .git/hooks/pre-commit",
+];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
+async fn a_sandboxed_command_cannot_plant_a_git_hook() {
+    // Catches a sandbox profile that leaves `.git` writable, as Codex's own workspace profile does
+    // not: a hook planted there runs outside every sandbox at the user's next commit.
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::command(WRITES[0]),
+            Reply::command(WRITES[1]),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    let folder = harness.folder();
+    let initialized = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&folder)
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    let hook = folder.join(".git").join("hooks").join("pre-commit");
+    harness.send("plant-a-hook");
+    loop {
+        match harness.next_event().await {
+            ThreadEventBody::ApprovalRequested { approval } => {
+                let declined = harness
+                    .client
+                    .post(
+                        &format!("/api/approvals/{}", approval.id),
+                        &json!({ "decision": "decline" }),
+                    )
+                    .unwrap();
+                assert_eq!(declined.status, 200, "{:?}", declined.body);
+            }
+            ThreadEventBody::ThreadPaused { reason } => panic!("real Codex paused: {reason:?}"),
+            ThreadEventBody::TurnCompleted { .. } => break,
+            _ => {}
+        }
+    }
+
+    let control = std::fs::read_to_string(folder.join("control.txt")).unwrap_or_default();
+    assert!(
+        control.contains("KRATOS_WORKSPACE_WRITE"),
+        "the workspace write control did not run: {:?}",
+        harness.model.tool_outputs()
+    );
+    assert!(
+        !hook.exists(),
+        "a sandboxed command planted a git hook: {:?}",
+        harness.model.tool_outputs()
+    );
+    let refused = harness
+        .model
+        .tool_outputs()
+        .iter()
+        .find(|output| output["call_id"] == "call-2")
+        .unwrap()
+        .to_string()
+        .to_lowercase();
+    assert!(
+        refused.contains("read-only") || refused.contains("denied"),
+        "the hook write must fail on the sandbox's refusal: {refused}"
+    );
+    harness.stop().await;
+}
