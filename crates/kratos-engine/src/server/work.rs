@@ -31,8 +31,9 @@ pub(super) async fn diff(
     Ok(json_reply(StatusCode::OK, &diff))
 }
 
-/// `POST /api/threads/{id}/commit`: 201 with the new commit. 409 while a turn runs, since its
-/// agent may be halfway through an edit, and 400 when nothing changed.
+/// `POST /api/threads/{id}/commit`: 201 with the new commit. 409 while a turn runs in any thread
+/// that works where the commit would take files from, since its agent may be halfway through an
+/// edit, and 400 when nothing changed.
 pub(super) async fn commit(
     State(state): State<ServerState>,
     id: ThreadPath,
@@ -40,10 +41,16 @@ pub(super) async fn commit(
 ) -> Result<Response, ApiError> {
     let thread = thread(&state, id).await?;
     let CommitThread { message } = read_json(body).await?;
-    if thread.running_turn.is_some() {
+    let running = state
+        .store
+        .call(|store| store.running_turn_folders())
+        .await?;
+    let folder = FilePath::new(&thread.folder);
+    if state.worktrees.is_being_edited(folder, &running).await? {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "A turn is running in this thread. Commit once it ends, or stop it first",
+            "A turn is running in a thread that works in this folder. Commit once it ends, or \
+             stop it first",
         ));
     }
     let commit = state

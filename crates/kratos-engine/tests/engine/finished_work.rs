@@ -13,7 +13,7 @@ use kratos_protocol::{
 use tempfile::TempDir;
 
 use super::running_engine::{RunningEngine, WAIT, post};
-use super::thread_places::{create, git, new_repository, workspace_at, worktree_of};
+use super::thread_places::{create, existing, git, new_repository, workspace_at, worktree_of};
 
 fn diff(client: &Client, thread: &Thread) -> ThreadDiff {
     client
@@ -260,6 +260,98 @@ fn a_commit_waits_for_the_running_turn() {
     std::fs::write(repository.join("README.md"), "half done\n").unwrap();
     post(&client, &thread, "keep going");
     engine.start_turn();
+    wait_for_turn(&client, &thread);
+
+    let refused = commit(&client, &thread, "Too early");
+
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+}
+
+/// A repository with a committed `component` folder, an engine, and workspaces at the repository
+/// and at the folder.
+fn repository_with_component(root: &TempDir) -> (std::path::PathBuf, RunningEngine) {
+    let repository = new_repository(root);
+    let component = repository.join("component");
+    std::fs::create_dir(&component).unwrap();
+    std::fs::write(
+        component.join("part.txt"),
+        "one
+",
+    )
+    .unwrap();
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "--message", "part"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    (repository, engine)
+}
+
+#[test]
+fn a_commit_waits_for_a_turn_in_a_worktree_it_shares_but_not_in_another_checkout() {
+    // Catches an idle thread committing another thread's half-done edit in a worktree they
+    // share, and a turn in a separate checkout holding a commit up.
+    let root = TempDir::new().unwrap();
+    let (repository, engine) = repository_with_component(&root);
+    let workspace = workspace_at(&engine, &repository);
+    let inner = workspace_at(&engine, &repository.join("component"));
+    let client = engine.client();
+    let busy = create(&client, &workspace, "busy", PlaceRequest::NewWorktree);
+    let shared = worktree_of(&client, &busy).path;
+    let sharer = create(&client, &workspace, "sharer", existing(Path::new(&shared)));
+    let in_component = create(&client, &inner, "component", PlaceRequest::default());
+    std::fs::write(
+        Path::new(&shared).join("README.md"),
+        "first half
+",
+    )
+    .unwrap();
+    std::fs::write(
+        repository.join("component/part.txt"),
+        "two
+",
+    )
+    .unwrap();
+    post(&client, &busy, "keep going");
+    engine.start_turn();
+    wait_for_turn(&client, &busy);
+
+    assert_eq!(commit(&client, &sharer, "Too early").status, 409);
+    assert_eq!(
+        git(Path::new(&shared), &["log", "-1", "--format=%s"]),
+        "part"
+    );
+    assert_eq!(commit(&client, &in_component, "Separate").status, 201);
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+}
+
+#[test]
+fn a_commit_waits_for_a_turn_in_a_project_folder_that_holds_it() {
+    // Catches a thread in a subfolder committing the half-done edit of a thread that works in
+    // the whole repository.
+    let root = TempDir::new().unwrap();
+    let (repository, engine) = repository_with_component(&root);
+    let workspace = workspace_at(&engine, &repository);
+    let inner = workspace_at(&engine, &repository.join("component"));
+    let client = engine.client();
+    let busy = create(&client, &workspace, "top", PlaceRequest::default());
+    let in_component = create(&client, &inner, "component", PlaceRequest::default());
+    std::fs::write(
+        repository.join("component/part.txt"),
+        "first half
+",
+    )
+    .unwrap();
+    post(&client, &busy, "keep going");
+    engine.start_turn();
+    wait_for_turn(&client, &busy);
+
+    assert_eq!(commit(&client, &in_component, "Too early").status, 409);
+    assert_eq!(git(&repository, &["log", "-1", "--format=%s"]), "part");
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+}
+
+fn wait_for_turn(client: &Client, thread: &Thread) {
     let deadline = Instant::now() + WAIT;
     loop {
         let details: ThreadDetails = client
@@ -268,17 +360,11 @@ fn a_commit_waits_for_the_running_turn() {
             .parse()
             .unwrap();
         if details.running_turn.is_some() {
-            break;
+            return;
         }
         assert!(Instant::now() < deadline, "the turn never started");
         std::thread::yield_now();
     }
-
-    let refused = commit(&client, &thread, "Too early");
-
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
-    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
 }
 
 #[test]

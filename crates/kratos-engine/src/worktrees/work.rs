@@ -79,6 +79,31 @@ impl Worktrees {
             .await?)
     }
 
+    /// Whether a turn running in one of the `running` folders may be editing files a commit of
+    /// `folder` would take: one folder holds the other and both are in the same checkout. A
+    /// worktree inside a project folder is a checkout of its own, so its turns do not count.
+    pub(crate) async fn is_being_edited(
+        &self,
+        folder: &Path,
+        running: &[String],
+    ) -> Result<bool, PlaceError> {
+        let overlapping: Vec<&Path> = running
+            .iter()
+            .map(Path::new)
+            .filter(|other| other.starts_with(folder) || folder.starts_with(other))
+            .collect();
+        if overlapping.is_empty() {
+            return Ok(false);
+        }
+        let checkout = self.locate(folder).await?.map(|found| found.top);
+        for other in overlapping {
+            if self.locate(other).await?.map(|found| found.top) == checkout {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Commits everything in `folder` as the user's git identity, with `message` and nothing
     /// added to it, and returns the new commit. A project can be a folder inside its repository,
     /// so changes outside `folder`, staged or not, stay as they were.

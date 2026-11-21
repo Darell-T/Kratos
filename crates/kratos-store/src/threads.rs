@@ -135,6 +135,18 @@ impl Store {
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
+
+    /// The folders that threads with a running turn work in.
+    pub fn running_turn_folders(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT COALESCE(worktrees.path, workspaces.path)
+             FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
+               LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
+             WHERE threads.running_turn IS NOT NULL",
+        )?;
+        let folders = statement.query_map([], |row| row.get(0))?;
+        Ok(folders.collect::<Result<_, _>>()?)
+    }
 }
 
 impl ThreadWrite<'_> {
