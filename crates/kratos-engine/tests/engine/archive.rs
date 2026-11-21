@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use super::running_engine::{Gate, RunningEngine, WAIT, fake_codex_at, post};
 use super::thread_places::{
-    create, existing, git, new_repository, refusal, request, resolved, workspace_at,
+    create, existing, git, new_repository, refusal, request, resolved, take_place, workspace_at,
     worktree_count, worktree_of,
 };
 
@@ -670,15 +670,7 @@ fn a_checkout_that_took_a_moved_worktrees_place_is_never_taken_for_kratoss() {
     let path = worktree_of(&client, &thread).path;
     let folder = Path::new(&path);
     let moved = root.path().join("moved");
-    git(
-        &repository,
-        &["worktree", "move", &path, moved.to_str().unwrap()],
-    );
-    git(
-        &repository,
-        &["worktree", "add", "--quiet", "-b", "users-branch", &path],
-    );
-    std::fs::write(folder.join("users.txt"), "the user's\n").unwrap();
+    take_place(&repository, &path, &moved);
 
     assert_eq!(
         listed_ownership(&client, &workspace, folder),
@@ -711,6 +703,7 @@ fn a_checkout_git_made_again_where_kratoss_worktree_stood_is_never_taken_for_kra
     let thread = create(&client, &workspace, "before", PlaceRequest::NewWorktree);
     let path = worktree_of(&client, &thread).path;
     let folder = Path::new(&path);
+    git(&repository, &["worktree", "unlock", &path]);
     git(&repository, &["worktree", "remove", &path]);
     git(
         &repository,
@@ -728,6 +721,118 @@ fn a_checkout_git_made_again_where_kratoss_worktree_stood_is_never_taken_for_kra
         Cleanup::NotOwned
     );
     assert!(folder.join("users.txt").exists());
+}
+
+#[test]
+fn git_refuses_to_move_or_remove_a_worktree_kratos_made() {
+    // Catches a worktree git lets the user move or remove while Kratos works in it, so another
+    // checkout can take its path between Kratos's check of the path and its use.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "locked", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let moved = root.path().join("moved");
+
+    for args in [
+        ["worktree", "move", &path, moved.to_str().unwrap()].as_slice(),
+        ["worktree", "remove", &path].as_slice(),
+    ] {
+        let refused = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(args)
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&refused.stderr);
+        assert!(!refused.status.success(), "git {args:?} went ahead");
+        assert!(said.contains("locked"), "{said}");
+    }
+    assert!(Path::new(&path).join(".git").exists());
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    assert!(!Path::new(&path).exists());
+    assert_eq!(worktree_count(&repository), 1);
+}
+
+#[test]
+fn a_worktree_that_holds_a_submodule_stays_unless_files_are_discarded() {
+    // Catches a removal through Kratos's own lock with git's double force, which also skips git's
+    // refusal to delete a submodule and the history it holds.
+    let root = TempDir::new().unwrap();
+    let library_root = TempDir::new_in(root.path()).unwrap();
+    let library = new_repository(&library_root);
+    let repository = new_repository(&root);
+    let library_text = library.to_str().unwrap();
+    git(
+        &repository,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "--quiet",
+            library_text,
+            "library",
+        ],
+    );
+    git(&repository, &["commit", "--quiet", "--message", "library"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "nested", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    git(
+        folder,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--quiet",
+            "--init",
+        ],
+    );
+    assert_eq!(git(folder, &["status", "--porcelain"]), "");
+
+    let kept = archive(&client, &thread, LeftFiles::Keep);
+
+    assert!(matches!(kept, Cleanup::Blocked { .. }), "{kept:?}");
+    assert!(folder.join("library").join("README.md").exists());
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Discard),
+        Cleanup::Removed
+    );
+    assert!(!folder.exists());
+}
+
+#[test]
+fn a_checkout_that_takes_the_worktrees_place_during_an_archive_is_left_alone() {
+    // Catches a worktree checked to be Kratos's before git reads it and removed by path after,
+    // which deletes a checkout that took the path meanwhile.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "symbolic-ref");
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "original", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    std::fs::write(Path::new(&path).join("original.txt"), "discard me\n").unwrap();
+    engine.hold(Gate::Git);
+    let archiving = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || archive(&client, &thread, LeftFiles::Discard))
+    };
+    engine.wait_until_held(Gate::Git);
+    let moved = root.path().join("moved");
+    take_place(&repository, &path, &moved);
+    engine.release(Gate::Git);
+
+    assert_eq!(archiving.join().unwrap(), Cleanup::NotOwned);
+    assert!(Path::new(&path).join("users.txt").exists());
+    assert!(moved.join("original.txt").exists());
 }
 
 #[test]

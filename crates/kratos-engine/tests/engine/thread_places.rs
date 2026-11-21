@@ -28,6 +28,26 @@ pub(super) fn git(folder: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+/// Moves the worktree at `path` to `moved` and makes another checkout at `path` that holds a file
+/// of the user's, as a user who overrides Kratos's lock on the worktree would.
+pub(super) fn take_place(repository: &Path, path: &str, moved: &Path) {
+    let _ = Command::new("git")
+        .arg("-C")
+        .arg(repository)
+        .args(["worktree", "unlock", path])
+        .output()
+        .unwrap();
+    git(
+        repository,
+        &["worktree", "move", path, moved.to_str().unwrap()],
+    );
+    git(
+        repository,
+        &["worktree", "add", "--quiet", "-b", "users-branch", path],
+    );
+    std::fs::write(Path::new(path).join("users.txt"), "the user's\n").unwrap();
+}
+
 /// A repository on branch `main` with one commit, at its resolved path.
 pub(super) fn new_repository(root: &TempDir) -> PathBuf {
     let path = root.path().join("repo");

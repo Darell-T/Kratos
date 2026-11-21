@@ -15,7 +15,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use kratos_protocol::{Ownership, PlaceRequest, Worktree, WorktreeId};
+use kratos_protocol::{Ownership, Place, PlaceRequest, WorktreeId};
 use kratos_store::{Checkout, KratosWorktree, NewPlace, StoreError};
 
 use crate::store_thread::StoreThread;
@@ -31,6 +31,10 @@ pub const WORKTREES_FOLDER: &str = ".kratos-worktrees";
 /// checkout it makes later at the same path a new one, even of the same name, without the file.
 /// So the file tells Kratos's worktree apart from any other checkout at its path.
 pub const WORKTREE_ID_FILE: &str = "kratos-worktree-id";
+
+/// Why git refuses to move or remove a worktree Kratos made, which git shows the user.
+const LOCK_REASON: &str =
+    "Kratos works in this worktree. Archive its thread in Kratos to remove it.";
 
 /// The most suffixed names, `-2` to `-100`, tried for a new branch before giving up.
 const MAX_NAME_TRIES: u32 = 100;
@@ -125,6 +129,11 @@ pub(crate) enum PlaceError {
     NotItsWorktree(String),
     #[error("Kratos cannot use the path {0}, because it is not valid Unicode.")]
     NotUnicode(String),
+    #[error(
+        "{0} holds submodules, and removing it would delete their history. Archive with Discard \
+         to remove them too, or remove the submodules first."
+    )]
+    HoldsSubmodules(String),
     #[error(transparent)]
     Git(#[from] GitError),
     #[error(transparent)]
@@ -223,24 +232,6 @@ impl Worktrees {
             path,
             repository: text(&repository.shared)?,
         })
-    }
-
-    /// Refuses a thread's finished work in `worktree` when Kratos made it and it is gone from its
-    /// path, removed or replaced by another checkout, so the thread never acts on someone else's
-    /// checkout. A borrowed worktree is the user's, whatever stands there.
-    pub(crate) async fn check_still_there(
-        &self,
-        store: &StoreThread,
-        worktree: &Worktree,
-    ) -> Result<(), PlaceError> {
-        if worktree.ownership == Ownership::Borrowed {
-            return Ok(());
-        }
-        let ours = store.call(|store| store.kratos_worktrees()).await?;
-        match ours.into_iter().find(|ours| ours.id == worktree.id) {
-            Some(recorded) if is_same_checkout(&recorded).await => Ok(()),
-            _ => Err(PlaceError::NotItsWorktree(worktree.path.clone())),
-        }
     }
 
     /// The worktree whose top folder is `path`.
@@ -466,19 +457,46 @@ async fn git_dir_of(folder: &Path) -> Option<PathBuf> {
     Some(folder.join(git_dir))
 }
 
-/// Writes `id` in the folder git keeps for the worktree Kratos just made at `path`. An engine that
-/// stops before this leaves a checkout Kratos never takes for its own, which the user removes.
+/// Writes `id` in the folder git keeps for the worktree Kratos just made at `path`, and locks the
+/// worktree there, as `git worktree lock` does. Git then refuses to move or remove it, so no other
+/// checkout takes its path between Kratos's check of the path and its use, unless the user
+/// unlocks it first. An engine that stops before this leaves a checkout Kratos never takes for its
+/// own, which the user removes.
 async fn mark_as_kratoss(path: &Path, id: &WorktreeId) -> Result<(), PlaceError> {
     let shown = path.display().to_string();
     let git_dir = git_dir_of(path)
         .await
         .ok_or_else(|| PlaceError::NotAWorktree(shown.clone()))?;
+    let io_error = |source| PlaceError::Io {
+        path: shown.clone(),
+        source,
+    };
     tokio::fs::write(git_dir.join(WORKTREE_ID_FILE), id.as_str())
         .await
-        .map_err(|source| PlaceError::Io {
-            path: shown,
-            source,
-        })
+        .map_err(io_error)?;
+    tokio::fs::write(git_dir.join("locked"), LOCK_REASON)
+        .await
+        .map_err(io_error)
+}
+
+/// Refuses a thread at `place` when it is a worktree Kratos made that is gone from its path,
+/// removed or replaced by another checkout, so the thread never acts on someone else's checkout.
+/// A borrowed worktree is the user's, whatever stands there.
+pub(crate) async fn check_still_there(
+    store: &StoreThread,
+    place: &Place,
+) -> Result<(), PlaceError> {
+    let Place::Worktree(worktree) = place else {
+        return Ok(());
+    };
+    if worktree.ownership == Ownership::Borrowed {
+        return Ok(());
+    }
+    let ours = store.call(|store| store.kratos_worktrees()).await?;
+    match ours.into_iter().find(|ours| ours.id == worktree.id) {
+        Some(recorded) if is_same_checkout(&recorded).await => Ok(()),
+        _ => Err(PlaceError::NotItsWorktree(worktree.path.clone())),
+    }
 }
 
 /// Closes the record of the worktree Kratos made at `path` when another checkout has taken its

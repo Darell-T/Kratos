@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use kratos_protocol::{ThreadDiff, ThreadId};
+use kratos_store::ProviderThread;
 use tokio::process::Command;
 use uuid::Uuid;
 
 use super::git::{self, CHECKOUT, Capped};
-use super::{PlaceError, Worktrees, resolved};
+use super::{PlaceError, Worktrees, check_still_there, resolved};
 use crate::store_thread::StoreThread;
 
 /// The most patch text a diff returns, cut at a whole line. A client shows the rest by reading the
@@ -110,9 +111,10 @@ impl Worktrees {
     pub(crate) async fn commit(
         &self,
         store: &StoreThread,
-        folder: &Path,
+        thread: &ProviderThread,
         message: &str,
     ) -> Result<String, PlaceError> {
+        let folder = Path::new(&thread.folder);
         let repository = self
             .locate(folder)
             .await?
@@ -134,6 +136,9 @@ impl Worktrees {
         let committed = async {
             self.stage(store, folder, &repository.top, is_whole_checkout, &index)
                 .await?;
+            // Checked again just before git writes, as another checkout may have taken the
+            // worktree's path while the commit waited or staged.
+            check_still_there(store, &thread.place).await?;
             self.commit_index(folder, &index, message, underway).await
         }
         .await;
@@ -275,15 +280,19 @@ impl Worktrees {
         ))
     }
 
-    /// Pushes the branch `folder` has checked out to `origin`, then opens a pull request for it
-    /// with the user's own `gh` and returns its address. A branch that is `origin`'s default is
-    /// refused before the push, which would put the work on it unreviewed.
+    /// Pushes the branch the thread's folder has checked out to `origin`, then opens a pull
+    /// request for it with the user's own `gh` and returns its address. A branch that is
+    /// `origin`'s default is refused before the push, which would put the work on it unreviewed.
     pub(crate) async fn pull_request(
         &self,
-        folder: &Path,
+        store: &StoreThread,
+        thread: &ProviderThread,
         title: &str,
         body: &str,
     ) -> Result<String, PlaceError> {
+        let folder = Path::new(&thread.folder);
+        let lock = self.lock_of_folder(folder).await?;
+        let _one_at_a_time = lock.lock().await;
         let branch = self
             .branch_of(folder)
             .await?
@@ -291,8 +300,9 @@ impl Worktrees {
         if self.default_branch(folder).await? == branch {
             return Err(PlaceError::OnDefaultBranch(branch));
         }
-        let lock = self.lock_of_folder(folder).await?;
-        let _one_at_a_time = lock.lock().await;
+        // Checked once the branch is read, as another checkout may have taken the worktree's
+        // path while the pull request waited, and its branch is not the thread's to publish.
+        check_still_there(store, &thread.place).await?;
         let push = ["push", "--set-upstream", "origin", &branch];
         self.git.run(folder, &push, CHECKOUT).await?;
         // `=` keeps a title or body that starts with a dash from reading as a flag.

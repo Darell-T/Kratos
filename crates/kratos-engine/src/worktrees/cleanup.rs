@@ -9,7 +9,7 @@ use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, WorktreeId};
 use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError, UnfinishedWorktree};
 
 use super::git::{self, CHECKOUT};
-use super::{PlaceError, Worktrees, is_same_checkout, resolved};
+use super::{PlaceError, WORKTREE_ID_FILE, Worktrees, git_dir_of, is_same_checkout, resolved};
 use crate::store_thread::StoreThread;
 
 impl Worktrees {
@@ -112,7 +112,7 @@ impl Worktrees {
         let folder = Path::new(path);
         let found = self.locate(folder).await?;
         if found.is_none_or(|worktree| worktree.top != folder) {
-            return remove_leftover(repository, folder).await;
+            return remove_leftover(repository, recorded).await;
         }
         if !is_same_checkout(recorded).await {
             return Ok(Cleanup::NotOwned);
@@ -120,25 +120,44 @@ impl Worktrees {
         if let Some(commit) = self.unsaved_head(folder).await? {
             return Ok(Cleanup::UnsavedCommit { commit });
         }
+        if files == LeftFiles::Keep {
+            let left = self.left_files(folder).await?;
+            if !left.is_empty() {
+                return Ok(Cleanup::Kept { files: left });
+            }
+        }
+        // Checked again just before git deletes, as another checkout may have taken the path
+        // while git read it.
+        if !is_same_checkout(recorded).await {
+            return Ok(Cleanup::NotOwned);
+        }
+        let remove = ["worktree", "remove", "--force", "--force", "--", path];
+        self.git.run(repository, &remove, CHECKOUT).await?;
+        Ok(Cleanup::Removed)
+    }
+
+    /// The files removing the worktree at `folder` would delete, as status lines. Refused when it
+    /// holds submodules with history of their own. Git's double force, which passes Kratos's own
+    /// lock, skips git's check of the same, so this stands in for it.
+    async fn left_files(&self, folder: &Path) -> Result<Vec<String>, PlaceError> {
         let status = [
             "status",
             "--porcelain",
             "--ignored",
             "--untracked-files=normal",
+            "--ignore-submodules=none",
         ];
         let status = self.git.run(folder, &status, git::QUICK).await?;
+        let listed = self
+            .git
+            .run_bytes(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
+            .await?;
         let mut left: Vec<String> = status.lines().map(str::to_owned).collect();
-        left.extend(self.overlooked_edits(folder).await?);
-        let mut remove = vec!["worktree", "remove"];
-        if !left.is_empty() {
-            match files {
-                LeftFiles::Keep => return Ok(Cleanup::Kept { files: left }),
-                LeftFiles::Discard => remove.push("--force"),
-            }
+        left.extend(self.overlooked_edits(folder, &listed).await?);
+        if left.is_empty() && holds_submodules(folder, &listed).await {
+            return Err(PlaceError::HoldsSubmodules(folder.display().to_string()));
         }
-        remove.extend(["--", path]);
-        self.git.run(repository, &remove, CHECKOUT).await?;
-        Ok(Cleanup::Removed)
+        Ok(left)
     }
 
     /// The worktree's `HEAD` when it is detached at a commit no ref holds, which only the
@@ -167,14 +186,15 @@ impl Worktrees {
     /// skip-worktree, as status lines such as ` M config.txt`. Git compares each such file on disk
     /// in a scratch copy of the index that no longer marks it, so a new executable bit, or a file
     /// replaced by a link, shows as git shows it for any other file.
-    async fn overlooked_edits(&self, folder: &Path) -> Result<Vec<String>, PlaceError> {
-        let listed = self
-            .git
-            .run_bytes(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
-            .await?;
+    /// `listed` is the worktree's `git ls-files -v -s -z`.
+    async fn overlooked_edits(
+        &self,
+        folder: &Path,
+        listed: &[u8],
+    ) -> Result<Vec<String>, PlaceError> {
         let mut edited = Vec::new();
         let mut on_disk = Vec::new();
-        for path in overlooked(&listed) {
+        for path in overlooked(listed) {
             let Some(file) = file_in(folder, path) else {
                 // Kratos cannot read the file, so it cannot tell that the file is unchanged.
                 edited.push(status_line(b"M", path));
@@ -230,7 +250,11 @@ impl Worktrees {
 /// Removes what is left of a worktree that is no longer one, such as the folder a removal git could
 /// not finish leaves after deleting its `.git` file. Git would read the project's repository there,
 /// so Kratos removes the folder only while it is empty. `repository` is the shared git folder.
-async fn remove_leftover(repository: &Path, folder: &Path) -> Result<Cleanup, PlaceError> {
+async fn remove_leftover(
+    repository: &Path,
+    recorded: &KratosWorktree,
+) -> Result<Cleanup, PlaceError> {
+    let folder = Path::new(&recorded.path);
     match tokio::fs::remove_dir(folder).await {
         Err(error) if error.kind() != io::ErrorKind::NotFound => {
             return Err(PlaceError::CannotRemove {
@@ -240,14 +264,15 @@ async fn remove_leftover(repository: &Path, folder: &Path) -> Result<Cleanup, Pl
         }
         _ => {}
     }
-    forget(repository, folder).await?;
+    forget(repository, recorded).await?;
     Ok(Cleanup::Removed)
 }
 
-/// Deletes git's record of the worktree at `folder`, whose folder is gone, as `git worktree prune`
-/// would for it alone. Prune also drops the record of every other worktree out of reach for now,
-/// such as one on a drive that is not plugged in. A locked record stays, as prune leaves it.
-async fn forget(repository: &Path, folder: &Path) -> Result<(), PlaceError> {
+/// Deletes git's record of `recorded`, whose folder is gone, as `git worktree prune` would for it
+/// alone. Prune also drops the record of every other worktree out of reach for now, such as one
+/// on a drive that is not plugged in. A record someone else locked stays, as prune leaves it, but
+/// Kratos's own lock does not keep it.
+async fn forget(repository: &Path, recorded: &KratosWorktree) -> Result<(), PlaceError> {
     let io_error = |path: &Path| {
         let path = path.display().to_string();
         move |source| PlaceError::Io { path, source }
@@ -257,7 +282,7 @@ async fn forget(repository: &Path, folder: &Path) -> Result<(), PlaceError> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         entries => entries.map_err(io_error(&records))?,
     };
-    let checkout = folder.join(".git");
+    let checkout = Path::new(&recorded.path).join(".git");
     while let Some(entry) = entries.next_entry().await.map_err(io_error(&records))? {
         let record = entry.path();
         let Ok(gitdir) = tokio::fs::read_to_string(record.join("gitdir")).await else {
@@ -266,7 +291,10 @@ async fn forget(repository: &Path, folder: &Path) -> Result<(), PlaceError> {
         let is_locked = tokio::fs::symlink_metadata(record.join("locked"))
             .await
             .is_ok();
-        if record.join(gitdir.trim()) == checkout && !is_locked {
+        let is_ours = tokio::fs::read_to_string(record.join(WORKTREE_ID_FILE))
+            .await
+            .is_ok_and(|id| id == recorded.id.as_str());
+        if record.join(gitdir.trim()) == checkout && (is_ours || !is_locked) {
             tokio::fs::remove_dir_all(&record)
                 .await
                 .map_err(io_error(&record))?;
@@ -289,6 +317,39 @@ async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, St
         }
     }
     Ok(false)
+}
+
+/// Whether the worktree at `folder` holds a submodule with history of its own, which git keeps in
+/// the worktree's git folder or in the submodule's own `.git`, and which removing the worktree
+/// deletes. `listed` is its `git ls-files -v -s -z`. Git checks the same before it removes a
+/// worktree without force.
+async fn holds_submodules(folder: &Path, listed: &[u8]) -> bool {
+    if let Some(git_dir) = git_dir_of(folder).await
+        && tokio::fs::metadata(git_dir.join("modules"))
+            .await
+            .is_ok_and(|modules| modules.is_dir())
+    {
+        return true;
+    }
+    for path in submodules(listed) {
+        if let Some(submodule) = file_in(folder, path)
+            && tokio::fs::symlink_metadata(submodule.join(".git"))
+                .await
+                .is_ok()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// The path of each submodule, an entry of mode `160000`, in `git ls-files -v -s -z` output.
+fn submodules(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
+    listed.split(|&byte| byte == 0).filter_map(|entry| {
+        let tab = entry.iter().position(|&byte| byte == b'\t')?;
+        let mode = entry[..tab].split(|&byte| byte == b' ').nth(1)?;
+        (mode == b"160000").then_some(&entry[tab + 1..])
+    })
 }
 
 /// The path of each index entry in `git ls-files -v -s -z` output that git is told to overlook: a

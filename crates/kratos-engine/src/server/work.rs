@@ -13,6 +13,7 @@ use kratos_store::ProviderThread;
 
 use super::json::read_json;
 use super::{ApiError, ServerState, ThreadPath, json_reply, path};
+use crate::worktrees::check_still_there;
 
 /// `GET /api/threads/{id}/diff`: 200 with what the thread's folder holds that its base does not.
 pub(super) async fn diff(
@@ -43,11 +44,7 @@ pub(super) async fn commit(
     let CommitThread { message } = read_json(body).await?;
     let commit = state
         .worktrees
-        .commit(
-            &state.store,
-            FilePath::new(&thread.folder),
-            message.as_str(),
-        )
+        .commit(&state.store, &thread, message.as_str())
         .await?;
     Ok(json_reply(StatusCode::CREATED, &Committed { commit }))
 }
@@ -63,7 +60,7 @@ pub(super) async fn pull_request(
     let CreatePullRequest { title, body } = read_json(body).await?;
     let url = state
         .worktrees
-        .pull_request(FilePath::new(&thread.folder), title.as_str(), &body)
+        .pull_request(&state.store, &thread, title.as_str(), &body)
         .await?;
     Ok(json_reply(StatusCode::CREATED, &PullRequest { url }))
 }
@@ -75,11 +72,6 @@ async fn thread(state: &ServerState, id: ThreadPath) -> Result<ProviderThread, A
         .store
         .call(move |store| store.provider_thread(&thread_id))
         .await?;
-    if let Place::Worktree(worktree) = &thread.place {
-        state
-            .worktrees
-            .check_still_there(&state.store, worktree)
-            .await?;
-    }
+    check_still_there(&state.store, &thread.place).await?;
     Ok(thread)
 }

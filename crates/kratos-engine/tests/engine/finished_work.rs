@@ -13,7 +13,9 @@ use kratos_protocol::{
 use tempfile::TempDir;
 
 use super::running_engine::{Gate, RunningEngine, WAIT, post};
-use super::thread_places::{create, existing, git, new_repository, workspace_at, worktree_of};
+use super::thread_places::{
+    create, existing, git, new_repository, take_place, workspace_at, worktree_of,
+};
 
 fn diff(client: &Client, thread: &Thread) -> ThreadDiff {
     client
@@ -518,6 +520,100 @@ fn a_commit_that_waited_for_the_repository_checks_for_turns_once_it_has_it() {
     assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
     assert_eq!(pull_request.join().unwrap(), 201);
     engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+}
+
+/// A bare `origin` for `repository` with its `main` pushed, as a real origin has.
+fn with_origin(root: &TempDir, repository: &Path) -> std::path::PathBuf {
+    let remote = root.path().join("remote.git");
+    let remote_text = remote.to_str().unwrap();
+    git(
+        root.path(),
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            remote_text,
+        ],
+    );
+    git(repository, &["remote", "add", "origin", remote_text]);
+    git(repository, &["push", "--quiet", "origin", "main"]);
+    remote
+}
+
+#[test]
+fn a_commit_that_waited_while_another_checkout_took_its_worktrees_place_is_refused() {
+    // Catches a commit that checks its worktree only before it waits for the repository, so a
+    // checkout that takes the path meanwhile gets the old thread's commit.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    with_origin(&root, &repository);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let reviewed = create(&client, &workspace, "reviewed", PlaceRequest::NewWorktree);
+    let old = create(&client, &workspace, "old", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &old).path;
+    std::fs::write(Path::new(&path).join("old.txt"), "the old thread's\n").unwrap();
+    engine.hold(Gate::Gh);
+    let pull_request = {
+        let (client, reviewed) = (client.clone(), reviewed.clone());
+        std::thread::spawn(move || open_pull_request(&client, &reviewed).status)
+    };
+    engine.wait_until_held(Gate::Gh);
+    let committing = {
+        let (client, old) = (client.clone(), old.clone());
+        std::thread::spawn(move || commit(&client, &old, "Old thread commit"))
+    };
+    // Long enough for the commit to reach the repository's lock and wait there.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    take_place(&repository, &path, &root.path().join("moved"));
+    engine.release(Gate::Gh);
+
+    let refused = committing.join().unwrap();
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(
+        git(Path::new(&path), &["log", "-1", "--format=%s"]),
+        "first"
+    );
+    assert_eq!(pull_request.join().unwrap(), 201);
+}
+
+#[test]
+fn a_pull_request_whose_worktree_another_checkout_took_while_it_ran_is_refused() {
+    // Catches a pull request that reads the branch to push from whatever checkout stands at the
+    // worktree's path once its check passed, and so publishes another checkout's branch.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let remote = with_origin(&root, &repository);
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "symbolic-ref");
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "proposal", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    engine.hold(Gate::Git);
+    let pull_request = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || open_pull_request(&client, &thread))
+    };
+    engine.wait_until_held(Gate::Git);
+    take_place(&repository, &path, &root.path().join("moved"));
+    engine.release(Gate::Git);
+
+    let refused = pull_request.join().unwrap();
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(git(&remote, &["branch", "--list", "users-branch"]), "");
+    assert!(engine.fake_gh_runs().is_empty());
+}
+
+fn open_pull_request(client: &Client, thread: &Thread) -> ApiReply {
+    let request = CreatePullRequest {
+        title: RequiredText::new("Review").unwrap(),
+        body: String::new(),
+    };
+    client
+        .post(&routes::thread_pull_request(&thread.id), &request)
+        .unwrap()
 }
 
 #[test]
