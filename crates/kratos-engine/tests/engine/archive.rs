@@ -297,6 +297,48 @@ fn an_overlooked_edit_to_a_file_whose_name_is_not_utf8_keeps_the_worktree() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn an_overlooked_change_of_mode_or_file_type_keeps_the_worktree() {
+    // Catches overlooked files compared by content alone: a file made executable, or replaced by
+    // a link to a file with the same content, hashes the same, so the removal drops the change.
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    for name in ["tool.sh", "link.txt", "peer.txt"] {
+        std::fs::write(repository.join(name), "same\n").unwrap();
+    }
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "--message", "files"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "modes", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    let tool = folder.join("tool.sh");
+    let link = folder.join("link.txt");
+    git(
+        folder,
+        &["update-index", "--assume-unchanged", "tool.sh", "link.txt"],
+    );
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("peer.txt", &link).unwrap();
+    assert_eq!(git(folder, &["status", "--porcelain"]), "");
+
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Keep),
+        Cleanup::Kept {
+            files: vec![" T link.txt".into(), " M tool.sh".into()]
+        }
+    );
+    let mode = std::fs::metadata(&tool).unwrap().permissions().mode();
+    assert_eq!(mode & 0o111, 0o111, "{mode:o}");
+    assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+}
+
 #[test]
 fn a_clean_worktree_with_many_files_git_is_told_to_overlook_is_removed() {
     // Catches every overlooked file named on git's command line, which outgrows the longest

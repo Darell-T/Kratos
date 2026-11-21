@@ -1,6 +1,7 @@
 //! Removing a worktree Kratos made, once every thread that worked in it is archived (D16). Its
 //! branch stays, and so do files the removal would delete unless the user chose to discard them.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -163,8 +164,9 @@ impl Worktrees {
     }
 
     /// Edits `git status` does not show, because the file is marked assume-unchanged or
-    /// skip-worktree, as status lines such as ` M config.txt`. A file is edited when its content
-    /// on disk hashes to another object than the index holds.
+    /// skip-worktree, as status lines such as ` M config.txt`. Git compares each such file on disk
+    /// in a scratch copy of the index that no longer marks it, so a new executable bit, or a file
+    /// replaced by a link, shows as git shows it for any other file.
     async fn overlooked_edits(&self, folder: &Path) -> Result<Vec<String>, PlaceError> {
         let listed = self
             .git
@@ -172,37 +174,56 @@ impl Worktrees {
             .await?;
         let mut edited = Vec::new();
         let mut on_disk = Vec::new();
-        for (object, path) in overlooked(&listed) {
+        for path in overlooked(&listed) {
             let Some(file) = file_in(folder, path) else {
                 // Kratos cannot read the file, so it cannot tell that the file is unchanged.
-                edited.push(edit_line(path));
+                edited.push(status_line(b"M", path));
                 continue;
             };
             // A skip-worktree file a sparse checkout left out has nothing on disk to lose.
             if tokio::fs::symlink_metadata(file).await.is_ok() {
-                on_disk.push((object, path));
+                on_disk.push(path);
             }
         }
         if on_disk.is_empty() {
             return Ok(edited);
         }
-        let mut paths = Vec::new();
-        for (_, path) in &on_disk {
-            paths.extend(quoted(path));
-            paths.push(b'\n');
-        }
-        let hash = ["hash-object", "--stdin-paths"];
-        let hashed = self
-            .git
-            .run_with_input(folder, &hash, paths, git::QUICK)
-            .await?;
-        let changed = on_disk
-            .iter()
-            .zip(hashed.lines())
-            .filter(|((object, _), now)| *object != now.as_bytes())
-            .map(|((_, path), _)| edit_line(path));
-        edited.extend(changed);
+        let index = self.scratch_index(folder).await?;
+        let changed = self.changed_once_unmarked(folder, &index, &on_disk).await;
+        let _ = tokio::fs::remove_file(&index).await;
+        edited.extend(changed?);
         Ok(edited)
+    }
+
+    /// The status line of each of `paths` that differs from `index` once `index` no longer marks
+    /// it to be overlooked.
+    async fn changed_once_unmarked(
+        &self,
+        folder: &Path,
+        index: &Path,
+        paths: &[&[u8]],
+    ) -> Result<Vec<String>, PlaceError> {
+        let listed: Vec<u8> = paths
+            .iter()
+            .flat_map(|path| path.iter().copied().chain([0]))
+            .collect();
+        // Git applies one of these marks per run.
+        for unmark in ["--no-assume-unchanged", "--no-skip-worktree"] {
+            let args = ["update-index", unmark, "-z", "--stdin"];
+            self.git
+                .run_in_index_with_input(folder, &args, listed.clone(), git::QUICK, index)
+                .await?;
+        }
+        let args = ["diff", "--name-status", "--no-renames", "-z"];
+        let changed = self
+            .git
+            .run_bytes_in_index(folder, &args, git::QUICK, index)
+            .await?;
+        let paths: HashSet<&[u8]> = paths.iter().copied().collect();
+        Ok(changes(&changed)
+            .filter(|(_, path)| paths.contains(path))
+            .map(|(status, path)| status_line(status, path))
+            .collect())
     }
 }
 
@@ -270,17 +291,24 @@ async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, St
     Ok(false)
 }
 
-/// The object and path of each index entry in `git ls-files -v -s -z` output that git is told to
-/// overlook: a lowercase tag marks assume-unchanged, and `S` marks skip-worktree. Paths stay as
-/// git wrote them, since a file name need not be UTF-8.
-fn overlooked(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+/// The path of each index entry in `git ls-files -v -s -z` output that git is told to overlook: a
+/// lowercase tag marks assume-unchanged, and `S` marks skip-worktree. Paths stay as git wrote
+/// them, since a file name need not be UTF-8.
+fn overlooked(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
     listed.split(|&byte| byte == 0).filter_map(|entry| {
         let tab = entry.iter().position(|&byte| byte == b'\t')?;
-        let mut fields = entry[..tab].split(|&byte| byte == b' ');
-        let tag = fields.next()?;
-        let object = fields.nth(1)?;
+        let tag = entry[..tab].split(|&byte| byte == b' ').next()?;
         let is_overlooked = tag == b"S" || tag.iter().all(u8::is_ascii_lowercase);
-        is_overlooked.then_some((object, &entry[tab + 1..]))
+        is_overlooked.then_some(&entry[tab + 1..])
+    })
+}
+
+/// The status and path of each file in `git diff --name-status --no-renames -z` output.
+fn changes(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    let mut fields = listed.split(|&byte| byte == 0);
+    std::iter::from_fn(move || {
+        let status = fields.next().filter(|status| !status.is_empty())?;
+        Some((status, fields.next()?))
     })
 }
 
@@ -298,40 +326,18 @@ fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(path).ok().map(|path| folder.join(path))
 }
 
-/// `path` as a status line for an edited file, such as ` M config.txt`.
-fn edit_line(path: &[u8]) -> String {
-    format!(" M {}", String::from_utf8_lossy(path))
-}
-
-/// `path` in the C-style quotes `git hash-object --stdin-paths` reads, so a newline, a carriage
-/// return git would trim, or a leading quote stays part of the name. Other bytes pass as they are.
-fn quoted(path: &[u8]) -> Vec<u8> {
-    let mut quoted = vec![b'"'];
-    for &byte in path {
-        match byte {
-            b'"' | b'\\' => quoted.extend([b'\\', byte]),
-            byte if byte.is_ascii_control() => {
-                quoted.extend(format!("\\{byte:03o}").into_bytes());
-            }
-            byte => quoted.push(byte),
-        }
-    }
-    quoted.push(b'"');
-    quoted
+/// `path` as a status line for a file changed on disk, such as ` M config.txt`.
+fn status_line(status: &[u8], path: &[u8]) -> String {
+    format!(
+        " {} {}",
+        String::from_utf8_lossy(status),
+        String::from_utf8_lossy(path)
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_quoted_path_escapes_what_git_would_read_as_quoting_or_a_line_end() {
-        assert_eq!(quoted(b"plain.txt"), b"\"plain.txt\"");
-        assert_eq!(
-            quoted(b"say \"hi\"\\back\nline\rend\xff"),
-            b"\"say \\\"hi\\\"\\\\back\\012line\\015end\xff\""
-        );
-    }
 
     #[test]
     fn only_files_git_is_told_to_overlook_are_listed() {
@@ -340,11 +346,17 @@ mod tests {
 
         assert_eq!(
             overlooked(listed).collect::<Vec<_>>(),
-            [
-                (&b"2222"[..], &b"assumed.txt"[..]),
-                (b"3333", b"sparse.txt"),
-                (b"4444", b"both.txt")
-            ]
+            [&b"assumed.txt"[..], b"sparse.txt", b"both.txt"]
+        );
+    }
+
+    #[test]
+    fn each_change_pairs_its_status_with_its_path() {
+        let listed = b"M\0tool.sh\0T\0link\ttab.txt\0";
+
+        assert_eq!(
+            changes(listed).collect::<Vec<_>>(),
+            [(&b"M"[..], &b"tool.sh"[..]), (b"T", b"link\ttab.txt")]
         );
     }
 }

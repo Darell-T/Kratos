@@ -91,7 +91,7 @@ impl Worktrees {
     /// A scratch copy of `folder`'s worktree index, for git to stage into without touching the
     /// user's own. The copy holds each file's last known state, so git hashes only the files that
     /// changed since. A worktree with no index yet gets none.
-    async fn scratch_index(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
+    pub(super) async fn scratch_index(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
         let index = self.scratch.join(format!("index-{}", Uuid::new_v4()));
         let own_index = self.index_of(folder).await?;
         match tokio::fs::copy(&own_index, &index).await {

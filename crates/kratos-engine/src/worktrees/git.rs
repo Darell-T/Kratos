@@ -95,23 +95,36 @@ impl Git {
         ))
     }
 
-    /// [`Git::run`] with `input` as git's standard input, for lists too long for a command line.
-    pub(super) async fn run_with_input(
+    /// [`Git::run_bytes`] with `index` as git's index file, as [`Git::run_in_index`] runs it.
+    pub(super) async fn run_bytes_in_index(
+        &self,
+        folder: &Path,
+        args: &[&str],
+        budget: Duration,
+        index: &Path,
+    ) -> Result<Vec<u8>, GitError> {
+        self.output(folder, args, budget, Some(index)).await
+    }
+
+    /// [`Git::run_in_index`] with `input` as git's standard input, for lists too long for a
+    /// command line.
+    pub(super) async fn run_in_index_with_input(
         &self,
         folder: &Path,
         args: &[&str],
         input: Vec<u8>,
         budget: Duration,
+        index: &Path,
     ) -> Result<String, GitError> {
         let command = args.join(" ");
-        let mut git = self.command(folder, args, None);
+        let mut git = self.command(folder, args, Some(index));
         git.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         let mut child = git.spawn().map_err(GitError::Missing)?;
         let mut stdin = child.stdin.take().expect("stdin is piped");
-        // Written while git's answer is read, since git answers each line as it reads it and
-        // would stop on a full pipe before reading the rest.
+        // Written while git's answer is read, since git may answer as it reads and would stop on
+        // a full pipe before reading the rest.
         let write = async move { stdin.write_all(&input).await };
         let ran = tokio::time::timeout(budget, async {
             tokio::join!(write, child.wait_with_output())
