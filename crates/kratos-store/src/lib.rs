@@ -149,6 +149,9 @@ pub enum StoreError {
     /// Kratos is making or removing a worktree at the path, so no thread may start in it now.
     #[error("Kratos is still setting up or removing the worktree at {0}; try again in a moment")]
     WorktreeTaken(String),
+    /// The thread's folder is in a worktree Kratos is removing, which would delete it.
+    #[error("Kratos is removing the worktree {0}, so no thread can start in it")]
+    InsideRemoval(String),
     /// The thread is archived, so it takes no more messages.
     #[error("Thread {0} is archived, so it takes no more messages")]
     ThreadArchived(ThreadId),
@@ -213,6 +216,7 @@ impl StoreError {
             StoreError::MessageTransition { .. }
             | StoreError::MessageIdTaken(_)
             | StoreError::WorktreeTaken(_)
+            | StoreError::InsideRemoval(_)
             | StoreError::ThreadArchived(_)
             | StoreError::ArchiveRefused { .. } => Some(Refusal::Conflict),
             StoreError::UnreadableEvent { .. } | StoreError::Sqlite(_) => None,

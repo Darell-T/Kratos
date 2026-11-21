@@ -167,7 +167,14 @@ impl Worktrees {
         title: &str,
     ) -> Result<NewPlace, PlaceError> {
         match request {
-            PlaceRequest::ProjectFolder => Ok(NewPlace::ProjectFolder),
+            PlaceRequest::ProjectFolder => {
+                let folder = resolved(project)
+                    .await
+                    .map_err(|_| PlaceError::NotAFolder(project.display().to_string()))?;
+                Ok(NewPlace::ProjectFolder {
+                    folder: text(&folder)?,
+                })
+            }
             PlaceRequest::ExistingWorktree { path } => self
                 .borrow(store, project, Path::new(path.as_str()))
                 .await

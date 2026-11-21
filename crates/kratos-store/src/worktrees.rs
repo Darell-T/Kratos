@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use kratos_protocol::{Ownership, Place, Worktree, WorktreeId};
 use rusqlite::{OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use uuid::Uuid;
@@ -47,14 +49,16 @@ pub enum Removal {
 pub enum RemovalEnd {
     /// The worktree is gone from its path: Kratos removed it, or another checkout stands there.
     Removed,
-    /// The worktree held files the user did not choose to discard.
+    /// The worktree stays: it held files the user did not choose to discard, or a thread works in
+    /// a folder inside it.
     Kept,
 }
 
 /// Where a new thread works, once the engine has checked it with git.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NewPlace {
-    ProjectFolder,
+    /// The project folder, as `folder` with links resolved.
+    ProjectFolder { folder: String },
     /// A worktree Kratos made after [`Store::reserve_worktree`] recorded it.
     Created(WorktreeId),
     /// A worktree that already existed. A thread attaches to its record if one exists.
@@ -203,47 +207,77 @@ impl Store {
     }
 }
 
-/// The worktree id a new thread records, after attaching it to `place` inside `transaction`.
+/// The worktree id a new thread records, after attaching it to `place` inside `transaction`. A
+/// folder inside a worktree being removed is refused, in the transaction that records the thread,
+/// so a removal that began before it sees no thread there and one that begins after sees it.
 pub(crate) fn attach(
     transaction: &Transaction<'_>,
     place: &NewPlace,
 ) -> Result<Option<WorktreeId>, StoreError> {
-    match place {
-        NewPlace::ProjectFolder => Ok(None),
-        NewPlace::Created(id) => {
-            let made = transaction.execute(
-                "UPDATE worktrees SET state = 'ready' WHERE id = ?1 AND state = 'creating'",
-                [id.as_str()],
-            )?;
-            if made == 0 {
-                return Err(StoreError::UnknownWorktree(id.clone()));
-            }
-            Ok(Some(id.clone()))
-        }
+    let (folder, worktree_id) = match place {
+        NewPlace::ProjectFolder { folder } => (folder.clone(), None),
+        NewPlace::Created(id) => (take_reservation(transaction, id)?, Some(id.clone())),
         NewPlace::Borrowed(checkout) => {
-            transaction.execute(
-                "INSERT INTO worktrees (id, path, repository, branch, ownership, state, created_at)
-                 VALUES (?1, ?2, ?3, ?4, 'borrowed', 'ready', ?5)
-                 ON CONFLICT (path) WHERE state != 'removed' DO NOTHING",
-                params![
-                    Uuid::new_v4().to_string(),
-                    checkout.path,
-                    checkout.repository,
-                    checkout.branch,
-                    timestamp_now()?.as_str()
-                ],
-            )?;
-            let (id, state): (String, String) = transaction.query_row(
-                "SELECT id, state FROM worktrees WHERE path = ?1 AND state != 'removed'",
-                [&checkout.path],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            if state != "ready" {
-                return Err(StoreError::WorktreeTaken(checkout.path.clone()));
-            }
-            Ok(Some(WorktreeId::new(id)))
+            let id = join_borrowed(transaction, checkout)?;
+            (checkout.path.clone(), Some(id))
+        }
+    };
+    refuse_inside_removal(transaction, &folder)?;
+    Ok(worktree_id)
+}
+
+/// Marks the worktree reserved as `id` ready for the thread it was made for, and returns its path.
+fn take_reservation(transaction: &Transaction<'_>, id: &WorktreeId) -> Result<String, StoreError> {
+    let path: Option<String> = transaction
+        .query_row(
+            "UPDATE worktrees SET state = 'ready' WHERE id = ?1 AND state = 'creating'
+             RETURNING path",
+            [id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    path.ok_or_else(|| StoreError::UnknownWorktree(id.clone()))
+}
+
+/// The record of the borrowed worktree at `checkout`'s path, made when there is none.
+fn join_borrowed(
+    transaction: &Transaction<'_>,
+    checkout: &Checkout,
+) -> Result<WorktreeId, StoreError> {
+    transaction.execute(
+        "INSERT INTO worktrees (id, path, repository, branch, ownership, state, created_at)
+         VALUES (?1, ?2, ?3, ?4, 'borrowed', 'ready', ?5)
+         ON CONFLICT (path) WHERE state != 'removed' DO NOTHING",
+        params![
+            Uuid::new_v4().to_string(),
+            checkout.path,
+            checkout.repository,
+            checkout.branch,
+            timestamp_now()?.as_str()
+        ],
+    )?;
+    let (id, state): (String, String) = transaction.query_row(
+        "SELECT id, state FROM worktrees WHERE path = ?1 AND state != 'removed'",
+        [&checkout.path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if state != "ready" {
+        return Err(StoreError::WorktreeTaken(checkout.path.clone()));
+    }
+    Ok(WorktreeId::new(id))
+}
+
+fn refuse_inside_removal(transaction: &Transaction<'_>, folder: &str) -> Result<(), StoreError> {
+    let mut statement =
+        transaction.prepare("SELECT path FROM worktrees WHERE state = 'removing'")?;
+    let removing = statement.query_map([], |row| row.get::<_, String>(0))?;
+    for worktree in removing {
+        let worktree = worktree?;
+        if Path::new(folder).starts_with(&worktree) {
+            return Err(StoreError::InsideRemoval(worktree));
         }
     }
+    Ok(())
 }
 
 /// The place in columns `first..first + 5`, `worktrees.id, path, branch, ownership, base`, of a

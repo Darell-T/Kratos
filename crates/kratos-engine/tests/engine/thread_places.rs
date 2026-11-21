@@ -56,7 +56,7 @@ pub(super) fn workspace_at(engine: &RunningEngine, folder: &Path) -> Workspace {
     engine.client().create_workspace(&request).unwrap()
 }
 
-fn request(workspace: &Workspace, title: &str, place: PlaceRequest) -> CreateThread {
+pub(super) fn request(workspace: &Workspace, title: &str, place: PlaceRequest) -> CreateThread {
     CreateThread {
         workspace_id: workspace.id.clone(),
         title: RequiredText::new(title).unwrap(),

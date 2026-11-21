@@ -62,15 +62,21 @@ impl Worktrees {
         path: &str,
         files: LeftFiles,
     ) -> Result<Cleanup, StoreError> {
-        if holds_a_project(store, Path::new(path)).await? {
-            return Ok(Cleanup::InUse);
-        }
         let begin = id.clone();
         let repository = match store.call(move |store| store.begin_removal(&begin)).await? {
             Removal::InUse => return Ok(Cleanup::InUse),
             Removal::Done => return Ok(Cleanup::Removed),
             Removal::Started { repository } => repository,
         };
+        // Looked for only once the worktree is marked as being removed, after which no thread can
+        // start inside it, so none is missed.
+        if holds_a_thread(store, Path::new(path)).await? {
+            let id = id.clone();
+            store
+                .call(move |store| store.end_removal(&id, RemovalEnd::Kept))
+                .await?;
+            return Ok(Cleanup::InUse);
+        }
         let recorded = KratosWorktree {
             id: id.clone(),
             path: path.to_owned(),
@@ -248,11 +254,11 @@ async fn forget(repository: &Path, folder: &Path) -> Result<(), PlaceError> {
     Ok(())
 }
 
-/// Whether a thread that is not archived works in a project folder at `worktree` or inside it,
-/// as when the user opens a worktree Kratos made as a project of its own. Project folders are
-/// stored as the user gave them, so each is resolved before the comparison.
-async fn holds_a_project(store: &StoreThread, worktree: &Path) -> Result<bool, StoreError> {
-    let folders = store.call(|store| store.project_folders_in_use()).await?;
+/// Whether a thread that is not archived works at `worktree` or in a folder inside it, as when the
+/// user opens a worktree Kratos made as a project of its own, then makes a worktree from it.
+/// Project folders are stored as the user gave them, so each is resolved before the comparison.
+async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, StoreError> {
+    let folders = store.call(|store| store.folders_in_use()).await?;
     for folder in folders {
         if resolved(Path::new(&folder))
             .await

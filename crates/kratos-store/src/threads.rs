@@ -136,13 +136,14 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The project folders, as the user gave them, of threads that are not archived and work in
-    /// their project folder.
-    pub fn project_folders_in_use(&self) -> Result<Vec<String>, StoreError> {
+    /// The folders threads that are not archived work in: a worktree's path, or the project
+    /// folder as the user gave it.
+    pub fn folders_in_use(&self) -> Result<Vec<String>, StoreError> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT DISTINCT workspaces.path
+            "SELECT DISTINCT COALESCE(worktrees.path, workspaces.path)
              FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
-             WHERE threads.worktree_id IS NULL AND threads.archived_at IS NULL",
+               LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
+             WHERE threads.archived_at IS NULL",
         )?;
         let folders = statement.query_map([], |row| row.get(0))?;
         Ok(folders.collect::<Result<_, _>>()?)

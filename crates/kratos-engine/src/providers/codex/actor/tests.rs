@@ -40,7 +40,12 @@ impl Harness {
         }))
         .unwrap();
         let thread_id = store
-            .create_thread(&request, &NewPlace::ProjectFolder)
+            .create_thread(
+                &request,
+                &NewPlace::ProjectFolder {
+                    folder: workspace.path.clone(),
+                },
+            )
             .unwrap()
             .id;
         let (store_thread, jobs) = store_thread::channel();

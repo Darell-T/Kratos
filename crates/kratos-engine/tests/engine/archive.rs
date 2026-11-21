@@ -7,8 +7,8 @@ use fake_agents::codex_control;
 use kratos_api_client::Client;
 use kratos_engine::worktrees::WORKTREE_ID_FILE;
 use kratos_protocol::{
-    ArchiveThread, ArchivedThread, Cleanup, LeftFiles, Ownership, PlaceRequest, ProjectWorktree,
-    Thread, ThreadDetails, Workspace, routes,
+    ArchiveThread, ArchivedThread, Cleanup, CreatePullRequest, LeftFiles, Ownership, PlaceRequest,
+    ProjectWorktree, RequiredText, Thread, ThreadDetails, Workspace, routes,
 };
 use kratos_store::{Checkout, Store};
 use serde_json::json;
@@ -16,7 +16,8 @@ use tempfile::TempDir;
 
 use super::running_engine::{RunningEngine, WAIT, fake_codex_at, post};
 use super::thread_places::{
-    create, existing, git, new_repository, resolved, workspace_at, worktree_count, worktree_of,
+    create, existing, git, new_repository, refusal, request, resolved, workspace_at,
+    worktree_count, worktree_of,
 };
 
 fn archive(client: &Client, thread: &Thread, files: LeftFiles) -> Cleanup {
@@ -385,6 +386,99 @@ fn a_worktree_stays_while_a_project_opened_in_it_has_a_thread() {
         Cleanup::NotOwned
     );
     assert_eq!(archive(&client, &owner, LeftFiles::Keep), Cleanup::Removed);
+}
+
+#[test]
+fn a_thread_cannot_start_in_a_worktree_an_archive_is_removing() {
+    // Catches a removal that looks for threads in the worktree only before it marks it as being
+    // removed: a project thread started there while the removal waits on git loses its folder.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let remote = root.path().join("remote.git");
+    let remote_text = remote.to_str().unwrap();
+    git(
+        root.path(),
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            remote_text,
+        ],
+    );
+    git(&repository, &["remote", "add", "origin", remote_text]);
+    git(&repository, &["push", "--quiet", "origin", "main"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let owner = create(&client, &workspace, "owner", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &owner).path;
+    let reviewed = create(&client, &workspace, "reviewed", PlaceRequest::NewWorktree);
+    engine.hold_gh();
+    let pull_request = {
+        let (client, reviewed) = (client.clone(), reviewed.clone());
+        std::thread::spawn(move || {
+            let request = CreatePullRequest {
+                title: RequiredText::new("Review").unwrap(),
+                body: String::new(),
+            };
+            let route = routes::thread_pull_request(&reviewed.id);
+            client.post(&route, &request).unwrap().status
+        })
+    };
+    engine.wait_for_held_gh();
+    let archiving = {
+        let (client, owner) = (client.clone(), owner.clone());
+        std::thread::spawn(move || archive(&client, &owner, LeftFiles::Keep))
+    };
+    wait_for_worktree_state(&engine, &path, "removing");
+    let opened = workspace_at(&engine, Path::new(&path));
+    let occupant = client.create_thread(&request(&opened, "occupant", PlaceRequest::default()));
+    engine.release_gh();
+
+    let (status, message) = refusal(occupant.expect_err("the occupant started"));
+    assert_eq!(status, 409, "{message}");
+    assert_eq!(archiving.join().unwrap(), Cleanup::Removed);
+    assert_eq!(pull_request.join().unwrap(), 201);
+}
+
+#[test]
+fn a_worktree_stays_while_a_thread_works_in_a_worktree_made_inside_it() {
+    // Catches a removal that counts only project threads inside the worktree, and so deletes a
+    // worktree made from a project opened there along with it.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let owner = create(&client, &workspace, "owner", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &owner).path;
+    let opened = workspace_at(&engine, Path::new(&path));
+    let nested = create(&client, &opened, "nested", PlaceRequest::NewWorktree);
+    let nested_path = worktree_of(&client, &nested).path;
+
+    assert_eq!(archive(&client, &owner, LeftFiles::Discard), Cleanup::InUse);
+    assert!(Path::new(&nested_path).exists());
+}
+
+/// Waits until the engine records the worktree at `path` in `state`.
+fn wait_for_worktree_state(engine: &RunningEngine, path: &str, state: &str) {
+    let database = rusqlite::Connection::open(engine.home().join("kratos.db")).unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let found: String = database
+            .query_row(
+                "SELECT state FROM worktrees WHERE path = ?1 AND state != 'removed'",
+                [path],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if found == state {
+            return;
+        }
+        assert!(Instant::now() < deadline, "the worktree stayed {found}");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 #[test]

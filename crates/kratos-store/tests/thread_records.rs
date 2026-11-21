@@ -32,7 +32,12 @@ fn store_with_thread(home: &Path) -> (Store, ThreadId) {
     )
     .unwrap();
     let thread = store
-        .create_thread(&request, &NewPlace::ProjectFolder)
+        .create_thread(
+            &request,
+            &NewPlace::ProjectFolder {
+                folder: workspace.path.clone(),
+            },
+        )
         .unwrap();
     (store, thread.id)
 }
@@ -275,7 +280,12 @@ fn an_approval_of_another_thread_is_unknown_to_this_one() {
     )
     .unwrap();
     let other = store
-        .create_thread(&other, &NewPlace::ProjectFolder)
+        .create_thread(
+            &other,
+            &NewPlace::ProjectFolder {
+                folder: workspace.path.clone(),
+            },
+        )
         .unwrap()
         .id;
     let mut write = store.write_thread(&thread).unwrap();
@@ -567,7 +577,9 @@ fn a_thread_cannot_send_another_threads_continuation() {
                 json!({ "workspaceId": workspace_id, "title": "other", "provider": "codex" }),
             )
             .unwrap(),
-            &NewPlace::ProjectFolder,
+            &NewPlace::ProjectFolder {
+                folder: "/work/repo".into(),
+            },
         )
         .unwrap()
         .id;
@@ -647,7 +659,12 @@ fn the_largest_context_limit_is_stored_and_read_back_unchanged() {
     });
 
     let created = store
-        .create_thread(&request, &NewPlace::ProjectFolder)
+        .create_thread(
+            &request,
+            &NewPlace::ProjectFolder {
+                folder: workspace.path.clone(),
+            },
+        )
         .unwrap();
     drop(store);
     let store = Store::open(home.path()).unwrap();

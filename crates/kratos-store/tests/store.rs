@@ -82,7 +82,9 @@ fn seed_thread(store: &mut Store, title: &str) -> Thread {
     store
         .create_thread(
             &thread_request(&workspace.id, title, "codex"),
-            &NewPlace::ProjectFolder,
+            &NewPlace::ProjectFolder {
+                folder: workspace.path.clone(),
+            },
         )
         .unwrap()
 }
@@ -341,25 +343,33 @@ fn lists_only_a_workspace_own_threads_oldest_first() {
     let a = store
         .create_thread(
             &thread_request(&mine.id, "a", "claude"),
-            &NewPlace::ProjectFolder,
+            &NewPlace::ProjectFolder {
+                folder: mine.path.clone(),
+            },
         )
         .unwrap();
     let b = store
         .create_thread(
             &thread_request(&mine.id, "b", "codex"),
-            &NewPlace::ProjectFolder,
+            &NewPlace::ProjectFolder {
+                folder: mine.path.clone(),
+            },
         )
         .unwrap();
     let elsewhere = store
         .create_thread(
             &thread_request(&other.id, "elsewhere", "codex"),
-            &NewPlace::ProjectFolder,
+            &NewPlace::ProjectFolder {
+                folder: other.path.clone(),
+            },
         )
         .unwrap();
     let c = store
         .create_thread(
             &thread_request(&mine.id, "c", "claude"),
-            &NewPlace::ProjectFolder,
+            &NewPlace::ProjectFolder {
+                folder: mine.path.clone(),
+            },
         )
         .unwrap();
 
@@ -407,7 +417,9 @@ fn reports_an_unknown_workspace_when_listing_or_creating_threads() {
     let creating = store
         .create_thread(
             &thread_request(&unknown, "t", "codex"),
-            &NewPlace::ProjectFolder,
+            &NewPlace::ProjectFolder {
+                folder: "/work/repo".into(),
+            },
         )
         .unwrap_err();
     assert!(matches!(&creating, StoreError::UnknownWorkspace(id) if *id == unknown));
@@ -1057,6 +1069,16 @@ fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_
     assert!(
         matches!(joining, Err(StoreError::WorktreeTaken(_))),
         "{joining:?}"
+    );
+    let inside = store.create_thread(
+        &thread_request(&workspace.id, "inside", "codex"),
+        &NewPlace::ProjectFolder {
+            folder: "/work/repo/.kratos-worktrees/chat/src".into(),
+        },
+    );
+    assert!(
+        matches!(inside, Err(StoreError::InsideRemoval(_))),
+        "{inside:?}"
     );
     assert_eq!(
         store.begin_removal(&id).unwrap(),

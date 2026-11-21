@@ -681,7 +681,12 @@ fn create_thread(store: &mut Store, folder: &Path, settings: ThreadSettings) -> 
     .unwrap();
     request.settings = Some(settings);
     store
-        .create_thread(&request, &NewPlace::ProjectFolder)
+        .create_thread(
+            &request,
+            &NewPlace::ProjectFolder {
+                folder: workspace.path.clone(),
+            },
+        )
         .unwrap()
         .id
 }

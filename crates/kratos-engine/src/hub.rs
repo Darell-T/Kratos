@@ -378,7 +378,12 @@ mod tests {
         )
         .unwrap();
         let thread = store
-            .create_thread(&thread, &NewPlace::ProjectFolder)
+            .create_thread(
+                &thread,
+                &NewPlace::ProjectFolder {
+                    folder: workspace.path.clone(),
+                },
+            )
             .unwrap();
         let (store_thread, store_jobs) = store_thread::channel();
         std::thread::spawn(move || store_jobs.run(store));

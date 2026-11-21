@@ -47,6 +47,9 @@ const FAKE_CLAUDE_LOG: &str = "fake-claude.log";
 /// Where the stand-in `gh` logs the arguments of each run.
 const FAKE_GH_LOG: &str = "fake-gh.log";
 
+/// The folder that holds the stand-in `gh` until a test lets it answer.
+const FAKE_GH_GATE: &str = "fake-gh-gate";
+
 impl RunningEngine {
     pub fn start(home: &Path) -> RunningEngine {
         RunningEngine::start_on(home, 0)
@@ -292,6 +295,28 @@ impl RunningEngine {
         &self.home
     }
 
+    /// Makes `gh` wait once it runs, until [`RunningEngine::release_gh`]. Kratos holds the
+    /// repository's lock while `gh` opens a pull request, so this holds the lock too.
+    pub fn hold_gh(&self) {
+        let gate = self.home.join(FAKE_GH_GATE);
+        std::fs::create_dir_all(&gate).unwrap();
+        std::fs::write(gate.join("hold"), "").unwrap();
+    }
+
+    /// Waits until a `gh` run waits at the gate [`RunningEngine::hold_gh`] closed.
+    pub fn wait_for_held_gh(&self) {
+        let held = self.home.join(FAKE_GH_GATE).join("held");
+        let deadline = Instant::now() + WAIT;
+        while !held.exists() {
+            assert!(Instant::now() < deadline, "gh never ran");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub fn release_gh(&self) {
+        std::fs::write(self.home.join(FAKE_GH_GATE).join("open"), "").unwrap();
+    }
+
     pub fn client(&self) -> Client {
         Client::new(&format!("http://127.0.0.1:{}", self.port))
             .unwrap()
@@ -415,6 +440,7 @@ fn command(home: &Path, port: &str) -> Command {
         .env("FAKE_CLAUDE_SILENT", "1")
         .env("GH_EXE", fake_agents::executable("fake-gh"))
         .env("FAKE_GH_LOG", home.join(FAKE_GH_LOG))
+        .env("FAKE_GH_GATE", home.join(FAKE_GH_GATE))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
