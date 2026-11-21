@@ -129,11 +129,6 @@ pub(crate) enum PlaceError {
     NotItsWorktree(String),
     #[error("Kratos cannot use the path {0}, because it is not valid Unicode.")]
     NotUnicode(String),
-    #[error(
-        "{0} holds submodules, and removing it would delete their history. Archive with Discard \
-         to remove them too, or remove the submodules first."
-    )]
-    HoldsSubmodules(String),
     #[error(transparent)]
     Git(#[from] GitError),
     #[error(transparent)]
@@ -474,9 +469,35 @@ async fn mark_as_kratoss(path: &Path, id: &WorktreeId) -> Result<(), PlaceError>
     tokio::fs::write(git_dir.join(WORKTREE_ID_FILE), id.as_str())
         .await
         .map_err(io_error)?;
-    tokio::fs::write(git_dir.join("locked"), LOCK_REASON)
+    lock(&git_dir).await.map_err(io_error)
+}
+
+/// Locks the worktree whose git folder is `git_dir` with Kratos's reason.
+async fn lock(git_dir: &Path) -> io::Result<()> {
+    tokio::fs::write(git_dir.join("locked"), LOCK_REASON).await
+}
+
+/// Takes Kratos's own lock off the worktree at `path`, so git removes it only once git's checks
+/// pass, as for any other worktree. A lock with another reason is the user's and stays, so git
+/// refuses the removal. Returns the worktree's git folder when Kratos took its lock off.
+async fn unlock_if_ours(path: &Path) -> Result<Option<PathBuf>, PlaceError> {
+    let Some(git_dir) = git_dir_of(path).await else {
+        return Ok(None);
+    };
+    let locked = git_dir.join("locked");
+    let is_ours = tokio::fs::read_to_string(&locked)
         .await
-        .map_err(io_error)
+        .is_ok_and(|reason| reason.trim_end() == LOCK_REASON);
+    if !is_ours {
+        return Ok(None);
+    }
+    tokio::fs::remove_file(&locked)
+        .await
+        .map_err(|source| PlaceError::Io {
+            path: locked.display().to_string(),
+            source,
+        })?;
+    Ok(Some(git_dir))
 }
 
 /// Refuses a thread at `place` when it is a worktree Kratos made that is gone from its path,

@@ -9,7 +9,9 @@ use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, WorktreeId};
 use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError, UnfinishedWorktree};
 
 use super::git::{self, CHECKOUT};
-use super::{PlaceError, WORKTREE_ID_FILE, Worktrees, git_dir_of, is_same_checkout, resolved};
+use super::{
+    PlaceError, WORKTREE_ID_FILE, Worktrees, is_same_checkout, lock, resolved, unlock_if_ours,
+};
 use crate::store_thread::StoreThread;
 
 impl Worktrees {
@@ -131,14 +133,38 @@ impl Worktrees {
         if !is_same_checkout(recorded).await {
             return Ok(Cleanup::NotOwned);
         }
-        let remove = ["worktree", "remove", "--force", "--force", "--", path];
-        self.git.run(repository, &remove, CHECKOUT).await?;
+        self.remove_checked(repository, path, files).await?;
         Ok(Cleanup::Removed)
     }
 
-    /// The files removing the worktree at `folder` would delete, as status lines. Refused when it
-    /// holds submodules with history of their own. Git's double force, which passes Kratos's own
-    /// lock, skips git's check of the same, so this stands in for it.
+    /// Has git remove the worktree at `path`. Git refuses while it holds changed files or
+    /// submodules, unless `files` discards them, and while the user locked it. Git checks the files
+    /// as it deletes them, so it also sees one saved after Kratos looked.
+    async fn remove_checked(
+        &self,
+        repository: &Path,
+        path: &str,
+        files: LeftFiles,
+    ) -> Result<(), PlaceError> {
+        let unlocked = unlock_if_ours(Path::new(path)).await?;
+        let mut remove = vec!["worktree", "remove"];
+        if files == LeftFiles::Discard {
+            remove.push("--force");
+        }
+        remove.extend(["--", path]);
+        let removed = self.git.run(repository, &remove, CHECKOUT).await;
+        if removed.is_err()
+            && let Some(git_dir) = unlocked
+        {
+            // Git may have deleted the worktree's git folder before it failed, and then there is
+            // no worktree left to lock.
+            let _ = lock(&git_dir).await;
+        }
+        removed?;
+        Ok(())
+    }
+
+    /// The files removing the worktree at `folder` would delete, as status lines.
     async fn left_files(&self, folder: &Path) -> Result<Vec<String>, PlaceError> {
         let status = [
             "status",
@@ -154,9 +180,6 @@ impl Worktrees {
             .await?;
         let mut left: Vec<String> = status.lines().map(str::to_owned).collect();
         left.extend(self.overlooked_edits(folder, &listed).await?);
-        if left.is_empty() && holds_submodules(folder, &listed).await {
-            return Err(PlaceError::HoldsSubmodules(folder.display().to_string()));
-        }
         Ok(left)
     }
 
@@ -317,39 +340,6 @@ async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, St
         }
     }
     Ok(false)
-}
-
-/// Whether the worktree at `folder` holds a submodule with history of its own, which git keeps in
-/// the worktree's git folder or in the submodule's own `.git`, and which removing the worktree
-/// deletes. `listed` is its `git ls-files -v -s -z`. Git checks the same before it removes a
-/// worktree without force.
-async fn holds_submodules(folder: &Path, listed: &[u8]) -> bool {
-    if let Some(git_dir) = git_dir_of(folder).await
-        && tokio::fs::metadata(git_dir.join("modules"))
-            .await
-            .is_ok_and(|modules| modules.is_dir())
-    {
-        return true;
-    }
-    for path in submodules(listed) {
-        if let Some(submodule) = file_in(folder, path)
-            && tokio::fs::symlink_metadata(submodule.join(".git"))
-                .await
-                .is_ok()
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// The path of each submodule, an entry of mode `160000`, in `git ls-files -v -s -z` output.
-fn submodules(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
-    listed.split(|&byte| byte == 0).filter_map(|entry| {
-        let tab = entry.iter().position(|&byte| byte == b'\t')?;
-        let mode = entry[..tab].split(|&byte| byte == b' ').nth(1)?;
-        (mode == b"160000").then_some(&entry[tab + 1..])
-    })
 }
 
 /// The path of each index entry in `git ls-files -v -s -z` output that git is told to overlook: a

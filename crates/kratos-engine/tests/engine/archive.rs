@@ -836,6 +836,68 @@ fn a_checkout_that_takes_the_worktrees_place_during_an_archive_is_left_alone() {
 }
 
 #[test]
+fn a_file_saved_after_an_archive_found_the_worktree_clean_keeps_it() {
+    // Catches a removal that skips git's own check for changed files, made as git deletes them, so
+    // an edit saved after Kratos's earlier check is deleted with the worktree.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "ls-files");
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "late", PlaceRequest::NewWorktree);
+    let readme = Path::new(&worktree_of(&client, &thread).path).join("README.md");
+    engine.hold(Gate::Git);
+    let archiving = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || archive(&client, &thread, LeftFiles::Keep))
+    };
+    engine.wait_until_held(Gate::Git);
+    std::fs::write(&readme, "saved late\n").unwrap();
+    engine.release(Gate::Git);
+
+    let cleanup = archiving.join().unwrap();
+    assert!(matches!(cleanup, Cleanup::Blocked { .. }), "{cleanup:?}");
+    assert_eq!(std::fs::read_to_string(&readme).unwrap(), "saved late\n");
+    let listed = git(&repository, &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains("locked Kratos works"), "{listed}");
+}
+
+#[test]
+fn the_next_engine_leaves_a_kept_worktree_the_user_locked() {
+    // Catches a removal that passes the user's own git lock, which only Kratos's lock may.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let home = root.path().join("kratos");
+    let engine = RunningEngine::start(&home);
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    // The sweep goes in reservation order, so once "later" is gone it has passed "locked".
+    let worktrees = ["locked", "later"].map(|title| {
+        let thread = create(&client, &workspace, title, PlaceRequest::NewWorktree);
+        let path = worktree_of(&client, &thread).path;
+        std::fs::write(Path::new(&path).join("notes.txt"), "mine\n").unwrap();
+        let kept = archive(&client, &thread, LeftFiles::Keep);
+        assert!(matches!(kept, Cleanup::Kept { .. }), "{kept:?}");
+        std::fs::remove_file(Path::new(&path).join("notes.txt")).unwrap();
+        path
+    });
+    drop(engine);
+    let [locked, later] = &worktrees;
+    git(&repository, &["worktree", "unlock", locked]);
+    git(
+        &repository,
+        &["worktree", "lock", "--reason", "mine to keep", locked],
+    );
+
+    let _engine = RunningEngine::start(&home);
+
+    wait_until_gone(Path::new(later));
+    assert!(Path::new(locked).join("README.md").exists());
+    let listed = git(&repository, &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains("locked mine to keep"), "{listed}");
+}
+
+#[test]
 fn an_archived_threads_finished_work_stops_once_its_worktree_is_gone() {
     // Catches a thread whose worktree Kratos removed committing into whatever checkout later
     // stands at the same path.
