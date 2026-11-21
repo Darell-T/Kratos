@@ -179,9 +179,16 @@ impl Worktrees {
         if on_disk.is_empty() {
             return Ok(Vec::new());
         }
-        let mut hash = vec!["hash-object", "--"];
-        hash.extend(on_disk.iter().map(|(_, path)| *path));
-        let hashed = self.git.run(folder, &hash, git::QUICK).await?;
+        let mut paths = Vec::new();
+        for (_, path) in &on_disk {
+            paths.extend(quoted(path.as_bytes()));
+            paths.push(b'\n');
+        }
+        let hash = ["hash-object", "--stdin-paths"];
+        let hashed = self
+            .git
+            .run_with_input(folder, &hash, paths, git::QUICK)
+            .await?;
         Ok(on_disk
             .iter()
             .zip(hashed.lines())
@@ -268,9 +275,35 @@ fn overlooked(listed: &str) -> impl Iterator<Item = (&str, &str)> {
     })
 }
 
+/// `path` in the C-style quotes `git hash-object --stdin-paths` reads, so a newline, a carriage
+/// return git would trim, or a leading quote stays part of the name. Other bytes pass as they are.
+fn quoted(path: &[u8]) -> Vec<u8> {
+    let mut quoted = vec![b'"'];
+    for &byte in path {
+        match byte {
+            b'"' | b'\\' => quoted.extend([b'\\', byte]),
+            byte if byte.is_ascii_control() => {
+                quoted.extend(format!("\\{byte:03o}").into_bytes());
+            }
+            byte => quoted.push(byte),
+        }
+    }
+    quoted.push(b'"');
+    quoted
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quoted_path_escapes_what_git_would_read_as_quoting_or_a_line_end() {
+        assert_eq!(quoted(b"plain.txt"), b"\"plain.txt\"");
+        assert_eq!(
+            quoted(b"say \"hi\"\\back\nline\rend\xff"),
+            b"\"say \\\"hi\\\"\\\\back\\012line\\015end\xff\""
+        );
+    }
 
     #[test]
     fn only_files_git_is_told_to_overlook_are_listed() {

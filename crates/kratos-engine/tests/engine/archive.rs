@@ -253,6 +253,39 @@ fn an_edit_git_is_told_to_overlook_still_keeps_the_worktree() {
 }
 
 #[test]
+fn a_clean_worktree_with_many_files_git_is_told_to_overlook_is_removed() {
+    // Catches every overlooked file named on git's command line, which outgrows the longest
+    // command Windows runs, so a clean worktree could never be removed.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let names: Vec<String> = (0..550)
+        .map(|number| format!("{}{number}.txt", "configuration-".repeat(5)))
+        .collect();
+    for name in &names {
+        std::fs::write(repository.join(name), "tracked config\n").unwrap();
+    }
+    git(&repository, &["add", "."]);
+    git(
+        &repository,
+        &["commit", "--quiet", "--message", "configuration"],
+    );
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "large", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    for batch in names.chunks(100) {
+        let mut marking = vec!["update-index", "--assume-unchanged", "--"];
+        marking.extend(batch.iter().map(String::as_str));
+        git(folder, &marking);
+    }
+
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    assert!(!folder.exists());
+}
+
+#[test]
 fn a_commit_no_branch_holds_keeps_the_worktree_even_when_files_are_discarded() {
     // Catches a removal that drops the worktree's HEAD when it is a commit on no branch, which
     // only that worktree's HEAD kept reachable.

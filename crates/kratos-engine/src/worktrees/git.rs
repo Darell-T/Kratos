@@ -1,9 +1,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::{ExitStatus, Output, Stdio};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 
 /// How long an ordinary git command may take, such as reading a branch name.
@@ -82,6 +82,36 @@ impl Git {
         self.output(folder, args, budget, Some(index)).await
     }
 
+    /// [`Git::run`] with `input` as git's standard input, for lists too long for a command line.
+    pub(super) async fn run_with_input(
+        &self,
+        folder: &Path,
+        args: &[&str],
+        input: Vec<u8>,
+        budget: Duration,
+    ) -> Result<String, GitError> {
+        let command = args.join(" ");
+        let mut git = self.command(folder, args, None);
+        git.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = git.spawn().map_err(GitError::Missing)?;
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        // Written while git's answer is read, since git answers each line as it reads it and
+        // would stop on a full pipe before reading the rest.
+        let write = async move { stdin.write_all(&input).await };
+        let ran = tokio::time::timeout(budget, async {
+            tokio::join!(write, child.wait_with_output())
+        });
+        let (written, output) = ran.await.map_err(|_| GitError::TimedOut {
+            command: command.clone(),
+            budget,
+        })?;
+        let text = output_text(command, output.map_err(GitError::Read)?)?;
+        written.map_err(GitError::Read)?;
+        Ok(text)
+    }
+
     async fn output(
         &self,
         folder: &Path,
@@ -91,20 +121,11 @@ impl Git {
     ) -> Result<String, GitError> {
         let command = args.join(" ");
         let mut git = self.command(folder, args, index);
-        let output = match tokio::time::timeout(budget, git.output()).await {
-            Err(_) => return Err(GitError::TimedOut { command, budget }),
-            Ok(Err(error)) => return Err(GitError::Missing(error)),
-            Ok(Ok(output)) => output,
-        };
-        if !output.status.success() {
-            return Err(GitError::Failed {
-                command,
-                code: output.status.code(),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
+        match tokio::time::timeout(budget, git.output()).await {
+            Err(_) => Err(GitError::TimedOut { command, budget }),
+            Ok(Err(error)) => Err(GitError::Missing(error)),
+            Ok(Ok(output)) => output_text(command, output),
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.trim_end_matches(['\r', '\n']).to_owned())
     }
 
     /// [`Git::run_in_index`] that keeps at most `max_bytes` of standard output, as git wrote it,
@@ -151,6 +172,19 @@ impl Git {
             .kill_on_drop(true);
         git
     }
+}
+
+/// Git's standard output without the final newline, once it succeeded.
+fn output_text(command: String, output: Output) -> Result<String, GitError> {
+    if !output.status.success() {
+        return Err(GitError::Failed {
+            command,
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 /// What a child wrote and how it ended.
