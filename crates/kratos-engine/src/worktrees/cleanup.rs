@@ -1,38 +1,59 @@
-//! Removing a worktree Kratos made, once every thread that worked in it is archived (D16). Its
-//! branch stays, and so do files the removal would delete unless the user chose to discard them.
+//! Removing a worktree Kratos made once every thread in it is archived (D16). Keep moves a clean
+//! checkout into a same-volume trash folder so late saves through open handles survive until
+//! Kratos empties expired trash; Discard deletes immediately. Branches always stay.
 
 use std::collections::HashSet;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
-use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, WorktreeId};
+use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, Timestamp, WorktreeId};
 use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError, UnfinishedWorktree};
+use serde::{Deserialize, Serialize};
 
-use super::git::{self, CHECKOUT};
+use super::git;
 use super::{
-    PlaceError, WorktreeLock, Worktrees, ensure_our_lock, git_dir_of, is_same_checkout,
-    is_same_checkout_at, is_same_checkout_dir, read_lock, resolved,
+    PlaceError, TRASH_FOLDER, WORKTREES_FOLDER, Worktrees, ensure_our_lock, ignore_everything_in,
+    is_same_checkout_at, is_same_checkout_dir, resolved,
 };
 use crate::store_thread::StoreThread;
 
-/// Outcome of checking whether a worktree may be deleted under [`LeftFiles::Keep`].
+/// How long a trashed worktree waits before startup sweep deletes it (measured from both trash
+/// time and the newest file modification inside the trashed checkout).
+const TRASH_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Length of each deterministic trash slot name inside [`TRASH_FOLDER`]. Because `.kratos-trash`
+/// is four characters shorter than `.kratos-worktrees`, a five-character slot keeps every trashed
+/// path no longer than even a one-character worktree name.
+const TRASH_SLOT_LEN: usize = 5;
+
+/// Outcome of checking whether a worktree may be archived under [`LeftFiles::Keep`].
 enum KeepCheck {
     Clean,
     Dirty(Vec<String>),
     HasSubmodule,
 }
 
-/// Decision reached after re-verifying a quarantined worktree.
-enum QuarantineVerdict {
-    Remove(PathBuf),
-    Keep(Cleanup),
+/// Metadata written beside a trashed worktree (`<trash>/<slot>.json`) so restarts recognize it
+/// after git's admin folder is gone and the user can locate and restore it.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TrashedWorktree {
+    worktree_id: String,
+    original_path: String,
+    branch: Option<String>,
+    trashed_at: Timestamp,
+}
+
+/// A slot inside `<repo>/.kratos-trash/` and its sibling metadata file.
+struct TrashSlot {
+    dir: PathBuf,
+    meta: PathBuf,
 }
 
 impl Worktrees {
-    /// Removes the worktree at `place` when Kratos made it and no thread that is not archived
-    /// still works in it. The project folder and borrowed worktrees are never removed. A removal
-    /// git refuses stays marked as begun, so no thread joins the worktree until a later call
-    /// removes it.
+    /// Removes the worktree at `place` when Kratos made it and no unarchived thread works in it.
+    /// The project folder and borrowed worktrees are never removed.
     pub(crate) async fn clean_up(
         &self,
         store: &StoreThread,
@@ -48,8 +69,7 @@ impl Worktrees {
         }
     }
 
-    /// Finishes what an earlier engine left, `unfinished`, read before this engine served. Files
-    /// left in a worktree keep it, since only the user may discard them.
+    /// Finishes worktrees left unfinished by an earlier engine and empties expired trash entries.
     pub async fn sweep(&self, store: &StoreThread, unfinished: Vec<UnfinishedWorktree>) {
         for UnfinishedWorktree { id, path } in unfinished {
             match self
@@ -70,6 +90,7 @@ impl Worktrees {
                 Err(error) => eprintln!("cannot finish removing the worktree {path}: {error}"),
             }
         }
+        self.empty_expired_trash(store, TRASH_RETENTION).await;
     }
 
     async fn remove_worktree(
@@ -85,8 +106,7 @@ impl Worktrees {
             Removal::Done => return Ok(Cleanup::Removed),
             Removal::Started { repository } => repository,
         };
-        // Looked for only once the worktree is marked as being removed, after which no thread can
-        // start inside it, so none is missed.
+        // Checked after `removing` is recorded so no new thread can start inside `path` unseen.
         if holds_a_thread(store, Path::new(path)).await? {
             let id = id.clone();
             store
@@ -105,17 +125,16 @@ impl Worktrees {
                 error: error.to_string(),
             });
         let end = match cleanup {
-            // Another checkout took the worktree's place, so Kratos's worktree is gone from it.
             Cleanup::Removed | Cleanup::NotOwned => RemovalEnd::Removed,
             Cleanup::Kept { .. } | Cleanup::UnsavedCommit { .. } => RemovalEnd::Kept,
-            _ => return Ok(cleanup),
+            Cleanup::InUse | Cleanup::Blocked { .. } => return Ok(cleanup),
         };
         let id = id.clone();
         store.call(move |store| store.end_removal(&id, end)).await?;
         Ok(cleanup)
     }
 
-    /// Runs git in `repository`, the shared git folder, since the worktree's own folder goes.
+    /// Reconciles disk, trash, and git's admin record for `recorded` under the repository lock.
     async fn remove(
         &self,
         repository: &Path,
@@ -124,25 +143,54 @@ impl Worktrees {
     ) -> Result<Cleanup, PlaceError> {
         let lock = self.lock_of(repository);
         let _one_at_a_time = lock.lock().await;
-        let path = recorded.path.as_str();
-        let folder = Path::new(path);
-        let quarantine = quarantine_path(folder, &recorded.id)?;
-        let found = self.locate(folder).await?;
-        if found.is_none_or(|worktree| worktree.top != folder) {
-            if is_same_checkout_at(&quarantine, recorded).await {
-                return self
-                    .finish_quarantined(repository, recorded, &quarantine, files)
-                    .await;
+        let folder = Path::new(recorded.path.as_str());
+        let trash_dir = trash_root(folder)?;
+        let admin = find_our_admin(repository, recorded).await?;
+        if let Some(slot) = find_trashed_entry(&trash_dir, recorded).await? {
+            return self
+                .finish_trashed(&slot, admin.as_deref(), recorded, files)
+                .await;
+        }
+        match admin {
+            Some(admin) => {
+                self.remove_registered(folder, &trash_dir, &admin, recorded, files)
+                    .await
             }
-            return remove_leftover(repository, recorded).await;
+            None => self.remove_unregistered(folder).await,
         }
-        let Some(git_dir) = git_dir_of(folder).await else {
-            return Ok(Cleanup::NotOwned);
-        };
-        if !is_same_checkout_dir(&git_dir, recorded).await {
+    }
+
+    async fn remove_registered(
+        &self,
+        folder: &Path,
+        trash_dir: &Path,
+        admin: &Path,
+        recorded: &KratosWorktree,
+        files: LeftFiles,
+    ) -> Result<Cleanup, PlaceError> {
+        ensure_our_lock(admin, &recorded.path).await?;
+        if is_same_checkout_at(folder, recorded).await {
+            return self
+                .remove_registered_live(folder, trash_dir, admin, recorded, files)
+                .await;
+        }
+        if self.is_live_checkout(folder).await? {
+            remove_tree(admin).await?;
             return Ok(Cleanup::NotOwned);
         }
-        ensure_our_lock(&git_dir, path).await?;
+        remove_empty_dir(folder).await?;
+        remove_tree(admin).await?;
+        Ok(Cleanup::Removed)
+    }
+
+    async fn remove_registered_live(
+        &self,
+        folder: &Path,
+        trash_dir: &Path,
+        admin: &Path,
+        recorded: &KratosWorktree,
+        files: LeftFiles,
+    ) -> Result<Cleanup, PlaceError> {
         if let Some(commit) = self.unsaved_head(folder).await? {
             return Ok(Cleanup::UnsavedCommit { commit });
         }
@@ -152,136 +200,120 @@ impl Worktrees {
                 KeepCheck::Dirty(left) => return Ok(Cleanup::Kept { files: left }),
                 KeepCheck::HasSubmodule => {
                     return Err(PlaceError::SubmodulesPresent {
-                        path: path.to_owned(),
+                        path: recorded.path.clone(),
                     });
                 }
             }
         }
-        if !is_same_checkout(recorded).await {
+        ensure_our_lock(admin, &recorded.path).await?;
+        if !is_same_checkout_at(folder, recorded).await {
             return Ok(Cleanup::NotOwned);
         }
-        // Move the worktree out of its live path atomically before re-checking and deleting, so
-        // late writes (including ignored files) move with it and git never acts on `folder`.
-        match tokio::fs::rename(folder, &quarantine).await {
+        self.move_and_finish(folder, trash_dir, admin, recorded, files)
+            .await
+    }
+
+    async fn move_and_finish(
+        &self,
+        folder: &Path,
+        trash_dir: &Path,
+        admin: &Path,
+        recorded: &KratosWorktree,
+        files: LeftFiles,
+    ) -> Result<Cleanup, PlaceError> {
+        let branch = self.branch_of(folder).await.ok().flatten();
+        ignore_everything_in(trash_dir).await?;
+        let slot = pick_free_trash_slot(trash_dir, recorded).await?;
+        // Write metadata before moving so a crash right after rename stays identifiable even if a
+        // replacement checkout overwrites git's admin folder at the vacated path.
+        write_trash_meta(&slot.meta, recorded, branch).await?;
+        match rename_long(folder, &slot.dir).await {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return remove_leftover(repository, recorded).await;
+                let _ = remove_file_if_present(&slot.meta).await;
+                remove_tree(admin).await?;
+                return Ok(Cleanup::Removed);
             }
             Err(source) => {
+                let _ = remove_file_if_present(&slot.meta).await;
                 return Err(PlaceError::CannotRemove {
-                    path: path.to_owned(),
+                    path: recorded.path.clone(),
                     source,
                 });
             }
         }
-        self.finish_quarantined(repository, recorded, &quarantine, files)
+        self.finish_trashed(&slot, Some(admin), recorded, files)
             .await
     }
 
-    /// Re-verifies `quarantine` and removes it through git, or restores it to `recorded.path` if
-    /// any check fails or decides to keep it.
-    async fn finish_quarantined(
+    async fn finish_trashed(
         &self,
-        repository: &Path,
+        slot: &TrashSlot,
+        admin: Option<&Path>,
         recorded: &KratosWorktree,
-        quarantine: &Path,
         files: LeftFiles,
     ) -> Result<Cleanup, PlaceError> {
-        let folder = Path::new(recorded.path.as_str());
-        match self.verify_quarantined(recorded, quarantine, files).await {
-            Ok(QuarantineVerdict::Remove(git_dir)) => {
-                self.remove_quarantined(repository, folder, quarantine, &git_dir)
-                    .await?;
-                Ok(Cleanup::Removed)
-            }
-            Ok(QuarantineVerdict::Keep(cleanup)) => {
-                restore_quarantine(quarantine, folder).await?;
-                Ok(cleanup)
-            }
-            Err(error) => {
-                let _ = restore_quarantine(quarantine, folder).await;
-                Err(error)
-            }
+        if let Some(admin) = admin {
+            ensure_our_lock(admin, &recorded.path).await?;
         }
+        match files {
+            LeftFiles::Keep => self.finish_keep_trashed(slot, admin, recorded).await?,
+            LeftFiles::Discard => Self::finish_discard_trashed(slot, admin).await?,
+        }
+        Ok(Cleanup::Removed)
     }
 
-    async fn verify_quarantined(
+    async fn finish_keep_trashed(
         &self,
+        slot: &TrashSlot,
+        admin: Option<&Path>,
         recorded: &KratosWorktree,
-        quarantine: &Path,
-        files: LeftFiles,
-    ) -> Result<QuarantineVerdict, PlaceError> {
-        let path = recorded.path.as_str();
-        let Some(git_dir) = git_dir_of(quarantine).await else {
-            return Ok(QuarantineVerdict::Keep(Cleanup::NotOwned));
-        };
-        if !is_same_checkout_dir(&git_dir, recorded).await {
-            return Ok(QuarantineVerdict::Keep(Cleanup::NotOwned));
+    ) -> Result<(), PlaceError> {
+        if tokio::fs::symlink_metadata(&slot.meta).await.is_err() {
+            let branch = self.branch_of(&slot.dir).await.ok().flatten();
+            write_trash_meta(&slot.meta, recorded, branch).await?;
         }
-        ensure_our_lock(&git_dir, path).await?;
-        if let Some(commit) = self.unsaved_head(quarantine).await? {
-            return Ok(QuarantineVerdict::Keep(Cleanup::UnsavedCommit { commit }));
+        if let Some(admin) = admin {
+            remove_tree(admin).await?;
         }
-        if files == LeftFiles::Keep {
-            match self.check_clean_for_keep(quarantine).await? {
-                KeepCheck::Clean => {}
-                KeepCheck::Dirty(left) => {
-                    return Ok(QuarantineVerdict::Keep(Cleanup::Kept { files: left }));
-                }
-                KeepCheck::HasSubmodule => {
-                    return Err(PlaceError::SubmodulesPresent {
-                        path: path.to_owned(),
-                    });
-                }
-            }
-        }
-        Ok(QuarantineVerdict::Remove(git_dir))
+        remove_file_if_present(&slot.dir.join(".git")).await
     }
 
-    /// Points `git_dir/gitdir` at `quarantine` and removes `quarantine` through git while Kratos's
-    /// own lock stays intact, so `folder` is never named to `git worktree remove`.
-    async fn remove_quarantined(
-        &self,
-        repository: &Path,
-        folder: &Path,
-        quarantine: &Path,
-        git_dir: &Path,
+    async fn finish_discard_trashed(
+        slot: &TrashSlot,
+        admin: Option<&Path>,
     ) -> Result<(), PlaceError> {
-        let gitdir_file = git_dir.join("gitdir");
-        let previous_gitdir = tokio::fs::read(&gitdir_file).await.ok();
-        let quarantine_text = super::text(quarantine)?;
-        let quarantine_gitdir = gitdir_entry(&quarantine.join(".git"));
-        if let Err(source) = tokio::fs::write(&gitdir_file, quarantine_gitdir).await {
-            let _ = restore_quarantine(quarantine, folder).await;
-            return Err(PlaceError::Io {
-                path: gitdir_file.display().to_string(),
-                source,
-            });
-        }
-        let remove = [
-            "worktree",
-            "remove",
-            "--force",
-            "--force",
-            "--",
-            &quarantine_text,
-        ];
-        let removed = self.git.run(repository, &remove, CHECKOUT).await;
-        if let Err(error) = removed {
-            if tokio::fs::symlink_metadata(quarantine).await.is_ok() {
-                if let Some(previous) = previous_gitdir {
-                    let _ = tokio::fs::write(&gitdir_file, previous).await;
-                }
-                let _ = restore_quarantine(quarantine, folder).await;
-            }
-            return Err(error.into());
+        remove_tree(&slot.dir).await?;
+        remove_file_if_present(&slot.meta).await?;
+        if let Some(admin) = admin {
+            remove_tree(admin).await?;
         }
         Ok(())
     }
 
+    async fn remove_unregistered(&self, folder: &Path) -> Result<Cleanup, PlaceError> {
+        if self.is_live_checkout(folder).await? {
+            return Ok(Cleanup::NotOwned);
+        }
+        remove_empty_dir(folder).await?;
+        Ok(Cleanup::Removed)
+    }
+
+    async fn is_live_checkout(&self, folder: &Path) -> Result<bool, PlaceError> {
+        Ok(self
+            .locate(folder)
+            .await?
+            .is_some_and(|worktree| worktree.top == folder))
+    }
+
     /// Checks whether `folder` has any file or initialized submodule that [`LeftFiles::Keep`] must
-    /// preserve.
+    /// preserve. Runs `ls-files` before `status` so `status` is the final scan right before moving.
     async fn check_clean_for_keep(&self, folder: &Path) -> Result<KeepCheck, PlaceError> {
+        let listed = self
+            .git
+            .run_bytes(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
+            .await?;
+        let overlooked = self.overlooked_edits(folder, &listed).await?;
         let status = [
             "status",
             "--porcelain",
@@ -290,12 +322,8 @@ impl Worktrees {
             "--ignore-submodules=none",
         ];
         let status = self.git.run(folder, &status, git::QUICK).await?;
-        let listed = self
-            .git
-            .run_bytes(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
-            .await?;
         let mut left: Vec<String> = status.lines().map(str::to_owned).collect();
-        left.extend(self.overlooked_edits(folder, &listed).await?);
+        left.extend(overlooked);
         if !left.is_empty() {
             return Ok(KeepCheck::Dirty(left));
         }
@@ -327,11 +355,9 @@ impl Worktrees {
         Ok(Some(commit))
     }
 
-    /// Edits `git status` does not show, because the file is marked assume-unchanged or
-    /// skip-worktree, as status lines such as ` M config.txt`. Git compares each such file on disk
-    /// in a scratch copy of the index that no longer marks it, so a new executable bit, or a file
-    /// replaced by a link, shows as git shows it for any other file.
-    /// `listed` is the worktree's `git ls-files -v -s -z`.
+    /// Edits `git status` does not show because the file is marked assume-unchanged or
+    /// skip-worktree. Compares in an mtime-preserved scratch index copy so racy-git checks stay
+    /// active and mode/type changes show as git reports them.
     async fn overlooked_edits(
         &self,
         folder: &Path,
@@ -341,7 +367,6 @@ impl Worktrees {
         let mut on_disk = Vec::new();
         for path in overlooked(listed) {
             let Some(file) = file_in(folder, path) else {
-                // Kratos cannot read the file, so it cannot tell that the file is unchanged.
                 edited.push(status_line(b"M", path));
                 continue;
             };
@@ -360,8 +385,6 @@ impl Worktrees {
         Ok(edited)
     }
 
-    /// The status line of each of `paths` that differs from `index` once `index` no longer marks
-    /// it to be overlooked.
     async fn changed_once_unmarked(
         &self,
         folder: &Path,
@@ -372,7 +395,6 @@ impl Worktrees {
             .iter()
             .flat_map(|path| path.iter().copied().chain([0]))
             .collect();
-        // Git applies one of these marks per run.
         for unmark in ["--no-assume-unchanged", "--no-skip-worktree"] {
             let args = ["update-index", unmark, "-z", "--stdin"];
             self.git
@@ -390,112 +412,383 @@ impl Worktrees {
             .map(|(status, path)| status_line(status, path))
             .collect())
     }
-}
 
-/// Removes what is left of a worktree that is no longer one, such as the folder a removal git could
-/// not finish leaves after deleting its `.git` file. Git would read the project's repository there,
-/// so Kratos removes the folder only while it is empty. A record the user locked stays untouched,
-/// even when its folder is offline and the record carries Kratos's ownership id.
-async fn remove_leftover(
-    repository: &Path,
-    recorded: &KratosWorktree,
-) -> Result<Cleanup, PlaceError> {
-    let records = matching_records(repository, recorded).await?;
-    if let Some(reason) = records.iter().find_map(|(_, lock)| match lock {
-        WorktreeLock::Other(reason) => Some(reason.clone()),
-        WorktreeLock::Unlocked | WorktreeLock::Ours => None,
-    }) {
-        return Err(PlaceError::WorktreeLocked {
-            path: recorded.path.clone(),
-            reason,
-        });
-    }
-    let folder = Path::new(&recorded.path);
-    match tokio::fs::remove_dir(folder).await {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => {
-            return Err(PlaceError::CannotRemove {
-                path: folder.display().to_string(),
-                source: error,
-            });
-        }
-        _ => {}
-    }
-    for (record, _) in records {
-        if is_same_checkout_dir(&record, recorded).await {
-            tokio::fs::remove_dir_all(&record)
-                .await
-                .map_err(|source| PlaceError::Io {
-                    path: record.display().to_string(),
-                    source,
-                })?;
+    async fn empty_expired_trash(&self, store: &StoreThread, retention: Duration) {
+        let Ok(workspaces) = store.call(|store| store.list_workspaces()).await else {
+            return;
+        };
+        let mut seen = HashSet::new();
+        for workspace in workspaces {
+            let trash_dir = Path::new(&workspace.path).join(TRASH_FOLDER);
+            if !seen.insert(trash_dir.clone()) {
+                continue;
+            }
+            let Ok(meta) = tokio::fs::symlink_metadata(&trash_dir).await else {
+                continue;
+            };
+            if !meta.file_type().is_symlink() && meta.is_dir() {
+                empty_expired_in(&trash_dir, retention).await;
+            }
         }
     }
-    Ok(Cleanup::Removed)
 }
 
-/// Every git worktree admin record under `repository/worktrees` whose `gitdir` points at
-/// `recorded.path/.git`, paired with its lock state.
-async fn matching_records(
-    repository: &Path,
-    recorded: &KratosWorktree,
-) -> Result<Vec<(PathBuf, WorktreeLock)>, PlaceError> {
-    let io_error = |path: &Path| {
-        let path = path.display().to_string();
-        move |source| PlaceError::Io { path, source }
+async fn empty_expired_in(trash_dir: &Path, retention: Duration) {
+    let Some(cutoff) = SystemTime::now().checked_sub(retention) else {
+        return;
     };
+    let Ok(mut entries) = tokio::fs::read_dir(trash_dir).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let meta_path = entry.path();
+        if meta_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = tokio::fs::read(&meta_path).await else {
+            continue;
+        };
+        let Ok(meta) = serde_json::from_slice::<TrashedWorktree>(&bytes) else {
+            continue;
+        };
+        if meta.trashed_at.instant() > cutoff {
+            continue;
+        }
+        let dir = meta_path.with_extension("");
+        if has_entry_newer_than(&dir, cutoff).await {
+            continue;
+        }
+        if remove_tree(&dir).await.is_ok() {
+            let _ = tokio::fs::remove_file(&meta_path).await;
+        }
+    }
+}
+
+/// Whether `dir` contains any file modified after `cutoff`, protecting late saves from expiry.
+async fn has_entry_newer_than(dir: &Path, cutoff: SystemTime) -> bool {
+    let dir = long_path(dir);
+    tokio::task::spawn_blocking(move || has_entry_newer_than_sync(&dir, cutoff))
+        .await
+        .unwrap_or(true)
+}
+
+fn has_entry_newer_than_sync(dir: &Path, cutoff: SystemTime) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else {
+            return true;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            if has_entry_newer_than_sync(&entry.path(), cutoff) {
+                return true;
+            }
+        } else if meta.modified().map_or(true, |modified| modified > cutoff) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Finds the git worktree admin folder under `repository/worktrees` carrying `recorded`'s Kratos
+/// id whose lexically normalized `gitdir` (handling relative `..` links offline) matches
+/// `recorded.path/.git`.
+async fn find_our_admin(
+    repository: &Path,
+    recorded: &KratosWorktree,
+) -> Result<Option<PathBuf>, PlaceError> {
     let records = repository.join("worktrees");
     let mut entries = match tokio::fs::read_dir(&records).await {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        entries => entries.map_err(io_error(&records))?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        entries => entries.map_err(|source| PlaceError::Io {
+            path: records.display().to_string(),
+            source,
+        })?,
     };
-    let checkout = Path::new(&recorded.path).join(".git");
-    let mut matched = Vec::new();
-    while let Some(entry) = entries.next_entry().await.map_err(io_error(&records))? {
+    let expected = normalize_lexical(&Path::new(&recorded.path).join(".git"));
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|source| PlaceError::Io {
+            path: records.display().to_string(),
+            source,
+        })?
+    {
         let record = entry.path();
+        if !is_same_checkout_dir(&record, recorded).await {
+            continue;
+        }
         let Ok(gitdir) = tokio::fs::read_to_string(record.join("gitdir")).await else {
             continue;
         };
-        if record.join(gitdir.trim()) == checkout {
-            let lock = read_lock(&record).await?;
-            matched.push((record, lock));
+        let resolved_gitdir = normalize_lexical(&record.join(gitdir.trim()));
+        if same_lexical_path(&resolved_gitdir, &expected) {
+            return Ok(Some(record));
         }
     }
-    Ok(matched)
+    Ok(None)
 }
 
-/// A sibling path in the same parent folder where `folder` is moved before final verification and
-/// deletion, keeping the rename atomic on the same filesystem.
-fn quarantine_path(folder: &Path, id: &WorktreeId) -> Result<PathBuf, PlaceError> {
+fn trash_root(folder: &Path) -> Result<PathBuf, PlaceError> {
     let parent = folder.parent().ok_or_else(|| PlaceError::CannotRemove {
         path: folder.display().to_string(),
         source: io::Error::new(io::ErrorKind::InvalidInput, "worktree has no parent folder"),
     })?;
-    Ok(parent.join(format!(".kratos-removing-{}", id.as_str())))
+    if parent.file_name().and_then(|name| name.to_str()) == Some(WORKTREES_FOLDER)
+        && let Some(repo_root) = parent.parent()
+    {
+        return Ok(repo_root.join(TRASH_FOLDER));
+    }
+    Ok(parent.join(TRASH_FOLDER))
 }
 
-/// Moves a quarantined worktree back to its original path when post-rename verification keeps it.
-async fn restore_quarantine(quarantine: &Path, folder: &Path) -> Result<(), PlaceError> {
-    tokio::fs::rename(quarantine, folder)
+fn slot_candidates(id: &WorktreeId) -> Vec<String> {
+    let alnum: String = id
+        .as_str()
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    let mut slots = Vec::new();
+    for chunk in alnum.as_bytes().chunks(TRASH_SLOT_LEN) {
+        if chunk.len() == TRASH_SLOT_LEN {
+            slots.push(String::from_utf8_lossy(chunk).into_owned());
+        }
+    }
+    if slots.is_empty() {
+        let mut padded = alnum;
+        while padded.len() < TRASH_SLOT_LEN {
+            padded.push('0');
+        }
+        slots.push(padded);
+    }
+    slots
+}
+
+async fn is_our_trash_meta(meta: &Path, recorded: &KratosWorktree) -> bool {
+    tokio::fs::read(meta)
         .await
-        .map_err(|source| PlaceError::CannotRemove {
-            path: quarantine.display().to_string(),
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<TrashedWorktree>(&bytes).ok())
+        .is_some_and(|parsed| parsed.worktree_id == recorded.id.as_str())
+}
+
+async fn find_trashed_entry(
+    trash_dir: &Path,
+    recorded: &KratosWorktree,
+) -> Result<Option<TrashSlot>, PlaceError> {
+    for slot in slot_candidates(&recorded.id) {
+        let dir = trash_dir.join(&slot);
+        if tokio::fs::symlink_metadata(&dir).await.is_err() {
+            continue;
+        }
+        let meta = trash_dir.join(format!("{slot}.json"));
+        if is_our_trash_meta(&meta, recorded).await || is_same_checkout_at(&dir, recorded).await {
+            return Ok(Some(TrashSlot { dir, meta }));
+        }
+    }
+    Ok(None)
+}
+
+async fn pick_free_trash_slot(
+    trash_dir: &Path,
+    recorded: &KratosWorktree,
+) -> Result<TrashSlot, PlaceError> {
+    for slot in slot_candidates(&recorded.id) {
+        let dir = trash_dir.join(&slot);
+        let meta = trash_dir.join(format!("{slot}.json"));
+        if tokio::fs::symlink_metadata(&dir).await.is_err()
+            && (tokio::fs::symlink_metadata(&meta).await.is_err()
+                || is_our_trash_meta(&meta, recorded).await)
+        {
+            return Ok(TrashSlot { dir, meta });
+        }
+    }
+    Err(PlaceError::CannotRemove {
+        path: recorded.path.clone(),
+        source: io::Error::new(io::ErrorKind::AlreadyExists, "no free trash slot"),
+    })
+}
+
+async fn write_trash_meta(
+    meta_path: &Path,
+    recorded: &KratosWorktree,
+    branch: Option<String>,
+) -> Result<(), PlaceError> {
+    let trashed_at = Timestamp::now().map_err(|error| PlaceError::Io {
+        path: meta_path.display().to_string(),
+        source: io::Error::other(error),
+    })?;
+    let payload = TrashedWorktree {
+        worktree_id: recorded.id.as_str().to_owned(),
+        original_path: recorded.path.clone(),
+        branch,
+        trashed_at,
+    };
+    let bytes = serde_json::to_vec_pretty(&payload).expect("trash metadata serializes");
+    tokio::fs::write(meta_path, bytes)
+        .await
+        .map_err(|source| PlaceError::Io {
+            path: meta_path.display().to_string(),
             source,
         })
 }
 
-/// Formats `git_file` (`<quarantine>/.git`) as git stores `gitdir` in a linked worktree's admin
-/// folder.
+async fn remove_empty_dir(folder: &Path) -> Result<(), PlaceError> {
+    match tokio::fs::remove_dir(long_path(folder)).await {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::CannotRemove {
+            path: folder.display().to_string(),
+            source: error,
+        }),
+        _ => Ok(()),
+    }
+}
+
+async fn remove_file_if_present(path: &Path) -> Result<(), PlaceError> {
+    match tokio::fs::remove_file(long_path(path)).await {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::Io {
+            path: path.display().to_string(),
+            source: error,
+        }),
+        _ => Ok(()),
+    }
+}
+
+async fn rename_long(from: &Path, to: &Path) -> io::Result<()> {
+    tokio::fs::rename(long_path(from), long_path(to)).await
+}
+
+/// Removes `path` recursively using Kratos's own filesystem calls (with extended-length paths and
+/// read-only clearing on Windows), avoiding git's 260-character path limit.
+async fn remove_tree(path: &Path) -> Result<(), PlaceError> {
+    let shown = path.display().to_string();
+    let target = long_path(path);
+    tokio::task::spawn_blocking(move || remove_tree_sync(&target))
+        .await
+        .map_err(|error| PlaceError::CannotRemove {
+            path: shown.clone(),
+            source: io::Error::other(error),
+        })?
+        .map_err(|source| PlaceError::CannotRemove {
+            path: shown,
+            source,
+        })
+}
+
+fn remove_tree_sync(target: &Path) -> io::Result<()> {
+    match std::fs::remove_dir_all(target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => {
+            clear_readonly_recursive(target);
+            match std::fs::remove_dir_all(target) {
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                result => result,
+            }
+        }
+    }
+}
+
+fn clear_readonly_recursive(path: &Path) {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return;
+    };
+    if meta.file_type().is_symlink() {
+        return;
+    }
+    make_owner_writable(path, &meta);
+    if meta.is_dir()
+        && let Ok(entries) = std::fs::read_dir(path)
+    {
+        for entry in entries.flatten() {
+            clear_readonly_recursive(&entry.path());
+        }
+    }
+}
+
 #[cfg(windows)]
-fn gitdir_entry(git_file: &Path) -> Vec<u8> {
-    format!("{}\n", git_file.to_string_lossy().replace('\\', "/")).into_bytes()
+fn make_owner_writable(path: &Path, meta: &std::fs::Metadata) {
+    let mut perms = meta.permissions();
+    if perms.readonly() {
+        #[expect(
+            clippy::permissions_set_readonly_false,
+            reason = "Windows clears FILE_ATTRIBUTE_READONLY without changing POSIX world-write bits"
+        )]
+        perms.set_readonly(false);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+#[cfg(unix)]
+fn make_owner_writable(path: &Path, meta: &std::fs::Metadata) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = meta.permissions();
+    let extra = if meta.is_dir() { 0o700 } else { 0o200 };
+    let mode = perms.mode();
+    if mode & extra != extra {
+        perms.set_mode(mode | extra);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+}
+
+#[cfg(windows)]
+fn long_path(path: &Path) -> PathBuf {
+    if !path.is_absolute() {
+        return path.to_path_buf();
+    }
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if text.starts_with(r"\\?\") || text.starts_with(r"\\.\") {
+        return path.to_path_buf();
+    }
+    let normalized = text.replace('/', "\\");
+    if let Some(unc) = normalized.strip_prefix(r"\\") {
+        PathBuf::from(format!(r"\\?\UNC\{unc}"))
+    } else {
+        PathBuf::from(format!(r"\\?\{normalized}"))
+    }
 }
 
 #[cfg(not(windows))]
-fn gitdir_entry(git_file: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    let mut bytes = git_file.as_os_str().as_bytes().to_vec();
-    bytes.push(b'\n');
-    bytes
+fn long_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
+/// Resolves `.` and `..` without touching the filesystem so relative `gitdir` entries match while
+/// the worktree folder is offline.
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(out.components().next_back(), Some(Component::Normal(_))) {
+                    out.pop();
+                } else {
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn same_lexical_path(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
 }
 
 /// Whether `listed` (`git ls-files -v -s -z`) names any gitlink (`160000`) whose folder in
@@ -525,9 +818,7 @@ fn submodules(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-/// Whether a thread that is not archived works at `worktree` or in a folder inside it, as when the
-/// user opens a worktree Kratos made as a project of its own, then makes a worktree from it.
-/// Project folders are stored as the user gave them, so each is resolved before the comparison.
+/// Whether an unarchived thread works at `worktree` or in a folder inside it.
 async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, StoreError> {
     let folders = store.call(|store| store.folders_in_use()).await?;
     for folder in folders {
@@ -541,9 +832,8 @@ async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, St
     Ok(false)
 }
 
-/// The path of each index entry in `git ls-files -v -s -z` output that git is told to overlook: a
-/// lowercase tag marks assume-unchanged, and `S` marks skip-worktree. Paths stay as git wrote
-/// them, since a file name need not be UTF-8.
+/// The path of each index entry in `git ls-files -v -s -z` output marked assume-unchanged or
+/// skip-worktree.
 fn overlooked(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
     listed.split(|&byte| byte == 0).filter_map(|entry| {
         let tab = entry.iter().position(|&byte| byte == b'\t')?;
@@ -562,21 +852,17 @@ fn changes(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
     })
 }
 
-/// The file git's `path` names in `folder`.
 #[cfg(unix)]
 fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     Some(folder.join(std::ffi::OsStr::from_bytes(path)))
 }
 
-/// The file git's `path` names in `folder`, or `None` when `path` is not UTF-8, which no file name
-/// here can be.
 #[cfg(not(unix))]
 fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(path).ok().map(|path| folder.join(path))
 }
 
-/// `path` as a status line for a file changed on disk, such as ` M config.txt`.
 fn status_line(status: &[u8], path: &[u8]) -> String {
     format!(
         " {} {}",
@@ -607,6 +893,27 @@ mod tests {
         assert_eq!(
             changes(listed).collect::<Vec<_>>(),
             [(&b"M"[..], &b"tool.sh"[..]), (b"T", b"link\ttab.txt")]
+        );
+    }
+
+    #[test]
+    fn relative_gitdir_normalizes_lexically_while_offline() {
+        let admin = Path::new("/tmp/repo/.git/worktrees/portable");
+        let target = normalize_lexical(&admin.join("../../../.kratos-worktrees/portable/.git"));
+        let expected = normalize_lexical(Path::new("/tmp/repo/.kratos-worktrees/portable/.git"));
+        assert!(same_lexical_path(&target, &expected));
+    }
+
+    #[test]
+    fn trash_slot_is_never_longer_than_a_one_char_worktree_path() {
+        let folder = Path::new("/repo/.kratos-worktrees/w");
+        let id = WorktreeId::new("fb5c58e7-bd79-4078-88e7-be4ccff40ceb".to_owned());
+        let slot = trash_root(folder).unwrap().join(&slot_candidates(&id)[0]);
+        assert!(
+            slot.to_string_lossy().len() <= folder.to_string_lossy().len(),
+            "{} > {}",
+            slot.display(),
+            folder.display()
         );
     }
 }

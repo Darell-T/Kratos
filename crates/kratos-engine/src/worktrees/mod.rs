@@ -27,6 +27,10 @@ pub(crate) use git::GitError;
 /// The folder in a project that holds the worktrees Kratos makes for it, one per branch.
 pub const WORKTREES_FOLDER: &str = ".kratos-worktrees";
 
+/// Sibling folder beside [`WORKTREES_FOLDER`] where clean archived worktrees wait before Kratos
+/// empties them. Its shorter name keeps trashed paths no longer than the original worktree path.
+pub const TRASH_FOLDER: &str = ".kratos-trash";
+
 /// The file that holds a worktree's id in the folder git keeps for a worktree Kratos made, under
 /// the repository's `worktrees` folder. Git deletes that folder with the worktree and gives a
 /// checkout it makes later at the same path a new one, even of the same name, without the file.
@@ -646,7 +650,7 @@ pub(super) async fn is_same_checkout_dir(git_dir: &Path, worktree: &KratosWorktr
 
 /// Makes `folder` with a `.gitignore` that ignores everything in it, itself included, so the
 /// worktrees inside never show as changes in the project and no project file is edited.
-async fn ignore_everything_in(folder: &Path) -> Result<(), PlaceError> {
+pub(super) async fn ignore_everything_in(folder: &Path) -> Result<(), PlaceError> {
     let io_error = |source| PlaceError::Io {
         path: folder.display().to_string(),
         source,

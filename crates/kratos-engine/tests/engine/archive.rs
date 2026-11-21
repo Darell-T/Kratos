@@ -913,11 +913,11 @@ fn an_ignored_file_saved_after_status_scan_keeps_the_worktree() {
 
 #[test]
 fn a_worktree_stays_locked_and_leaves_any_replacement_alone_during_removal() {
-    // Catches unlocking a worktree before `git worktree remove` runs by path: another git command
-    // could move the checkout without unlocking it and place an unlocked replacement at the path.
+    // Catches unlocking a worktree during removal: another git command could move the checkout
+    // without unlocking it and place an unlocked replacement at the path.
     let root = TempDir::new().unwrap();
     let repository = new_repository(&root);
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "remove");
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "symbolic-ref");
     let workspace = workspace_at(&engine, &repository);
     let client = engine.client();
     let thread = create(&client, &workspace, "guarded", PlaceRequest::NewWorktree);
@@ -1317,4 +1317,433 @@ fn reserve_and_check_out(
         std::fs::write(Path::new(&git_dir).join(WORKTREE_ID_FILE), id.as_str()).unwrap();
     }
     path
+}
+
+fn trash_entries(repository: &Path) -> Vec<(std::path::PathBuf, serde_json::Value)> {
+    let trash = repository.join(".kratos-trash");
+    let Ok(entries) = std::fs::read_dir(&trash) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            let meta: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let dir = path.with_extension("");
+            found.push((dir, meta));
+        }
+    }
+    found
+}
+
+#[test]
+fn a_clean_keep_archive_moves_the_worktree_to_trash_and_keeps_repo_status_clean() {
+    // Catches Keep deleting a clean worktree outright instead of moving it to `.kratos-trash`,
+    // lengthening its path past the original worktree path, or dirtying the project's `git status`.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let keep_thread = create(&client, &workspace, "w", PlaceRequest::NewWorktree);
+    let keep_wt = worktree_of(&client, &keep_thread);
+    let keep_folder = Path::new(&keep_wt.path);
+    std::fs::write(keep_folder.join("committed.txt"), "saved\n").unwrap();
+    git(keep_folder, &["add", "committed.txt"]);
+    git(keep_folder, &["commit", "--quiet", "--message", "saved"]);
+
+    assert_eq!(
+        archive(&client, &keep_thread, LeftFiles::Keep),
+        Cleanup::Removed
+    );
+    assert!(!keep_folder.exists());
+    assert_eq!(worktree_count(&repository), 1);
+    assert_eq!(git(&repository, &["status", "--porcelain"]), "");
+    assert_eq!(git(&repository, &["show", "w:committed.txt"]), "saved");
+
+    let trashed = trash_entries(&repository);
+    assert_eq!(trashed.len(), 1, "{trashed:?}");
+    let (trash_dir, meta) = &trashed[0];
+    assert!(
+        trash_dir.to_string_lossy().len() <= keep_wt.path.len(),
+        "trash path {} is longer than worktree path {}",
+        trash_dir.display(),
+        keep_wt.path
+    );
+    assert_eq!(meta["worktreeId"].as_str(), Some(keep_wt.id.as_str()));
+    assert_eq!(meta["originalPath"].as_str(), Some(keep_wt.path.as_str()));
+    assert_eq!(meta["branch"].as_str(), Some("w"));
+    assert!(meta["trashedAt"].as_str().is_some());
+    assert_eq!(
+        std::fs::read_to_string(trash_dir.join("committed.txt")).unwrap(),
+        "saved\n"
+    );
+    assert!(!trash_dir.join(".git").exists());
+
+    // Discard deletes immediately and leaves no new trash entry.
+    let discard_thread = create(&client, &workspace, "drop", PlaceRequest::NewWorktree);
+    let discard_wt = worktree_of(&client, &discard_thread);
+    std::fs::write(Path::new(&discard_wt.path).join("scratch.txt"), "bye\n").unwrap();
+    assert_eq!(
+        archive(&client, &discard_thread, LeftFiles::Discard),
+        Cleanup::Removed
+    );
+    assert!(!Path::new(&discard_wt.path).exists());
+    assert_eq!(trash_entries(&repository).len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_open_directory_save_after_keep_check_survives_in_trash() {
+    // Catches Keep deleting saves written through an already-open directory handle (a shell or
+    // editor inside the worktree) after Kratos's last clean scan.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    std::fs::write(repository.join(".gitignore"), "*.local\n").unwrap();
+    git(&repository, &["add", ".gitignore"]);
+    git(
+        &repository,
+        &["commit", "--quiet", "--message", "ignore local"],
+    );
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "work", PlaceRequest::NewWorktree);
+    let wt = worktree_of(&client, &thread);
+    let ready = root.path().join("writer-ready");
+    let trigger = root.path().join("writer-go");
+    let done = root.path().join("writer-done");
+    let script = format!(
+        "import os, time\n\
+         fd = os.open({path:?}, os.O_RDONLY | os.O_DIRECTORY)\n\
+         open({ready:?}, 'w').close()\n\
+         while not os.path.exists({trigger:?}): time.sleep(0.01)\n\
+         for name, body in [('README.md', b'late tracked save\\n'), ('saved.local', b'late ignored save\\n')]:\n\
+             f = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600, dir_fd=fd)\n\
+             with os.fdopen(f, 'wb') as out: out.write(body)\n\
+         os.close(fd)\n\
+         open({done:?}, 'w').close()\n",
+        path = wt.path,
+        ready = ready.to_str().unwrap(),
+        trigger = trigger.to_str().unwrap(),
+        done = done.to_str().unwrap(),
+    );
+    let mut writer = std::process::Command::new("python3")
+        .args(["-c", &script])
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + WAIT;
+    while !ready.exists() {
+        assert!(Instant::now() < deadline, "open-dir writer never opened fd");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    std::fs::write(&trigger, "").unwrap();
+    assert!(writer.wait().unwrap().success());
+    assert!(done.exists());
+
+    let trashed = trash_entries(&repository);
+    assert_eq!(trashed.len(), 1, "{trashed:?}");
+    let (trash_dir, _) = &trashed[0];
+    assert_eq!(
+        std::fs::read_to_string(trash_dir.join("README.md")).unwrap(),
+        "late tracked save\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(trash_dir.join("saved.local")).unwrap(),
+        "late ignored save\n"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_long_path_worktree_archives_cleanly_under_keep_and_discard() {
+    // Catches quarantine names or `git worktree remove` pushing valid <=240-char Windows paths
+    // past MAX_PATH with `core.longpaths=false` and leaving a broken checkout.
+    for files in [LeftFiles::Keep, LeftFiles::Discard] {
+        let root = TempDir::new().unwrap();
+        let repository = new_repository(&root);
+        git(&repository, &["config", "core.longpaths", "false"]);
+        git(&repository, &["config", "core.autocrlf", "false"]);
+        let prefix = repository.join(".kratos-worktrees").join("w");
+        let leaf_len = 240usize.saturating_sub(prefix.to_string_lossy().len() + 1);
+        assert!(leaf_len >= 16, "unexpected temp path: {}", prefix.display());
+        let leaf = "p".repeat(leaf_len);
+        std::fs::write(repository.join(&leaf), "tracked contents\n").unwrap();
+        git(&repository, &["add", &leaf]);
+        git(
+            &repository,
+            &["commit", "--quiet", "--message", "long path"],
+        );
+        let engine = RunningEngine::start(&root.path().join("kratos"));
+        let workspace = workspace_at(&engine, &repository);
+        let client = engine.client();
+        let thread = create(&client, &workspace, "w", PlaceRequest::NewWorktree);
+        let path = worktree_of(&client, &thread).path;
+        let folder = Path::new(&path);
+        assert_eq!(
+            std::fs::read_to_string(folder.join(&leaf)).unwrap().trim(),
+            "tracked contents"
+        );
+
+        assert_eq!(archive(&client, &thread, files), Cleanup::Removed);
+        assert!(!folder.exists());
+        assert_eq!(worktree_count(&repository), 1);
+        assert_eq!(archive(&client, &thread, files), Cleanup::Removed);
+        if files == LeftFiles::Keep {
+            let trashed = trash_entries(&repository);
+            assert_eq!(trashed.len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(trashed[0].0.join(&leaf))
+                    .unwrap()
+                    .trim(),
+                "tracked contents"
+            );
+        } else {
+            assert!(trash_entries(&repository).is_empty());
+        }
+    }
+}
+
+#[test]
+fn a_crash_after_moving_to_trash_finishes_cleanly_with_or_without_a_replacement_checkout() {
+    // Catches restart recovery restoring files without fixing gitdir, or confusing a replacement
+    // checkout at the vacated path with the trashed worktree and forgetting its admin record.
+    for with_replacement in [false, true] {
+        let root = TempDir::new().unwrap();
+        let repository = new_repository(&root);
+        let home = root.path().join("kratos");
+        let engine = RunningEngine::start(&home);
+        let workspace = workspace_at(&engine, &repository);
+        let client = engine.client();
+        let thread = create(&client, &workspace, "work", PlaceRequest::NewWorktree);
+        let wt = worktree_of(&client, &thread);
+        let folder = Path::new(&wt.path);
+        let admin = std::path::PathBuf::from(git(folder, &["rev-parse", "--absolute-git-dir"]));
+        engine.kill();
+
+        // Simulate a crash right after `begin_removal`, write-ahead `<slot>.json`, and atomic
+        // rename into `.kratos-trash/<slot>`, before removing `admin` or `<slot>/.git`.
+        let database = rusqlite::Connection::open(home.join("kratos.db")).unwrap();
+        database
+            .execute(
+                "UPDATE threads SET archived_at = created_at WHERE id = ?1",
+                [thread.id.as_str()],
+            )
+            .unwrap();
+        database
+            .execute(
+                "UPDATE worktrees SET state = 'removing' WHERE id = ?1",
+                [wt.id.as_str()],
+            )
+            .unwrap();
+        drop(database);
+        let slot: String = wt
+            .id
+            .as_str()
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .take(5)
+            .collect::<String>()
+            .to_ascii_lowercase();
+        let trash_dir = repository.join(".kratos-trash");
+        std::fs::create_dir_all(&trash_dir).unwrap();
+        std::fs::write(trash_dir.join(".gitignore"), "*\n").unwrap();
+        std::fs::write(
+            trash_dir.join(format!("{slot}.json")),
+            json!({
+                "worktreeId": wt.id.as_str(),
+                "originalPath": wt.path,
+                "branch": "work",
+                "trashedAt": "2026-11-21T00:00:00.000Z"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let moved = trash_dir.join(&slot);
+        std::fs::rename(folder, &moved).unwrap();
+        std::fs::write(moved.join("saved.local"), "late save after rename\n").unwrap();
+        if with_replacement {
+            git(
+                &repository,
+                &[
+                    "worktree",
+                    "add",
+                    "--force",
+                    "--force",
+                    "--quiet",
+                    "-b",
+                    "replacement",
+                    &wt.path,
+                ],
+            );
+            std::fs::write(folder.join("replacement.txt"), "user replacement\n").unwrap();
+        }
+
+        let restarted = RunningEngine::start(&home);
+        let client = restarted.client();
+        let expected_worktrees = if with_replacement { 2 } else { 1 };
+        wait_for_worktree_count(&repository, expected_worktrees);
+
+        for _ in 0..2 {
+            assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+        }
+        let our_admin_still_present = std::fs::read_dir(repository.join(".git").join("worktrees"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| {
+                std::fs::read_to_string(entry.path().join("kratos-worktree-id"))
+                    .ok()
+                    .is_some_and(|mark| mark.trim() == wt.id.as_str())
+            });
+        assert!(!our_admin_still_present, "old admin dir still registered");
+        assert_eq!(
+            std::fs::read_to_string(moved.join("saved.local")).unwrap(),
+            "late save after rename\n"
+        );
+        assert!(trash_dir.join(format!("{slot}.json")).is_file());
+        assert!(!moved.join(".git").exists());
+        if with_replacement {
+            assert_eq!(
+                std::fs::read_to_string(folder.join("replacement.txt")).unwrap(),
+                "user replacement\n"
+            );
+            assert_eq!(git(folder, &["branch", "--show-current"]), "replacement");
+        } else {
+            assert!(!admin.exists(), "old admin dir still registered");
+            assert!(!folder.exists());
+        }
+    }
+}
+
+#[test]
+fn an_offline_locked_worktree_with_relative_git_links_stays_actionable_until_unlocked() {
+    // Catches lexical `gitdir` matching that fails on relative `..` links (`worktree.useRelativePaths`),
+    // marking an offline user-locked worktree removed so a later Discard leaves it behind.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let home = root.path().join("kratos");
+    let engine = RunningEngine::start(&home);
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "portable", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    let admin = std::path::PathBuf::from(git(folder, &["rev-parse", "--absolute-git-dir"]));
+    let admin_name = admin.file_name().unwrap().to_str().unwrap().to_owned();
+    std::fs::write(folder.join("notes.txt"), "keep the notes\n").unwrap();
+    assert!(matches!(
+        archive(&client, &thread, LeftFiles::Keep),
+        Cleanup::Kept { .. }
+    ));
+    drop(engine);
+
+    // Install the user lock first, then write relative worktree links (matching git 2.48+
+    // `worktree.useRelativePaths=true`, while keeping the test runnable on git 2.47 on Windows).
+    git(&repository, &["worktree", "unlock", &path]);
+    git(
+        &repository,
+        &["worktree", "lock", "--reason", "offline on purpose", &path],
+    );
+    std::fs::write(
+        admin.join("gitdir"),
+        "../../../.kratos-worktrees/portable/.git\n",
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join(".git"),
+        format!("gitdir: ../../.git/worktrees/{admin_name}\n"),
+    )
+    .unwrap();
+    let parked = root.path().join("disconnected");
+    std::fs::rename(folder, &parked).unwrap();
+
+    let restarted = RunningEngine::start(&home);
+    let client = restarted.client();
+    let offline = archive(&client, &thread, LeftFiles::Keep);
+    assert!(
+        matches!(offline, Cleanup::Blocked { ref error } if error.contains("offline on purpose")),
+        "{offline:?}"
+    );
+    assert!(admin.exists(), "git admin record was deleted while offline");
+    assert_eq!(
+        std::fs::read_to_string(admin.join("locked"))
+            .unwrap()
+            .trim(),
+        "offline on purpose"
+    );
+
+    std::fs::rename(&parked, folder).unwrap();
+    assert_eq!(git(folder, &["rev-parse", "--is-inside-work-tree"]), "true");
+    std::fs::remove_file(admin.join("locked")).unwrap();
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Discard),
+        Cleanup::Removed
+    );
+    assert!(!folder.exists());
+    assert!(!admin.exists());
+}
+
+#[test]
+fn expired_trash_is_emptied_on_startup_without_deleting_recent_saves() {
+    // Catches trash accumulating forever, or startup emptying trash that is still within the
+    // retention window or received a recent late save.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let home = root.path().join("kratos");
+    let engine = RunningEngine::start(&home);
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    for title in ["expired", "fresh", "recently-saved"] {
+        let thread = create(&client, &workspace, title, PlaceRequest::NewWorktree);
+        assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    }
+    drop(engine);
+
+    let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 24 * 3600);
+    let mut expired_dir = None;
+    let mut fresh_dir = None;
+    let mut recent_save_dir = None;
+    for (dir, mut meta) in trash_entries(&repository) {
+        let branch = meta["branch"].as_str().unwrap().to_owned();
+        if branch == "expired" || branch == "recently-saved" {
+            meta["trashedAt"] = json!("2020-01-01T00:00:00.000Z");
+            std::fs::write(
+                dir.with_extension("json"),
+                serde_json::to_vec(&meta).unwrap(),
+            )
+            .unwrap();
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                if entry.file_type().unwrap().is_file() {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(entry.path())
+                        .unwrap()
+                        .set_modified(old_time)
+                        .unwrap();
+                }
+            }
+            if branch == "recently-saved" {
+                std::fs::write(dir.join("late-save.txt"), "just saved\n").unwrap();
+                recent_save_dir = Some(dir);
+            } else {
+                expired_dir = Some(dir);
+            }
+        } else {
+            fresh_dir = Some(dir);
+        }
+    }
+    let expired_dir = expired_dir.unwrap();
+    let fresh_dir = fresh_dir.unwrap();
+    let recent_save_dir = recent_save_dir.unwrap();
+
+    let _restarted = RunningEngine::start(&home);
+
+    wait_until_gone(&expired_dir);
+    assert!(!expired_dir.with_extension("json").exists());
+    assert!(fresh_dir.exists());
+    assert!(recent_save_dir.join("late-save.txt").is_file());
 }
