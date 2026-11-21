@@ -16,6 +16,7 @@ use super::ends::{Stop, TurnEnd, end_turn};
 use super::threads::{ActiveTurn, InFlight, SessionConfig};
 use super::{ProviderError, wire};
 use crate::providers::queue::mark_refused;
+use crate::providers::worktree_gone;
 use crate::usage::LimitStop;
 
 /// Why Kratos ends a CLI that was asked to stop and did not.
@@ -44,6 +45,10 @@ impl Actor {
                 .cancel_timer();
             return;
         };
+        if let Some(error) = worktree_gone(&self.store, thread_id).await {
+            self.pause_unavailable_if_waiting(thread_id, error).await;
+            return;
+        }
         self.dispatch_message(thread_id, next).await;
     }
 

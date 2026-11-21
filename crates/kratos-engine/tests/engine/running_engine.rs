@@ -254,6 +254,15 @@ impl RunningEngine {
             .collect()
     }
 
+    /// Every `thread/start`, `thread/resume`, and `thread/unsubscribe` the fake Codexes got.
+    pub fn fake_codex_thread_requests(&self) -> Vec<serde_json::Value> {
+        self.every_fake_codex("test/threadRequests")
+            .into_iter()
+            .filter_map(|answer| answer["result"].as_array().cloned())
+            .flatten()
+            .collect()
+    }
+
     pub fn fake_codex_request(&self, request: ControlRequest) {
         self.fake_codex(request.method, request.params);
     }

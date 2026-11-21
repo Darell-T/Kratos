@@ -17,6 +17,7 @@ use super::profiles::Profile;
 use super::servers::ServerKey;
 use super::threads::{Turn, TurnWork};
 use super::{ProviderError, policy, wire};
+use crate::providers::worktree_gone;
 use crate::providers::{queue, report_item};
 
 /// How long `turn/interrupt` may take to answer.
@@ -80,6 +81,10 @@ impl Actor {
         let Some(next) = self.next_to_start(thread_id).await else {
             return;
         };
+        if let Some(error) = worktree_gone(&self.store, thread_id).await {
+            self.pause_unavailable_if_waiting(thread_id, error).await;
+            return;
+        }
         if let Err(error) = self.threads[thread_id].settings.validate_report_format() {
             self.pause_unavailable_if_waiting(
                 thread_id,

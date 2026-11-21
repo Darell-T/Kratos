@@ -5,13 +5,13 @@ use std::process::Command;
 
 use kratos_api_client::{Client, ClientError};
 use kratos_protocol::{
-    CreateThread, CreateWorkspace, Ownership, Place, PlaceRequest, ProjectWorktree, Provider,
-    RequiredText, Thread, ThreadDetails, Workspace, Worktree, routes,
+    CreateThread, CreateWorkspace, Ownership, PauseReason, Place, PlaceRequest, ProjectWorktree,
+    Provider, RequiredText, Thread, ThreadDetails, Workspace, Worktree, routes,
 };
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::running_engine::{RunningEngine, post};
+use super::running_engine::{RunningEngine, WAIT, post};
 
 pub(super) fn git(folder: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -535,4 +535,104 @@ fn the_project_lists_every_worktree_of_its_repository_and_a_thread_can_start_in_
     assert_eq!(listed, expected);
     let thread = create(&client, &workspace, "work there", existing(&theirs));
     assert_eq!(PathBuf::from(worktree_of(&client, &thread).path), theirs);
+}
+
+#[test]
+fn a_codex_thread_whose_worktree_another_checkout_took_starts_no_turn_there() {
+    // Catches a turn started in whatever checkout stands at the worktree's path: the diff refuses
+    // the path, yet Codex was given it to work in.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "original", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    take_place(&repository, &path, &root.path().join("moved"));
+
+    post(&client, &thread, "keep going");
+
+    let error = paused_before_working_in(&client, &thread, &path, || {
+        engine
+            .fake_codex_thread_requests()
+            .iter()
+            .filter_map(|request| request["params"]["cwd"].as_str().map(str::to_owned))
+            .collect()
+    });
+    assert!(error.contains("no longer the worktree"), "{error}");
+}
+
+#[test]
+fn a_claude_thread_whose_worktree_another_checkout_took_starts_no_session_there() {
+    // Catches a Claude session started in whatever checkout stands at the worktree's path.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start_with_answering_claude(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = client
+        .create_thread(&CreateThread {
+            provider: Provider::Claude,
+            ..request(&workspace, "original", PlaceRequest::NewWorktree)
+        })
+        .unwrap();
+    let path = worktree_of(&client, &thread).path;
+    take_place(&repository, &path, &root.path().join("moved"));
+
+    post(&client, &thread, "keep going");
+
+    let log = engine.fake_claude_log();
+    let error = paused_before_working_in(&client, &thread, &path, || {
+        std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                let started: serde_json::Value = serde_json::from_str(line).ok()?;
+                started["cwd"].as_str().map(str::to_owned)
+            })
+            .collect()
+    });
+    assert!(error.contains("no longer the worktree"), "{error}");
+}
+
+/// Waits for `thread` to pause as unavailable and returns why. Fails at once when `folders`, the
+/// folders the provider was given to work in, includes `path`.
+fn paused_before_working_in(
+    client: &Client,
+    thread: &Thread,
+    path: &str,
+    folders: impl Fn() -> Vec<String>,
+) -> String {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let given = folders();
+        assert!(
+            !given.iter().any(|folder| same_folder(folder, path)),
+            "the agent was given {path}"
+        );
+        let details: ThreadDetails = client
+            .get(&routes::thread(&thread.id))
+            .unwrap()
+            .parse()
+            .unwrap();
+        if let Some(PauseReason::Unavailable { error }) = details.paused {
+            return error;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the thread never paused: {:?}",
+            details.paused
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+fn same_folder(one: &str, other: &str) -> bool {
+    match (
+        Path::new(one).canonicalize(),
+        Path::new(other).canonicalize(),
+    ) {
+        (Ok(one), Ok(other)) => one == other,
+        _ => false,
+    }
 }

@@ -15,8 +15,24 @@ pub use agent::Providers;
 use kratos_protocol::{AgentItem, ApprovalId, Message, MessageId, QuestionId, ThreadId, TurnId};
 use kratos_store::StoreError;
 
+use crate::store_thread::StoreThread;
+use crate::worktrees::{PlaceError, check_still_there};
+
 /// The most undelivered messages one thread holds (D85).
 pub(crate) const MAX_PENDING_MESSAGES: usize = 10;
+
+/// Why the thread's next turn may not start: Kratos made the worktree it works in, and the worktree
+/// is gone from its path, removed or replaced by another checkout, so the agent would work in
+/// someone else's checkout. Checked as each turn starts, since the user may replace a worktree at
+/// any time.
+pub(crate) async fn worktree_gone(store: &StoreThread, thread_id: &ThreadId) -> Option<String> {
+    let id = thread_id.clone();
+    let checked = match store.call(move |store| store.provider_thread(&id)).await {
+        Ok(thread) => check_still_there(store, &thread.place).await,
+        Err(error) => Err(PlaceError::Store(error)),
+    };
+    checked.err().map(|error| error.to_string())
+}
 
 /// The item a completed turn under a report format ends with. No provider gives the report an id,
 /// so it takes one from its turn.
