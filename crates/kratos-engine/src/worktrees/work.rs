@@ -43,6 +43,17 @@ struct Indexes {
 pub(crate) enum Underway {
     Merge,
     CherryPick,
+    Revert,
+}
+
+impl Underway {
+    /// The file git keeps in the worktree's git folder while each is underway, which `git commit`
+    /// deletes as it ends it.
+    const FILES: [(Underway, &'static str); 3] = [
+        (Underway::Merge, "MERGE_HEAD"),
+        (Underway::CherryPick, "CHERRY_PICK_HEAD"),
+        (Underway::Revert, "REVERT_HEAD"),
+    ];
 }
 
 impl fmt::Display for Underway {
@@ -50,6 +61,7 @@ impl fmt::Display for Underway {
         formatter.write_str(match self {
             Underway::Merge => "merge",
             Underway::CherryPick => "cherry-pick",
+            Underway::Revert => "revert",
         })
     }
 }
@@ -366,16 +378,12 @@ impl Worktrees {
 
     /// The commit git is in the middle of making in `folder`'s worktree, if any.
     async fn underway(&self, folder: &Path) -> Result<Option<Underway>, PlaceError> {
-        let args = [
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-path",
-            "MERGE_HEAD",
-            "--git-path",
-            "CHERRY_PICK_HEAD",
-        ];
+        let mut args = vec!["rev-parse", "--path-format=absolute"];
+        for (_, file) in Underway::FILES {
+            args.extend(["--git-path", file]);
+        }
         let paths = self.git.run(folder, &args, git::QUICK).await?;
-        for (path, underway) in paths.lines().zip([Underway::Merge, Underway::CherryPick]) {
+        for (path, (underway, _)) in paths.lines().zip(Underway::FILES) {
             if tokio::fs::symlink_metadata(path).await.is_ok() {
                 return Ok(Some(underway));
             }

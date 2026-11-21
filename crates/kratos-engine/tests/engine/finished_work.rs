@@ -938,20 +938,20 @@ fn run_a_turn_that_edits_both(
 }
 
 #[test]
-fn a_folder_commit_is_refused_while_a_merge_waits_to_be_committed() {
-    // Catches a commit of only a folder that ends a merge with none of the merged changes from
-    // outside the folder.
+fn a_folder_commit_is_refused_while_a_merge_or_a_revert_waits_to_be_committed() {
+    // Catches a commit of only a folder that ends a merge or a revert with none of its changes
+    // from outside the folder.
+    refuses_a_folder_commit_while(start_merge, "MERGE_HEAD");
+    refuses_a_folder_commit_while(start_revert, "REVERT_HEAD");
+}
+
+/// Checks that a commit of the `component` folder is refused, and leaves git's `pending` file,
+/// once `start` leaves git in the middle of a commit.
+fn refuses_a_folder_commit_while(start: fn(&Path), pending: &str) {
     let root = TempDir::new().unwrap();
     let repository = repository_with_component_only(&root);
-    git(&repository, &["switch", "--quiet", "--create", "feature"]);
-    std::fs::write(repository.join("feature.txt"), "feature\n").unwrap();
-    git(&repository, &["add", "feature.txt"]);
-    git(&repository, &["commit", "--quiet", "--message", "feature"]);
-    git(&repository, &["switch", "--quiet", "main"]);
-    git(
-        &repository,
-        &["merge", "--quiet", "--no-ff", "--no-commit", "feature"],
-    );
+    start(&repository);
+    let head = git(&repository, &["rev-parse", "HEAD"]);
     std::fs::write(repository.join("component").join("part.txt"), "two\n").unwrap();
     let engine = RunningEngine::start(&root.path().join("kratos"));
     let inner = workspace_at(&engine, &repository.join("component"));
@@ -960,9 +960,46 @@ fn a_folder_commit_is_refused_while_a_merge_waits_to_be_committed() {
 
     let refused = commit(&client, &thread, "Only the component");
 
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["log", "-1", "--format=%s"]), "part");
-    assert!(repository.join(".git").join("MERGE_HEAD").exists());
+    assert_eq!(refused.status, 409, "{pending}: {}", refused.body);
+    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
+    assert!(repository.join(".git").join(pending).exists(), "{pending}");
+}
+
+fn start_merge(repository: &Path) {
+    git(repository, &["switch", "--quiet", "--create", "feature"]);
+    std::fs::write(repository.join("feature.txt"), "feature\n").unwrap();
+    git(repository, &["add", "feature.txt"]);
+    git(repository, &["commit", "--quiet", "--message", "feature"]);
+    git(repository, &["switch", "--quiet", "main"]);
+    git(
+        repository,
+        &["merge", "--quiet", "--no-ff", "--no-commit", "feature"],
+    );
+}
+
+/// Reverts a commit whose file changed since, which stops on the conflict, and stages the user's
+/// resolution.
+fn start_revert(repository: &Path) {
+    let readme = repository.join("README.md");
+    std::fs::write(&readme, "to revert\n").unwrap();
+    git(
+        repository,
+        &["commit", "--quiet", "--all", "--message", "To revert"],
+    );
+    let target = git(repository, &["rev-parse", "HEAD"]);
+    std::fs::write(&readme, "later\n").unwrap();
+    git(
+        repository,
+        &["commit", "--quiet", "--all", "--message", "Later"],
+    );
+    let reverted = std::process::Command::new("git")
+        .args(["revert", "--no-edit", &target])
+        .current_dir(repository)
+        .output()
+        .unwrap();
+    assert!(!reverted.status.success(), "the revert met no conflict");
+    std::fs::write(&readme, "resolved\n").unwrap();
+    git(repository, &["add", "README.md"]);
 }
 
 fn wait_for_turn(client: &Client, thread: &Thread) {
