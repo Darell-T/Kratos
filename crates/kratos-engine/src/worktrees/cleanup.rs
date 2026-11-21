@@ -8,7 +8,7 @@ use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, WorktreeId};
 use kratos_store::{Removal, RemovalEnd, StoreError, UnfinishedWorktree};
 
 use super::git::{self, CHECKOUT};
-use super::{PlaceError, Worktrees};
+use super::{PlaceError, Worktrees, resolved};
 use crate::store_thread::StoreThread;
 
 impl Worktrees {
@@ -62,6 +62,9 @@ impl Worktrees {
         path: &str,
         files: LeftFiles,
     ) -> Result<Cleanup, StoreError> {
+        if holds_a_project(store, Path::new(path)).await? {
+            return Ok(Cleanup::InUse);
+        }
         let begin = id.clone();
         let repository = match store.call(move |store| store.begin_removal(&begin)).await? {
             Removal::InUse => return Ok(Cleanup::InUse),
@@ -194,6 +197,22 @@ impl Worktrees {
         self.git.run(repository, &prune, git::QUICK).await?;
         Ok(Cleanup::Removed)
     }
+}
+
+/// Whether a thread that is not archived works in a project folder at `worktree` or inside it,
+/// as when the user opens a worktree Kratos made as a project of its own. Project folders are
+/// stored as the user gave them, so each is resolved before the comparison.
+async fn holds_a_project(store: &StoreThread, worktree: &Path) -> Result<bool, StoreError> {
+    let folders = store.call(|store| store.project_folders_in_use()).await?;
+    for folder in folders {
+        if resolved(Path::new(&folder))
+            .await
+            .is_ok_and(|folder| folder.starts_with(worktree))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The object and path of each index entry in `git ls-files -v -s -z` output that git is told to

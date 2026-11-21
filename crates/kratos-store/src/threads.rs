@@ -136,6 +136,18 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The project folders, as the user gave them, of threads that are not archived and work in
+    /// their project folder.
+    pub fn project_folders_in_use(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT workspaces.path
+             FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
+             WHERE threads.worktree_id IS NULL AND threads.archived_at IS NULL",
+        )?;
+        let folders = statement.query_map([], |row| row.get(0))?;
+        Ok(folders.collect::<Result<_, _>>()?)
+    }
+
     /// The folders that threads with a running turn work in.
     pub fn running_turn_folders(&self) -> Result<Vec<String>, StoreError> {
         let mut statement = self.connection.prepare_cached(

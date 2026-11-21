@@ -287,6 +287,29 @@ fn a_commit_no_branch_holds_keeps_the_worktree_even_when_files_are_discarded() {
 }
 
 #[test]
+fn a_worktree_stays_while_a_project_opened_in_it_has_a_thread() {
+    // Catches a removal that counts only threads attached to the worktree, and so deletes the
+    // folder a thread of another project, opened at the worktree, works in.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let owner = create(&client, &workspace, "owner", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &owner).path;
+    let opened = workspace_at(&engine, &Path::new(&path).join("."));
+    let occupant = create(&client, &opened, "occupant", PlaceRequest::default());
+
+    assert_eq!(archive(&client, &owner, LeftFiles::Discard), Cleanup::InUse);
+    assert!(Path::new(&path).exists());
+    assert_eq!(
+        archive(&client, &occupant, LeftFiles::Keep),
+        Cleanup::NotOwned
+    );
+    assert_eq!(archive(&client, &owner, LeftFiles::Keep), Cleanup::Removed);
+}
+
+#[test]
 fn a_worktree_stays_while_another_thread_works_in_it() {
     // Catches a removal that pulls the folder out from under a thread still working in it.
     let root = TempDir::new().unwrap();
