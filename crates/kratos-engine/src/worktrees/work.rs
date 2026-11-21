@@ -20,7 +20,7 @@ use crate::store_thread::StoreThread;
 /// folder itself.
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
-/// The number of the last event of each thread that is not archived, when a commit looked.
+/// The number of the event that started each thread's last turn, when a commit looked.
 type Seen = HashMap<ThreadId, u64>;
 
 /// Each path's entries in an index, as `mode object stage`, the form `git update-index
@@ -315,8 +315,8 @@ impl Worktrees {
     }
 
     /// Refuses while a thread may be editing files a commit of `folder` would take: a turn runs
-    /// or is starting there, or, with `seen`, the thread did anything since, such as a whole
-    /// turn. Its folder must hold `folder` or lie inside it, in the checkout at `top`. Returns
+    /// or is starting there, or, with `seen`, the thread started a turn since, even one that
+    /// ended. Its folder must hold `folder` or lie inside it, in the checkout at `top`. Returns
     /// what it saw, for the next look.
     async fn refuse_while_edited(
         &self,
@@ -328,8 +328,10 @@ impl Worktrees {
         let threads = store.call(|store| store.thread_activity()).await?;
         let folder = resolved_or_given(folder).await;
         for thread in &threads {
-            let moved_on =
-                seen.is_some_and(|seen| seen.get(&thread.thread_id) != Some(&thread.last_seq));
+            // A thread made since the last look counts from 0, as if it had been there idle.
+            let moved_on = seen.is_some_and(|seen| {
+                seen.get(&thread.thread_id).copied().unwrap_or(0) != thread.last_turn
+            });
             if (thread.is_busy || moved_on)
                 && self.shares_files(&folder, top, &thread.folder).await?
             {
@@ -338,7 +340,7 @@ impl Worktrees {
         }
         Ok(threads
             .into_iter()
-            .map(|thread| (thread.thread_id, thread.last_seq))
+            .map(|thread| (thread.thread_id, thread.last_turn))
             .collect())
     }
 
