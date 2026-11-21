@@ -47,8 +47,25 @@ const FAKE_CLAUDE_LOG: &str = "fake-claude.log";
 /// Where the stand-in `gh` logs the arguments of each run.
 const FAKE_GH_LOG: &str = "fake-gh.log";
 
-/// The folder that holds the stand-in `gh` until a test lets it answer.
-const FAKE_GH_GATE: &str = "fake-gh-gate";
+/// A stand-in that waits at a folder until a test lets it go on.
+#[derive(Clone, Copy)]
+pub enum Gate {
+    /// `gh`, which answers once let go. Kratos holds the repository's lock while `gh` opens a
+    /// pull request, so holding it holds the lock too.
+    Gh,
+    /// The git an engine from [`RunningEngine::start_holding_git`] runs, which starts the real git
+    /// once let go.
+    Git,
+}
+
+impl Gate {
+    fn folder(self) -> &'static str {
+        match self {
+            Gate::Gh => "fake-gh-gate",
+            Gate::Git => "fake-git-gate",
+        }
+    }
+}
 
 impl RunningEngine {
     pub fn start(home: &Path) -> RunningEngine {
@@ -57,6 +74,28 @@ impl RunningEngine {
 
     pub fn start_on(home: &Path, port: u16) -> RunningEngine {
         Self::from_child(home, spawn(home, port))
+    }
+
+    /// Starts with a git that waits at [`Gate::Git`], once it is held, in the first run that has
+    /// `on` among its arguments, such as `status`.
+    pub fn start_holding_git(home: &Path, on: &str) -> RunningEngine {
+        let shim = home.join("fake-git");
+        std::fs::create_dir_all(&shim).unwrap();
+        let git = format!("git{}", std::env::consts::EXE_SUFFIX);
+        std::fs::copy(fake_agents::executable("fake-git"), shim.join(&git)).unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let real = std::env::split_paths(&path)
+            .map(|folder| folder.join(&git))
+            .find(|candidate| candidate.is_file())
+            .expect("git is on PATH");
+        let searched = std::iter::once(shim).chain(std::env::split_paths(&path));
+        let mut command = command(home, "0");
+        command
+            .env("PATH", std::env::join_paths(searched).unwrap())
+            .env("FAKE_GIT_REAL", real)
+            .env("FAKE_GIT_HOLD_ON", on)
+            .env("FAKE_GIT_GATE", home.join(Gate::Git.folder()));
+        Self::from_child(home, command.spawn().unwrap())
     }
 
     /// Starts with a scripted Claude that answers, so a Claude thread runs its messages.
@@ -295,26 +334,29 @@ impl RunningEngine {
         &self.home
     }
 
-    /// Makes `gh` wait once it runs, until [`RunningEngine::release_gh`]. Kratos holds the
-    /// repository's lock while `gh` opens a pull request, so this holds the lock too.
-    pub fn hold_gh(&self) {
-        let gate = self.home.join(FAKE_GH_GATE);
-        std::fs::create_dir_all(&gate).unwrap();
-        std::fs::write(gate.join("hold"), "").unwrap();
+    /// Makes the stand-in wait at `gate` once it runs, until [`RunningEngine::release`].
+    pub fn hold(&self, gate: Gate) {
+        let folder = self.home.join(gate.folder());
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("hold"), "").unwrap();
     }
 
-    /// Waits until a `gh` run waits at the gate [`RunningEngine::hold_gh`] closed.
-    pub fn wait_for_held_gh(&self) {
-        let held = self.home.join(FAKE_GH_GATE).join("held");
+    /// Waits until a run of the stand-in waits at `gate`.
+    pub fn wait_until_held(&self, gate: Gate) {
+        let held = self.home.join(gate.folder()).join("held");
         let deadline = Instant::now() + WAIT;
         while !held.exists() {
-            assert!(Instant::now() < deadline, "gh never ran");
+            assert!(
+                Instant::now() < deadline,
+                "nothing waited at {}",
+                gate.folder()
+            );
             thread::sleep(Duration::from_millis(10));
         }
     }
 
-    pub fn release_gh(&self) {
-        std::fs::write(self.home.join(FAKE_GH_GATE).join("open"), "").unwrap();
+    pub fn release(&self, gate: Gate) {
+        std::fs::write(self.home.join(gate.folder()).join("open"), "").unwrap();
     }
 
     pub fn client(&self) -> Client {
@@ -440,7 +482,7 @@ fn command(home: &Path, port: &str) -> Command {
         .env("FAKE_CLAUDE_SILENT", "1")
         .env("GH_EXE", fake_agents::executable("fake-gh"))
         .env("FAKE_GH_LOG", home.join(FAKE_GH_LOG))
-        .env("FAKE_GH_GATE", home.join(FAKE_GH_GATE))
+        .env("FAKE_GH_GATE", home.join(Gate::Gh.folder()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command

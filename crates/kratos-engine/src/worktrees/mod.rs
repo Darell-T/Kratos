@@ -89,10 +89,16 @@ pub(crate) enum PlaceError {
     #[error("Nothing changed since the last commit, so there is nothing to commit.")]
     NothingToCommit,
     #[error(
-        "A turn is running in a thread that works in this folder. Commit once it ends, or stop \
-         it first."
+        "A thread that works in this folder is running a turn, or ran one while Kratos read the \
+         files. Commit once the turn ends, or stop it first."
     )]
     BeingEdited,
+    #[error(
+        "A {0} in this repository waits to be committed, and a commit of only this folder would \
+         end it without the rest of its changes. Finish the {0} in git, or commit from a thread \
+         in the repository's top folder."
+    )]
+    PartialCommitDuring(work::Underway),
     #[error("{0} has no branch checked out. Check out a branch to open a pull request from it.")]
     NoBranch(String),
     #[error(

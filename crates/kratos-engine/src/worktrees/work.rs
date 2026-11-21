@@ -1,10 +1,12 @@
 //! A thread's finished work (D27, D55): its diff, a commit of it, and a pull request for it.
 
+use std::collections::HashMap;
+use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use kratos_protocol::ThreadDiff;
+use kratos_protocol::{ThreadDiff, ThreadId};
 use tokio::process::Command;
 use uuid::Uuid;
 
@@ -15,6 +17,25 @@ use crate::store_thread::StoreThread;
 /// The most patch text a diff returns, cut at a whole line. A client shows the rest by reading the
 /// folder itself.
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
+
+/// The number of the last event of each thread that is not archived, when a commit looked.
+type Seen = HashMap<ThreadId, u64>;
+
+/// A commit git is in the middle of making, which the next commit ends.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Underway {
+    Merge,
+    CherryPick,
+}
+
+impl fmt::Display for Underway {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Underway::Merge => "merge",
+            Underway::CherryPick => "cherry-pick",
+        })
+    }
+}
 
 impl Worktrees {
     /// What `folder` holds that `base` does not, or that its `HEAD` does not without a base, and
@@ -29,19 +50,7 @@ impl Worktrees {
             Some(base) => base.to_owned(),
             None => self.head_commit(folder).await?,
         };
-        let index = self.scratch.join(format!("index-{}", Uuid::new_v4()));
-        let own_index = self.index_of(folder).await?;
-        // The worktree's own index holds each file's last known state, so git hashes only the
-        // files that changed since.
-        match tokio::fs::copy(&own_index, &index).await {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                return Err(PlaceError::Io {
-                    path: index.display().to_string(),
-                    source: error,
-                });
-            }
-            _ => {}
-        }
+        let index = self.scratch_index(folder).await?;
         let patch = self.staged_patch(folder, &base, &index).await;
         let _ = tokio::fs::remove_file(&index).await;
         let patch = patch?;
@@ -79,31 +88,19 @@ impl Worktrees {
             .await?)
     }
 
-    /// Refuses while a turn runs, or is starting, in a thread that may be editing files a commit
-    /// of `folder` would take: one folder holds the other, and both are in the checkout at `top`.
-    /// Folders are compared with links and `..` resolved, so another path to a folder is caught. A
-    /// worktree inside a project folder is a checkout of its own, so its turns do not count.
-    async fn refuse_while_edited(
-        &self,
-        store: &StoreThread,
-        folder: &Path,
-        top: &Path,
-    ) -> Result<(), PlaceError> {
-        let busy = store.call(|store| store.busy_folders()).await?;
-        let folder = resolved_or_given(folder).await;
-        for other in busy {
-            let other = resolved_or_given(Path::new(&other)).await;
-            let overlaps = other.starts_with(&folder) || folder.starts_with(&other);
-            if overlaps
-                && self
-                    .locate(&other)
-                    .await?
-                    .is_some_and(|found| found.top == top)
-            {
-                return Err(PlaceError::BeingEdited);
-            }
+    /// A scratch copy of `folder`'s worktree index, for git to stage into without touching the
+    /// user's own. The copy holds each file's last known state, so git hashes only the files that
+    /// changed since. A worktree with no index yet gets none.
+    async fn scratch_index(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
+        let index = self.scratch.join(format!("index-{}", Uuid::new_v4()));
+        let own_index = self.index_of(folder).await?;
+        match tokio::fs::copy(&own_index, &index).await {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::Io {
+                path: index.display().to_string(),
+                source: error,
+            }),
+            _ => Ok(index),
         }
-        Ok(())
     }
 
     /// Commits everything in `folder` as the user's git identity, with `message` and nothing
@@ -122,69 +119,146 @@ impl Worktrees {
             .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))?;
         let lock = self.lock_of(&repository.shared);
         let _one_at_a_time = lock.lock().await;
+        let is_whole_checkout = resolved(folder)
+            .await
+            .is_ok_and(|folder| folder == repository.top);
+        if !is_whole_checkout && let Some(underway) = self.underway(folder).await? {
+            return Err(PlaceError::PartialCommitDuring(underway));
+        }
+        let index = self.scratch_index(folder).await?;
         // Staged once the lock is held, since the commit may have waited for it behind another
         // git command of the repository while a turn started.
-        self.stage(store, folder, &repository.top).await?;
-        let staged = ["diff", "--cached", "--quiet", "--", "."];
-        match self.git.run(folder, &staged, git::QUICK).await {
+        let committed = async {
+            self.stage(store, folder, &repository.top, is_whole_checkout, &index)
+                .await?;
+            self.commit_index(folder, &index, message).await
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&index).await;
+        committed
+    }
+
+    /// Stages `folder` in `index`, a scratch copy of its worktree's index, while no thread can be
+    /// editing it. A commit of `index` then holds the files as git read them here, since git never
+    /// reads them again, and a refused commit leaves the user's index as it was.
+    async fn stage(
+        &self,
+        store: &StoreThread,
+        folder: &Path,
+        top: &Path,
+        is_whole_checkout: bool,
+        index: &Path,
+    ) -> Result<(), PlaceError> {
+        let seen = self.refuse_while_edited(store, folder, top, None).await?;
+        if !is_whole_checkout {
+            // The commit holds the folder's changes on top of HEAD, and nothing staged elsewhere.
+            let to_head = ["reset", "--quiet", "--", ":/"];
+            self.git
+                .run_in_index(folder, &to_head, git::QUICK, index)
+                .await?;
+        }
+        let add = ["add", "--all", "--", "."];
+        self.git.run_in_index(folder, &add, CHECKOUT, index).await?;
+        self.refuse_while_edited(store, folder, top, Some(&seen))
+            .await?;
+        Ok(())
+    }
+
+    /// Commits what `index` holds, and returns the new commit.
+    async fn commit_index(
+        &self,
+        folder: &Path,
+        index: &Path,
+        message: &str,
+    ) -> Result<String, PlaceError> {
+        let staged = ["diff", "--cached", "--quiet"];
+        match self
+            .git
+            .run_in_index(folder, &staged, git::QUICK, index)
+            .await
+        {
             Ok(_) => return Err(PlaceError::NothingToCommit),
             Err(error) if error.exited_with(1) => {}
             Err(error) => return Err(error.into()),
         }
-        let mut commit = vec!["commit", "--quiet", "--message", message];
-        // Naming the folder commits only its files, which git refuses while a merge is in
-        // progress. The whole checkout needs no name, so a thread there can conclude a merge.
-        let is_whole_checkout = resolved(folder)
-            .await
-            .is_ok_and(|folder| folder == repository.top);
-        if !is_whole_checkout {
-            commit.extend(["--", "."]);
-        }
-        self.git.run(folder, &commit, git::QUICK).await?;
+        let commit = ["commit", "--quiet", "--message", message];
+        self.git
+            .run_in_index(folder, &commit, git::QUICK, index)
+            .await?;
+        // The user's index still holds the committed files as they were before the commit.
+        let to_head = ["reset", "--quiet", "--", "."];
+        self.git.run(folder, &to_head, git::QUICK).await?;
         Ok(self
             .git
             .run(folder, &["rev-parse", "HEAD"], git::QUICK)
             .await?)
     }
 
-    /// Stages everything in `folder` once no thread may be editing it. A turn that starts while git
-    /// reads the files may have half-written one, so then the index goes back to what it held and
-    /// the commit is refused.
-    async fn stage(
+    /// Refuses while a thread may be editing files a commit of `folder` would take: a turn runs
+    /// or is starting there, or, with `seen`, the thread did anything since, such as a whole
+    /// turn. Its folder must hold `folder` or lie inside it, in the checkout at `top`. Returns
+    /// what it saw, for the next look.
+    async fn refuse_while_edited(
         &self,
         store: &StoreThread,
         folder: &Path,
         top: &Path,
-    ) -> Result<(), PlaceError> {
-        self.refuse_while_edited(store, folder, top).await?;
-        let index = self.index_of(folder).await?;
-        let saved = self.scratch.join(format!("saved-index-{}", Uuid::new_v4()));
-        let had_index = match tokio::fs::copy(&index, &saved).await {
-            Ok(_) => true,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
-            Err(source) => {
-                return Err(PlaceError::Io {
-                    path: index.display().to_string(),
-                    source,
-                });
+        seen: Option<&Seen>,
+    ) -> Result<Seen, PlaceError> {
+        let threads = store.call(|store| store.thread_activity()).await?;
+        let folder = resolved_or_given(folder).await;
+        for thread in &threads {
+            let moved_on =
+                seen.is_some_and(|seen| seen.get(&thread.thread_id) != Some(&thread.last_seq));
+            if (thread.is_busy || moved_on)
+                && self.shares_files(&folder, top, &thread.folder).await?
+            {
+                return Err(PlaceError::BeingEdited);
             }
-        };
-        let add = ["add", "--all", "--", "."];
-        let staged = match self.git.run(folder, &add, CHECKOUT).await {
-            Ok(_) => self.refuse_while_edited(store, folder, top).await,
-            Err(error) => Err(error.into()),
-        };
-        let restored = match (&staged, had_index) {
-            (Ok(()), _) => Ok(()),
-            (Err(_), true) => tokio::fs::copy(&saved, &index).await.map(drop),
-            (Err(_), false) => tokio::fs::remove_file(&index).await,
-        };
-        let _ = tokio::fs::remove_file(&saved).await;
-        restored.map_err(|source| PlaceError::Io {
-            path: index.display().to_string(),
-            source,
-        })?;
-        staged
+        }
+        Ok(threads
+            .into_iter()
+            .map(|thread| (thread.thread_id, thread.last_seq))
+            .collect())
+    }
+
+    /// Whether an agent working in `other` can edit files of `folder`, which is in the checkout at
+    /// `top`: one folder holds the other, and both are in that checkout. Folders are compared
+    /// with links and `..` resolved, so another path to a folder counts. A worktree inside a
+    /// project folder is a checkout of its own.
+    async fn shares_files(
+        &self,
+        folder: &Path,
+        top: &Path,
+        other: &str,
+    ) -> Result<bool, PlaceError> {
+        let other = resolved_or_given(Path::new(other)).await;
+        if !(other.starts_with(folder) || folder.starts_with(&other)) {
+            return Ok(false);
+        }
+        Ok(self
+            .locate(&other)
+            .await?
+            .is_some_and(|found| found.top == top))
+    }
+
+    /// The commit git is in the middle of making in `folder`'s worktree, if any.
+    async fn underway(&self, folder: &Path) -> Result<Option<Underway>, PlaceError> {
+        let args = [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "MERGE_HEAD",
+            "--git-path",
+            "CHERRY_PICK_HEAD",
+        ];
+        let paths = self.git.run(folder, &args, git::QUICK).await?;
+        for (path, underway) in paths.lines().zip([Underway::Merge, Underway::CherryPick]) {
+            if tokio::fs::symlink_metadata(path).await.is_ok() {
+                return Ok(Some(underway));
+            }
+        }
+        Ok(None)
     }
 
     /// The worktree's own index file.

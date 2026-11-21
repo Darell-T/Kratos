@@ -34,7 +34,7 @@ pub use data_directory::DirectoryError;
 pub use messages::{Enqueued, QueuePlace};
 pub use migrations::SCHEMA_VERSION;
 pub use requests::{Settle, StoredApproval, StoredQuestion};
-pub use threads::ProviderThread;
+pub use threads::{ProviderThread, ThreadActivity};
 pub use worktrees::{Checkout, KratosWorktree, NewPlace, Removal, RemovalEnd, UnfinishedWorktree};
 pub use write::ThreadWrite;
 

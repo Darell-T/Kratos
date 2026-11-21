@@ -14,7 +14,7 @@ use kratos_store::{Checkout, Store};
 use serde_json::json;
 use tempfile::TempDir;
 
-use super::running_engine::{RunningEngine, WAIT, fake_codex_at, post};
+use super::running_engine::{Gate, RunningEngine, WAIT, fake_codex_at, post};
 use super::thread_places::{
     create, existing, git, new_repository, refusal, request, resolved, workspace_at,
     worktree_count, worktree_of,
@@ -414,7 +414,7 @@ fn a_thread_cannot_start_in_a_worktree_an_archive_is_removing() {
     let owner = create(&client, &workspace, "owner", PlaceRequest::NewWorktree);
     let path = worktree_of(&client, &owner).path;
     let reviewed = create(&client, &workspace, "reviewed", PlaceRequest::NewWorktree);
-    engine.hold_gh();
+    engine.hold(Gate::Gh);
     let pull_request = {
         let (client, reviewed) = (client.clone(), reviewed.clone());
         std::thread::spawn(move || {
@@ -426,7 +426,7 @@ fn a_thread_cannot_start_in_a_worktree_an_archive_is_removing() {
             client.post(&route, &request).unwrap().status
         })
     };
-    engine.wait_for_held_gh();
+    engine.wait_until_held(Gate::Gh);
     let archiving = {
         let (client, owner) = (client.clone(), owner.clone());
         std::thread::spawn(move || archive(&client, &owner, LeftFiles::Keep))
@@ -434,7 +434,7 @@ fn a_thread_cannot_start_in_a_worktree_an_archive_is_removing() {
     wait_for_worktree_state(&engine, &path, "removing");
     let opened = workspace_at(&engine, Path::new(&path));
     let occupant = client.create_thread(&request(&opened, "occupant", PlaceRequest::default()));
-    engine.release_gh();
+    engine.release(Gate::Gh);
 
     let (status, message) = refusal(occupant.expect_err("the occupant started"));
     assert_eq!(status, 409, "{message}");
