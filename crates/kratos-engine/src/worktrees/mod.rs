@@ -104,13 +104,24 @@ pub(crate) enum PlaceError {
          in the repository's top folder."
     )]
     PartialCommitDuring(work::Underway),
-    #[error("Another git command is changing the index at {0}. Commit again once it ends.")]
+    #[error("Another git command or program is using the index at {0}. Commit again once it ends.")]
     IndexInUse(String),
     #[error(
-        "Another git command committed, or started or ended a merge, cherry-pick, or revert, \
-         while Kratos staged the files. Look at what it changed, then commit again."
+        "Another git command switched branches, committed, or started, changed, or ended a merge, \
+         cherry-pick, or revert, while Kratos staged the files. Look at what it changed, then \
+         commit again."
     )]
     ChangedMeanwhile,
+    #[error(
+        "Kratos made commit {commit}, but could not update the index at {path}: {source}. Close \
+         any program holding the index and run `git reset` to match HEAD."
+    )]
+    IndexNotUpdatedAfterCommit {
+        commit: String,
+        path: String,
+        #[source]
+        source: io::Error,
+    },
     #[error("{0} has no branch checked out. Check out a branch to open a pull request from it.")]
     NoBranch(String),
     #[error(
@@ -135,6 +146,16 @@ pub(crate) enum PlaceError {
          checkout took its place. Start a new thread to work there."
     )]
     NotItsWorktree(String),
+    #[error(
+        "The worktree at {path} is locked in git{detail}. Unlock it in git before archiving.",
+        detail = if reason.is_empty() { String::new() } else { format!(" ({reason})") }
+    )]
+    WorktreeLocked { path: String, reason: String },
+    #[error(
+        "The worktree at {path} holds a git submodule, which removing it would delete. Archive \
+         again discarding files to remove it."
+    )]
+    SubmodulesPresent { path: String },
     #[error("Kratos cannot use the path {0}, because it is not valid Unicode.")]
     NotUnicode(String),
     #[error(transparent)]
@@ -454,10 +475,86 @@ impl Worktrees {
 
 /// The folder git keeps for the linked worktree at `folder`, which its `.git` file names. `None`
 /// when `folder` has no such file.
-async fn git_dir_of(folder: &Path) -> Option<PathBuf> {
+pub(super) async fn git_dir_of(folder: &Path) -> Option<PathBuf> {
     let named = tokio::fs::read_to_string(folder.join(".git")).await.ok()?;
     let git_dir = named.trim().strip_prefix("gitdir:")?.trim();
     Some(folder.join(git_dir))
+}
+
+/// The git lock on a worktree's admin folder (`<git_dir>/locked`).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WorktreeLock {
+    Unlocked,
+    Ours,
+    Other(String),
+}
+
+/// Reads the lock state of the worktree whose git admin folder is `git_dir`.
+pub(super) async fn read_lock(git_dir: &Path) -> Result<WorktreeLock, PlaceError> {
+    let locked = git_dir.join("locked");
+    match tokio::fs::read(&locked).await {
+        Ok(bytes) => {
+            let reason = String::from_utf8_lossy(&bytes);
+            if reason.trim_end() == LOCK_REASON {
+                Ok(WorktreeLock::Ours)
+            } else {
+                Ok(WorktreeLock::Other(reason.trim().to_owned()))
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(WorktreeLock::Unlocked),
+        Err(source) => Err(PlaceError::Io {
+            path: locked.display().to_string(),
+            source,
+        }),
+    }
+}
+
+/// Ensures `git_dir` carries Kratos's own lock without ever overwriting a user's lock.
+pub(super) async fn ensure_our_lock(git_dir: &Path, path: &str) -> Result<(), PlaceError> {
+    match read_lock(git_dir).await? {
+        WorktreeLock::Ours => return Ok(()),
+        WorktreeLock::Other(reason) => {
+            return Err(PlaceError::WorktreeLocked {
+                path: path.to_owned(),
+                reason,
+            });
+        }
+        WorktreeLock::Unlocked => {}
+    }
+    let locked = git_dir.join("locked");
+    match create_our_lock(&locked).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            match read_lock(git_dir).await? {
+                WorktreeLock::Ours => Ok(()),
+                WorktreeLock::Other(reason) => Err(PlaceError::WorktreeLocked {
+                    path: path.to_owned(),
+                    reason,
+                }),
+                WorktreeLock::Unlocked => Err(PlaceError::Io {
+                    path: locked.display().to_string(),
+                    source: error,
+                }),
+            }
+        }
+        Err(source) => Err(PlaceError::Io {
+            path: locked.display().to_string(),
+            source,
+        }),
+    }
+}
+
+/// Atomically creates `locked` with Kratos's reason, failing with `AlreadyExists` if another lock
+/// won the race.
+async fn create_our_lock(locked: &Path) -> io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(locked)
+        .await?;
+    file.write_all(LOCK_REASON.as_bytes()).await?;
+    file.flush().await
 }
 
 /// Writes `id` in the folder git keeps for the worktree Kratos just made at `path`, and locks the
@@ -477,35 +574,9 @@ async fn mark_as_kratoss(path: &Path, id: &WorktreeId) -> Result<(), PlaceError>
     tokio::fs::write(git_dir.join(WORKTREE_ID_FILE), id.as_str())
         .await
         .map_err(io_error)?;
-    lock(&git_dir).await.map_err(io_error)
-}
-
-/// Locks the worktree whose git folder is `git_dir` with Kratos's reason.
-async fn lock(git_dir: &Path) -> io::Result<()> {
-    tokio::fs::write(git_dir.join("locked"), LOCK_REASON).await
-}
-
-/// Takes Kratos's own lock off the worktree at `path`, so git removes it only once git's checks
-/// pass, as for any other worktree. A lock with another reason is the user's and stays, so git
-/// refuses the removal. Returns the worktree's git folder when Kratos took its lock off.
-async fn unlock_if_ours(path: &Path) -> Result<Option<PathBuf>, PlaceError> {
-    let Some(git_dir) = git_dir_of(path).await else {
-        return Ok(None);
-    };
-    let locked = git_dir.join("locked");
-    let is_ours = tokio::fs::read_to_string(&locked)
+    create_our_lock(&git_dir.join("locked"))
         .await
-        .is_ok_and(|reason| reason.trim_end() == LOCK_REASON);
-    if !is_ours {
-        return Ok(None);
-    }
-    tokio::fs::remove_file(&locked)
-        .await
-        .map_err(|source| PlaceError::Io {
-            path: locked.display().to_string(),
-            source,
-        })?;
-    Ok(Some(git_dir))
+        .map_err(io_error)
 }
 
 /// Refuses a thread at `place` when it is a worktree Kratos made that is gone from its path,
@@ -546,9 +617,19 @@ async fn close_if_replaced(store: &StoreThread, path: &str) -> Result<(), StoreE
 /// Whether the checkout at `worktree`'s path is the one Kratos made there, which holds its id. A
 /// checkout Kratos cannot read the id from is never taken for its own.
 pub(crate) async fn is_same_checkout(worktree: &KratosWorktree) -> bool {
-    let Some(git_dir) = git_dir_of(Path::new(&worktree.path)).await else {
+    is_same_checkout_at(Path::new(&worktree.path), worktree).await
+}
+
+/// Whether the checkout at `folder` is the one Kratos recorded as `worktree`.
+pub(super) async fn is_same_checkout_at(folder: &Path, worktree: &KratosWorktree) -> bool {
+    let Some(git_dir) = git_dir_of(folder).await else {
         return false;
     };
+    is_same_checkout_dir(&git_dir, worktree).await
+}
+
+/// Whether `git_dir` carries `worktree`'s Kratos ownership id.
+pub(super) async fn is_same_checkout_dir(git_dir: &Path, worktree: &KratosWorktree) -> bool {
     tokio::fs::read_to_string(git_dir.join(WORKTREE_ID_FILE))
         .await
         .is_ok_and(|id| id == worktree.id.as_str())

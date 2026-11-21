@@ -304,12 +304,15 @@ impl From<PlaceError> for ApiError {
             failed @ (PlaceError::Git(_)
             | PlaceError::Io { .. }
             | PlaceError::CannotRemove { .. }
+            | PlaceError::IndexNotUpdatedAfterCommit { .. }
             | PlaceError::NoGh(_)
             | PlaceError::Gh(_)
             | PlaceError::UnreadableGit { .. }) => {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
             }
             conflict @ (PlaceError::NotItsWorktree(_)
+            | PlaceError::WorktreeLocked { .. }
+            | PlaceError::SubmodulesPresent { .. }
             | PlaceError::BeingEdited
             | PlaceError::PartialCommitDuring(_)
             | PlaceError::IndexInUse(_)

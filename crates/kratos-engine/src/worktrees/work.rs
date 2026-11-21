@@ -12,7 +12,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use super::git::{self, CHECKOUT, Capped};
-use super::index_lock::IndexLock;
+use super::index_lock::{IndexLock, PreparedReplacement};
 use super::{PlaceError, Worktrees, check_still_there, resolved};
 use crate::store_thread::StoreThread;
 
@@ -23,16 +23,90 @@ const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 /// The number of the event that started each thread's last turn, when a commit looked.
 type Seen = HashMap<ThreadId, u64>;
 
-/// Each path's entries in an index, as `mode object stage`, the form `git update-index
-/// --index-info` reads back.
-type Entries<'listed> = BTreeMap<&'listed [u8], Vec<&'listed [u8]>>;
+/// Per-entry index flags read from `git ls-files -v --stage -z` that `git update-index
+/// --index-info` resets and Kratos must preserve.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct EntryFlags {
+    assume_unchanged: bool,
+    skip_worktree: bool,
+}
 
-/// What a commit goes on top of: the commit the worktree has checked out, or none on a branch with
-/// no commit yet, and a commit git is in the middle of making there.
+impl EntryFlags {
+    fn from_tag(tag: &[u8]) -> EntryFlags {
+        EntryFlags {
+            assume_unchanged: !tag.is_empty() && tag.iter().all(u8::is_ascii_lowercase),
+            skip_worktree: tag.eq_ignore_ascii_case(b"S"),
+        }
+    }
+
+    fn merge(&mut self, other: EntryFlags) {
+        self.assume_unchanged |= other.assume_unchanged;
+        self.skip_worktree |= other.skip_worktree;
+    }
+}
+
+/// One path's stage records and flags in an index.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PathEntry<'listed> {
+    /// Each entry as `mode object stage`, the form `git update-index --index-info` reads back.
+    stages: Vec<&'listed [u8]>,
+    flags: EntryFlags,
+}
+
+/// Each path's entries in an index, keyed by repo-relative path bytes.
+type Entries<'listed> = BTreeMap<&'listed [u8], PathEntry<'listed>>;
+
+/// The updates to apply to the real index, together with flags to restore on updated entries.
+struct ReconciledIndex<'listed> {
+    info: Vec<u8>,
+    assume_unchanged: Vec<&'listed [u8]>,
+    skip_worktree: Vec<&'listed [u8]>,
+}
+
+/// Where `HEAD` points in a worktree: either a symbolic branch (possibly unborn) or a detached
+/// commit.
+#[derive(Debug, PartialEq, Eq)]
+enum HeadTarget {
+    Branch {
+        reference: String,
+        oid: Option<String>,
+    },
+    Detached(String),
+}
+
+/// A git commit operation in progress together with its target OIDs (`MERGE_HEAD`,
+/// `CHERRY_PICK_HEAD`, or `REVERT_HEAD`).
+#[derive(Debug, PartialEq, Eq)]
+struct PendingCommit {
+    kind: Underway,
+    heads: Vec<String>,
+}
+
+/// What a commit goes on top of: `HEAD` (symbolic branch or detached commit, plus OID) and any
+/// pending merge, cherry-pick, or revert with its target OIDs.
 #[derive(Debug, PartialEq, Eq)]
 struct Tip {
-    head: Option<String>,
-    underway: Option<Underway>,
+    head: HeadTarget,
+    pending: Vec<PendingCommit>,
+}
+
+impl Tip {
+    fn underway(&self) -> Option<Underway> {
+        self.pending.first().map(|pending| pending.kind)
+    }
+
+    fn has_merge(&self) -> bool {
+        self.pending
+            .iter()
+            .any(|pending| pending.kind == Underway::Merge)
+    }
+}
+
+/// Holds the worktree's `index.lock` across `git commit`, either plain or prepared to replace the
+/// real index atomically once the commit lands.
+enum CommitLock {
+    Plain(IndexLock),
+    Prepared(PreparedReplacement),
 }
 
 /// The index files of one commit: the worktree's own, and scratch files Kratos makes.
@@ -172,7 +246,7 @@ impl Worktrees {
         // Read before the index, so a git command that changes both while Kratos copies the index
         // changes the tip too.
         let tip = self.tip(folder).await?;
-        refuse_partial_during(tip.underway, is_whole_checkout)?;
+        refuse_partial_during(tip.underway(), is_whole_checkout)?;
         let indexes = self.indexes_of(folder).await?;
         // Staged once the lock is held, since the commit may have waited for it behind another
         // git command of the repository while a turn started.
@@ -188,7 +262,8 @@ impl Worktrees {
             // Checked again just before git writes, as another checkout may have taken the
             // worktree's path while the commit waited or staged.
             check_still_there(store, &thread.place).await?;
-            self.commit_index(folder, &indexes, &tip, message).await
+            self.commit_index(folder, &repository.top, &indexes, &tip, message)
+                .await
         }
         .await;
         for scratch in [&indexes.before, &indexes.staged, &indexes.updated] {
@@ -242,17 +317,23 @@ impl Worktrees {
     async fn commit_index(
         &self,
         folder: &Path,
+        top: &Path,
         indexes: &Indexes,
         tip: &Tip,
         message: &str,
     ) -> Result<String, PlaceError> {
-        self.refuse_unless_staged(folder, &indexes.staged, tip.underway)
+        self.refuse_unless_staged(folder, &indexes.staged, tip.has_merge())
             .await?;
         let index_lock = IndexLock::take(&indexes.own).await?;
         if self.tip(folder).await? != *tip {
             return Err(PlaceError::ChangedMeanwhile);
         }
-        let is_updated = self.write_updated_index(folder, indexes).await?;
+        let is_updated = self.write_updated_index(folder, top, indexes).await?;
+        let commit_lock = if is_updated {
+            CommitLock::Prepared(index_lock.prepare_replacement(&indexes.updated).await?)
+        } else {
+            CommitLock::Plain(index_lock)
+        };
         let commit = ["commit", "--quiet", "--message", message];
         self.git
             .run_in_index(folder, &commit, git::QUICK, &indexes.staged)
@@ -260,24 +341,29 @@ impl Worktrees {
         let committed = self
             .git
             .run(folder, &["rev-parse", "HEAD"], git::QUICK)
-            .await;
-        if is_updated && let Err(error) = index_lock.replace_with(&indexes.updated).await {
-            // The commit is made, so the caller hears of it rather than of this.
-            eprintln!(
-                "Kratos committed, but could not update the index at {}: {error}",
-                indexes.own.display()
-            );
+            .await?;
+        match commit_lock {
+            CommitLock::Prepared(replacement) => {
+                replacement.commit().await.map_err(|source| {
+                    PlaceError::IndexNotUpdatedAfterCommit {
+                        commit: committed.clone(),
+                        path: indexes.own.display().to_string(),
+                        source,
+                    }
+                })?;
+            }
+            CommitLock::Plain(lock) => drop(lock),
         }
-        Ok(committed?)
+        Ok(committed)
     }
 
-    /// Refuses a commit of `staged` that would change no file, except to conclude a merge
-    /// `underway`, which git records with both parents.
+    /// Refuses a commit of `staged` that would change no file, except to conclude a merge, which
+    /// git records with both parents.
     async fn refuse_unless_staged(
         &self,
         folder: &Path,
         staged: &Path,
-        underway: Option<Underway>,
+        has_merge: bool,
     ) -> Result<(), PlaceError> {
         let args = ["diff", "--cached", "--quiet"];
         match self
@@ -285,7 +371,7 @@ impl Worktrees {
             .run_in_index(folder, &args, git::QUICK, staged)
             .await
         {
-            Ok(_) if matches!(underway, Some(Underway::Merge)) => Ok(()),
+            Ok(_) if has_merge => Ok(()),
             Ok(_) => Err(PlaceError::NothingToCommit),
             Err(error) if error.exited_with(1) => Ok(()),
             Err(error) => Err(error.into()),
@@ -293,14 +379,17 @@ impl Worktrees {
     }
 
     /// Writes `indexes.updated`: the worktree's index as it is now, with each file of `folder` the
-    /// commit takes set to what it commits, unless the user staged another version of the file
-    /// since Kratos copied the index. Returns whether the index changes at all.
+    /// commit takes set to what it commits, unless the user concurrently staged that path or a
+    /// colliding ancestor/descendant path. Preserves per-entry index flags (`assume-unchanged` and
+    /// `skip-worktree`) on entries updated from `indexes.own`. Returns whether the index changes at
+    /// all.
     async fn write_updated_index(
         &self,
         folder: &Path,
+        top: &Path,
         indexes: &Indexes,
     ) -> Result<bool, PlaceError> {
-        let list = ["ls-files", "--full-name", "--stage", "-z", "--", "."];
+        let list = ["ls-files", "--full-name", "-v", "--stage", "-z", "--", "."];
         let mut listed = Vec::new();
         for index in [&indexes.before, &indexes.own, &indexes.staged] {
             listed.push(
@@ -311,8 +400,8 @@ impl Worktrees {
         }
         let [before, now, staged] =
             [&listed[0], &listed[1], &listed[2]].map(|listed| entries(listed));
-        let info = index_info(&before, &now, &staged);
-        if info.is_empty() {
+        let reconciled = reconcile_index(&before, &now, &staged);
+        if reconciled.info.is_empty() {
             return Ok(false);
         }
         // A repository that never staged a file has no index yet, and git makes one.
@@ -327,8 +416,37 @@ impl Worktrees {
         }
         let update = ["update-index", "-z", "--index-info"];
         self.git
-            .run_in_index_with_input(folder, &update, info, git::QUICK, &indexes.updated)
+            .run_in_index_with_input(
+                folder,
+                &update,
+                reconciled.info,
+                git::QUICK,
+                &indexes.updated,
+            )
             .await?;
+        for (flag, paths) in [
+            ("--assume-unchanged", &reconciled.assume_unchanged),
+            ("--skip-worktree", &reconciled.skip_worktree),
+        ] {
+            if paths.is_empty() {
+                continue;
+            }
+            let input: Vec<u8> = paths
+                .iter()
+                .flat_map(|path| path.iter().copied().chain([0]))
+                .collect();
+            // `--full-name` paths are relative to `top`, and `update-index --stdin` resolves paths
+            // relative to its working directory.
+            self.git
+                .run_in_index_with_input(
+                    top,
+                    &["update-index", flag, "-z", "--stdin"],
+                    input,
+                    git::QUICK,
+                    &indexes.updated,
+                )
+                .await?;
+        }
         Ok(true)
     }
 
@@ -382,32 +500,65 @@ impl Worktrees {
             .is_some_and(|found| found.top == top))
     }
 
-    /// The commit git is in the middle of making in `folder`'s worktree, if any.
-    async fn underway(&self, folder: &Path) -> Result<Option<Underway>, PlaceError> {
+    /// The pending commit operations in `folder`'s worktree together with their target OIDs.
+    async fn pending_commits(&self, folder: &Path) -> Result<Vec<PendingCommit>, PlaceError> {
         let mut args = vec!["rev-parse", "--path-format=absolute"];
         for (_, file) in Underway::FILES {
             args.extend(["--git-path", file]);
         }
         let paths = self.git.run(folder, &args, git::QUICK).await?;
-        for (path, (underway, _)) in paths.lines().zip(Underway::FILES) {
-            if tokio::fs::symlink_metadata(path).await.is_ok() {
-                return Ok(Some(underway));
+        let mut pending = Vec::new();
+        for (path, (kind, _)) in paths.lines().zip(Underway::FILES) {
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => {
+                    let heads = content
+                        .lines()
+                        .map(|line| line.trim().to_owned())
+                        .filter(|line| !line.is_empty())
+                        .collect();
+                    pending.push(PendingCommit { kind, heads });
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(PlaceError::Io {
+                        path: path.to_owned(),
+                        source,
+                    });
+                }
             }
         }
-        Ok(None)
+        Ok(pending)
     }
 
-    /// What a commit in `folder`'s worktree goes on top of.
+    /// What a commit in `folder`'s worktree goes on top of: both the symbolic branch (or detached
+    /// state) and commit OID of `HEAD`, plus every pending merge, cherry-pick, or revert and its
+    /// target OIDs.
     async fn tip(&self, folder: &Path) -> Result<Tip, PlaceError> {
-        let args = ["rev-parse", "--verify", "--quiet", "HEAD"];
-        let head = match self.git.run(folder, &args, git::QUICK).await {
+        let symref = ["symbolic-ref", "--quiet", "HEAD"];
+        let reference = match self.git.run(folder, &symref, git::QUICK).await {
+            Ok(reference) => Some(reference),
+            Err(error) if error.exited_with(1) => None,
+            Err(error) => return Err(error.into()),
+        };
+        let rev = ["rev-parse", "--verify", "--quiet", "HEAD"];
+        let oid = match self.git.run(folder, &rev, git::QUICK).await {
             Ok(head) => Some(head),
             Err(error) if error.exited_with(1) => None,
             Err(error) => return Err(error.into()),
         };
+        let head = match (reference, oid) {
+            (Some(reference), oid) => HeadTarget::Branch { reference, oid },
+            (None, Some(oid)) => HeadTarget::Detached(oid),
+            (None, None) => {
+                return Err(PlaceError::UnreadableGit {
+                    command: "rev-parse --verify --quiet HEAD".to_owned(),
+                    output: "HEAD is detached with no commit".to_owned(),
+                });
+            }
+        };
         Ok(Tip {
             head,
-            underway: self.underway(folder).await?,
+            pending: self.pending_commits(folder).await?,
         })
     }
 
@@ -510,80 +661,230 @@ fn refuse_partial_during(
     }
 }
 
-/// Each path's entries in `git ls-files --stage -z` output.
+/// Each path's entries and flags in `git ls-files -v --stage -z` output.
 fn entries(listed: &[u8]) -> Entries<'_> {
     let mut entries = Entries::new();
-    for entry in listed.split(|&byte| byte == 0) {
-        if let Some(tab) = entry.iter().position(|&byte| byte == b'\t') {
-            entries
-                .entry(&entry[tab + 1..])
-                .or_default()
-                .push(&entry[..tab]);
-        }
+    for record in listed.split(|&byte| byte == 0) {
+        let Some(tab) = record.iter().position(|&byte| byte == b'\t') else {
+            continue;
+        };
+        let meta = &record[..tab];
+        let Some(space) = meta.iter().position(|&byte| byte == b' ') else {
+            continue;
+        };
+        let tag = &meta[..space];
+        let stage = &meta[space + 1..];
+        let entry = entries.entry(&record[tab + 1..]).or_default();
+        entry.stages.push(stage);
+        entry.flags.merge(EntryFlags::from_tag(tag));
     }
     entries
 }
 
-/// `git update-index -z --index-info` input that sets each path of `before` and `staged` to its
-/// entries in `staged`, where the index holds `now` and still has the path as in `before`.
-fn index_info(before: &Entries, now: &Entries, staged: &Entries) -> Vec<u8> {
-    let mut info = Vec::new();
-    let paths: BTreeSet<&[u8]> = before.keys().chain(staged.keys()).copied().collect();
-    for path in paths {
-        let current = now.get(path);
-        if current != before.get(path) || current == staged.get(path) {
-            continue;
-        }
-        let entries = match (staged.get(path), current) {
-            (Some(entries), _) => entries.iter().map(|entry| entry.to_vec()).collect(),
-            // Mode 0 tells git to drop the path, and the object is read but not used.
-            (None, Some(current)) => {
-                let object_and_stage = current[0].splitn(2, |&byte| byte == b' ').nth(1);
-                vec![[b"0 ", object_and_stage.unwrap_or_default()].concat()]
+fn stages_of<'a>(entries: &'a Entries<'a>, path: &[u8]) -> Option<&'a [&'a [u8]]> {
+    entries.get(path).map(|entry| entry.stages.as_slice())
+}
+
+/// Whether `now` contains any ancestor or descendant of `path` that changed since `before`, so
+/// inserting `path` into `now` would evict concurrent user staging through a file/directory
+/// collision.
+fn has_concurrent_df_collision(path: &[u8], before: &Entries<'_>, now: &Entries<'_>) -> bool {
+    for (index, &byte) in path.iter().enumerate() {
+        if byte == b'/' {
+            let ancestor = &path[..index];
+            if now.contains_key(ancestor) && stages_of(now, ancestor) != stages_of(before, ancestor)
+            {
+                return true;
             }
-            (None, None) => Vec::new(),
-        };
-        for entry in entries {
-            info.extend([&entry[..], b"\t", path, b"\0"].concat());
         }
     }
-    info
+    let mut prefix = Vec::with_capacity(path.len() + 1);
+    prefix.extend_from_slice(path);
+    prefix.push(b'/');
+    for (&descendant, entry) in now.range(prefix.as_slice()..) {
+        if !descendant.starts_with(&prefix) {
+            break;
+        }
+        if Some(entry.stages.as_slice()) != stages_of(before, descendant) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Builds `git update-index -z --index-info` input and flag restorations for every path of `before`
+/// and `staged` that was not concurrently changed in `now` (either directly or through a
+/// file/directory collision). Deletions are emitted before additions so non-concurrent file/folder
+/// replacements apply cleanly.
+fn reconcile_index<'a>(
+    before: &Entries<'a>,
+    now: &Entries<'a>,
+    staged: &Entries<'a>,
+) -> ReconciledIndex<'a> {
+    let mut deletions = Vec::new();
+    let mut additions = Vec::new();
+    let mut assume_unchanged = Vec::new();
+    let mut skip_worktree = Vec::new();
+    let paths: BTreeSet<&[u8]> = before.keys().chain(staged.keys()).copied().collect();
+    for path in paths {
+        let current = stages_of(now, path);
+        let target = stages_of(staged, path);
+        if current != stages_of(before, path) || current == target {
+            continue;
+        }
+        match (target, current) {
+            (Some(target_stages), _) => {
+                if has_concurrent_df_collision(path, before, now) {
+                    continue;
+                }
+                for stage in target_stages {
+                    additions.extend([*stage, b"\t", path, b"\0"].concat());
+                }
+                if let Some(current_entry) = now.get(path) {
+                    if current_entry.flags.assume_unchanged {
+                        assume_unchanged.push(path);
+                    }
+                    if current_entry.flags.skip_worktree {
+                        skip_worktree.push(path);
+                    }
+                }
+            }
+            // Mode 0 tells git to drop the path, and the object is read but not used.
+            (None, Some(current_stages)) => {
+                let object_and_stage = current_stages[0].splitn(2, |&byte| byte == b' ').nth(1);
+                deletions.extend(
+                    [
+                        b"0 ".as_slice(),
+                        object_and_stage.unwrap_or_default(),
+                        b"\t",
+                        path,
+                        b"\0",
+                    ]
+                    .concat(),
+                );
+            }
+            (None, None) => {}
+        }
+    }
+    let mut info = deletions;
+    info.extend(additions);
+    ReconciledIndex {
+        info,
+        assume_unchanged,
+        skip_worktree,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn listed(items: &[&str]) -> Vec<u8> {
+        items.join("\0").into_bytes()
+    }
+
     #[test]
     fn the_index_takes_the_committed_files_the_user_did_not_stage_again() {
-        let listed = |entries: &[&str]| entries.join("\0").into_bytes();
         let before = listed(&[
-            "100644 aaa 0\tkept.txt",
-            "100644 bbb 0\tcommitted.txt",
-            "100644 ccc 0\tdeleted.txt",
+            "H 100644 aaa 0\tkept.txt",
+            "H 100644 bbb 0\tcommitted.txt",
+            "H 100644 ccc 0\tdeleted.txt",
         ]);
         let now = listed(&[
-            "100644 ddd 0\tkept.txt",
-            "100644 bbb 0\tcommitted.txt",
-            "100644 ccc 0\tdeleted.txt",
+            "H 100644 ddd 0\tkept.txt",
+            "H 100644 bbb 0\tcommitted.txt",
+            "H 100644 ccc 0\tdeleted.txt",
         ]);
         let staged = listed(&[
-            "100644 eee 0\tkept.txt",
-            "100644 fff 0\tcommitted.txt",
-            "100644 ggg 0\tadded.txt",
+            "H 100644 eee 0\tkept.txt",
+            "H 100644 fff 0\tcommitted.txt",
+            "H 100644 ggg 0\tadded.txt",
         ]);
 
-        let info = index_info(&entries(&before), &entries(&now), &entries(&staged));
+        let reconciled = reconcile_index(&entries(&before), &entries(&now), &entries(&staged));
 
         let expected = listed(&[
+            "0 ccc 0\tdeleted.txt",
             "100644 ggg 0\tadded.txt",
             "100644 fff 0\tcommitted.txt",
-            "0 ccc 0\tdeleted.txt",
             "",
         ]);
         assert_eq!(
-            String::from_utf8_lossy(&info),
+            String::from_utf8_lossy(&reconciled.info),
             String::from_utf8_lossy(&expected)
         );
+        assert!(reconciled.assume_unchanged.is_empty());
+        assert!(reconciled.skip_worktree.is_empty());
+    }
+
+    #[test]
+    fn concurrent_file_directory_collisions_skip_both_ancestor_and_descendant_overwrites() {
+        let before = listed(&["H 100644 aaa 0\tcomponent/other.txt"]);
+        let now = listed(&[
+            "H 100644 aaa 0\tcomponent/other.txt",
+            "H 100644 uuu 0\tcomponent/newtree",
+            "H 100644 vvv 0\tcomponent/nested/child",
+        ]);
+        let staged = listed(&[
+            "H 100644 bbb 0\tcomponent/other.txt",
+            "H 100644 sss 0\tcomponent/newtree/child",
+            "H 100644 ttt 0\tcomponent/nested",
+        ]);
+
+        let reconciled = reconcile_index(&entries(&before), &entries(&now), &entries(&staged));
+
+        let expected = listed(&["100644 bbb 0\tcomponent/other.txt", ""]);
+        assert_eq!(
+            String::from_utf8_lossy(&reconciled.info),
+            String::from_utf8_lossy(&expected)
+        );
+    }
+
+    #[test]
+    fn non_concurrent_file_to_directory_replacement_deletes_before_adding() {
+        let before = listed(&["H 100644 aaa 0\tcomponent/item"]);
+        let now = listed(&["H 100644 aaa 0\tcomponent/item"]);
+        let staged = listed(&["H 100644 bbb 0\tcomponent/item/child"]);
+
+        let reconciled = reconcile_index(&entries(&before), &entries(&now), &entries(&staged));
+
+        let expected = listed(&[
+            "0 aaa 0\tcomponent/item",
+            "100644 bbb 0\tcomponent/item/child",
+            "",
+        ]);
+        assert_eq!(
+            String::from_utf8_lossy(&reconciled.info),
+            String::from_utf8_lossy(&expected)
+        );
+    }
+
+    #[test]
+    fn index_flags_on_updated_entries_are_preserved() {
+        let before = listed(&[
+            "H 100644 aaa 0\tassumed.txt",
+            "S 100644 bbb 0\tsparse.txt",
+            "H 100644 ccc 0\tboth.txt",
+            "h 100644 ddd 0\tdeleted.txt",
+        ]);
+        let now = listed(&[
+            "h 100644 aaa 0\tassumed.txt",
+            "S 100644 bbb 0\tsparse.txt",
+            "s 100644 ccc 0\tboth.txt",
+            "h 100644 ddd 0\tdeleted.txt",
+        ]);
+        let staged = listed(&[
+            "H 100644 111 0\tassumed.txt",
+            "H 100644 222 0\tsparse.txt",
+            "H 100644 333 0\tboth.txt",
+        ]);
+
+        let reconciled = reconcile_index(&entries(&before), &entries(&now), &entries(&staged));
+
+        assert_eq!(
+            reconciled.assume_unchanged,
+            [&b"assumed.txt"[..], b"both.txt"]
+        );
+        assert_eq!(reconciled.skip_worktree, [&b"both.txt"[..], b"sparse.txt"]);
     }
 }

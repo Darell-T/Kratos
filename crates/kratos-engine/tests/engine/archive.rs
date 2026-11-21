@@ -856,10 +856,210 @@ fn a_file_saved_after_an_archive_found_the_worktree_clean_keeps_it() {
     engine.release(Gate::Git);
 
     let cleanup = archiving.join().unwrap();
-    assert!(matches!(cleanup, Cleanup::Blocked { .. }), "{cleanup:?}");
+    assert_eq!(
+        cleanup,
+        Cleanup::Kept {
+            files: vec![" M README.md".into()]
+        }
+    );
     assert_eq!(std::fs::read_to_string(&readme).unwrap(), "saved late\n");
     let listed = git(&repository, &["worktree", "list", "--porcelain"]);
     assert!(listed.contains("locked Kratos works"), "{listed}");
+}
+
+#[test]
+fn an_ignored_file_saved_after_status_scan_keeps_the_worktree() {
+    // Catches a Keep removal that relies on `git worktree remove` to notice late files: git
+    // deletes ignored files even without `--force`, so an ignored file saved after status was lost.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    std::fs::write(repository.join(".gitignore"), "*.local\n").unwrap();
+    git(&repository, &["add", ".gitignore"]);
+    git(
+        &repository,
+        &["commit", "--quiet", "--message", "ignore local"],
+    );
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "ls-files");
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(
+        &client,
+        &workspace,
+        "keep-ignored",
+        PlaceRequest::NewWorktree,
+    );
+    let path = worktree_of(&client, &thread).path;
+    let saved = Path::new(&path).join("saved.local");
+    engine.hold(Gate::Git);
+    let archiving = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || archive(&client, &thread, LeftFiles::Keep))
+    };
+    engine.wait_until_held(Gate::Git);
+    std::fs::write(&saved, "editor output\n").unwrap();
+    engine.release(Gate::Git);
+
+    let cleanup = archiving.join().unwrap();
+    assert_eq!(
+        cleanup,
+        Cleanup::Kept {
+            files: vec!["!! saved.local".into()]
+        }
+    );
+    assert_eq!(std::fs::read_to_string(&saved).unwrap(), "editor output\n");
+    let listed = git(&repository, &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains("locked Kratos works"), "{listed}");
+}
+
+#[test]
+fn a_worktree_stays_locked_and_leaves_any_replacement_alone_during_removal() {
+    // Catches unlocking a worktree before `git worktree remove` runs by path: another git command
+    // could move the checkout without unlocking it and place an unlocked replacement at the path.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "remove");
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "guarded", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let relocated = root.path().join("relocated");
+    engine.hold(Gate::Git);
+    let archiving = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || archive(&client, &thread, LeftFiles::Discard))
+    };
+    engine.wait_until_held(Gate::Git);
+    let moved = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["worktree", "move", &path, relocated.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let mut created_replacement = false;
+    if !Path::new(&path).exists() {
+        git(
+            &repository,
+            &["worktree", "add", "--quiet", "-b", "replacement", &path],
+        );
+        std::fs::write(Path::new(&path).join("users.txt"), "unlocked\n").unwrap();
+        created_replacement = true;
+    }
+    engine.release(Gate::Git);
+
+    assert!(
+        !moved.status.success(),
+        "move succeeded without user unlock"
+    );
+    assert!(!relocated.exists());
+    assert_eq!(archiving.join().unwrap(), Cleanup::Removed);
+    if created_replacement {
+        assert_eq!(
+            std::fs::read_to_string(Path::new(&path).join("users.txt")).unwrap(),
+            "unlocked\n"
+        );
+        assert_eq!(
+            git(Path::new(&path), &["branch", "--show-current"]),
+            "replacement"
+        );
+    }
+}
+
+#[test]
+fn a_failed_removal_never_overwrites_a_users_lock_reason() {
+    // Catches unconditional re-locking after a refused removal, which overwrote a lock reason the
+    // user installed before git ran.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "ls-files");
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "relock", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let admin = git(Path::new(&path), &["rev-parse", "--absolute-git-dir"]);
+    engine.hold(Gate::Git);
+    let archiving = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || archive(&client, &thread, LeftFiles::Keep))
+    };
+    engine.wait_until_held(Gate::Git);
+    git(&repository, &["worktree", "unlock", &path]);
+    git(
+        &repository,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "user: preserve offline",
+            &path,
+        ],
+    );
+    engine.release(Gate::Git);
+
+    let cleanup = archiving.join().unwrap();
+    assert!(matches!(cleanup, Cleanup::Blocked { .. }), "{cleanup:?}");
+    assert!(Path::new(&path).join("README.md").exists());
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&admin).join("locked"))
+            .unwrap()
+            .trim(),
+        "user: preserve offline"
+    );
+}
+
+#[test]
+fn the_next_engine_leaves_an_offline_worktree_the_user_locked() {
+    // Catches offline leftover cleanup deleting git's admin record and lock when the record still
+    // carries Kratos's worktree id even though the user replaced the lock reason.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let home = root.path().join("kratos");
+    let engine = RunningEngine::start(&home);
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let worktrees = ["offline", "later"].map(|title| {
+        let thread = create(&client, &workspace, title, PlaceRequest::NewWorktree);
+        let path = worktree_of(&client, &thread).path;
+        std::fs::write(Path::new(&path).join("hold.txt"), "keep\n").unwrap();
+        let kept = archive(&client, &thread, LeftFiles::Keep);
+        assert!(matches!(kept, Cleanup::Kept { .. }), "{kept:?}");
+        if title == "later" {
+            std::fs::remove_file(Path::new(&path).join("hold.txt")).unwrap();
+        }
+        path
+    });
+    drop(engine);
+    let [offline, later] = &worktrees;
+    let admin = git(Path::new(offline), &["rev-parse", "--absolute-git-dir"]);
+    git(&repository, &["worktree", "unlock", offline]);
+    git(
+        &repository,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "user: preserve while offline",
+            offline,
+        ],
+    );
+    let parked = root.path().join("parked-offline");
+    std::fs::rename(offline, &parked).unwrap();
+
+    let _engine = RunningEngine::start(&home);
+
+    wait_until_gone(Path::new(later));
+    std::fs::rename(&parked, offline).unwrap();
+    assert!(Path::new(&admin).exists(), "git admin record was deleted");
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&admin).join("locked"))
+            .unwrap()
+            .trim(),
+        "user: preserve while offline"
+    );
+    assert!(Path::new(offline).join("hold.txt").is_file());
+    assert_eq!(
+        git(Path::new(offline), &["rev-parse", "--is-inside-work-tree"]),
+        "true"
+    );
 }
 
 #[test]
@@ -952,6 +1152,19 @@ fn a_removal_a_held_folder_blocks_is_tried_again_by_the_next_archive() {
     assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
     assert!(!Path::new(&path).exists());
     assert_eq!(worktree_count(&repository), 1);
+}
+
+/// Waits for the engine's startup sweep to leave `expected` worktrees registered in `repository`.
+fn wait_for_worktree_count(repository: &Path, expected: usize) {
+    let deadline = Instant::now() + WAIT;
+    while worktree_count(repository) != expected {
+        assert!(
+            Instant::now() < deadline,
+            "worktree count stayed {} instead of {expected}",
+            worktree_count(repository)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 /// Waits for the engine's startup sweep to remove `folder`.
@@ -1047,9 +1260,9 @@ fn the_next_engine_removes_a_clean_checkout_no_thread_took_and_keeps_one_with_fi
     let _engine = RunningEngine::start(&home);
 
     wait_until_gone(&clean);
+    wait_for_worktree_count(&repository, 2);
     assert!(branch_exists(&repository, "clean"));
     assert!(dirty.join("notes.txt").exists());
-    assert_eq!(worktree_count(&repository), 2);
 }
 
 #[test]
@@ -1068,8 +1281,8 @@ fn the_next_engine_never_removes_a_checkout_its_reservation_cannot_vouch_for() {
     let _engine = RunningEngine::start(&home);
 
     wait_until_gone(&ours);
+    wait_for_worktree_count(&repository, 2);
     assert!(theirs.join("README.md").exists());
-    assert_eq!(worktree_count(&repository), 2);
 }
 
 /// Whether a checkout carries the mark Kratos leaves on a worktree it made.
