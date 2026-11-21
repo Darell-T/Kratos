@@ -106,6 +106,13 @@ pub(super) fn launch(settings: &CodexSettings) -> Launch {
     #[cfg(windows)]
     args.extend(super::sandbox::launch_arguments());
     args.extend(settings.protected.launch_arguments(&temp_folder()));
+    let mut env_set = settings.env_set.clone();
+    // npm's default cache is outside every folder a sandboxed thread may write, so without this
+    // every `npm install` below Full access fails. Threads share one cache in the temp folder.
+    env_set.push((
+        "npm_config_cache".into(),
+        temp_folder().join("kratos-npm-cache").into(),
+    ));
     Launch {
         program: settings.program.clone(),
         args,
@@ -115,7 +122,7 @@ pub(super) fn launch(settings: &CodexSettings) -> Launch {
             .map(|(name, _)| name)
             .filter(|name| is_kratos_variable(name))
             .collect(),
-        env_set: settings.env_set.clone(),
+        env_set,
         client_info: types::ClientInfo {
             name: "kratos".to_owned(),
             title: Some("Kratos".to_owned()),

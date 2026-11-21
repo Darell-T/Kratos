@@ -316,3 +316,44 @@ async fn a_sandboxed_command_cannot_plant_a_git_hook() {
     );
     harness.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1, npm, the npm registry, and a provisioned Windows sandbox home; CI runs it"]
+async fn npm_install_works_in_a_sandboxed_thread() {
+    // Catches npm writing its default cache, which sits outside every folder the sandbox lets a
+    // thread write, so every install below Full access fails.
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::command("npm install --no-audit --no-fund --no-package-lock is-number@7.0.0"),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    let installed = harness
+        .folder()
+        .join("node_modules")
+        .join("is-number")
+        .join("package.json");
+    harness.send("npm-install");
+    loop {
+        match harness.next_event().await {
+            ThreadEventBody::ApprovalRequested { approval } => {
+                panic!("a plain install asked for approval: {approval:?}")
+            }
+            ThreadEventBody::ThreadPaused { reason } => panic!("real Codex paused: {reason:?}"),
+            ThreadEventBody::TurnCompleted { .. } => break,
+            _ => {}
+        }
+    }
+
+    assert!(
+        installed.exists(),
+        "npm install failed in the sandbox: {:?}",
+        harness.model.tool_outputs()
+    );
+    harness.stop().await;
+}
