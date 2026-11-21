@@ -16,9 +16,9 @@ use super::{PlaceError, Worktrees};
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
 impl Worktrees {
-    /// What `folder` holds that `base` does not, or that its `HEAD` does not without a base. The
-    /// files are staged in a scratch index, so new files show and the user's staged changes stay
-    /// as they were.
+    /// What `folder` holds that `base` does not, or that its `HEAD` does not without a base, and
+    /// nothing from the rest of the repository. The files are staged in a scratch index, so new files show
+    /// and the user's staged changes stay as they were.
     pub(crate) async fn diff(
         &self,
         folder: &Path,
@@ -59,7 +59,7 @@ impl Worktrees {
         index: &Path,
     ) -> Result<Capped, PlaceError> {
         self.git
-            .run_in_index(folder, &["add", "--all"], CHECKOUT, index)
+            .run_in_index(folder, &["add", "--all", "--", "."], CHECKOUT, index)
             .await?;
         // A diff or text-conversion program the user's config names would run outside every
         // sandbox, on files an agent wrote.
@@ -71,6 +71,7 @@ impl Worktrees {
             "--no-textconv",
             base,
             "--",
+            ".",
         ];
         Ok(self
             .git
@@ -79,16 +80,19 @@ impl Worktrees {
     }
 
     /// Commits everything in `folder` as the user's git identity, with `message` and nothing
-    /// added to it, and returns the new commit.
+    /// added to it, and returns the new commit. A project can be a folder inside its repository,
+    /// so changes outside `folder`, staged or not, stay as they were.
     pub(crate) async fn commit(&self, folder: &Path, message: &str) -> Result<String, PlaceError> {
-        self.git.run(folder, &["add", "--all"], CHECKOUT).await?;
-        let staged = ["diff", "--cached", "--quiet"];
+        self.git
+            .run(folder, &["add", "--all", "--", "."], CHECKOUT)
+            .await?;
+        let staged = ["diff", "--cached", "--quiet", "--", "."];
         match self.git.run(folder, &staged, git::QUICK).await {
             Ok(_) => return Err(PlaceError::NothingToCommit),
             Err(error) if error.exited_with(1) => {}
             Err(error) => return Err(error.into()),
         }
-        let commit = ["commit", "--quiet", "--message", message];
+        let commit = ["commit", "--quiet", "--message", message, "--", "."];
         self.git.run(folder, &commit, git::QUICK).await?;
         Ok(self
             .git

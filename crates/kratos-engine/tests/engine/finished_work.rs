@@ -129,7 +129,48 @@ fn a_diff_past_the_limit_ends_at_a_whole_line_and_says_it_was_cut() {
 
     assert!(diff.truncated);
     assert!(diff.patch.len() <= 4 * 1024 * 1024, "{}", diff.patch.len());
-    assert!(diff.patch.ends_with(&format!("+{line}")), "the patch ends mid-line");
+    assert!(
+        diff.patch.ends_with(&format!("+{line}")),
+        "the patch ends mid-line"
+    );
+}
+
+#[test]
+fn a_project_in_a_subfolder_diffs_and_commits_only_that_folder() {
+    // Catches a diff or commit that takes in the rest of the repository, including a change the
+    // user staged outside the project.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let component = repository.join("component");
+    std::fs::create_dir(&component).unwrap();
+    std::fs::write(component.join("inside.txt"), "one\n").unwrap();
+    std::fs::write(repository.join("staged.txt"), "one\n").unwrap();
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "--message", "parts"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &component);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
+    std::fs::write(component.join("inside.txt"), "two\n").unwrap();
+    std::fs::write(repository.join("outside.txt"), "not the project's\n").unwrap();
+    std::fs::write(repository.join("staged.txt"), "the user's\n").unwrap();
+    git(&repository, &["add", "staged.txt"]);
+
+    let patch = diff(&client, &thread).patch;
+    let reply = commit(&client, &thread, "Change the component");
+
+    assert!(patch.contains("component/inside.txt"), "{patch}");
+    assert!(
+        !patch.contains("outside.txt") && !patch.contains("staged.txt"),
+        "{patch}"
+    );
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    let committed = git(&repository, &["show", "--name-only", "--format=", "HEAD"]);
+    assert_eq!(committed, "component/inside.txt");
+    assert_eq!(
+        git(&repository, &["status", "--porcelain"]),
+        "M  staged.txt\n?? outside.txt"
+    );
 }
 
 #[test]
