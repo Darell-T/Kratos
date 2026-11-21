@@ -384,6 +384,43 @@ fn a_folder_that_is_no_longer_a_worktree_is_removed_only_while_empty() {
     assert_eq!(worktree_count(&repository), 1);
 }
 
+#[test]
+fn removing_a_leftover_forgets_only_that_worktree() {
+    // Catches `git worktree prune`, which also deletes git's record of every other worktree whose
+    // folder is out of reach for now, such as one on a drive that is not plugged in.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let users = root.path().join("users");
+    git(
+        &repository,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "users",
+            users.to_str().unwrap(),
+        ],
+    );
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "orphan", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    for file in [".git", "README.md"] {
+        std::fs::remove_file(folder.join(file)).unwrap();
+    }
+    let away = root.path().join("unplugged");
+    std::fs::rename(&users, &away).unwrap();
+
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    assert!(!folder.exists());
+    std::fs::rename(&away, &users).unwrap();
+    assert_eq!(worktree_count(&repository), 2);
+    assert_eq!(git(&users, &["branch", "--show-current"]), "users");
+}
+
 /// Windows refuses to remove a folder that a running program works in.
 #[cfg(windows)]
 #[test]
@@ -448,7 +485,12 @@ fn the_next_engine_finishes_a_removal_git_could_not() {
     let _engine = RunningEngine::start(&home);
 
     wait_until_gone(folder);
-    assert_eq!(worktree_count(&repository), 1);
+    // The sweep deletes git's record of the worktree just after the folder.
+    let deadline = Instant::now() + WAIT;
+    while worktree_count(&repository) != 1 {
+        assert!(Instant::now() < deadline, "git still records the worktree");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 #[test]

@@ -99,7 +99,7 @@ impl Worktrees {
         let folder = Path::new(path);
         let found = self.locate(folder).await?;
         if found.is_none_or(|worktree| worktree.top != folder) {
-            return self.remove_leftover(repository, folder).await;
+            return remove_leftover(repository, folder).await;
         }
         if let Some(commit) = self.unsaved_head(folder).await? {
             return Ok(Cleanup::UnsavedCommit { commit });
@@ -175,28 +175,54 @@ impl Worktrees {
             .map(|((_, path), _)| format!(" M {path}"))
             .collect())
     }
+}
 
-    /// Removes what is left of a worktree that is no longer one, such as the folder a removal git
-    /// could not finish leaves after deleting its `.git` file. Git would read the project's
-    /// repository there, so Kratos removes the folder only while it is empty.
-    async fn remove_leftover(
-        &self,
-        repository: &Path,
-        folder: &Path,
-    ) -> Result<Cleanup, PlaceError> {
-        match tokio::fs::remove_dir(folder).await {
-            Err(error) if error.kind() != io::ErrorKind::NotFound => {
-                return Err(PlaceError::CannotRemove {
-                    path: folder.display().to_string(),
-                    source: error,
-                });
-            }
-            _ => {}
+/// Removes what is left of a worktree that is no longer one, such as the folder a removal git could
+/// not finish leaves after deleting its `.git` file. Git would read the project's repository there,
+/// so Kratos removes the folder only while it is empty. `repository` is the shared git folder.
+async fn remove_leftover(repository: &Path, folder: &Path) -> Result<Cleanup, PlaceError> {
+    match tokio::fs::remove_dir(folder).await {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => {
+            return Err(PlaceError::CannotRemove {
+                path: folder.display().to_string(),
+                source: error,
+            });
         }
-        let prune = ["worktree", "prune"];
-        self.git.run(repository, &prune, git::QUICK).await?;
-        Ok(Cleanup::Removed)
+        _ => {}
     }
+    forget(repository, folder).await?;
+    Ok(Cleanup::Removed)
+}
+
+/// Deletes git's record of the worktree at `folder`, whose folder is gone, as `git worktree prune`
+/// would for it alone. Prune also drops the record of every other worktree out of reach for now,
+/// such as one on a drive that is not plugged in. A locked record stays, as prune leaves it.
+async fn forget(repository: &Path, folder: &Path) -> Result<(), PlaceError> {
+    let io_error = |path: &Path| {
+        let path = path.display().to_string();
+        move |source| PlaceError::Io { path, source }
+    };
+    let records = repository.join("worktrees");
+    let mut entries = match tokio::fs::read_dir(&records).await {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        entries => entries.map_err(io_error(&records))?,
+    };
+    let checkout = folder.join(".git");
+    while let Some(entry) = entries.next_entry().await.map_err(io_error(&records))? {
+        let record = entry.path();
+        let Ok(gitdir) = tokio::fs::read_to_string(record.join("gitdir")).await else {
+            continue;
+        };
+        let is_locked = tokio::fs::symlink_metadata(record.join("locked"))
+            .await
+            .is_ok();
+        if record.join(gitdir.trim()) == checkout && !is_locked {
+            tokio::fs::remove_dir_all(&record)
+                .await
+                .map_err(io_error(&record))?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether a thread that is not archived works in a project folder at `worktree` or inside it,
