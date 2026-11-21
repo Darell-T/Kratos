@@ -971,6 +971,56 @@ fn a_reserved_worktree_stays_reserved_until_a_thread_uses_it_or_git_never_made_i
 }
 
 #[test]
+fn a_version_8_database_an_earlier_build_made_still_records_worktrees() {
+    // Catches a column added to step 8 after builds had run it: a database already at version 8
+    // never runs the step again, so every query of the new column fails there.
+    let home = home();
+    drop(Store::open(home.path()).unwrap());
+    let connection = Connection::open(live_database(home.path())).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE worktrees;
+             CREATE TABLE worktrees (
+               id TEXT PRIMARY KEY,
+               path TEXT NOT NULL,
+               repository TEXT NOT NULL,
+               branch TEXT,
+               base TEXT,
+               ownership TEXT NOT NULL CHECK (ownership IN ('createdByKratos', 'borrowed')),
+               state TEXT NOT NULL CHECK (state IN ('creating', 'ready', 'removing', 'removed')),
+               created_at TEXT NOT NULL,
+               CHECK (ownership = 'createdByKratos' OR state = 'ready'),
+               CHECK (ownership = 'borrowed' OR (branch IS NOT NULL AND base IS NOT NULL))
+             );
+             CREATE UNIQUE INDEX worktrees_by_path ON worktrees (path) WHERE state != 'removed';",
+        )
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(home.path()).unwrap();
+    let workspace = store
+        .create_workspace(&workspace_request("repo", "/work/repo"))
+        .unwrap();
+    let checkout = Checkout {
+        path: "/work/repo/.kratos-worktrees/chat".into(),
+        repository: "/work/repo/.git".into(),
+        branch: Some("chat".into()),
+    };
+
+    let id = store.reserve_worktree(&checkout, "0000000").unwrap();
+    store
+        .create_thread(
+            &thread_request(&workspace.id, "chat", "codex"),
+            &NewPlace::Created(id.clone()),
+        )
+        .unwrap();
+
+    let ours = store.kratos_worktrees().unwrap();
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].id, id);
+    assert!(store.unfinished_worktrees().unwrap().is_empty());
+}
+
+#[test]
 fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_joins_meanwhile() {
     // Catches a removal that starts while a thread still works in the worktree, a thread that
     // joins a worktree being removed, or a removed worktree whose path stays blocked.
@@ -985,9 +1035,6 @@ fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_
         branch: Some("chat".into()),
     };
     let id = store.reserve_worktree(&checkout, "0000000").unwrap();
-    store
-        .record_git_dir(&id, "/work/repo/.git/worktrees/chat")
-        .unwrap();
     let thread = store
         .create_thread(
             &thread_request(&workspace.id, "chat", "codex"),
@@ -1001,7 +1048,6 @@ fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_
     write.commit().unwrap();
     let started = Removal::Started {
         repository: checkout.repository.clone(),
-        git_dir: Some("/work/repo/.git/worktrees/chat".into()),
     };
     assert_eq!(store.begin_removal(&id).unwrap(), started);
     let joining = store.create_thread(

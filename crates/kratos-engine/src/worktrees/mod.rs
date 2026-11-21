@@ -26,6 +26,12 @@ pub(crate) use git::GitError;
 /// The folder in a project that holds the worktrees Kratos makes for it, one per branch.
 pub const WORKTREES_FOLDER: &str = ".kratos-worktrees";
 
+/// The file that holds a worktree's id in the folder git keeps for a worktree Kratos made, under
+/// the repository's `worktrees` folder. Git deletes that folder with the worktree and gives a
+/// checkout it makes later at the same path a new one, even of the same name, without the file.
+/// So the file tells Kratos's worktree apart from any other checkout at its path.
+pub const WORKTREE_ID_FILE: &str = "kratos-worktree-id";
+
 /// The most suffixed names, `-2` to `-100`, tried for a new branch before giving up.
 const MAX_NAME_TRIES: u32 = 100;
 
@@ -295,12 +301,7 @@ impl Worktrees {
         };
         let made = self.check_out(&repository.top, path, name, base).await;
         if let Ok(true) = made {
-            if let Some(git_dir) = git_dir_of(path).await {
-                let recorded = id.clone();
-                store
-                    .call(move |store| store.record_git_dir(&recorded, &git_dir))
-                    .await?;
-            }
+            mark_as_kratoss(path, &id).await?;
             return Ok(Some(id));
         }
         // A checkout stopped partway leaves a folder, which keeps its reservation so a later
@@ -434,13 +435,27 @@ impl Worktrees {
     }
 }
 
-/// The folder git keeps for the linked worktree at `folder`, which its `.git` file names, with
-/// links resolved. `None` when `folder` has no such file.
-async fn git_dir_of(folder: &Path) -> Option<String> {
+/// The folder git keeps for the linked worktree at `folder`, which its `.git` file names. `None`
+/// when `folder` has no such file.
+async fn git_dir_of(folder: &Path) -> Option<PathBuf> {
     let named = tokio::fs::read_to_string(folder.join(".git")).await.ok()?;
     let git_dir = named.trim().strip_prefix("gitdir:")?.trim();
-    let git_dir = resolved(&folder.join(git_dir)).await.ok()?;
-    git_dir.to_str().map(str::to_owned)
+    Some(folder.join(git_dir))
+}
+
+/// Writes `id` in the folder git keeps for the worktree Kratos just made at `path`. An engine that
+/// stops before this leaves a checkout Kratos never takes for its own, which the user removes.
+async fn mark_as_kratoss(path: &Path, id: &WorktreeId) -> Result<(), PlaceError> {
+    let shown = path.display().to_string();
+    let git_dir = git_dir_of(path)
+        .await
+        .ok_or_else(|| PlaceError::NotAWorktree(shown.clone()))?;
+    tokio::fs::write(git_dir.join(WORKTREE_ID_FILE), id.as_str())
+        .await
+        .map_err(|source| PlaceError::Io {
+            path: shown,
+            source,
+        })
 }
 
 /// Closes the record of the worktree Kratos made at `path` when another checkout has taken its
@@ -458,13 +473,15 @@ async fn close_if_replaced(store: &StoreThread, path: &str) -> Result<(), StoreE
     Ok(())
 }
 
-/// Whether the checkout at `worktree`'s path is the one Kratos made there. A worktree recorded
-/// before Kratos knew its git folder is taken to be, as a path was all Kratos had then.
+/// Whether the checkout at `worktree`'s path is the one Kratos made there, which holds its id. A
+/// checkout Kratos cannot read the id from is never taken for its own.
 pub(crate) async fn is_same_checkout(worktree: &KratosWorktree) -> bool {
-    match &worktree.git_dir {
-        None => true,
-        Some(recorded) => git_dir_of(Path::new(&worktree.path)).await.as_ref() == Some(recorded),
-    }
+    let Some(git_dir) = git_dir_of(Path::new(&worktree.path)).await else {
+        return false;
+    };
+    tokio::fs::read_to_string(git_dir.join(WORKTREE_ID_FILE))
+        .await
+        .is_ok_and(|id| id == worktree.id.as_str())
 }
 
 /// Makes `folder` with a `.gitignore` that ignores everything in it, itself included, so the

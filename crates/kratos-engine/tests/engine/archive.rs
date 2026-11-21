@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use fake_agents::codex_control;
 use kratos_api_client::Client;
+use kratos_engine::worktrees::WORKTREE_ID_FILE;
 use kratos_protocol::{
     ArchiveThread, ArchivedThread, Cleanup, LeftFiles, Ownership, PlaceRequest, ProjectWorktree,
     Thread, ThreadDetails, Workspace, routes,
@@ -562,6 +563,38 @@ fn a_checkout_that_took_a_moved_worktrees_place_is_never_taken_for_kratoss() {
 }
 
 #[test]
+fn a_checkout_git_made_again_where_kratoss_worktree_stood_is_never_taken_for_kratoss() {
+    // Catches telling Kratos's worktree apart by the folder git keeps for it: once the user
+    // removes the worktree and makes another at its path, git gives the newcomer a folder of the
+    // same name, and archive deletes the user's checkout.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "before", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    git(&repository, &["worktree", "remove", &path]);
+    git(
+        &repository,
+        &["worktree", "add", "--quiet", "-b", "users-branch", &path],
+    );
+    std::fs::write(folder.join("users.txt"), "the user's\n").unwrap();
+
+    assert_eq!(
+        listed_ownership(&client, &workspace, folder),
+        Ownership::Borrowed
+    );
+    assert_eq!(commit_status(&client, &thread), 409);
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Discard),
+        Cleanup::NotOwned
+    );
+    assert!(folder.join("users.txt").exists());
+}
+
+#[test]
 fn an_archived_threads_finished_work_stops_once_its_worktree_is_gone() {
     // Catches a thread whose worktree Kratos removed committing into whatever checkout later
     // stands at the same path.
@@ -701,31 +734,71 @@ fn the_next_engine_removes_a_clean_checkout_no_thread_took_and_keeps_one_with_fi
     let root = TempDir::new().unwrap();
     let repository = new_repository(&root);
     let home = root.path().join("kratos");
-    let shared = resolved(&repository.join(".git"));
     let store = Store::open(&home).unwrap();
-    let mut checkouts = Vec::new();
     // The sweep goes in reservation order, so once "clean" is gone it has passed "dirty".
-    for name in ["dirty", "clean"] {
-        let path = repository.join(".kratos-worktrees").join(name);
-        let checkout = Checkout {
-            path: path.to_str().unwrap().to_owned(),
-            repository: shared.to_str().unwrap().to_owned(),
-            branch: Some(name.to_owned()),
-        };
-        store.reserve_worktree(&checkout, "0000000").unwrap();
-        git(
-            &repository,
-            &["worktree", "add", "--quiet", "-b", name, &checkout.path],
-        );
-        checkouts.push(path);
-    }
+    let dirty = reserve_and_check_out(&store, &repository, "dirty", Marked::AsKratoss);
+    let clean = reserve_and_check_out(&store, &repository, "clean", Marked::AsKratoss);
     drop(store);
-    std::fs::write(checkouts[0].join("notes.txt"), "mine\n").unwrap();
+    std::fs::write(dirty.join("notes.txt"), "mine\n").unwrap();
 
     let _engine = RunningEngine::start(&home);
 
-    wait_until_gone(&checkouts[1]);
+    wait_until_gone(&clean);
     assert!(branch_exists(&repository, "clean"));
-    assert!(checkouts[0].join("notes.txt").exists());
+    assert!(dirty.join("notes.txt").exists());
     assert_eq!(worktree_count(&repository), 2);
+}
+
+#[test]
+fn the_next_engine_never_removes_a_checkout_its_reservation_cannot_vouch_for() {
+    // Catches a reservation trusted for its path alone. An engine that stopped before it marked
+    // the checkout git made for it leaves a reservation that may name the user's own checkout by
+    // the next start.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let home = root.path().join("kratos");
+    let store = Store::open(&home).unwrap();
+    let theirs = reserve_and_check_out(&store, &repository, "theirs", Marked::No);
+    let ours = reserve_and_check_out(&store, &repository, "ours", Marked::AsKratoss);
+    drop(store);
+
+    let _engine = RunningEngine::start(&home);
+
+    wait_until_gone(&ours);
+    assert!(theirs.join("README.md").exists());
+    assert_eq!(worktree_count(&repository), 2);
+}
+
+/// Whether a checkout carries the mark Kratos leaves on a worktree it made.
+enum Marked {
+    AsKratoss,
+    No,
+}
+
+/// Reserves a worktree named `name`, as an engine does before it makes one, and has git make it.
+fn reserve_and_check_out(
+    store: &Store,
+    repository: &Path,
+    name: &str,
+    marked: Marked,
+) -> std::path::PathBuf {
+    let path = repository.join(".kratos-worktrees").join(name);
+    let checkout = Checkout {
+        path: path.to_str().unwrap().to_owned(),
+        repository: resolved(&repository.join(".git"))
+            .to_str()
+            .unwrap()
+            .to_owned(),
+        branch: Some(name.to_owned()),
+    };
+    let id = store.reserve_worktree(&checkout, "0000000").unwrap();
+    git(
+        repository,
+        &["worktree", "add", "--quiet", "-b", name, &checkout.path],
+    );
+    if let Marked::AsKratoss = marked {
+        let git_dir = git(&path, &["rev-parse", "--absolute-git-dir"]);
+        std::fs::write(Path::new(&git_dir).join(WORKTREE_ID_FILE), id.as_str()).unwrap();
+    }
+    path
 }

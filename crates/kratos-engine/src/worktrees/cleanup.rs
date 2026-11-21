@@ -66,19 +66,14 @@ impl Worktrees {
             return Ok(Cleanup::InUse);
         }
         let begin = id.clone();
-        let (repository, git_dir) =
-            match store.call(move |store| store.begin_removal(&begin)).await? {
-                Removal::InUse => return Ok(Cleanup::InUse),
-                Removal::Done => return Ok(Cleanup::Removed),
-                Removal::Started {
-                    repository,
-                    git_dir,
-                } => (repository, git_dir),
-            };
+        let repository = match store.call(move |store| store.begin_removal(&begin)).await? {
+            Removal::InUse => return Ok(Cleanup::InUse),
+            Removal::Done => return Ok(Cleanup::Removed),
+            Removal::Started { repository } => repository,
+        };
         let recorded = KratosWorktree {
             id: id.clone(),
             path: path.to_owned(),
-            git_dir,
         };
         let cleanup = self
             .remove(Path::new(&repository), &recorded, files)
