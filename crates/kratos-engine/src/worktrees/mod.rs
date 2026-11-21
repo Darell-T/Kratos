@@ -88,6 +88,11 @@ pub(crate) enum PlaceError {
     UnreadableGit { command: String, output: String },
     #[error("Nothing changed since the last commit, so there is nothing to commit.")]
     NothingToCommit,
+    #[error(
+        "A turn is running in a thread that works in this folder. Commit once it ends, or stop \
+         it first."
+    )]
+    BeingEdited,
     #[error("{0} has no branch checked out. Check out a branch to open a pull request from it.")]
     NoBranch(String),
     #[error(

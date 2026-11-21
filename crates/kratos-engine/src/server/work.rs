@@ -41,21 +41,13 @@ pub(super) async fn commit(
 ) -> Result<Response, ApiError> {
     let thread = thread(&state, id).await?;
     let CommitThread { message } = read_json(body).await?;
-    let running = state
-        .store
-        .call(|store| store.running_turn_folders())
-        .await?;
-    let folder = FilePath::new(&thread.folder);
-    if state.worktrees.is_being_edited(folder, &running).await? {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "A turn is running in a thread that works in this folder. Commit once it ends, or \
-             stop it first",
-        ));
-    }
     let commit = state
         .worktrees
-        .commit(FilePath::new(&thread.folder), message.as_str())
+        .commit(
+            &state.store,
+            FilePath::new(&thread.folder),
+            message.as_str(),
+        )
         .await?;
     Ok(json_reply(StatusCode::CREATED, &Committed { commit }))
 }

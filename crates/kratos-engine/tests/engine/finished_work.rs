@@ -402,6 +402,144 @@ fn a_commit_waits_for_a_turn_in_a_project_folder_that_holds_it() {
     engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
 }
 
+#[test]
+fn a_commit_through_another_path_to_the_folder_still_waits_for_its_turn() {
+    // Catches folders compared as the user typed them: a project added through `..` names the
+    // same folder, but the turn running there went unseen and the commit took its edit.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let sibling = root.path().join("sibling");
+    std::fs::create_dir(&sibling).unwrap();
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let aliased = workspace_at(&engine, &sibling.join("..").join("repo"));
+    let client = engine.client();
+    let busy = create(&client, &workspace, "busy", PlaceRequest::default());
+    let idle = create(&client, &aliased, "idle", PlaceRequest::default());
+    std::fs::write(repository.join("half.txt"), "unfinished\n").unwrap();
+    post(&client, &busy, "keep going");
+    engine.start_turn();
+    wait_for_turn(&client, &busy);
+
+    let refused = commit(&client, &idle, "Through the alias");
+
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+}
+
+#[test]
+fn a_commit_that_waited_for_the_repository_checks_for_turns_once_it_has_it() {
+    // Catches a check made before the commit waits behind another git command of the repository,
+    // here a pull request's push: a turn that starts during the wait goes unseen.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let remote = root.path().join("remote.git");
+    let remote_text = remote.to_str().unwrap();
+    git(
+        root.path(),
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            remote_text,
+        ],
+    );
+    git(&repository, &["remote", "add", "origin", remote_text]);
+    git(&repository, &["push", "--quiet", "origin", "main"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let busy = create(&client, &workspace, "busy", PlaceRequest::default());
+    let idle = create(&client, &workspace, "idle", PlaceRequest::default());
+    let reviewed = create(&client, &workspace, "reviewed", PlaceRequest::NewWorktree);
+    engine.hold_gh();
+    let pull_request = {
+        let (client, reviewed) = (client.clone(), reviewed.clone());
+        std::thread::spawn(move || {
+            let request = CreatePullRequest {
+                title: RequiredText::new("Review").unwrap(),
+                body: String::new(),
+            };
+            let route = routes::thread_pull_request(&reviewed.id);
+            client.post(&route, &request).unwrap().status
+        })
+    };
+    engine.wait_for_held_gh();
+    let committing = {
+        let (client, idle) = (client.clone(), idle.clone());
+        std::thread::spawn(move || commit(&client, &idle, "After the wait"))
+    };
+    // Long enough for the commit to reach the repository's lock and wait there.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    post(&client, &busy, "keep going");
+    engine.start_turn();
+    wait_for_turn(&client, &busy);
+    std::fs::write(repository.join("half.txt"), "unfinished\n").unwrap();
+    engine.release_gh();
+
+    let refused = committing.join().unwrap();
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(pull_request.join().unwrap(), 201);
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+}
+
+#[test]
+fn a_turn_that_starts_while_a_commit_stages_files_stops_it_and_leaves_the_index_alone() {
+    // Catches a commit that checks for turns only before it stages: a turn that starts while
+    // `git add` reads the files may have half-written one of them.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let gate = root.path().join("filter-gate");
+    std::fs::create_dir(&gate).unwrap();
+    let gate_text = gate.to_str().unwrap().replace('\\', "/");
+    // Git runs the clean filter on each file it stages, so this holds `git add` until the test
+    // has started a turn.
+    git(
+        &repository,
+        &[
+            "config",
+            "filter.held.clean",
+            &format!(
+                "touch '{gate_text}/staging' && \
+                 while [ ! -f '{gate_text}/go' ]; do sleep 0.05; done && cat"
+            ),
+        ],
+    );
+    std::fs::write(
+        repository.join(".git").join("info").join("attributes"),
+        "half.txt filter=held\n",
+    )
+    .unwrap();
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let busy = create(&client, &workspace, "busy", PlaceRequest::default());
+    let idle = create(&client, &workspace, "idle", PlaceRequest::default());
+    std::fs::write(repository.join("half.txt"), "unfinished\n").unwrap();
+    let committing = {
+        let (client, idle) = (client.clone(), idle.clone());
+        std::thread::spawn(move || commit(&client, &idle, "While staging"))
+    };
+    let deadline = Instant::now() + WAIT;
+    while !gate.join("staging").exists() {
+        assert!(Instant::now() < deadline, "git never staged half.txt");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    post(&client, &busy, "keep going");
+    engine.start_turn();
+    wait_for_turn(&client, &busy);
+    std::fs::write(gate.join("go"), "").unwrap();
+
+    let refused = committing.join().unwrap();
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(git(&repository, &["status", "--porcelain"]), "?? half.txt");
+    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
+}
+
 fn wait_for_turn(client: &Client, thread: &Thread) {
     let deadline = Instant::now() + WAIT;
     loop {

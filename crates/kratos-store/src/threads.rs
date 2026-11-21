@@ -149,13 +149,17 @@ impl Store {
         Ok(folders.collect::<Result<_, _>>()?)
     }
 
-    /// The folders that threads with a running turn work in.
-    pub fn running_turn_folders(&self) -> Result<Vec<String>, StoreError> {
+    /// The folders of threads with a turn running, or a message being sent to start one. Codex
+    /// records a turn only once it took the message, and its agent may act on it before then.
+    pub fn busy_folders(&self) -> Result<Vec<String>, StoreError> {
         let mut statement = self.connection.prepare_cached(
             "SELECT COALESCE(worktrees.path, workspaces.path)
              FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
                LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
-             WHERE threads.running_turn IS NOT NULL",
+             WHERE threads.running_turn IS NOT NULL
+                OR EXISTS (SELECT 1 FROM thread_messages
+                           WHERE thread_messages.thread_id = threads.id
+                             AND thread_messages.status = 'submitting')",
         )?;
         let folders = statement.query_map([], |row| row.get(0))?;
         Ok(folders.collect::<Result<_, _>>()?)

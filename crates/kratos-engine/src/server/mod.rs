@@ -309,7 +309,9 @@ impl From<PlaceError> for ApiError {
             | PlaceError::UnreadableGit { .. }) => {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
             }
-            gone @ PlaceError::NotItsWorktree(_) => ApiError::new(StatusCode::CONFLICT, gone),
+            conflict @ (PlaceError::NotItsWorktree(_) | PlaceError::BeingEdited) => {
+                ApiError::new(StatusCode::CONFLICT, conflict)
+            }
             refused => ApiError::bad_request(refused.to_string()),
         }
     }
