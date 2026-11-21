@@ -252,6 +252,41 @@ fn an_edit_git_is_told_to_overlook_still_keeps_the_worktree() {
 }
 
 #[test]
+fn a_commit_no_branch_holds_keeps_the_worktree_even_when_files_are_discarded() {
+    // Catches a removal that drops the worktree's HEAD when it is a commit on no branch, which
+    // only that worktree's HEAD kept reachable.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "detached", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    git(folder, &["switch", "--quiet", "--detach"]);
+    std::fs::write(folder.join("work.txt"), "finished\n").unwrap();
+    let request = json!({ "message": "Finish the work" });
+    let committed = client
+        .post(&routes::thread_commit(&thread.id), &request)
+        .unwrap();
+    assert_eq!(committed.status, 201, "{}", committed.body);
+    let commit = git(folder, &["rev-parse", "HEAD"]);
+
+    for files in [LeftFiles::Keep, LeftFiles::Discard] {
+        assert_eq!(
+            archive(&client, &thread, files),
+            Cleanup::UnsavedCommit {
+                commit: commit.clone()
+            }
+        );
+    }
+    assert_eq!(git(folder, &["rev-parse", "HEAD"]), commit);
+    git(folder, &["switch", "--quiet", "--create", "finished"]);
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    assert_eq!(git(&repository, &["rev-parse", "finished"]), commit);
+}
+
+#[test]
 fn a_worktree_stays_while_another_thread_works_in_it() {
     // Catches a removal that pulls the folder out from under a thread still working in it.
     let root = TempDir::new().unwrap();

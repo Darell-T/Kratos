@@ -154,6 +154,10 @@ pub enum Cleanup {
     /// Kratos kept the worktree because removing it would delete these files, each as
     /// `git status --porcelain` prints it. Archive again with [`LeftFiles::Discard`] to remove it.
     Kept { files: Vec<String> },
+    /// Kratos kept the worktree because its `HEAD` is `commit`, which no branch or other ref
+    /// holds, so removing the worktree would lose it. Create a branch at it, then archive again.
+    /// Discarding files does not remove it.
+    UnsavedCommit { commit: String },
     /// Git could not remove the worktree, for example because a program holds a file in it. No
     /// thread may start there until an archive of one of its threads removes it.
     Blocked { error: String },

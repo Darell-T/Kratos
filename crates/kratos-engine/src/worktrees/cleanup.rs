@@ -46,6 +46,9 @@ impl Worktrees {
                         files.len()
                     );
                 }
+                Ok(Cleanup::UnsavedCommit { commit }) => {
+                    println!("Kept the worktree {path}, whose HEAD {commit} is on no branch");
+                }
                 Ok(Cleanup::Blocked { error }) => eprintln!("{error}"),
                 Err(error) => eprintln!("cannot finish removing the worktree {path}: {error}"),
             }
@@ -73,7 +76,7 @@ impl Worktrees {
             });
         let end = match cleanup {
             Cleanup::Removed => RemovalEnd::Removed,
-            Cleanup::Kept { .. } => RemovalEnd::Kept,
+            Cleanup::Kept { .. } | Cleanup::UnsavedCommit { .. } => RemovalEnd::Kept,
             _ => return Ok(cleanup),
         };
         let id = id.clone();
@@ -95,6 +98,9 @@ impl Worktrees {
         if found.is_none_or(|worktree| worktree.top != folder) {
             return self.remove_leftover(repository, folder).await;
         }
+        if let Some(commit) = self.unsaved_head(folder).await? {
+            return Ok(Cleanup::UnsavedCommit { commit });
+        }
         let status = [
             "status",
             "--porcelain",
@@ -114,6 +120,28 @@ impl Worktrees {
         remove.extend(["--", path]);
         self.git.run(repository, &remove, CHECKOUT).await?;
         Ok(Cleanup::Removed)
+    }
+
+    /// The worktree's `HEAD` when it is detached at a commit no ref holds, which only the
+    /// worktree keeps reachable.
+    async fn unsaved_head(&self, folder: &Path) -> Result<Option<String>, PlaceError> {
+        if self.branch_of(folder).await?.is_some() {
+            return Ok(None);
+        }
+        let holders = [
+            "for-each-ref",
+            "--count=1",
+            "--contains=HEAD",
+            "--format=%(refname)",
+        ];
+        if !self.git.run(folder, &holders, git::QUICK).await?.is_empty() {
+            return Ok(None);
+        }
+        let commit = self
+            .git
+            .run(folder, &["rev-parse", "HEAD"], git::QUICK)
+            .await?;
+        Ok(Some(commit))
     }
 
     /// Edits `git status` does not show, because the file is marked assume-unchanged or
