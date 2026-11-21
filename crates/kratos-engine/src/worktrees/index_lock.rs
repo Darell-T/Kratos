@@ -29,10 +29,11 @@ pub(super) struct IndexLock {
 }
 
 /// An [`IndexLock`] whose lock file already holds the replacement index bytes and (on Windows)
-/// holds a `DELETE` share-check handle on the target index so a reader without `FILE_SHARE_DELETE`
-/// is caught before `git commit` advances `HEAD`.
+/// holds `DELETE` share-check handles on both the target index and the lock file so a reader
+/// without `FILE_SHARE_DELETE` cannot block the rename after `git commit` advances `HEAD`.
 pub(super) struct PreparedReplacement {
-    // Dropped before `lock` so the target index handle is released before any teardown.
+    // Dropped before `lock` so file handles are released before any teardown.
+    lock_guard: Option<tokio::fs::File>,
     replace_guard: Option<tokio::fs::File>,
     lock: IndexLock,
 }
@@ -72,20 +73,18 @@ impl IndexLock {
         }
     }
 
-    /// Stages `updated` into the lock file and verifies the target index can be replaced before
-    /// `git commit` advances `HEAD`.
+    /// Stages `updated` into the lock file (preserving its modified time for git's racy-index
+    /// check) and reserves both the target index and the lock file for replacement before `git
+    /// commit` advances `HEAD`.
     pub(super) async fn prepare_replacement(
         self,
         updated: &Path,
     ) -> Result<PreparedReplacement, PlaceError> {
-        tokio::fs::copy(updated, &self.lock)
-            .await
-            .map_err(|source| PlaceError::Io {
-                path: self.lock.display().to_string(),
-                source,
-            })?;
+        copy_preserving_mtime(updated, &self.lock).await?;
         let replace_guard = reserve_for_replace(&self.index).await?;
+        let lock_guard = reserve_for_replace(&self.lock).await?;
         Ok(PreparedReplacement {
+            lock_guard,
             replace_guard,
             lock: self,
         })
@@ -93,8 +92,13 @@ impl IndexLock {
 }
 
 impl PreparedReplacement {
+    pub(super) fn lock_path(&self) -> &Path {
+        &self.lock.lock
+    }
+
     /// Atomically renames the prepared lock file into the index's place and releases the lock.
     pub(super) async fn commit(mut self) -> io::Result<()> {
+        drop(self.lock_guard.take());
         drop(self.replace_guard.take());
         let deadline = Instant::now() + WAIT;
         loop {
@@ -123,11 +127,39 @@ impl Drop for IndexLock {
     }
 }
 
-/// On Windows, opens `index` with `DELETE` access and full sharing so any existing reader without
+/// Copies `from` to `to` while keeping `from`'s modified time, so git's racy-index check stays
+/// active on Linux where plain `fs::copy` writes a fresh timestamp. Returns `Ok(false)` when
+/// `from` does not exist yet.
+pub(super) async fn copy_preserving_mtime(from: &Path, to: &Path) -> Result<bool, PlaceError> {
+    let from = from.to_owned();
+    let to = to.to_owned();
+    let dest = to.display().to_string();
+    tokio::task::spawn_blocking(move || -> io::Result<bool> {
+        let modified = match std::fs::metadata(&from) {
+            Ok(meta) => meta.modified()?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        std::fs::copy(&from, &to)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&to)?
+            .set_modified(modified)?;
+        Ok(true)
+    })
+    .await
+    .map_err(|error| PlaceError::Io {
+        path: dest.clone(),
+        source: io::Error::other(error),
+    })?
+    .map_err(|source| PlaceError::Io { path: dest, source })
+}
+
+/// On Windows, opens `path` with `DELETE` access and full sharing so any existing reader without
 /// `FILE_SHARE_DELETE` fails this check before `git commit` runs, and new non-delete-sharing
 /// readers cannot sneak in while `git commit` runs on the scratch index.
 #[cfg(windows)]
-async fn reserve_for_replace(index: &Path) -> Result<Option<tokio::fs::File>, PlaceError> {
+async fn reserve_for_replace(path: &Path) -> Result<Option<tokio::fs::File>, PlaceError> {
     const DELETE: u32 = 0x0001_0000;
     const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
 
@@ -136,7 +168,7 @@ async fn reserve_for_replace(index: &Path) -> Result<Option<tokio::fs::File>, Pl
         let opened = tokio::fs::OpenOptions::new()
             .access_mode(DELETE)
             .share_mode(FILE_SHARE_ALL)
-            .open(index)
+            .open(path)
             .await;
         match opened {
             Ok(file) => return Ok(Some(file)),
@@ -145,11 +177,11 @@ async fn reserve_for_replace(index: &Path) -> Result<Option<tokio::fs::File>, Pl
                 tokio::time::sleep(RETRY).await;
             }
             Err(error) if is_index_busy(&error) => {
-                return Err(PlaceError::IndexInUse(index.display().to_string()));
+                return Err(PlaceError::IndexInUse(path.display().to_string()));
             }
             Err(source) => {
                 return Err(PlaceError::Io {
-                    path: index.display().to_string(),
+                    path: path.display().to_string(),
                     source,
                 });
             }
@@ -158,7 +190,7 @@ async fn reserve_for_replace(index: &Path) -> Result<Option<tokio::fs::File>, Pl
 }
 
 #[cfg(not(windows))]
-async fn reserve_for_replace(_index: &Path) -> Result<Option<tokio::fs::File>, PlaceError> {
+async fn reserve_for_replace(_path: &Path) -> Result<Option<tokio::fs::File>, PlaceError> {
     Ok(None)
 }
 
