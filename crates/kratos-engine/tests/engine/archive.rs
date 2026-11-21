@@ -219,6 +219,39 @@ fn a_worktree_holding_files_a_removal_would_delete_stays_until_the_user_discards
 }
 
 #[test]
+fn an_edit_git_is_told_to_overlook_still_keeps_the_worktree() {
+    // Catches a removal that trusts `git status`, which skips files marked assume-unchanged or
+    // skip-worktree, and so deletes the only copy of an edit to them.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    std::fs::write(repository.join("config.txt"), "default\n").unwrap();
+    git(&repository, &["add", "config.txt"]);
+    git(&repository, &["commit", "--quiet", "--message", "config"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "hidden", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    std::fs::write(folder.join("README.md"), "only copy\n").unwrap();
+    std::fs::write(folder.join("config.txt"), "local\n").unwrap();
+    git(folder, &["update-index", "--assume-unchanged", "README.md"]);
+    git(folder, &["update-index", "--skip-worktree", "config.txt"]);
+    assert_eq!(git(folder, &["status", "--porcelain"]), "");
+
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Keep),
+        Cleanup::Kept {
+            files: vec![" M README.md".into(), " M config.txt".into()]
+        }
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join("README.md")).unwrap(),
+        "only copy\n"
+    );
+}
+
+#[test]
 fn a_worktree_stays_while_another_thread_works_in_it() {
     // Catches a removal that pulls the folder out from under a thread still working in it.
     let root = TempDir::new().unwrap();

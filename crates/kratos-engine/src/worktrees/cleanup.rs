@@ -101,20 +101,48 @@ impl Worktrees {
             "--ignored",
             "--untracked-files=normal",
         ];
-        let left = self.git.run(folder, &status, git::QUICK).await?;
+        let status = self.git.run(folder, &status, git::QUICK).await?;
+        let mut left: Vec<String> = status.lines().map(str::to_owned).collect();
+        left.extend(self.overlooked_edits(folder).await?);
         let mut remove = vec!["worktree", "remove"];
         if !left.is_empty() {
             match files {
-                LeftFiles::Keep => {
-                    let files = left.lines().map(str::to_owned).collect();
-                    return Ok(Cleanup::Kept { files });
-                }
+                LeftFiles::Keep => return Ok(Cleanup::Kept { files: left }),
                 LeftFiles::Discard => remove.push("--force"),
             }
         }
         remove.extend(["--", path]);
         self.git.run(repository, &remove, CHECKOUT).await?;
         Ok(Cleanup::Removed)
+    }
+
+    /// Edits `git status` does not show, because the file is marked assume-unchanged or
+    /// skip-worktree, as status lines such as ` M config.txt`. A file is edited when its content
+    /// on disk hashes to another object than the index holds.
+    async fn overlooked_edits(&self, folder: &Path) -> Result<Vec<String>, PlaceError> {
+        let listed = self
+            .git
+            .run(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
+            .await?;
+        let mut on_disk = Vec::new();
+        for (object, path) in overlooked(&listed) {
+            // A skip-worktree file a sparse checkout left out has nothing on disk to lose.
+            if tokio::fs::symlink_metadata(folder.join(path)).await.is_ok() {
+                on_disk.push((object, path));
+            }
+        }
+        if on_disk.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut hash = vec!["hash-object", "--"];
+        hash.extend(on_disk.iter().map(|(_, path)| *path));
+        let hashed = self.git.run(folder, &hash, git::QUICK).await?;
+        Ok(on_disk
+            .iter()
+            .zip(hashed.lines())
+            .filter(|((object, _), now)| object != now)
+            .map(|((_, path), _)| format!(" M {path}"))
+            .collect())
     }
 
     /// Removes what is left of a worktree that is no longer one, such as the folder a removal git
@@ -137,5 +165,38 @@ impl Worktrees {
         let prune = ["worktree", "prune"];
         self.git.run(repository, &prune, git::QUICK).await?;
         Ok(Cleanup::Removed)
+    }
+}
+
+/// The object and path of each index entry in `git ls-files -v -s -z` output that git is told to
+/// overlook: a lowercase tag marks assume-unchanged, and `S` marks skip-worktree.
+fn overlooked(listed: &str) -> impl Iterator<Item = (&str, &str)> {
+    listed.split('\0').filter_map(|entry| {
+        let (fields, path) = entry.split_once('\t')?;
+        let mut fields = fields.split(' ');
+        let tag = fields.next()?;
+        let object = fields.nth(1)?;
+        let is_overlooked = tag == "S" || tag.chars().all(|tag| tag.is_ascii_lowercase());
+        is_overlooked.then_some((object, path))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_files_git_is_told_to_overlook_are_listed() {
+        let listed = "H 100644 1111 0\tplain.txt\0h 100644 2222 0\tassumed.txt\0\
+                      S 100644 3333 0\tsparse.txt\0s 100644 4444 0\tboth.txt\0";
+
+        assert_eq!(
+            overlooked(listed).collect::<Vec<_>>(),
+            [
+                ("2222", "assumed.txt"),
+                ("3333", "sparse.txt"),
+                ("4444", "both.txt")
+            ]
+        );
     }
 }
