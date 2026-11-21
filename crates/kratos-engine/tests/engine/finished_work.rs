@@ -368,6 +368,59 @@ fn wait_for_turn(client: &Client, thread: &Thread) {
 }
 
 #[test]
+fn a_pull_request_from_the_default_branch_is_refused_before_anything_is_pushed() {
+    // Catches a pull request that pushes the thread's work straight onto the branch it was meant
+    // to be reviewed against.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let remote = root.path().join("remote.git");
+    git(
+        root.path(),
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            remote.to_str().unwrap(),
+        ],
+    );
+    git(
+        &repository,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&repository, &["push", "--quiet", "origin", "main"]);
+    let published = git(&remote, &["rev-parse", "main"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
+    std::fs::write(repository.join("README.md"), "reviewed later\n").unwrap();
+    assert_eq!(commit(&client, &thread, "Change the readme").status, 201);
+
+    let reply = client
+        .post(
+            &routes::thread_pull_request(&thread.id),
+            &CreatePullRequest {
+                title: RequiredText::new("Change the readme").unwrap(),
+                body: String::new(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(reply.status, 400, "{}", reply.body);
+    assert!(
+        reply.body["error"]
+            .as_str()
+            .unwrap()
+            .contains("default branch"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(git(&remote, &["rev-parse", "main"]), published);
+    assert!(engine.fake_gh_runs().is_empty());
+}
+
+#[test]
 fn a_pull_request_pushes_the_branch_and_gives_gh_each_value_as_its_own_argument() {
     // Catches a branch never pushed, or a title or body that a shell or `gh` itself would read as
     // code or a flag.

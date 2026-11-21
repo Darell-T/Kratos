@@ -128,7 +128,8 @@ impl Worktrees {
     }
 
     /// Pushes the branch `folder` has checked out to `origin`, then opens a pull request for it
-    /// with the user's own `gh` and returns its address.
+    /// with the user's own `gh` and returns its address. A branch that is `origin`'s default is
+    /// refused before the push, which would put the work on it unreviewed.
     pub(crate) async fn pull_request(
         &self,
         folder: &Path,
@@ -139,6 +140,9 @@ impl Worktrees {
             .branch_of(folder)
             .await?
             .ok_or_else(|| PlaceError::NoBranch(folder.display().to_string()))?;
+        if self.default_branch(folder).await?.as_ref() == Some(&branch) {
+            return Err(PlaceError::OnDefaultBranch(branch));
+        }
         let lock = self.lock_of_folder(folder).await?;
         let _one_at_a_time = lock.lock().await;
         let push = ["push", "--set-upstream", "origin", &branch];
@@ -153,6 +157,19 @@ impl Worktrees {
         ];
         let created = self.gh(folder, &args).await?;
         Ok(created.lines().last().unwrap_or_default().trim().to_owned())
+    }
+
+    /// The branch `origin`'s `HEAD` names, which `gh` opens a pull request against, or `None` when
+    /// the remote names none, as an empty one does.
+    async fn default_branch(&self, folder: &Path) -> Result<Option<String>, PlaceError> {
+        let args = ["ls-remote", "--symref", "origin", "HEAD"];
+        let listed = self.git.run(folder, &args, CHECKOUT).await?;
+        Ok(listed.lines().find_map(|line| {
+            let branch = line
+                .strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")?;
+            Some(branch.to_owned())
+        }))
     }
 
     async fn gh(&self, folder: &Path, args: &[String]) -> Result<String, PlaceError> {

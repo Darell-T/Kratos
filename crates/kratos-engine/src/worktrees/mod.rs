@@ -85,6 +85,12 @@ pub(crate) enum PlaceError {
     #[error("{0} has no branch checked out. Check out a branch to open a pull request from it.")]
     NoBranch(String),
     #[error(
+        "{0} is the repository's default branch, so a pull request from it would push the work \
+         straight onto the branch it is meant to be reviewed against. Start the thread in a new \
+         worktree, then open the pull request from there."
+    )]
+    OnDefaultBranch(String),
+    #[error(
         "Kratos could not run gh. Install the GitHub CLI and sign in with `gh auth login`. ({0})"
     )]
     NoGh(#[source] io::Error),
