@@ -9,7 +9,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::actor::{Actor, Done, Frame, Opened};
-use super::profiles::{Profile, temp_folder};
+use super::profiles::{NpmCache, Profile, temp_folder};
 use super::recovery::{self, EndReason, EndingTurn, Unfinished};
 use super::servers::{Server, ServerKey, TerminalCheck};
 use super::threads::{Link, ThreadState, Turn};
@@ -86,6 +86,7 @@ fn thread_config(
     context_limit: Option<ContextLimit>,
     mcp: Option<&McpServer>,
     thread_id: &ThreadId,
+    npm_cache: NpmCache,
 ) -> Option<serde_json::Value> {
     let mut config = serde_json::Map::new();
     if let Some(tokens) = context_limit {
@@ -97,7 +98,17 @@ fn thread_config(
         kratos["tool_timeout_sec"] = json!(MCP_TOOL_TIMEOUT_SECONDS);
         config.insert("mcp_servers".to_owned(), json!({ "kratos": kratos }));
     }
-    (!config.is_empty()).then_some(serde_json::Value::Object(config))
+    // Always write `shell_environment_policy.set` so resuming a previously sandboxed thread under
+    // Full access clears Kratos's temp-folder override while keeping any user config.toml entries.
+    let env_set = match npm_cache.path() {
+        Some(path) => json!({ "npm_config_cache": path }),
+        None => json!({}),
+    };
+    config.insert(
+        "shell_environment_policy".to_owned(),
+        json!({ "set": env_set }),
+    );
+    Some(serde_json::Value::Object(config))
 }
 
 pub(super) fn launch(settings: &CodexSettings) -> Launch {
@@ -106,13 +117,6 @@ pub(super) fn launch(settings: &CodexSettings) -> Launch {
     #[cfg(windows)]
     args.extend(super::sandbox::launch_arguments());
     args.extend(settings.protected.launch_arguments(&temp_folder()));
-    let mut env_set = settings.env_set.clone();
-    // npm's default cache is outside every folder a sandboxed thread may write, so without this
-    // every `npm install` below Full access fails. Threads share one cache in the temp folder.
-    env_set.push((
-        "npm_config_cache".into(),
-        temp_folder().join("kratos-npm-cache").into(),
-    ));
     Launch {
         program: settings.program.clone(),
         args,
@@ -122,7 +126,7 @@ pub(super) fn launch(settings: &CodexSettings) -> Launch {
             .map(|(name, _)| name)
             .filter(|name| is_kratos_variable(name))
             .collect(),
-        env_set,
+        env_set: settings.env_set.clone(),
         client_info: types::ClientInfo {
             name: "kratos".to_owned(),
             title: Some("Kratos".to_owned()),
@@ -191,6 +195,7 @@ impl Actor {
     pub(super) async fn attached(
         &mut self,
         thread_id: &ThreadId,
+        limit: Option<kratos_protocol::AccessLimit>,
     ) -> Result<Option<String>, ProviderError> {
         self.load(thread_id).await?;
         let key = ServerKey::Thread(thread_id.clone());
@@ -202,21 +207,12 @@ impl Actor {
             return Ok(None);
         }
         let thread = self.threads.get(thread_id).expect("loaded above");
-        // Codex applies a context limit only when it loads the thread, so a thread loaded under
-        // another limit is unloaded and loaded again.
-        let (reload, access) = match &thread.link {
-            Link::Attached {
-                native_id,
-                context_limit,
-                ..
-            } if *context_limit == thread.settings.context_limit_tokens => {
-                return Ok(Some(native_id.clone()));
-            }
-            Link::Attached {
-                native_id, access, ..
-            } => (Some(native_id.clone()), *access),
-            Link::Attaching => return Ok(None),
-            Link::Detached => (None, thread.turn_settings().access()),
+        let effective = effective_settings(&thread.settings, limit);
+        let desired_npm_cache = NpmCache::for_profile(Profile::for_settings(&effective));
+        let (reload, access) = match attach_action(thread, &effective, desired_npm_cache) {
+            AttachAction::Ready(native_id) => return Ok(Some(native_id)),
+            AttachAction::Wait => return Ok(None),
+            AttachAction::Open { reload, access } => (reload, access),
         };
         let Some(codex) = self.connection(&key)? else {
             return Ok(None);
@@ -231,12 +227,16 @@ impl Actor {
             .native_id;
         let thread = self.threads.get_mut(thread_id).expect("loaded above");
         thread.link = Link::Attaching;
-        let profile = Profile::for_settings(&thread.settings).id().to_owned();
-        let context_limit = thread.settings.context_limit_tokens;
-        let config = thread_config(context_limit, self.settings.mcp.as_ref(), thread_id);
+        let profile = Profile::for_settings(&effective).id().to_owned();
+        let context_limit = effective.context_limit_tokens;
+        let config = thread_config(
+            context_limit,
+            self.settings.mcp.as_ref(),
+            thread_id,
+            desired_npm_cache,
+        );
         let folder = thread.folder.clone();
-        let model = thread
-            .settings
+        let model = effective
             .model
             .as_ref()
             .map(|model| model.as_str().to_owned());
@@ -254,6 +254,7 @@ impl Actor {
                 thread_id,
                 context_limit,
                 access,
+                npm_cache: desired_npm_cache,
                 result,
             }
         });
@@ -265,6 +266,7 @@ impl Actor {
         thread_id: ThreadId,
         context_limit: Option<ContextLimit>,
         access: kratos_protocol::AccessLimit,
+        npm_cache: NpmCache,
         result: Result<Opened, RequestError>,
     ) {
         let Some(thread) = self.threads.get_mut(&thread_id) else {
@@ -277,6 +279,7 @@ impl Actor {
                     model: opened.model.clone(),
                     context_limit,
                     access,
+                    npm_cache,
                 };
                 let recorded = if opened.is_new {
                     let plan = self.plan.clone();
@@ -338,6 +341,8 @@ impl Actor {
         }
         let context_limit = settings.context_limit_tokens;
         let access = settings.access();
+        let profile = Profile::for_settings(&settings);
+        let npm_cache = NpmCache::for_profile(profile);
         let mut params: types::ThreadForkParams = wire::required(json!({
             "threadId": native_id, "ephemeral": false, "excludeTurns": true,
             "deferGoalContinuation": true,
@@ -346,10 +351,15 @@ impl Actor {
         params.runtime_workspace_roots = Some(vec![types::AbsolutePathBuf(thread.folder.clone())]);
         params.approval_policy = Some(policy::APPROVAL_POLICY);
         params.approvals_reviewer = Some(policy::APPROVALS_REVIEWER);
-        params.permissions = Some(Profile::for_settings(&settings).id().to_owned());
+        params.permissions = Some(profile.id().to_owned());
         params.model = settings.model.map(RequiredText::into_string);
-        params.config = thread_config(context_limit, self.settings.mcp.as_ref(), thread_id)
-            .and_then(|config| config.as_object().cloned());
+        params.config = thread_config(
+            context_limit,
+            self.settings.mcp.as_ref(),
+            thread_id,
+            npm_cache,
+        )
+        .and_then(|config| config.as_object().cloned());
         let native_id = native_id.clone();
         thread.link = Link::Attaching;
         let key = ServerKey::Thread(thread_id.clone());
@@ -381,6 +391,7 @@ impl Actor {
                 thread_id,
                 context_limit,
                 access,
+                npm_cache,
                 result,
             }
         });
@@ -392,7 +403,7 @@ impl Actor {
     pub(super) async fn reconcile_waiting(&mut self) {
         for thread_id in std::mem::take(&mut self.reconcile) {
             let key = ServerKey::Thread(thread_id.clone());
-            let waits_for_codex = matches!(self.attached(&thread_id).await, Ok(None))
+            let waits_for_codex = matches!(self.attached(&thread_id, None).await, Ok(None))
                 && (self
                     .servers
                     .get(&key)
@@ -559,6 +570,61 @@ pub(super) async fn connect_ready(
     Ok((codex, incoming))
 }
 
+enum AttachAction {
+    Ready(String),
+    Wait,
+    Open {
+        reload: Option<String>,
+        access: kratos_protocol::AccessLimit,
+    },
+}
+
+fn effective_settings(
+    settings: &kratos_protocol::ThreadSettings,
+    limit: Option<kratos_protocol::AccessLimit>,
+) -> kratos_protocol::ThreadSettings {
+    match limit {
+        Some(limit) => settings.limited_to(limit),
+        None => settings.clone(),
+    }
+}
+
+/// Codex applies a context limit and `shell_environment_policy` only when it loads the thread, so
+/// a thread whose limit or npm cache scope changed is unloaded and loaded again unless a pending
+/// access-reduction fork is about to replace the session.
+fn attach_action(
+    thread: &ThreadState,
+    effective: &kratos_protocol::ThreadSettings,
+    desired_npm_cache: NpmCache,
+) -> AttachAction {
+    match &thread.link {
+        Link::Attached {
+            native_id,
+            context_limit,
+            access,
+            npm_cache,
+            ..
+        } => {
+            let will_fork = thread.turn_settings.is_some() && !effective.access().covers(*access);
+            let matches =
+                *context_limit == effective.context_limit_tokens && *npm_cache == desired_npm_cache;
+            if will_fork || matches {
+                AttachAction::Ready(native_id.clone())
+            } else {
+                AttachAction::Open {
+                    reload: Some(native_id.clone()),
+                    access: *access,
+                }
+            }
+        }
+        Link::Attaching => AttachAction::Wait,
+        Link::Detached => AttachAction::Open {
+            reload: None,
+            access: thread.turn_settings().access(),
+        },
+    }
+}
+
 fn fail_discards(thread: &mut ThreadState, error: &str) {
     for (_, reply) in std::mem::take(&mut thread.discards) {
         let _ = reply.send(Err(ProviderError::Unavailable(error.to_owned())));
@@ -646,5 +712,35 @@ mod tests {
         for name in ["PATH", "KRATOSX", "MY_KRATOS_HOME"] {
             assert!(!is_kratos_variable(std::ffi::OsStr::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn app_server_launch_does_not_override_npm_config_cache() {
+        // Catches setting `npm_config_cache` process-wide on the Codex app-server, which leaks the
+        // sandbox-writable temp cache into Full access threads and account/MCP processes.
+        let settings = CodexSettings {
+            program: "codex".into(),
+            extra_args: Vec::new(),
+            env_set: Vec::new(),
+            server_folder: std::path::PathBuf::from("."),
+            protected: super::super::profiles::ProtectedFolders::new(
+                std::path::PathBuf::from(".kratos"),
+                None,
+                None,
+            ),
+            stop_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(5),
+            platform: kratos_command_safety::DangerousCommandPlatform::Posix,
+            mcp: None,
+        };
+        let launched = launch(&settings);
+        assert!(
+            launched
+                .env_set
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("npm_config_cache")),
+            "launch must not set npm_config_cache: {:?}",
+            launched.env_set
+        );
     }
 }

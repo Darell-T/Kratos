@@ -93,7 +93,7 @@ impl Actor {
             .await;
             return;
         }
-        let native_id = match self.attached(thread_id).await {
+        let native_id = match self.attached(thread_id, next.origin.limit()).await {
             Ok(Some(native_id)) => native_id,
             // Loading; the load's completion dispatches again.
             Ok(None) => return,

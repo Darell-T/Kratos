@@ -86,7 +86,7 @@ impl Harness {
 
     async fn attached_reply_for(&mut self, thread_id: &ThreadId) -> Completion {
         loop {
-            self.actor.attached(thread_id).await.unwrap();
+            self.actor.attached(thread_id, None).await.unwrap();
             let done = self
                 .completion(|done| matches!(done, Done::Connected { .. } | Done::Attached { .. }))
                 .await;
@@ -330,7 +330,11 @@ async fn an_old_attach_reply_does_not_detach_a_replacement_process() {
     let loaded = harness.actor.threads[&harness.thread_id]
         .native_id()
         .map(str::to_owned);
-    let attached = harness.actor.attached(&harness.thread_id).await.unwrap();
+    let attached = harness
+        .actor
+        .attached(&harness.thread_id, None)
+        .await
+        .unwrap();
     harness.close().await;
     assert_eq!(loaded, Some(native_id.clone()));
     assert_eq!(attached, Some(native_id));

@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use super::approvals::Requests;
 use super::connection::StartError;
+use super::profiles::NpmCache;
 use super::servers::{ServerKey, Servers};
 use super::threads::ThreadState;
 use super::turns::{Delivery, StartRequest, StopWaiters};
@@ -145,6 +146,7 @@ pub(super) enum Done {
         /// The context limit the thread was loaded with (D76).
         context_limit: Option<ContextLimit>,
         access: AccessLimit,
+        npm_cache: NpmCache,
         result: Result<Opened, RequestError>,
     },
     StartAnswered {
@@ -332,9 +334,10 @@ impl Actor {
                 thread_id,
                 context_limit,
                 access,
+                npm_cache,
                 result,
             } => {
-                self.on_attached(thread_id, context_limit, access, result)
+                self.on_attached(thread_id, context_limit, access, npm_cache, result)
                     .await
             }
             Done::StartAnswered { request, result } => {

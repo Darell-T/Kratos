@@ -489,6 +489,7 @@ impl Fake {
                 id,
                 json!({
                     "codexHome": std::env::var("CODEX_HOME").ok(),
+                    "npmConfigCache": std::env::var("npm_config_cache").ok(),
                     "cwd": std::env::current_dir().ok(),
                     "arguments": std::env::args().skip(1).collect::<Vec<_>>(),
                 }),

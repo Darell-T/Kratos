@@ -157,7 +157,7 @@ impl Actor {
                 "Stop the turn before discarding a message".into(),
             ));
         }
-        self.attached(thread_id).await
+        self.attached(thread_id, None).await
     }
 
     pub(super) async fn on_history_for_discard(
