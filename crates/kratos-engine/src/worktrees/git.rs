@@ -126,24 +126,14 @@ impl Git {
             Ok(Err(error)) => return Err(GitError::Read(error)),
             Ok(Ok(read)) => read,
         };
-        let mut kept = read.stdout;
-        if read.is_cut {
-            let whole_lines = kept
-                .iter()
-                .rposition(|&byte| byte == b'\n')
-                .map_or(0, |end| end + 1);
-            kept.truncate(whole_lines);
-        } else if !read.status.success() {
+        if !read.is_cut && !read.status.success() {
             return Err(GitError::Failed {
                 command,
                 code: read.status.code(),
                 stderr: String::from_utf8_lossy(&read.stderr).trim().to_owned(),
             });
         }
-        Ok(Capped {
-            text: String::from_utf8_lossy(&kept).into_owned(),
-            is_cut: read.is_cut,
-        })
+        Ok(capped_text(&read.stdout, read.is_cut, max_bytes))
     }
 
     fn command(&self, folder: &Path, args: &[&str], index: Option<&Path>) -> Command {
@@ -205,6 +195,23 @@ async fn read_child(mut child: Child, max_bytes: usize) -> io::Result<ChildOutpu
         stderr,
         status,
     })
+}
+
+/// `bytes` as text of at most `max_bytes`, which ends at the last whole line within the limit when
+/// git wrote more (`is_cut`) or when decoding made it longer: each byte that is not UTF-8 becomes
+/// a three-byte replacement character.
+fn capped_text(bytes: &[u8], is_cut: bool, max_bytes: usize) -> Capped {
+    let mut text = String::from_utf8_lossy(bytes).into_owned();
+    let is_cut = is_cut || text.len() > max_bytes;
+    if is_cut {
+        let within = &text.as_bytes()[..text.len().min(max_bytes)];
+        let whole_lines = within
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |end| end + 1);
+        text.truncate(whole_lines);
+    }
+    Capped { text, is_cut }
 }
 
 /// Reads `reader` until it ends or has given more than `max_bytes`, and keeps at most `max_bytes`

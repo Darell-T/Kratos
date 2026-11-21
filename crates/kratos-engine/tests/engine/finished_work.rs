@@ -136,6 +136,26 @@ fn a_diff_past_the_limit_ends_at_a_whole_line_and_says_it_was_cut() {
 }
 
 #[test]
+fn a_diff_of_text_that_is_not_utf8_stays_within_the_limit_once_decoded() {
+    // Catches the limit applied to git's bytes only: each byte that is not UTF-8 becomes a
+    // three-byte replacement character, so 2 MiB of Latin-1 became a 6 MiB patch.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
+    let line = [&[0xE9_u8; 63][..], b"\n"].concat();
+    std::fs::write(repository.join("latin1.txt"), line.repeat(32_768)).unwrap();
+
+    let diff = diff(&client, &thread);
+
+    assert!(diff.patch.len() <= 4 * 1024 * 1024, "{}", diff.patch.len());
+    assert!(diff.truncated);
+    assert!(diff.patch.ends_with('\n'), "the patch ends mid-line");
+}
+
+#[test]
 fn a_project_in_a_subfolder_diffs_and_commits_only_that_folder() {
     // Catches a diff or commit that takes in the rest of the repository, including a change the
     // user staged outside the project.
