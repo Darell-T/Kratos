@@ -311,7 +311,9 @@ impl From<PlaceError> for ApiError {
             }
             conflict @ (PlaceError::NotItsWorktree(_)
             | PlaceError::BeingEdited
-            | PlaceError::PartialCommitDuring(_)) => ApiError::new(StatusCode::CONFLICT, conflict),
+            | PlaceError::PartialCommitDuring(_)
+            | PlaceError::IndexInUse(_)
+            | PlaceError::HeadMoved) => ApiError::new(StatusCode::CONFLICT, conflict),
             refused => ApiError::bad_request(refused.to_string()),
         }
     }

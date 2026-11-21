@@ -745,6 +745,88 @@ fn a_refused_commit_leaves_what_the_user_staged_meanwhile() {
 }
 
 #[test]
+fn a_commit_the_user_makes_while_a_folder_commit_stages_files_is_not_undone() {
+    // Catches a folder commit whose files outside the folder come from HEAD as it was before it
+    // staged, put on top of the commit the user made meanwhile, which undoes that commit.
+    let root = TempDir::new().unwrap();
+    let repository = repository_with_component_only(&root);
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "add");
+    let inner = workspace_at(&engine, &repository.join("component"));
+    let client = engine.client();
+    let thread = create(&client, &inner, "chat", PlaceRequest::default());
+    std::fs::write(repository.join("component").join("part.txt"), "two\n").unwrap();
+    engine.hold(Gate::Git);
+    let committing = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || commit(&client, &thread, "Two"))
+    };
+    engine.wait_until_held(Gate::Git);
+    std::fs::write(repository.join("README.md"), "the user's\n").unwrap();
+    git(&repository, &["commit", "--quiet", "-am", "The user's"]);
+    let users = git(&repository, &["rev-parse", "HEAD"]);
+    engine.release(Gate::Git);
+
+    let refused = committing.join().unwrap();
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), users);
+    assert!(!repository.join(".git").join("index.lock").exists());
+}
+
+#[test]
+fn a_commit_keeps_what_the_user_staged_in_the_folder_while_it_staged_files() {
+    // Catches a commit that sets the user's index to the committed files afterwards, which drops a
+    // version the user staged meanwhile.
+    let root = TempDir::new().unwrap();
+    let repository = repository_with_component_only(&root);
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "add");
+    let inner = workspace_at(&engine, &repository.join("component"));
+    let client = engine.client();
+    let thread = create(&client, &inner, "chat", PlaceRequest::default());
+    let part = repository.join("component").join("part.txt");
+    std::fs::write(&part, "two\n").unwrap();
+    engine.hold(Gate::Git);
+    let committing = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || commit(&client, &thread, "Three"))
+    };
+    engine.wait_until_held(Gate::Git);
+    git(&repository, &["add", "component/part.txt"]);
+    std::fs::write(&part, "three\n").unwrap();
+    engine.release(Gate::Git);
+
+    let reply = committing.join().unwrap();
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(
+        git(&repository, &["show", "HEAD:component/part.txt"]),
+        "three"
+    );
+    assert_eq!(git(&repository, &["show", ":component/part.txt"]), "two");
+    assert!(!repository.join(".git").join("index.lock").exists());
+}
+
+#[test]
+fn a_commit_while_another_git_command_changes_the_index_is_refused_before_it_commits() {
+    // Catches a commit that moves HEAD, then fails to update the user's index, which another git
+    // command holds, and reports the commit it made as failed.
+    let root = TempDir::new().unwrap();
+    let (repository, engine) = repository_with_component(&root);
+    let inner = workspace_at(&engine, &repository.join("component"));
+    let client = engine.client();
+    let thread = create(&client, &inner, "chat", PlaceRequest::default());
+    std::fs::write(repository.join("component").join("part.txt"), "two\n").unwrap();
+    let head = git(&repository, &["rev-parse", "HEAD"]);
+    let index_lock = repository.join(".git").join("index.lock");
+    std::fs::write(&index_lock, "").unwrap();
+
+    let refused = commit(&client, &thread, "Two");
+
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
+    std::fs::remove_file(&index_lock).unwrap();
+    assert_eq!(git(&repository, &["show", ":component/part.txt"]), "one");
+}
+
+#[test]
 fn a_turn_that_runs_and_ends_while_a_commit_stages_files_stops_it() {
     // Catches a commit that only asks whether a turn runs before and after git stages: a whole
     // turn can run between, so git took one file from before it and another from after it.

@@ -6,6 +6,7 @@
 
 mod cleanup;
 mod git;
+mod index_lock;
 mod list;
 mod work;
 
@@ -103,6 +104,13 @@ pub(crate) enum PlaceError {
          in the repository's top folder."
     )]
     PartialCommitDuring(work::Underway),
+    #[error("Another git command is changing the index at {0}. Commit again once it ends.")]
+    IndexInUse(String),
+    #[error(
+        "Another commit landed on this branch while Kratos staged the files. Look at what it \
+         changed, then commit again."
+    )]
+    HeadMoved,
     #[error("{0} has no branch checked out. Check out a branch to open a pull request from it.")]
     NoBranch(String),
     #[error(
