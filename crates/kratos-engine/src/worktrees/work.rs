@@ -8,10 +8,11 @@ use kratos_protocol::ThreadDiff;
 use tokio::process::Command;
 use uuid::Uuid;
 
-use super::git::{self, CHECKOUT};
+use super::git::{self, CHECKOUT, Capped};
 use super::{PlaceError, Worktrees};
 
-/// The most patch text a diff returns. A client shows the rest by reading the folder itself.
+/// The most patch text a diff returns, cut at a whole line. A client shows the rest by reading the
+/// folder itself.
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
 impl Worktrees {
@@ -43,15 +44,11 @@ impl Worktrees {
         }
         let patch = self.staged_patch(folder, &base, &index).await;
         let _ = tokio::fs::remove_file(&index).await;
-        let mut patch = patch?;
-        let truncated = patch.len() > MAX_PATCH_BYTES;
-        if truncated {
-            patch.truncate(patch.floor_char_boundary(MAX_PATCH_BYTES));
-        }
+        let patch = patch?;
         Ok(ThreadDiff {
             base,
-            patch,
-            truncated,
+            patch: patch.text,
+            truncated: patch.is_cut,
         })
     }
 
@@ -60,9 +57,9 @@ impl Worktrees {
         folder: &Path,
         base: &str,
         index: &Path,
-    ) -> Result<String, PlaceError> {
+    ) -> Result<Capped, PlaceError> {
         self.git
-            .run_with_index(folder, &["add", "--all"], CHECKOUT, index)
+            .run_in_index(folder, &["add", "--all"], CHECKOUT, index)
             .await?;
         // A diff or text-conversion program the user's config names would run outside every
         // sandbox, on files an agent wrote.
@@ -77,7 +74,7 @@ impl Worktrees {
         ];
         Ok(self
             .git
-            .run_with_index(folder, &args, git::QUICK, index)
+            .read_in_index(folder, &args, git::QUICK, index, MAX_PATCH_BYTES)
             .await?)
     }
 

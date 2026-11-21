@@ -1,8 +1,10 @@
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use tokio::process::Command;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::{Child, Command};
 
 /// How long an ordinary git command may take, such as reading a branch name.
 pub(super) const QUICK: Duration = Duration::from_secs(30);
@@ -10,6 +12,10 @@ pub(super) const QUICK: Duration = Duration::from_secs(30);
 /// How long `git worktree add` may take. Checking out a large repository writes every tracked
 /// file, and users saw removals of big worktrees time out (Appendix I, L12).
 pub(super) const CHECKOUT: Duration = Duration::from_secs(600);
+
+/// The most of git's error output kept for a message. The rest is read and dropped, so git never
+/// waits on a full pipe.
+const MAX_STDERR_BYTES: usize = 64 * 1024;
 
 /// Runs Kratos's own git commands with the repository's hooks turned off, so a hook a repository
 /// ships never runs outside every sandbox when Kratos makes a worktree or a branch.
@@ -21,7 +27,9 @@ pub(super) struct Git {
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum GitError {
     #[error("Kratos could not run git. Install git and put it on PATH. ({0})")]
-    Missing(std::io::Error),
+    Missing(io::Error),
+    #[error("Kratos could not read what git wrote: {0}")]
+    Read(io::Error),
     #[error("`git {command}` failed: {stderr}")]
     Failed {
         command: String,
@@ -39,6 +47,13 @@ impl GitError {
     }
 }
 
+/// What a command wrote, up to a limit.
+pub(super) struct Capped {
+    pub text: String,
+    /// Whether git wrote more than the limit, so `text` ends at the last whole line within it.
+    pub is_cut: bool,
+}
+
 impl Git {
     /// `hooks_off` is an empty folder that git reads as the hooks folder.
     pub(super) fn new(hooks_off: PathBuf) -> Git {
@@ -52,24 +67,22 @@ impl Git {
         args: &[&str],
         budget: Duration,
     ) -> Result<String, GitError> {
-        let stdout = self.run_with(folder, args, budget, None).await?;
-        Ok(stdout.trim_end_matches(['\r', '\n']).to_owned())
+        self.output(folder, args, budget, None).await
     }
 
-    /// Runs git with `index` as its index file instead of the worktree's own, so staging there
-    /// leaves the user's staged changes as they were. Returns standard output as git wrote it, so
-    /// a patch keeps its last newline.
-    pub(super) async fn run_with_index(
+    /// [`Git::run`] with `index` as git's index file instead of the worktree's own, so staging
+    /// there leaves the user's staged changes as they were.
+    pub(super) async fn run_in_index(
         &self,
         folder: &Path,
         args: &[&str],
         budget: Duration,
         index: &Path,
     ) -> Result<String, GitError> {
-        self.run_with(folder, args, budget, Some(index)).await
+        self.output(folder, args, budget, Some(index)).await
     }
 
-    async fn run_with(
+    async fn output(
         &self,
         folder: &Path,
         args: &[&str],
@@ -77,18 +90,7 @@ impl Git {
         index: Option<&Path>,
     ) -> Result<String, GitError> {
         let command = args.join(" ");
-        let mut git = Command::new("git");
-        if let Some(index) = index {
-            git.env("GIT_INDEX_FILE", index);
-        }
-        git.arg("-c")
-            .arg(format!("core.hooksPath={}", self.hooks_off.display()))
-            .arg("-C")
-            .arg(folder)
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdin(Stdio::null())
-            .kill_on_drop(true);
+        let mut git = self.command(folder, args, index);
         let output = match tokio::time::timeout(budget, git.output()).await {
             Err(_) => return Err(GitError::TimedOut { command, budget }),
             Ok(Err(error)) => return Err(GitError::Missing(error)),
@@ -101,6 +103,149 @@ impl Git {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             });
         }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        Ok(stdout.trim_end_matches(['\r', '\n']).to_owned())
+    }
+
+    /// [`Git::run_in_index`] that keeps at most `max_bytes` of standard output, as git wrote it,
+    /// and stops git once it writes more.
+    pub(super) async fn read_in_index(
+        &self,
+        folder: &Path,
+        args: &[&str],
+        budget: Duration,
+        index: &Path,
+        max_bytes: usize,
+    ) -> Result<Capped, GitError> {
+        let command = args.join(" ");
+        let mut git = self.command(folder, args, Some(index));
+        git.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let child = git.spawn().map_err(GitError::Missing)?;
+        let read = match tokio::time::timeout(budget, read_child(child, max_bytes)).await {
+            Err(_) => return Err(GitError::TimedOut { command, budget }),
+            Ok(Err(error)) => return Err(GitError::Read(error)),
+            Ok(Ok(read)) => read,
+        };
+        let mut kept = read.stdout;
+        if read.is_cut {
+            let whole_lines = kept
+                .iter()
+                .rposition(|&byte| byte == b'\n')
+                .map_or(0, |end| end + 1);
+            kept.truncate(whole_lines);
+        } else if !read.status.success() {
+            return Err(GitError::Failed {
+                command,
+                code: read.status.code(),
+                stderr: String::from_utf8_lossy(&read.stderr).trim().to_owned(),
+            });
+        }
+        Ok(Capped {
+            text: String::from_utf8_lossy(&kept).into_owned(),
+            is_cut: read.is_cut,
+        })
+    }
+
+    fn command(&self, folder: &Path, args: &[&str], index: Option<&Path>) -> Command {
+        let mut git = Command::new("git");
+        if let Some(index) = index {
+            git.env("GIT_INDEX_FILE", index);
+        }
+        git.arg("-c")
+            .arg(format!("core.hooksPath={}", self.hooks_off.display()))
+            .arg("-C")
+            .arg(folder)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        git
+    }
+}
+
+/// What a child wrote and how it ended.
+struct ChildOutput {
+    stdout: Vec<u8>,
+    /// Whether the child wrote more than the limit, so it was stopped.
+    is_cut: bool,
+    stderr: Vec<u8>,
+    status: ExitStatus,
+}
+
+/// Reads `child`'s output, keeping at most `max_bytes` of standard output and stopping the child
+/// once it writes more. Standard error is read at the same time, so the child never waits on a
+/// full pipe.
+async fn read_child(mut child: Child, max_bytes: usize) -> io::Result<ChildOutput> {
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let mut stderr = child.stderr.take().expect("stderr is piped");
+    let out = async {
+        let read = read_capped(&mut stdout, max_bytes).await?;
+        if read.1 {
+            child.start_kill()?;
+        }
+        io::Result::Ok(read)
+    };
+    let err = async {
+        let (kept, is_cut) = read_capped(&mut stderr, MAX_STDERR_BYTES).await?;
+        if is_cut {
+            tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await?;
+        }
+        io::Result::Ok(kept)
+    };
+    let ((stdout, is_cut), stderr) = tokio::try_join!(out, err)?;
+    let status = child.wait().await?;
+    Ok(ChildOutput {
+        stdout,
+        is_cut,
+        stderr,
+        status,
+    })
+}
+
+/// Reads `reader` until it ends or has given more than `max_bytes`, and keeps at most `max_bytes`
+/// of it. Returns what it kept and whether there was more.
+async fn read_capped(
+    reader: &mut (impl AsyncRead + Unpin),
+    max_bytes: usize,
+) -> io::Result<(Vec<u8>, bool)> {
+    let mut kept = Vec::new();
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        let read = reader.read(&mut chunk).await?;
+        if read == 0 {
+            return Ok((kept, false));
+        }
+        let room = max_bytes - kept.len();
+        if read > room {
+            kept.extend_from_slice(&chunk[..room]);
+            return Ok((kept, true));
+        }
+        kept.extend_from_slice(&chunk[..read]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reading_stops_at_the_limit_however_much_more_there_is() {
+        // Catches a reader that buffers all of git's output before applying the limit: on an
+        // endless stream it never returns.
+        let mut endless = tokio::io::repeat(b'x');
+        let read = tokio::time::timeout(Duration::from_secs(10), read_capped(&mut endless, 1000))
+            .await
+            .expect("reading an endless stream stops at the limit")
+            .unwrap();
+
+        assert_eq!((read.0.len(), read.1), (1000, true));
+    }
+
+    #[tokio::test]
+    async fn output_at_the_limit_is_kept_whole() {
+        let mut exact: &[u8] = &[b'x'; 1000];
+        let read = read_capped(&mut exact, 1000).await.unwrap();
+
+        assert_eq!((read.0.len(), read.1), (1000, false));
     }
 }

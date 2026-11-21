@@ -114,6 +114,25 @@ fn a_diff_is_a_patch_git_can_apply() {
 }
 
 #[test]
+fn a_diff_past_the_limit_ends_at_a_whole_line_and_says_it_was_cut() {
+    // Catches a cut in the middle of a line, or a long diff returned whole.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
+    let line = format!("{}\n", "x".repeat(99));
+    std::fs::write(repository.join("big.txt"), line.repeat(60_000)).unwrap();
+
+    let diff = diff(&client, &thread);
+
+    assert!(diff.truncated);
+    assert!(diff.patch.len() <= 4 * 1024 * 1024, "{}", diff.patch.len());
+    assert!(diff.patch.ends_with(&format!("+{line}")), "the patch ends mid-line");
+}
+
+#[test]
 fn a_commit_is_the_users_own_with_the_message_as_given_and_runs_no_hook() {
     // Catches a commit under another identity, a trailer or signature line added to the message,
     // a hook an agent planted running outside every sandbox, or an empty commit.
