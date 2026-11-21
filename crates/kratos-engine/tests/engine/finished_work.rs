@@ -94,6 +94,26 @@ fn a_project_folder_diff_starts_at_its_head() {
 }
 
 #[test]
+fn a_diff_is_a_patch_git_can_apply() {
+    // Catches a patch cut short of its last newline, which git rejects as corrupt.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
+    std::fs::write(repository.join("README.md"), "edited in place\n").unwrap();
+
+    let patch = root.path().join("change.patch");
+    std::fs::write(&patch, diff(&client, &thread).patch).unwrap();
+
+    git(
+        &repository,
+        &["apply", "--reverse", "--check", patch.to_str().unwrap()],
+    );
+}
+
+#[test]
 fn a_commit_is_the_users_own_with_the_message_as_given_and_runs_no_hook() {
     // Catches a commit under another identity, a trailer or signature line added to the message,
     // a hook an agent planted running outside every sandbox, or an empty commit.

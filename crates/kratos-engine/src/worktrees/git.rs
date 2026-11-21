@@ -52,11 +52,13 @@ impl Git {
         args: &[&str],
         budget: Duration,
     ) -> Result<String, GitError> {
-        self.run_with(folder, args, budget, None).await
+        let stdout = self.run_with(folder, args, budget, None).await?;
+        Ok(stdout.trim_end_matches(['\r', '\n']).to_owned())
     }
 
-    /// [`Git::run`] with `index` as git's index file instead of the worktree's own, so staging
-    /// there leaves the user's staged changes as they were.
+    /// Runs git with `index` as its index file instead of the worktree's own, so staging there
+    /// leaves the user's staged changes as they were. Returns standard output as git wrote it, so
+    /// a patch keeps its last newline.
     pub(super) async fn run_with_index(
         &self,
         folder: &Path,
@@ -99,7 +101,6 @@ impl Git {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
             });
         }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout.trim_end_matches(['\r', '\n']).to_owned())
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 }
