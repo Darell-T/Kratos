@@ -2,7 +2,7 @@
 //! branch stays, and so do files the removal would delete unless the user chose to discard them.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, WorktreeId};
 use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError, UnfinishedWorktree};
@@ -167,21 +167,27 @@ impl Worktrees {
     async fn overlooked_edits(&self, folder: &Path) -> Result<Vec<String>, PlaceError> {
         let listed = self
             .git
-            .run(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
+            .run_bytes(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
             .await?;
+        let mut edited = Vec::new();
         let mut on_disk = Vec::new();
         for (object, path) in overlooked(&listed) {
+            let Some(file) = file_in(folder, path) else {
+                // Kratos cannot read the file, so it cannot tell that the file is unchanged.
+                edited.push(edit_line(path));
+                continue;
+            };
             // A skip-worktree file a sparse checkout left out has nothing on disk to lose.
-            if tokio::fs::symlink_metadata(folder.join(path)).await.is_ok() {
+            if tokio::fs::symlink_metadata(file).await.is_ok() {
                 on_disk.push((object, path));
             }
         }
         if on_disk.is_empty() {
-            return Ok(Vec::new());
+            return Ok(edited);
         }
         let mut paths = Vec::new();
         for (_, path) in &on_disk {
-            paths.extend(quoted(path.as_bytes()));
+            paths.extend(quoted(path));
             paths.push(b'\n');
         }
         let hash = ["hash-object", "--stdin-paths"];
@@ -189,12 +195,13 @@ impl Worktrees {
             .git
             .run_with_input(folder, &hash, paths, git::QUICK)
             .await?;
-        Ok(on_disk
+        let changed = on_disk
             .iter()
             .zip(hashed.lines())
-            .filter(|((object, _), now)| object != now)
-            .map(|((_, path), _)| format!(" M {path}"))
-            .collect())
+            .filter(|((object, _), now)| *object != now.as_bytes())
+            .map(|((_, path), _)| edit_line(path));
+        edited.extend(changed);
+        Ok(edited)
     }
 }
 
@@ -263,16 +270,36 @@ async fn holds_a_project(store: &StoreThread, worktree: &Path) -> Result<bool, S
 }
 
 /// The object and path of each index entry in `git ls-files -v -s -z` output that git is told to
-/// overlook: a lowercase tag marks assume-unchanged, and `S` marks skip-worktree.
-fn overlooked(listed: &str) -> impl Iterator<Item = (&str, &str)> {
-    listed.split('\0').filter_map(|entry| {
-        let (fields, path) = entry.split_once('\t')?;
-        let mut fields = fields.split(' ');
+/// overlook: a lowercase tag marks assume-unchanged, and `S` marks skip-worktree. Paths stay as
+/// git wrote them, since a file name need not be UTF-8.
+fn overlooked(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    listed.split(|&byte| byte == 0).filter_map(|entry| {
+        let tab = entry.iter().position(|&byte| byte == b'\t')?;
+        let mut fields = entry[..tab].split(|&byte| byte == b' ');
         let tag = fields.next()?;
         let object = fields.nth(1)?;
-        let is_overlooked = tag == "S" || tag.chars().all(|tag| tag.is_ascii_lowercase());
-        is_overlooked.then_some((object, path))
+        let is_overlooked = tag == b"S" || tag.iter().all(u8::is_ascii_lowercase);
+        is_overlooked.then_some((object, &entry[tab + 1..]))
     })
+}
+
+/// The file git's `path` names in `folder`.
+#[cfg(unix)]
+fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(folder.join(std::ffi::OsStr::from_bytes(path)))
+}
+
+/// The file git's `path` names in `folder`, or `None` when `path` is not UTF-8, which no file name
+/// here can be.
+#[cfg(not(unix))]
+fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(path).ok().map(|path| folder.join(path))
+}
+
+/// `path` as a status line for an edited file, such as ` M config.txt`.
+fn edit_line(path: &[u8]) -> String {
+    format!(" M {}", String::from_utf8_lossy(path))
 }
 
 /// `path` in the C-style quotes `git hash-object --stdin-paths` reads, so a newline, a carriage
@@ -307,15 +334,15 @@ mod tests {
 
     #[test]
     fn only_files_git_is_told_to_overlook_are_listed() {
-        let listed = "H 100644 1111 0\tplain.txt\0h 100644 2222 0\tassumed.txt\0\
+        let listed = b"H 100644 1111 0\tplain.txt\0h 100644 2222 0\tassumed.txt\0\
                       S 100644 3333 0\tsparse.txt\0s 100644 4444 0\tboth.txt\0";
 
         assert_eq!(
             overlooked(listed).collect::<Vec<_>>(),
             [
-                ("2222", "assumed.txt"),
-                ("3333", "sparse.txt"),
-                ("4444", "both.txt")
+                (&b"2222"[..], &b"assumed.txt"[..]),
+                (b"3333", b"sparse.txt"),
+                (b"4444", b"both.txt")
             ]
         );
     }

@@ -252,6 +252,49 @@ fn an_edit_git_is_told_to_overlook_still_keeps_the_worktree() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn an_overlooked_edit_to_a_file_whose_name_is_not_utf8_keeps_the_worktree() {
+    // Catches git's file names read as UTF-8 text: the name no longer matches the file, so its
+    // edit goes unchecked and the removal deletes the only copy.
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let name = OsStr::from_bytes(b"notes-\xff.txt");
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    std::fs::write(repository.join(name), "original\n").unwrap();
+    git(&repository, &["add", "."]);
+    git(&repository, &["commit", "--quiet", "--message", "notes"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "notes", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    let marked = std::process::Command::new("git")
+        .arg("-C")
+        .arg(folder)
+        .args(["update-index", "--assume-unchanged", "--"])
+        .arg(name)
+        .status()
+        .unwrap();
+    assert!(marked.success());
+    std::fs::write(folder.join(name), "only copy\n").unwrap();
+    assert_eq!(git(folder, &["status", "--porcelain"]), "");
+
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Keep),
+        Cleanup::Kept {
+            files: vec![" M notes-\u{FFFD}.txt".into()]
+        }
+    );
+    assert_eq!(
+        std::fs::read_to_string(folder.join(name)).unwrap(),
+        "only copy\n"
+    );
+}
+
 #[test]
 fn a_clean_worktree_with_many_files_git_is_told_to_overlook_is_removed() {
     // Catches every overlooked file named on git's command line, which outgrows the longest

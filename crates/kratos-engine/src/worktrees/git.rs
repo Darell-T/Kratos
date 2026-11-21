@@ -67,6 +67,17 @@ impl Git {
         args: &[&str],
         budget: Duration,
     ) -> Result<String, GitError> {
+        Ok(text_of(&self.output(folder, args, budget, None).await?))
+    }
+
+    /// [`Git::run`] that returns standard output as git wrote it, for file names, which need not
+    /// be UTF-8.
+    pub(super) async fn run_bytes(
+        &self,
+        folder: &Path,
+        args: &[&str],
+        budget: Duration,
+    ) -> Result<Vec<u8>, GitError> {
         self.output(folder, args, budget, None).await
     }
 
@@ -79,7 +90,9 @@ impl Git {
         budget: Duration,
         index: &Path,
     ) -> Result<String, GitError> {
-        self.output(folder, args, budget, Some(index)).await
+        Ok(text_of(
+            &self.output(folder, args, budget, Some(index)).await?,
+        ))
     }
 
     /// [`Git::run`] with `input` as git's standard input, for lists too long for a command line.
@@ -107,9 +120,9 @@ impl Git {
             command: command.clone(),
             budget,
         })?;
-        let text = output_text(command, output.map_err(GitError::Read)?)?;
+        let stdout = succeeded(command, output.map_err(GitError::Read)?)?;
         written.map_err(GitError::Read)?;
-        Ok(text)
+        Ok(text_of(&stdout))
     }
 
     async fn output(
@@ -118,13 +131,13 @@ impl Git {
         args: &[&str],
         budget: Duration,
         index: Option<&Path>,
-    ) -> Result<String, GitError> {
+    ) -> Result<Vec<u8>, GitError> {
         let command = args.join(" ");
         let mut git = self.command(folder, args, index);
         match tokio::time::timeout(budget, git.output()).await {
             Err(_) => Err(GitError::TimedOut { command, budget }),
             Ok(Err(error)) => Err(GitError::Missing(error)),
-            Ok(Ok(output)) => output_text(command, output),
+            Ok(Ok(output)) => succeeded(command, output),
         }
     }
 
@@ -174,8 +187,8 @@ impl Git {
     }
 }
 
-/// Git's standard output without the final newline, once it succeeded.
-fn output_text(command: String, output: Output) -> Result<String, GitError> {
+/// Git's standard output, once it succeeded.
+fn succeeded(command: String, output: Output) -> Result<Vec<u8>, GitError> {
     if !output.status.success() {
         return Err(GitError::Failed {
             command,
@@ -183,8 +196,13 @@ fn output_text(command: String, output: Output) -> Result<String, GitError> {
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         });
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.trim_end_matches(['\r', '\n']).to_owned())
+    Ok(output.stdout)
+}
+
+/// `stdout` as text without the final newline.
+fn text_of(stdout: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    text.trim_end_matches(['\r', '\n']).to_owned()
 }
 
 /// What a child wrote and how it ended.
