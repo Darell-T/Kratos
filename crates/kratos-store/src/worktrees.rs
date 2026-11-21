@@ -82,12 +82,19 @@ impl Store {
         Ok(id)
     }
 
-    /// Worktrees an earlier engine left unfinished: reserved and never given to a thread, or
-    /// being removed when git refused. Read before the engine serves, since a worktree reserved
-    /// after that may be one a request is making.
+    /// Worktrees an earlier engine left unfinished: reserved and never given to a thread, being
+    /// removed when git refused, or made by Kratos with every thread archived. The last covers an
+    /// archive that stopped before its removal began, and a worktree kept for its files, which
+    /// goes once the user has dealt with them. Read before the engine serves, since a worktree
+    /// reserved after that may be one a request is making.
     pub fn unfinished_worktrees(&self) -> Result<Vec<UnfinishedWorktree>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, path FROM worktrees WHERE state IN ('creating', 'removing') ORDER BY rowid",
+            "SELECT id, path FROM worktrees
+             WHERE state IN ('creating', 'removing')
+                OR (state = 'ready' AND ownership = 'createdByKratos'
+                    AND NOT EXISTS (SELECT 1 FROM threads
+                                    WHERE worktree_id = worktrees.id AND archived_at IS NULL))
+             ORDER BY rowid",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(UnfinishedWorktree {

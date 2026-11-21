@@ -452,6 +452,40 @@ fn the_next_engine_finishes_a_removal_git_could_not() {
 }
 
 #[test]
+fn the_next_engine_removes_a_worktree_whose_archive_stopped_before_removal_began() {
+    // Catches a worktree left for good when an archive recorded the thread as archived and then
+    // failed before marking the worktree for removal, which the next start never looked at.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let home = root.path().join("kratos");
+    let engine = RunningEngine::start(&home);
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(
+        &client,
+        &workspace,
+        "interrupted",
+        PlaceRequest::NewWorktree,
+    );
+    let path = worktree_of(&client, &thread).path;
+    engine.kill();
+    let database = rusqlite::Connection::open(home.join("kratos.db")).unwrap();
+    let archived = database
+        .execute(
+            "UPDATE threads SET archived_at = created_at WHERE id = ?1",
+            [thread.id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(archived, 1);
+    drop(database);
+
+    let _engine = RunningEngine::start(&home);
+
+    wait_until_gone(Path::new(&path));
+    assert!(branch_exists(&repository, "interrupted"));
+}
+
+#[test]
 fn the_next_engine_removes_a_clean_checkout_no_thread_took_and_keeps_one_with_files() {
     // Catches a worktree an engine made and then stopped before its thread was recorded, left
     // behind for good, or one holding files deleted without the user's choice.
