@@ -258,6 +258,10 @@ impl Actor {
                 request.answer(answer.response(ApprovalDecision::Accept));
                 return;
             }
+            Verdict::Decline => {
+                request.answer(answer.response(ApprovalDecision::Decline));
+                return;
+            }
             Verdict::Ask(why) => why,
         };
         let approval = Approval {

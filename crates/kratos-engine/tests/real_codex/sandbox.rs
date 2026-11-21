@@ -357,3 +357,64 @@ async fn npm_install_works_in_a_sandboxed_thread() {
     );
     harness.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
+async fn a_request_to_leave_the_sandbox_is_declined_without_asking() {
+    // Catches asking the user a question whose yes changes nothing. Measured on Codex 0.159.1:
+    // an accepted request still ran in the sandbox, because the profile denies Kratos's folder,
+    // and the write failed with a read-only file system error.
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    std::fs::create_dir_all(&target).unwrap();
+    let outside = tempfile::Builder::new()
+        .prefix("escalation-")
+        .tempdir_in(target)
+        .unwrap();
+    let written = std::fs::canonicalize(outside.path())
+        .unwrap()
+        .join("escalated.txt");
+    let command = if cfg!(windows) {
+        format!(
+            "Set-Content -LiteralPath '{}' -Value escalated",
+            written.display()
+        )
+    } else {
+        format!("echo escalated > '{}'", written.display())
+    };
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::EscalatedCommand(command),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    harness.send("escalate");
+    loop {
+        match harness.next_event().await {
+            ThreadEventBody::ApprovalRequested { approval } => {
+                panic!("Kratos asked about a request Codex cannot grant: {approval:?}")
+            }
+            ThreadEventBody::ThreadPaused { reason } => panic!("real Codex paused: {reason:?}"),
+            ThreadEventBody::TurnCompleted { .. } => break,
+            _ => {}
+        }
+    }
+
+    let outputs = harness.model.tool_outputs();
+    assert!(!written.exists(), "the declined command wrote: {outputs:?}");
+    let answer = outputs
+        .iter()
+        .find(|output| output["call_id"] == "call-1")
+        .unwrap()
+        .to_string()
+        .to_lowercase();
+    assert!(
+        answer.contains("reject") || answer.contains("declin") || answer.contains("denied"),
+        "the agent must learn its request was refused: {answer}"
+    );
+    harness.stop().await;
+}

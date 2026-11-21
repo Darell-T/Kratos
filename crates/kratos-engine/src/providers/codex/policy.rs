@@ -11,7 +11,7 @@ use kratos_command_safety::{
 };
 use kratos_protocol::{AskReason, FileChange, FileChangeKind, Permission, ThreadSettings};
 
-use super::profiles::ProtectedFolders;
+use super::profiles::{Profile, ProtectedFolders};
 use crate::providers::writes::{self, Destination};
 
 /// The policy every thread and turn opens with, so each request reaches this module first.
@@ -23,6 +23,8 @@ pub(super) const APPROVALS_REVIEWER: types::ApprovalsReviewer = types::Approvals
 pub enum Verdict {
     Accept,
     Ask(AskReason),
+    /// Refuse without asking, because Codex would ignore the user's yes.
+    Decline,
 }
 
 /// The parts of a command approval request the decision reads.
@@ -39,12 +41,16 @@ pub(super) struct CommandRequest<'a> {
 /// Ask me asks about everything (D84). Under the other permissions a command runs without asking
 /// unless it asks to leave the sandbox, the dangerous-command check flags it (D18), or it starts a
 /// shell or interpreter whose later input Kratos would never see. Plan mode changes the sandbox,
-/// not what asks: its profile writes nothing.
+/// not what asks: its profile writes nothing. A request the sandbox cannot grant is declined
+/// before any of that.
 pub(super) fn decide_command(
     settings: &ThreadSettings,
     request: &CommandRequest<'_>,
     platform: DangerousCommandPlatform,
 ) -> Verdict {
+    if sandbox_cannot_grant(settings, request) {
+        return Verdict::Decline;
+    }
     if asks_every_action(settings.permission) {
         return Verdict::Ask(AskReason::AskEveryAction);
     }
@@ -96,6 +102,15 @@ pub fn decide_patch(
         return Verdict::Ask(AskReason::Escalation);
     }
     Verdict::Accept
+}
+
+/// Every sandboxed profile denies Kratos's data folder, so the agent cannot read the client token.
+/// While a profile denies a folder, Codex 0.159.1 runs an approved request to leave the sandbox, or
+/// to widen it, inside the same sandbox, and the write the user approved still fails. A request
+/// for network access is the exception: Codex still honors it.
+fn sandbox_cannot_grant(settings: &ThreadSettings, request: &CommandRequest<'_>) -> bool {
+    let wants_out = request.reason.is_some() || request.wants_more_permissions;
+    wants_out && !request.wants_network && Profile::for_settings(settings) != Profile::FullAccess
 }
 
 fn asks_every_action(permission: Permission) -> bool {
@@ -211,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn a_request_to_leave_the_sandbox_asks_under_every_permission() {
+    fn a_request_to_leave_the_sandbox_asks_under_full_access() {
         // Catches an escalation accepted under Full access, which would hand the agent extra
         // permissions such as a write root in a protected folder.
         let escalations = [
@@ -231,6 +246,45 @@ mod tests {
         for request in escalations {
             let verdict = decide_command(&settings(Permission::FullAccess, false), &request, POSIX);
             assert_eq!(verdict, Verdict::Ask(AskReason::Escalation), "{request:?}");
+        }
+    }
+
+    #[test]
+    fn a_sandboxed_thread_declines_a_request_to_leave_the_sandbox_without_asking() {
+        // Catches asking the user a question whose yes changes nothing: Codex keeps the command in
+        // the sandbox, so the approved write fails. Network access still asks, because Codex
+        // honors it.
+        let leaving = [
+            CommandRequest {
+                reason: Some("needs ~/Desktop"),
+                ..command("/bin/bash -lc 'touch ~/Desktop/a'")
+            },
+            CommandRequest {
+                wants_more_permissions: true,
+                ..command("/bin/bash -lc 'touch ~/Desktop/a'")
+            },
+        ];
+        let network = CommandRequest {
+            reason: Some("needs the registry"),
+            wants_network: true,
+            ..command("/bin/bash -lc 'curl example.com'")
+        };
+        let sandboxed = [
+            settings(Permission::AskMe, false),
+            settings(Permission::ApproveForMe, false),
+            settings(Permission::ApproveForMe, true),
+            settings(Permission::FullAccess, true),
+        ];
+        for settings in &sandboxed {
+            for request in &leaving {
+                let verdict = decide_command(settings, request, POSIX);
+                assert_eq!(verdict, Verdict::Decline, "{settings:?} {request:?}");
+            }
+            let verdict = decide_command(settings, &network, POSIX);
+            assert!(
+                matches!(verdict, Verdict::Ask(_)),
+                "{settings:?} {verdict:?}"
+            );
         }
     }
 
