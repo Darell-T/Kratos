@@ -9,7 +9,7 @@ use tokio::process::Command;
 use uuid::Uuid;
 
 use super::git::{self, CHECKOUT, Capped};
-use super::{PlaceError, Worktrees};
+use super::{PlaceError, Worktrees, resolved};
 
 /// The most patch text a diff returns, cut at a whole line. A client shows the rest by reading the
 /// folder itself.
@@ -108,7 +108,11 @@ impl Worktrees {
     /// added to it, and returns the new commit. A project can be a folder inside its repository,
     /// so changes outside `folder`, staged or not, stay as they were.
     pub(crate) async fn commit(&self, folder: &Path, message: &str) -> Result<String, PlaceError> {
-        let lock = self.lock_of_folder(folder).await?;
+        let repository = self
+            .locate(folder)
+            .await?
+            .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))?;
+        let lock = self.lock_of(&repository.shared);
         let _one_at_a_time = lock.lock().await;
         self.git
             .run(folder, &["add", "--all", "--", "."], CHECKOUT)
@@ -119,7 +123,15 @@ impl Worktrees {
             Err(error) if error.exited_with(1) => {}
             Err(error) => return Err(error.into()),
         }
-        let commit = ["commit", "--quiet", "--message", message, "--", "."];
+        let mut commit = vec!["commit", "--quiet", "--message", message];
+        // Naming the folder commits only its files, which git refuses while a merge is in
+        // progress. The whole checkout needs no name, so a thread there can conclude a merge.
+        let is_whole_checkout = resolved(folder)
+            .await
+            .is_ok_and(|folder| folder == repository.top);
+        if !is_whole_checkout {
+            commit.extend(["--", "."]);
+        }
         self.git.run(folder, &commit, git::QUICK).await?;
         Ok(self
             .git
