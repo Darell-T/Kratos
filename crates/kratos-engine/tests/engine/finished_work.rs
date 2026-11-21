@@ -174,6 +174,37 @@ fn a_project_in_a_subfolder_diffs_and_commits_only_that_folder() {
 }
 
 #[test]
+fn commits_sent_together_make_one_commit_and_the_rest_find_nothing_to_commit() {
+    // Catches two git commands racing for the repository's index lock, which git answers with an
+    // error that tells the user to delete the lock file.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
+    std::fs::write(repository.join("README.md"), "changed\n").unwrap();
+
+    let senders: Vec<_> = (0..5)
+        .map(|_| {
+            let (client, thread) = (client.clone(), thread.clone());
+            std::thread::spawn(move || commit(&client, &thread, "Change the readme"))
+        })
+        .collect();
+    let mut statuses: Vec<u16> = senders
+        .into_iter()
+        .map(|sender| {
+            let reply = sender.join().unwrap();
+            assert!(reply.status != 500, "{}", reply.body);
+            reply.status
+        })
+        .collect();
+    statuses.sort_unstable();
+
+    assert_eq!(statuses, [201, 400, 400, 400, 400]);
+}
+
+#[test]
 fn a_commit_is_the_users_own_with_the_message_as_given_and_runs_no_hook() {
     // Catches a commit under another identity, a trailer or signature line added to the message,
     // a hook an agent planted running outside every sandbox, or an empty commit.

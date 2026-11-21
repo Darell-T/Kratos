@@ -369,6 +369,18 @@ impl Worktrees {
         }
     }
 
+    /// The lock of the repository `folder` is in.
+    async fn lock_of_folder(
+        &self,
+        folder: &Path,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, PlaceError> {
+        let repository = self
+            .locate(folder)
+            .await?
+            .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))?;
+        Ok(self.lock_of(&repository.shared))
+    }
+
     fn lock_of(&self, repository: &Path) -> Arc<tokio::sync::Mutex<()>> {
         let mut repositories = self.repositories.lock().expect("lock poisoned");
         repositories

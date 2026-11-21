@@ -83,6 +83,8 @@ impl Worktrees {
     /// added to it, and returns the new commit. A project can be a folder inside its repository,
     /// so changes outside `folder`, staged or not, stay as they were.
     pub(crate) async fn commit(&self, folder: &Path, message: &str) -> Result<String, PlaceError> {
+        let lock = self.lock_of_folder(folder).await?;
+        let _one_at_a_time = lock.lock().await;
         self.git
             .run(folder, &["add", "--all", "--", "."], CHECKOUT)
             .await?;
@@ -112,6 +114,8 @@ impl Worktrees {
             .branch_of(folder)
             .await?
             .ok_or_else(|| PlaceError::NoBranch(folder.display().to_string()))?;
+        let lock = self.lock_of_folder(folder).await?;
+        let _one_at_a_time = lock.lock().await;
         let push = ["push", "--set-upstream", "origin", &branch];
         self.git.run(folder, &push, CHECKOUT).await?;
         // `=` keeps a title or body that starts with a dash from reading as a flag.
