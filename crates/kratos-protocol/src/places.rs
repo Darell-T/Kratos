@@ -145,11 +145,12 @@ pub struct ArchivedThread {
     rename_all_fields = "camelCase"
 )]
 pub enum Cleanup {
-    /// The thread worked in its project folder or a borrowed worktree, which Kratos never removes.
+    /// The thread worked in its project folder or a borrowed worktree, which Kratos never removes,
+    /// or in a worktree Kratos made whose place another checkout has since taken.
     NotOwned,
     /// Another thread still works in the worktree.
     InUse,
-    /// Kratos removed the worktree. Its branch stays.
+    /// Kratos removed the worktree, or it was already gone from its path. Its branch stays.
     Removed,
     /// Kratos kept the worktree because removing it would delete these files, each as
     /// `git status --porcelain` prints it. Archive again with [`LeftFiles::Discard`] to remove it.

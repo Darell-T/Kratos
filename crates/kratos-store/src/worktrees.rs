@@ -23,12 +23,25 @@ pub struct UnfinishedWorktree {
     pub path: String,
 }
 
+/// A worktree Kratos made and has not removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KratosWorktree {
+    pub id: WorktreeId,
+    pub path: String,
+    /// The folder git keeps for the worktree, which tells it apart from another checkout at its
+    /// path. `None` until Kratos has made the worktree.
+    pub git_dir: Option<String>,
+}
+
 /// What [`Store::begin_removal`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Removal {
     /// The worktree is marked as being removed, and the caller removes it from `repository`, the
-    /// shared git folder.
-    Started { repository: String },
+    /// shared git folder, once the checkout at its path is the one `git_dir` names.
+    Started {
+        repository: String,
+        git_dir: Option<String>,
+    },
     /// A thread that is not archived still works in it.
     InUse,
     /// An earlier archive already removed it.
@@ -38,6 +51,7 @@ pub enum Removal {
 /// How a removal ended, for [`Store::end_removal`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemovalEnd {
+    /// The worktree is gone from its path: Kratos removed it, or another checkout stands there.
     Removed,
     /// The worktree held files the user did not choose to discard.
     Kept,
@@ -82,6 +96,15 @@ impl Store {
         Ok(id)
     }
 
+    /// Records `git_dir`, the folder git made for the worktree Kratos just checked out.
+    pub fn record_git_dir(&self, id: &WorktreeId, git_dir: &str) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE worktrees SET git_dir = ?2 WHERE id = ?1",
+            params![id.as_str(), git_dir],
+        )?;
+        Ok(())
+    }
+
     /// Worktrees an earlier engine left unfinished: reserved and never given to a thread, being
     /// removed when git refused, or made by Kratos with every thread archived. The last covers an
     /// archive that stopped before its removal began, and a worktree kept for its files, which
@@ -113,15 +136,15 @@ impl Store {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let found: Option<(String, String)> = transaction
+        let found: Option<(String, String, Option<String>)> = transaction
             .query_row(
-                "SELECT state, repository FROM worktrees
+                "SELECT state, repository, git_dir FROM worktrees
                  WHERE id = ?1 AND ownership = 'createdByKratos'",
                 [id.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
-        let Some((state, repository)) = found else {
+        let Some((state, repository, git_dir)) = found else {
             return Err(StoreError::UnknownWorktree(id.clone()));
         };
         let removal = match state.as_str() {
@@ -137,7 +160,10 @@ impl Store {
                 if started == 0 {
                     Removal::InUse
                 } else {
-                    Removal::Started { repository }
+                    Removal::Started {
+                        repository,
+                        git_dir,
+                    }
                 }
             }
         };
@@ -159,13 +185,31 @@ impl Store {
         Ok(())
     }
 
-    /// The folders of the worktrees Kratos made that it has not removed.
-    pub fn kratos_worktree_paths(&self) -> Result<Vec<String>, StoreError> {
+    /// The worktrees Kratos made that it has not removed.
+    pub fn kratos_worktrees(&self) -> Result<Vec<KratosWorktree>, StoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT path FROM worktrees WHERE ownership = 'createdByKratos' AND state != 'removed'",
+            "SELECT id, path, git_dir FROM worktrees
+             WHERE ownership = 'createdByKratos' AND state != 'removed'",
         )?;
-        let paths = statement.query_map([], |row| row.get(0))?;
-        Ok(paths.collect::<Result<_, _>>()?)
+        let worktrees = statement.query_map([], |row| {
+            Ok(KratosWorktree {
+                id: WorktreeId::new(row.get(0)?),
+                path: row.get(1)?,
+                git_dir: row.get(2)?,
+            })
+        })?;
+        Ok(worktrees.collect::<Result<_, _>>()?)
+    }
+
+    /// Closes the record of a worktree Kratos made that no longer stands at its path, because
+    /// another checkout took its place, so that checkout can be recorded as borrowed.
+    pub fn close_replaced_worktree(&self, id: &WorktreeId) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE worktrees SET state = 'removed'
+             WHERE id = ?1 AND ownership = 'createdByKratos' AND state = 'ready'",
+            [id.as_str()],
+        )?;
+        Ok(())
     }
 
     /// Forgets a reservation that git never turned into a worktree.

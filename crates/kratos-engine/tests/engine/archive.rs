@@ -6,7 +6,8 @@ use std::time::Instant;
 use fake_agents::codex_control;
 use kratos_api_client::Client;
 use kratos_protocol::{
-    ArchiveThread, ArchivedThread, Cleanup, LeftFiles, PlaceRequest, Thread, ThreadDetails, routes,
+    ArchiveThread, ArchivedThread, Cleanup, LeftFiles, Ownership, PlaceRequest, ProjectWorktree,
+    Thread, ThreadDetails, Workspace, routes,
 };
 use kratos_store::{Checkout, Store};
 use serde_json::json;
@@ -419,6 +420,96 @@ fn removing_a_leftover_forgets_only_that_worktree() {
     std::fs::rename(&away, &users).unwrap();
     assert_eq!(worktree_count(&repository), 2);
     assert_eq!(git(&users, &["branch", "--show-current"]), "users");
+}
+
+fn listed_ownership(client: &Client, workspace: &Workspace, path: &Path) -> Ownership {
+    let listed: Vec<ProjectWorktree> = client
+        .get(&routes::workspace_worktrees(&workspace.id))
+        .unwrap()
+        .parse()
+        .unwrap();
+    listed
+        .into_iter()
+        .find(|worktree| Path::new(&worktree.path) == path)
+        .unwrap_or_else(|| panic!("{} is not listed", path.display()))
+        .ownership
+}
+
+fn commit_status(client: &Client, thread: &Thread) -> u16 {
+    let request = json!({ "message": "Commit through the old thread" });
+    client
+        .post(&routes::thread_commit(&thread.id), &request)
+        .unwrap()
+        .status
+}
+
+#[test]
+fn a_checkout_that_took_a_moved_worktrees_place_is_never_taken_for_kratoss() {
+    // Catches Kratos knowing its worktrees only by path: once the user moves one away and makes
+    // another checkout where it stood, the listing calls the newcomer Kratos's, the old thread
+    // commits into it, and archive deletes it.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "before", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let folder = Path::new(&path);
+    let moved = root.path().join("moved");
+    git(
+        &repository,
+        &["worktree", "move", &path, moved.to_str().unwrap()],
+    );
+    git(
+        &repository,
+        &["worktree", "add", "--quiet", "-b", "users-branch", &path],
+    );
+    std::fs::write(folder.join("users.txt"), "the user's\n").unwrap();
+
+    assert_eq!(
+        listed_ownership(&client, &workspace, folder),
+        Ownership::Borrowed
+    );
+    assert_eq!(commit_status(&client, &thread), 409);
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Discard),
+        Cleanup::NotOwned
+    );
+    assert!(folder.join("users.txt").exists());
+    assert!(moved.exists());
+    let borrowed = create(&client, &workspace, "users", existing(folder));
+    assert_eq!(
+        worktree_of(&client, &borrowed).ownership,
+        Ownership::Borrowed
+    );
+}
+
+#[test]
+fn an_archived_threads_finished_work_stops_once_its_worktree_is_gone() {
+    // Catches a thread whose worktree Kratos removed committing into whatever checkout later
+    // stands at the same path.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "reused", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    git(
+        &repository,
+        &["worktree", "add", "--quiet", "-b", "later", &path],
+    );
+    std::fs::write(Path::new(&path).join("later.txt"), "later work\n").unwrap();
+
+    assert_eq!(commit_status(&client, &thread), 409);
+    let diff = client.get(&routes::thread_diff(&thread.id)).unwrap();
+    assert_eq!(diff.status, 409, "{}", diff.body);
+    assert_eq!(
+        git(Path::new(&path), &["log", "-1", "--format=%s"]),
+        "first"
+    );
 }
 
 /// Windows refuses to remove a folder that a running program works in.

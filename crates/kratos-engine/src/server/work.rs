@@ -76,10 +76,18 @@ pub(super) async fn pull_request(
     Ok(json_reply(StatusCode::CREATED, &PullRequest { url }))
 }
 
+/// The thread, once its folder is still where it worked.
 async fn thread(state: &ServerState, id: ThreadPath) -> Result<ProviderThread, ApiError> {
     let thread_id = path(id)?;
-    Ok(state
+    let thread = state
         .store
         .call(move |store| store.provider_thread(&thread_id))
-        .await?)
+        .await?;
+    if let Place::Worktree(worktree) = &thread.place {
+        state
+            .worktrees
+            .check_still_there(&state.store, worktree)
+            .await?;
+    }
+    Ok(thread)
 }

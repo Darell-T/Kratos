@@ -985,6 +985,9 @@ fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_
         branch: Some("chat".into()),
     };
     let id = store.reserve_worktree(&checkout, "0000000").unwrap();
+    store
+        .record_git_dir(&id, "/work/repo/.git/worktrees/chat")
+        .unwrap();
     let thread = store
         .create_thread(
             &thread_request(&workspace.id, "chat", "codex"),
@@ -998,6 +1001,7 @@ fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_
     write.commit().unwrap();
     let started = Removal::Started {
         repository: checkout.repository.clone(),
+        git_dir: Some("/work/repo/.git/worktrees/chat".into()),
     };
     assert_eq!(store.begin_removal(&id).unwrap(), started);
     let joining = store.create_thread(

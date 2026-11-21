@@ -5,10 +5,10 @@ use std::io;
 use std::path::Path;
 
 use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, WorktreeId};
-use kratos_store::{Removal, RemovalEnd, StoreError, UnfinishedWorktree};
+use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError, UnfinishedWorktree};
 
 use super::git::{self, CHECKOUT};
-use super::{PlaceError, Worktrees, resolved};
+use super::{PlaceError, Worktrees, is_same_checkout, resolved};
 use crate::store_thread::StoreThread;
 
 impl Worktrees {
@@ -66,19 +66,29 @@ impl Worktrees {
             return Ok(Cleanup::InUse);
         }
         let begin = id.clone();
-        let repository = match store.call(move |store| store.begin_removal(&begin)).await? {
-            Removal::InUse => return Ok(Cleanup::InUse),
-            Removal::Done => return Ok(Cleanup::Removed),
-            Removal::Started { repository } => repository,
+        let (repository, git_dir) =
+            match store.call(move |store| store.begin_removal(&begin)).await? {
+                Removal::InUse => return Ok(Cleanup::InUse),
+                Removal::Done => return Ok(Cleanup::Removed),
+                Removal::Started {
+                    repository,
+                    git_dir,
+                } => (repository, git_dir),
+            };
+        let recorded = KratosWorktree {
+            id: id.clone(),
+            path: path.to_owned(),
+            git_dir,
         };
         let cleanup = self
-            .remove(Path::new(&repository), path, files)
+            .remove(Path::new(&repository), &recorded, files)
             .await
             .unwrap_or_else(|error| Cleanup::Blocked {
                 error: error.to_string(),
             });
         let end = match cleanup {
-            Cleanup::Removed => RemovalEnd::Removed,
+            // Another checkout took the worktree's place, so Kratos's worktree is gone from it.
+            Cleanup::Removed | Cleanup::NotOwned => RemovalEnd::Removed,
             Cleanup::Kept { .. } | Cleanup::UnsavedCommit { .. } => RemovalEnd::Kept,
             _ => return Ok(cleanup),
         };
@@ -91,15 +101,19 @@ impl Worktrees {
     async fn remove(
         &self,
         repository: &Path,
-        path: &str,
+        recorded: &KratosWorktree,
         files: LeftFiles,
     ) -> Result<Cleanup, PlaceError> {
         let lock = self.lock_of(repository);
         let _one_at_a_time = lock.lock().await;
+        let path = recorded.path.as_str();
         let folder = Path::new(path);
         let found = self.locate(folder).await?;
         if found.is_none_or(|worktree| worktree.top != folder) {
             return remove_leftover(repository, folder).await;
+        }
+        if !is_same_checkout(recorded).await {
+            return Ok(Cleanup::NotOwned);
         }
         if let Some(commit) = self.unsaved_head(folder).await? {
             return Ok(Cleanup::UnsavedCommit { commit });

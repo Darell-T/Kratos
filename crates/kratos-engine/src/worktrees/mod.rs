@@ -15,8 +15,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use kratos_protocol::{PlaceRequest, WorktreeId};
-use kratos_store::{Checkout, NewPlace, StoreError};
+use kratos_protocol::{Ownership, PlaceRequest, Worktree, WorktreeId};
+use kratos_store::{Checkout, KratosWorktree, NewPlace, StoreError};
 
 use crate::store_thread::StoreThread;
 use git::{CHECKOUT, Git};
@@ -96,6 +96,11 @@ pub(crate) enum PlaceError {
     NoGh(#[source] io::Error),
     #[error("gh could not open the pull request: {0}")]
     Gh(String),
+    #[error(
+        "{0} is no longer the worktree this thread worked in. Kratos removed it, or another \
+         checkout took its place. Start a new thread to work there."
+    )]
+    NotItsWorktree(String),
     #[error("Kratos cannot use the path {0}, because it is not valid Unicode.")]
     NotUnicode(String),
     #[error(transparent)]
@@ -158,14 +163,21 @@ impl Worktrees {
         match request {
             PlaceRequest::ProjectFolder => Ok(NewPlace::ProjectFolder),
             PlaceRequest::ExistingWorktree { path } => self
-                .borrow(project, Path::new(path.as_str()))
+                .borrow(store, project, Path::new(path.as_str()))
                 .await
                 .map(NewPlace::Borrowed),
             PlaceRequest::NewWorktree => self.create(store, project, title).await,
         }
     }
 
-    async fn borrow(&self, project: &Path, path: &Path) -> Result<Checkout, PlaceError> {
+    /// The existing worktree at `path`. A worktree Kratos made that another checkout has since
+    /// replaced at that path stops being Kratos's, so the checkout there is borrowed.
+    async fn borrow(
+        &self,
+        store: &StoreThread,
+        project: &Path,
+        path: &Path,
+    ) -> Result<Checkout, PlaceError> {
         let repository = self.repository_of(project).await?;
         let worktree = self.worktree_at(path).await?;
         let shown = worktree.top.display().to_string();
@@ -175,11 +187,31 @@ impl Worktrees {
         if worktree.top == repository.top {
             return Err(PlaceError::IsProjectFolder(shown));
         }
+        let path = text(&worktree.top)?;
+        close_if_replaced(store, &path).await?;
         Ok(Checkout {
             branch: self.branch_of(&worktree.top).await?,
-            path: text(&worktree.top)?,
+            path,
             repository: text(&repository.shared)?,
         })
+    }
+
+    /// Refuses a thread's finished work in `worktree` when Kratos made it and it is gone from its
+    /// path, removed or replaced by another checkout, so the thread never acts on someone else's
+    /// checkout. A borrowed worktree is the user's, whatever stands there.
+    pub(crate) async fn check_still_there(
+        &self,
+        store: &StoreThread,
+        worktree: &Worktree,
+    ) -> Result<(), PlaceError> {
+        if worktree.ownership == Ownership::Borrowed {
+            return Ok(());
+        }
+        let ours = store.call(|store| store.kratos_worktrees()).await?;
+        match ours.into_iter().find(|ours| ours.id == worktree.id) {
+            Some(recorded) if is_same_checkout(&recorded).await => Ok(()),
+            _ => Err(PlaceError::NotItsWorktree(worktree.path.clone())),
+        }
     }
 
     /// The worktree whose top folder is `path`.
@@ -263,6 +295,12 @@ impl Worktrees {
         };
         let made = self.check_out(&repository.top, path, name, base).await;
         if let Ok(true) = made {
+            if let Some(git_dir) = git_dir_of(path).await {
+                let recorded = id.clone();
+                store
+                    .call(move |store| store.record_git_dir(&recorded, &git_dir))
+                    .await?;
+            }
             return Ok(Some(id));
         }
         // A checkout stopped partway leaves a folder, which keeps its reservation so a later
@@ -393,6 +431,39 @@ impl Worktrees {
             .entry(repository.to_owned())
             .or_default()
             .clone()
+    }
+}
+
+/// The folder git keeps for the linked worktree at `folder`, which its `.git` file names, with
+/// links resolved. `None` when `folder` has no such file.
+async fn git_dir_of(folder: &Path) -> Option<String> {
+    let named = tokio::fs::read_to_string(folder.join(".git")).await.ok()?;
+    let git_dir = named.trim().strip_prefix("gitdir:")?.trim();
+    let git_dir = resolved(&folder.join(git_dir)).await.ok()?;
+    git_dir.to_str().map(str::to_owned)
+}
+
+/// Closes the record of the worktree Kratos made at `path` when another checkout has taken its
+/// place there, so the checkout at `path` can be recorded as borrowed.
+async fn close_if_replaced(store: &StoreThread, path: &str) -> Result<(), StoreError> {
+    let ours = store.call(|store| store.kratos_worktrees()).await?;
+    let Some(recorded) = ours.into_iter().find(|ours| ours.path == path) else {
+        return Ok(());
+    };
+    if !is_same_checkout(&recorded).await {
+        store
+            .call(move |store| store.close_replaced_worktree(&recorded.id))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Whether the checkout at `worktree`'s path is the one Kratos made there. A worktree recorded
+/// before Kratos knew its git folder is taken to be, as a path was all Kratos had then.
+pub(crate) async fn is_same_checkout(worktree: &KratosWorktree) -> bool {
+    match &worktree.git_dir {
+        None => true,
+        Some(recorded) => git_dir_of(Path::new(&worktree.path)).await.as_ref() == Some(recorded),
     }
 }
 

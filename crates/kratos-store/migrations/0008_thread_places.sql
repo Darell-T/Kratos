@@ -3,14 +3,18 @@
 -- archive a thread. A thread with no worktree works in its project folder. `creating` marks a
 -- worktree Kratos reserved before git made it, so a restart can tell its own leftover from a
 -- folder the user made. `removing` marks one Kratos began to remove, which no thread may join.
--- A removed worktree's row stays for the threads that worked there, and frees its path. `base`
--- is the commit Kratos made a worktree from, which a thread's diff starts at.
+-- A removed worktree's row stays for the threads that worked there, and frees its path. It is
+-- also how Kratos closes a worktree that no longer stands at its path, because the user moved it
+-- and another checkout took its place. `base` is the commit Kratos made a worktree from, which a
+-- thread's diff starts at. `git_dir` is the folder git keeps for a worktree Kratos made, under the
+-- repository's `worktrees` folder, which tells that checkout apart from another at its path.
   CREATE TABLE worktrees (
     id TEXT PRIMARY KEY,
     path TEXT NOT NULL,
     repository TEXT NOT NULL,
     branch TEXT,
     base TEXT,
+    git_dir TEXT,
     ownership TEXT NOT NULL CHECK (ownership IN ('createdByKratos', 'borrowed')),
     state TEXT NOT NULL CHECK (state IN ('creating', 'ready', 'removing', 'removed')),
     created_at TEXT NOT NULL,
