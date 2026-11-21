@@ -107,10 +107,10 @@ pub(crate) enum PlaceError {
     #[error("Another git command is changing the index at {0}. Commit again once it ends.")]
     IndexInUse(String),
     #[error(
-        "Another commit landed on this branch while Kratos staged the files. Look at what it \
-         changed, then commit again."
+        "Another git command committed, or started or ended a merge, cherry-pick, or revert, \
+         while Kratos staged the files. Look at what it changed, then commit again."
     )]
-    HeadMoved,
+    ChangedMeanwhile,
     #[error("{0} has no branch checked out. Check out a branch to open a pull request from it.")]
     NoBranch(String),
     #[error(

@@ -313,7 +313,7 @@ impl From<PlaceError> for ApiError {
             | PlaceError::BeingEdited
             | PlaceError::PartialCommitDuring(_)
             | PlaceError::IndexInUse(_)
-            | PlaceError::HeadMoved) => ApiError::new(StatusCode::CONFLICT, conflict),
+            | PlaceError::ChangedMeanwhile) => ApiError::new(StatusCode::CONFLICT, conflict),
             refused => ApiError::bad_request(refused.to_string()),
         }
     }

@@ -27,6 +27,14 @@ type Seen = HashMap<ThreadId, u64>;
 /// --index-info` reads back.
 type Entries<'listed> = BTreeMap<&'listed [u8], Vec<&'listed [u8]>>;
 
+/// What a commit goes on top of: the commit the worktree has checked out, or none on a branch with
+/// no commit yet, and a commit git is in the middle of making there.
+#[derive(Debug, PartialEq, Eq)]
+struct Tip {
+    head: Option<String>,
+    underway: Option<Underway>,
+}
+
 /// The index files of one commit: the worktree's own, and scratch files Kratos makes.
 struct Indexes {
     own: PathBuf,
@@ -39,7 +47,7 @@ struct Indexes {
 }
 
 /// A commit git is in the middle of making, which the next commit ends.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Underway {
     Merge,
     CherryPick,
@@ -161,10 +169,10 @@ impl Worktrees {
         let is_whole_checkout = resolved(folder)
             .await
             .is_ok_and(|folder| folder == repository.top);
-        let underway = self.underway(folder).await?;
-        refuse_partial_during(underway, is_whole_checkout)?;
-        // Read before the index, so a commit that lands while Kratos copies it moves HEAD on.
-        let head = self.head(folder).await?;
+        // Read before the index, so a git command that changes both while Kratos copies the index
+        // changes the tip too.
+        let tip = self.tip(folder).await?;
+        refuse_partial_during(tip.underway, is_whole_checkout)?;
         let indexes = self.indexes_of(folder).await?;
         // Staged once the lock is held, since the commit may have waited for it behind another
         // git command of the repository while a turn started.
@@ -180,8 +188,7 @@ impl Worktrees {
             // Checked again just before git writes, as another checkout may have taken the
             // worktree's path while the commit waited or staged.
             check_still_there(store, &thread.place).await?;
-            self.commit_index(folder, &indexes, head.as_deref(), message, underway)
-                .await
+            self.commit_index(folder, &indexes, &tip, message).await
         }
         .await;
         for scratch in [&indexes.before, &indexes.staged, &indexes.updated] {
@@ -228,23 +235,22 @@ impl Worktrees {
         Ok(())
     }
 
-    /// Commits what `indexes.staged` holds on top of `head`, and returns the new commit. Kratos
-    /// holds git's lock on the worktree's index from its look at HEAD until the index holds the
-    /// committed files, as git's own commit does, so no other commit lands and the index changes
-    /// only here.
+    /// Commits what `indexes.staged` holds on top of `tip`, and returns the new commit. Kratos
+    /// holds git's lock on the worktree's index from its look at the tip until the index holds the
+    /// committed files, as git's own commit does, so no other git command commits, starts or ends
+    /// a merge, or changes the index meanwhile.
     async fn commit_index(
         &self,
         folder: &Path,
         indexes: &Indexes,
-        head: Option<&str>,
+        tip: &Tip,
         message: &str,
-        underway: Option<Underway>,
     ) -> Result<String, PlaceError> {
-        self.refuse_unless_staged(folder, &indexes.staged, underway)
+        self.refuse_unless_staged(folder, &indexes.staged, tip.underway)
             .await?;
         let index_lock = IndexLock::take(&indexes.own).await?;
-        if self.head(folder).await?.as_deref() != head {
-            return Err(PlaceError::HeadMoved);
+        if self.tip(folder).await? != *tip {
+            return Err(PlaceError::ChangedMeanwhile);
         }
         let is_updated = self.write_updated_index(folder, indexes).await?;
         let commit = ["commit", "--quiet", "--message", message];
@@ -391,14 +397,18 @@ impl Worktrees {
         Ok(None)
     }
 
-    /// The commit `folder`'s worktree has checked out, or `None` on a branch with no commit yet.
-    async fn head(&self, folder: &Path) -> Result<Option<String>, PlaceError> {
+    /// What a commit in `folder`'s worktree goes on top of.
+    async fn tip(&self, folder: &Path) -> Result<Tip, PlaceError> {
         let args = ["rev-parse", "--verify", "--quiet", "HEAD"];
-        match self.git.run(folder, &args, git::QUICK).await {
-            Ok(head) => Ok(Some(head)),
-            Err(error) if error.exited_with(1) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
+        let head = match self.git.run(folder, &args, git::QUICK).await {
+            Ok(head) => Some(head),
+            Err(error) if error.exited_with(1) => None,
+            Err(error) => return Err(error.into()),
+        };
+        Ok(Tip {
+            head,
+            underway: self.underway(folder).await?,
+        })
     }
 
     /// The worktree's own index file.

@@ -773,6 +773,41 @@ fn a_commit_the_user_makes_while_a_folder_commit_stages_files_is_not_undone() {
 }
 
 #[test]
+fn a_merge_the_user_starts_while_a_folder_commit_stages_files_is_left_to_them() {
+    // Catches a commit that looks for a merge in progress only before it stages, so it concludes
+    // one the user starts meanwhile without the merged files outside the folder.
+    let root = TempDir::new().unwrap();
+    let repository = repository_with_component_only(&root);
+    git(&repository, &["switch", "--quiet", "--create", "feature"]);
+    std::fs::write(repository.join("feature.txt"), "feature\n").unwrap();
+    git(&repository, &["add", "feature.txt"]);
+    git(&repository, &["commit", "--quiet", "--message", "feature"]);
+    git(&repository, &["switch", "--quiet", "main"]);
+    let head = git(&repository, &["rev-parse", "HEAD"]);
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "add");
+    let inner = workspace_at(&engine, &repository.join("component"));
+    let client = engine.client();
+    let thread = create(&client, &inner, "chat", PlaceRequest::default());
+    std::fs::write(repository.join("component").join("part.txt"), "two\n").unwrap();
+    engine.hold(Gate::Git);
+    let committing = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || commit(&client, &thread, "Two"))
+    };
+    engine.wait_until_held(Gate::Git);
+    git(
+        &repository,
+        &["merge", "--quiet", "--no-ff", "--no-commit", "feature"],
+    );
+    engine.release(Gate::Git);
+
+    let refused = committing.join().unwrap();
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
+    assert!(repository.join(".git").join("MERGE_HEAD").exists());
+}
+
+#[test]
 fn a_commit_keeps_what_the_user_staged_in_the_folder_while_it_staged_files() {
     // Catches a commit that sets the user's index to the committed files afterwards, which drops a
     // version the user staged meanwhile.
