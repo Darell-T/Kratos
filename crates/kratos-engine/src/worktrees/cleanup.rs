@@ -217,20 +217,16 @@ impl Worktrees {
         // Write metadata before moving so a crash right after rename stays identifiable even if a
         // replacement checkout overwrites git's admin folder at the vacated path.
         write_trash_meta(&slot.meta, recorded, branch).await?;
-        match tokio::fs::rename(folder, &slot.dir).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let _ = remove_file_if_present(&slot.meta).await;
+        if let Err(source) = tokio::fs::rename(folder, &slot.dir).await {
+            let _ = tokio::fs::remove_file(&slot.meta).await;
+            if source.kind() == io::ErrorKind::NotFound {
                 remove_tree(admin).await?;
                 return Ok(Cleanup::Removed);
             }
-            Err(source) => {
-                let _ = remove_file_if_present(&slot.meta).await;
-                return Err(PlaceError::CannotRemove {
-                    path: recorded.path.clone(),
-                    source,
-                });
-            }
+            return Err(PlaceError::CannotRemove {
+                path: recorded.path.clone(),
+                source,
+            });
         }
         self.finish_trashed(&slot, Some(admin), recorded, files)
             .await
@@ -259,7 +255,7 @@ impl Worktrees {
         admin: Option<&Path>,
         recorded: &KratosWorktree,
     ) -> Result<(), PlaceError> {
-        if tokio::fs::symlink_metadata(&slot.meta).await.is_err() {
+        if !is_our_trash_meta(&slot.meta, recorded).await {
             let branch = self.branch_of(&slot.dir).await.ok().flatten();
             write_trash_meta(&slot.meta, recorded, branch).await?;
         }
@@ -280,7 +276,14 @@ impl Worktrees {
         admin: Option<&Path>,
     ) -> Result<(), PlaceError> {
         remove_tree(&slot.dir).await?;
-        remove_file_if_present(&slot.meta).await?;
+        if let Err(source) = tokio::fs::remove_file(&slot.meta).await
+            && source.kind() != io::ErrorKind::NotFound
+        {
+            return Err(PlaceError::Io {
+                path: slot.meta.display().to_string(),
+                source,
+            });
+        }
         if let Some(admin) = admin {
             remove_tree(admin).await?;
         }
@@ -295,7 +298,14 @@ impl Worktrees {
         {
             return Ok(Cleanup::NotOwned);
         }
-        remove_empty_dir(folder).await?;
+        if let Err(source) = tokio::fs::remove_dir(folder).await
+            && source.kind() != io::ErrorKind::NotFound
+        {
+            return Err(PlaceError::CannotRemove {
+                path: folder.display().to_string(),
+                source,
+            });
+        }
         Ok(Cleanup::Removed)
     }
 
@@ -369,11 +379,9 @@ impl Worktrees {
             return Ok(edited);
         }
         let own = self.index_of(folder).await?;
-        let index = self.scratch_name();
+        let index = self.scratch_index();
         copy_preserving_mtime_if_present(&own, &index).await?;
-        let changed = self.changed_once_unmarked(folder, &index, &on_disk).await;
-        let _ = tokio::fs::remove_file(&index).await;
-        edited.extend(changed?);
+        edited.extend(self.changed_once_unmarked(folder, &index, &on_disk).await?);
         Ok(edited)
     }
 
@@ -644,28 +652,7 @@ async fn write_trash_meta(
         })
 }
 
-async fn remove_empty_dir(folder: &Path) -> Result<(), PlaceError> {
-    match tokio::fs::remove_dir(folder).await {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::CannotRemove {
-            path: folder.display().to_string(),
-            source: error,
-        }),
-        _ => Ok(()),
-    }
-}
-
-async fn remove_file_if_present(path: &Path) -> Result<(), PlaceError> {
-    match tokio::fs::remove_file(path).await {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::Io {
-            path: path.display().to_string(),
-            source: error,
-        }),
-        _ => Ok(()),
-    }
-}
-
-/// Removes `path` recursively through Rust's filesystem calls, avoiding Git for Windows's
-/// 260-character path limit when `core.longpaths` is false.
+/// Avoids Git for Windows's 260-character path limit when `core.longpaths` is false.
 async fn remove_tree(path: &Path) -> Result<(), PlaceError> {
     match tokio::fs::remove_dir_all(path).await {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::CannotRemove {
@@ -676,8 +663,7 @@ async fn remove_tree(path: &Path) -> Result<(), PlaceError> {
     }
 }
 
-/// Resolves `.` and `..` without touching the filesystem so relative `gitdir` entries match while
-/// the worktree folder is offline.
+/// Keeps relative `gitdir` links (`worktree.useRelativePaths`) matchable while offline.
 fn normalize_lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -708,8 +694,6 @@ fn same_lexical_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Whether `listed` (`git ls-files -v -s -z`) names any gitlink whose folder in `folder` is
-/// non-empty, matching `git worktree remove`'s submodule refusal.
 async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
     for (_, mode, path) in ls_files_entries(listed) {
         if mode != GITLINK_MODE {
@@ -737,7 +721,6 @@ fn ls_files_entries(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8], &[u8])
     })
 }
 
-/// Whether an unarchived thread works at `worktree` or in a folder inside it.
 async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, StoreError> {
     let folders = store.call(|store| store.folders_in_use()).await?;
     for folder in folders {
@@ -758,7 +741,6 @@ fn overlooked(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
     })
 }
 
-/// The status and path of each file in `git diff --name-status --no-renames -z` output.
 fn changes(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
     let mut fields = listed.split(|&byte| byte == 0);
     std::iter::from_fn(move || {

@@ -1811,6 +1811,33 @@ fn diff_and_commit_include_force_added_ignored_files_with_working_content() {
     assert_eq!(git(&repository, &["show", ":outside.local"]), "outside");
     let tree = git(&repository, &["ls-tree", "-r", "--name-only", "HEAD"]);
     assert!(!tree.lines().any(|line| line == "outside.local"), "{tree}");
+
+    // A tracked gitignored file marked skip-worktree and still present on disk must not break diff
+    // or commit (git add --force rejects pathspecs matching only skip-worktree entries).
+    std::fs::write(repository.join("sparse.local"), "committed sparse\n").unwrap();
+    git(&repository, &["add", "--force", "sparse.local"]);
+    git(
+        &repository,
+        &["commit", "--quiet", "--message", "track sparse ignored"],
+    );
+    git(
+        &repository,
+        &["update-index", "--skip-worktree", "sparse.local"],
+    );
+    std::fs::write(repository.join("README.md"), "ordinary edit\n").unwrap();
+
+    let sparse_patch = diff(&client, &thread);
+    assert!(
+        sparse_patch.patch.contains("README.md"),
+        "{}",
+        sparse_patch.patch
+    );
+    let sparse_reply = commit(&client, &thread, "Commit alongside skip-worktree ignored");
+    assert_eq!(sparse_reply.status, 201, "{}", sparse_reply.body);
+    assert_eq!(
+        git(&repository, &["show", "HEAD:README.md"]),
+        "ordinary edit"
+    );
 }
 
 #[test]

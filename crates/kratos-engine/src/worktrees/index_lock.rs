@@ -1,6 +1,3 @@
-//! Git's lock on a worktree's index, which a commit holds as git's own commit does. Git commands
-//! that stage files or make a commit take the same lock, so none runs while Kratos commits.
-
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -10,17 +7,12 @@ use tokio::time::Instant;
 
 use super::PlaceError;
 
-/// How long Kratos waits for a git command or short-lived Windows reader that holds the index,
-/// such as an editor's `git status`.
 const WAIT: Duration = Duration::from_secs(2);
-
 const RETRY: Duration = Duration::from_millis(20);
 
 #[cfg(windows)]
 const ERROR_SHARING_VIOLATION: i32 = 32;
 
-/// The lock git takes on the index at `index`: the file `index.lock`, which exists while one git
-/// command changes the index. Dropping it lets go of the lock.
 pub(super) struct IndexLock {
     index: PathBuf,
     lock: PathBuf,
@@ -30,7 +22,6 @@ pub(super) struct IndexLock {
 pub(super) struct PreparedReplacement(IndexLock);
 
 impl IndexLock {
-    /// Takes the lock, waiting a moment for a git command that holds it.
     pub(super) async fn take(index: &Path) -> Result<IndexLock, PlaceError> {
         let mut lock = index.as_os_str().to_owned();
         lock.push(".lock");
@@ -78,45 +69,39 @@ impl PreparedReplacement {
         &self.0.lock
     }
 
-    pub(super) async fn commit(mut self) -> io::Result<()> {
-        // Take ownership of cleanup before entering the blocking pool so cancellation cannot race
-        // `IndexLock::drop` against an in-flight rename.
-        self.0.is_held = false;
-        let lock_path = self.0.lock.clone();
-        let index_path = self.0.index.clone();
-        tokio::task::spawn_blocking(move || commit_rename_sync(&lock_path, &index_path))
+    pub(super) async fn commit(self) -> io::Result<()> {
+        let mut lock = self.0;
+        tokio::task::spawn_blocking(move || commit_rename_sync(&mut lock))
             .await
             .map_err(io::Error::other)?
     }
 }
 
-fn commit_rename_sync(lock_path: &Path, index_path: &Path) -> io::Result<()> {
+fn commit_rename_sync(lock: &mut IndexLock) -> io::Result<()> {
     let deadline = std::time::Instant::now() + WAIT;
     loop {
-        match std::fs::rename(lock_path, index_path) {
-            Ok(()) => return Ok(()),
+        match std::fs::rename(&lock.lock, &lock.index) {
+            Ok(()) => {
+                lock.is_held = false;
+                return Ok(());
+            }
             Err(error) if is_index_busy(&error) && std::time::Instant::now() < deadline => {
                 std::thread::sleep(RETRY);
             }
-            Err(error) => {
-                let _ = std::fs::remove_file(lock_path);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         }
     }
 }
 
 impl Drop for IndexLock {
     fn drop(&mut self) {
-        // Once the lock file became the index, the name may already be another git command's lock.
         if self.is_held {
             let _ = std::fs::remove_file(&self.lock);
         }
     }
 }
 
-/// Copies `from` to `to` while keeping `from`'s modified time (so git's racy-index check stays
-/// active on Linux), returning `Ok(())` when `from` does not exist yet.
+/// Keeps `from`'s modified time so git's racy-index check still hashes same-second working edits.
 pub(super) async fn copy_preserving_mtime_if_present(
     from: &Path,
     to: &Path,
@@ -132,12 +117,11 @@ enum MissingSource {
 
 async fn copy_mtime(from: &Path, to: &Path, missing: MissingSource) -> Result<(), PlaceError> {
     let from = from.to_owned();
-    let to = to.to_owned();
-    let dest = to.display().to_string();
-    tokio::task::spawn_blocking(move || copy_mtime_sync(&from, &to, missing))
+    let to_owned = to.to_owned();
+    tokio::task::spawn_blocking(move || copy_mtime_sync(&from, &to_owned, missing))
         .await
         .map_err(|error| PlaceError::Io {
-            path: dest,
+            path: to.display().to_string(),
             source: io::Error::other(error),
         })?
 }

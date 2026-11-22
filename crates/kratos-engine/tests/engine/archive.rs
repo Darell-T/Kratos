@@ -1508,8 +1508,8 @@ fn a_windows_long_path_worktree_archives_cleanly_under_keep_and_discard() {
 
 #[test]
 fn a_crash_after_moving_to_trash_finishes_cleanly_with_or_without_a_replacement_checkout() {
-    // Catches restart recovery restoring files without fixing gitdir, or confusing a replacement
-    // checkout at the vacated path with the trashed worktree and forgetting its admin record.
+    // Catches restart recovery failing to remove the old admin record or disarm `<slot>/.git`, or
+    // confusing a replacement checkout at the vacated path with the trashed worktree.
     for with_replacement in [false, true] {
         let root = TempDir::new().unwrap();
         let repository = new_repository(&root);
@@ -1747,7 +1747,6 @@ fn git_in_a_trashed_worktree_fails_and_never_touches_the_project() {
     let workspace = workspace_at(&engine, &repository);
     let client = engine.client();
     let thread = create(&client, &workspace, "work", PlaceRequest::NewWorktree);
-    // Unfinished edit in the project folder itself, which a command in trash must never commit.
     std::fs::write(
         repository.join("README.md"),
         "unfinished edit in the project\n",

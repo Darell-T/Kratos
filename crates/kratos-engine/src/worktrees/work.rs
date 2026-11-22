@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
+use std::ops::Deref;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 
@@ -104,11 +105,23 @@ impl fmt::Display for Underway {
     }
 }
 
+pub(super) struct ScratchIndex(PathBuf);
+
+impl Deref for ScratchIndex {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchIndex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 impl Worktrees {
-    /// What `folder` holds that `base` does not, or that its `HEAD` does not without a base, and
-    /// nothing from the rest of the repository. Built in a fresh private index from `HEAD` so new
-    /// files show, the user's staging stays untouched, and same-size edits inside git's timestamp
-    /// window are never masked by a copied stat cache.
     pub(crate) async fn diff(
         &self,
         folder: &Path,
@@ -123,12 +136,10 @@ impl Worktrees {
             Some(base) => base.to_owned(),
             None => head.clone().ok_or(PlaceError::NoCommits)?,
         };
-        let index = self.scratch_name();
+        let index = self.scratch_index();
         let patch = self
             .staged_patch(folder, head.as_deref(), &base, &index)
-            .await;
-        let _ = tokio::fs::remove_file(&index).await;
-        let patch = patch?;
+            .await?;
         Ok(ThreadDiff {
             base,
             patch: patch.text,
@@ -170,8 +181,8 @@ impl Worktrees {
             .await?)
     }
 
-    pub(super) fn scratch_name(&self) -> PathBuf {
-        self.scratch.join(format!("index-{}", Uuid::new_v4()))
+    pub(super) fn scratch_index(&self) -> ScratchIndex {
+        ScratchIndex(self.scratch.join(format!("index-{}", Uuid::new_v4())))
     }
 
     pub(crate) async fn commit(
@@ -192,21 +203,16 @@ impl Worktrees {
         let base = self
             .capture_commit_base(folder, &resolved_folder, &repository.top, is_whole_checkout)
             .await?;
-        let staged = self.scratch_name();
-        let committed = async {
-            let tree = self
-                .prepare_commit_tree(store, thread, &repository.top, &base, &staged)
-                .await?;
-            let prepared = PreparedCommit {
-                staged: &staged,
-                tree,
-            };
-            self.publish_commit(store, thread, &repository.top, &base, &prepared, message)
-                .await
-        }
-        .await;
-        let _ = tokio::fs::remove_file(&staged).await;
-        committed
+        let staged = self.scratch_index();
+        let tree = self
+            .prepare_commit_tree(store, thread, &repository.top, &base, &staged)
+            .await?;
+        let prepared = PreparedCommit {
+            staged: &staged,
+            tree,
+        };
+        self.publish_commit(store, thread, &repository.top, &base, &prepared, message)
+            .await
     }
 
     async fn capture_commit_base(
@@ -257,14 +263,15 @@ impl Worktrees {
             .await?)
     }
 
-    /// Stages working-tree files in `folder` into the private `index`, carrying over any
-    /// force-added ignored files still present on disk that `git add --all` skips.
     async fn stage_folder(&self, folder: &Path, index: &Path) -> Result<(), PlaceError> {
         self.git
             .run_in_index(folder, &["add", "--all", "--", "."], CHECKOUT, index)
             .await?;
+        // Carry over force-added ignored files that `git add --all` skips, excluding
+        // `skip-worktree` entries because `git add --force` rejects sparse-excluded paths.
         let args = [
             "ls-files",
+            "-v",
             "--cached",
             "--ignored",
             "--exclude-standard",
@@ -274,16 +281,13 @@ impl Worktrees {
         ];
         let listed = self.git.run_bytes(folder, &args, git::QUICK).await?;
         let mut forced = Vec::new();
-        for path in listed
-            .split(|&byte| byte == 0)
-            .filter(|path| !path.is_empty())
-        {
+        for path in non_sparse_paths(&listed) {
             let Some(file) = cleanup::file_in(folder, path) else {
                 continue;
             };
             if tokio::fs::symlink_metadata(&file)
                 .await
-                .is_ok_and(|meta| !meta.is_dir())
+                .is_ok_and(|meta| meta.is_file() || meta.file_type().is_symlink())
             {
                 forced.extend_from_slice(b":(literal)");
                 forced.extend_from_slice(path);
@@ -304,8 +308,8 @@ impl Worktrees {
         Ok(())
     }
 
-    /// Populates `index` from `head` and reapplies any `skip-worktree` bits from `listed` so
-    /// sparse-checkout files absent on disk are not treated as deletions by `git add --all`.
+    /// Reapplies `skip-worktree` bits from `listed` so sparse-checkout files absent on disk are
+    /// not treated as deletions by `git add --all`.
     async fn seed_private_index(
         &self,
         cwd: &Path,
@@ -341,22 +345,18 @@ impl Worktrees {
             return Err(PlaceError::ChangedMeanwhile);
         }
         check_still_there(store, &thread.place).await?;
-        let updated = self.scratch_name();
-        let replacement = async {
-            copy_preserving_mtime_if_present(&own, &updated).await?;
-            self.git
-                .run_in_index(
-                    folder,
-                    &["reset", "--quiet", &prepared.tree, "--", "."],
-                    git::QUICK,
-                    &updated,
-                )
-                .await?;
-            index_lock.prepare_replacement(&updated).await
-        }
-        .await;
-        let _ = tokio::fs::remove_file(&updated).await;
-        Ok((own, replacement?))
+        let updated = self.scratch_index();
+        copy_preserving_mtime_if_present(&own, &updated).await?;
+        self.git
+            .run_in_index(
+                folder,
+                &["reset", "--quiet", &prepared.tree, "--", "."],
+                git::QUICK,
+                &updated,
+            )
+            .await?;
+        let replacement = index_lock.prepare_replacement(&updated).await?;
+        Ok((own, replacement))
     }
 
     async fn publish_commit(
@@ -627,12 +627,18 @@ impl Worktrees {
     }
 }
 
-/// `path` with links and `..` resolved, or as given when it is gone.
 async fn resolved_or_given(path: &Path) -> PathBuf {
     resolved(path).await.unwrap_or_else(|_| path.to_owned())
 }
 
-/// NUL-delimited paths marked `skip-worktree` (`S` or `s`) in `git ls-files -v [-s] -z` output.
+fn non_sparse_paths(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
+    listed.split(|&byte| byte == 0).filter_map(|record| {
+        let (&tag, rest) = record.split_first()?;
+        let path = rest.strip_prefix(b" ")?;
+        (!matches!(tag, b'S' | b's') && !path.is_empty()).then_some(path)
+    })
+}
+
 fn skip_worktree_input(listed: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     for record in listed.split(|&byte| byte == 0) {
