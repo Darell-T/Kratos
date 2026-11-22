@@ -21,6 +21,9 @@ use crate::store_thread::StoreThread;
 
 const TRASH_RETENTION: Duration = Duration::from_hours(7 * 24);
 const TRASH_SLOT_LEN: usize = WORKTREES_FOLDER.len() - TRASH_FOLDER.len() + 1;
+/// Replaces `<slot>/.git` on Keep so git run in a trashed worktree fails with "not a git
+/// repository" instead of walking up to the project's `.git`.
+const TRASH_GIT_SENTINEL: &str = "gitdir: .kratos-archived-worktree\n";
 const GITLINK_MODE: &[u8] = b"160000";
 
 enum KeepCheck {
@@ -263,7 +266,13 @@ impl Worktrees {
         if let Some(admin) = admin {
             remove_tree(admin).await?;
         }
-        remove_file_if_present(&slot.dir.join(".git")).await
+        let git_file = slot.dir.join(".git");
+        tokio::fs::write(&git_file, TRASH_GIT_SENTINEL)
+            .await
+            .map_err(|source| PlaceError::Io {
+                path: git_file.display().to_string(),
+                source,
+            })
     }
 
     async fn finish_discard_trashed(

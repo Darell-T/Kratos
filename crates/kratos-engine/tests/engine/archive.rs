@@ -1379,7 +1379,10 @@ fn a_clean_keep_archive_moves_the_worktree_to_trash_and_keeps_repo_status_clean(
         std::fs::read_to_string(trash_dir.join("committed.txt")).unwrap(),
         "saved\n"
     );
-    assert!(!trash_dir.join(".git").exists());
+    assert_eq!(
+        std::fs::read_to_string(trash_dir.join(".git")).unwrap(),
+        "gitdir: .kratos-archived-worktree\n"
+    );
 
     // Discard deletes immediately and leaves no new trash entry.
     let discard_thread = create(&client, &workspace, "drop", PlaceRequest::NewWorktree);
@@ -1521,7 +1524,7 @@ fn a_crash_after_moving_to_trash_finishes_cleanly_with_or_without_a_replacement_
         engine.kill();
 
         // Simulate a crash right after `begin_removal`, write-ahead `<slot>.json`, and atomic
-        // rename into `.kratos-trash/<slot>`, before removing `admin` or `<slot>/.git`.
+        // rename into `.kratos-trash/<slot>`, before removing `admin` or disarming `<slot>/.git`.
         let database = rusqlite::Connection::open(home.join("kratos.db")).unwrap();
         database
             .execute(
@@ -1601,7 +1604,10 @@ fn a_crash_after_moving_to_trash_finishes_cleanly_with_or_without_a_replacement_
             "late save after rename\n"
         );
         assert!(trash_dir.join(format!("{slot}.json")).is_file());
-        assert!(!moved.join(".git").exists());
+        assert_eq!(
+            std::fs::read_to_string(moved.join(".git")).unwrap(),
+            "gitdir: .kratos-archived-worktree\n"
+        );
         if with_replacement {
             assert_eq!(
                 std::fs::read_to_string(folder.join("replacement.txt")).unwrap(),
@@ -1722,4 +1728,67 @@ fn expired_trash_is_emptied_on_startup_without_deleting_recent_saves() {
     wait_until_gone(&expired_dir);
     assert!(!expired_dir.with_extension("json").exists());
     assert!(fresh_dir.exists());
+}
+
+#[test]
+fn git_in_a_trashed_worktree_fails_and_never_touches_the_project() {
+    // Catches Keep removing `<slot>/.git` so a terminal left open inside the trashed worktree (or
+    // a subdirectory of it) walks up to the project's repository and commits project edits.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    std::fs::create_dir_all(repository.join("nested")).unwrap();
+    std::fs::write(repository.join("nested").join("file.txt"), "tracked\n").unwrap();
+    git(&repository, &["add", "nested/file.txt"]);
+    git(
+        &repository,
+        &["commit", "--quiet", "--message", "add nested"],
+    );
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "work", PlaceRequest::NewWorktree);
+    // Unfinished edit in the project folder itself, which a command in trash must never commit.
+    std::fs::write(
+        repository.join("README.md"),
+        "unfinished edit in the project\n",
+    )
+    .unwrap();
+    let project_head = git(&repository, &["rev-parse", "HEAD"]);
+
+    assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
+    let trashed = trash_entries(&repository);
+    assert_eq!(trashed.len(), 1, "{trashed:?}");
+    let slot = &trashed[0].0;
+
+    for dir in [slot.clone(), slot.join("nested")] {
+        for args in [
+            &["rev-parse", "--show-toplevel"][..],
+            &["commit", "--quiet", "-am", "typed in old worktree terminal"],
+        ] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir)
+                .args(args)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "git {args:?} in {} unexpectedly succeeded: {}",
+                dir.display(),
+                String::from_utf8_lossy(&output.stdout)
+            );
+            assert!(
+                stderr.to_ascii_lowercase().contains("not a git repository"),
+                "expected 'not a git repository' from git {args:?} in {}, got: {stderr}",
+                dir.display()
+            );
+        }
+    }
+    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), project_head);
+    assert_eq!(
+        std::fs::read_to_string(repository.join("README.md")).unwrap(),
+        "unfinished edit in the project\n"
+    );
+    assert_eq!(git(&repository, &["status", "--porcelain"]), "M README.md");
 }
