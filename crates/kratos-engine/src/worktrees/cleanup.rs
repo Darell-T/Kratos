@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, Timestamp, WorktreeId};
@@ -453,7 +453,7 @@ async fn find_our_admin(
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         entries => entries.map_err(io_err)?,
     };
-    let expected = normalize_lexical(&Path::new(&recorded.path).join(".git"));
+    let expected = Path::new(&recorded.path).join(".git");
     while let Some(entry) = entries.next_entry().await.map_err(io_err)? {
         let record = entry.path();
         if !is_same_checkout_dir(&record, recorded).await {
@@ -462,9 +462,7 @@ async fn find_our_admin(
         let Ok(gitdir) = tokio::fs::read_to_string(record.join("gitdir")).await else {
             continue;
         };
-        let resolved_gitdir =
-            normalize_lexical(&record.join(gitdir.trim_end_matches(['\r', '\n'])));
-        if same_lexical_path(&resolved_gitdir, &expected) {
+        if record.join(gitdir.trim_end_matches(['\r', '\n'])) == expected {
             return Ok(Some(record));
         }
     }
@@ -603,37 +601,6 @@ async fn remove_tree(path: &Path) -> Result<(), PlaceError> {
     }
 }
 
-/// Keeps relative `gitdir` links (`worktree.useRelativePaths`) matchable while offline.
-fn normalize_lexical(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => match out.components().next_back() {
-                Some(Component::Normal(_)) => {
-                    out.pop();
-                }
-                Some(Component::RootDir | Component::Prefix(_)) => {}
-                _ => out.push(component),
-            },
-            other => out.push(other),
-        }
-    }
-    out
-}
-
-fn same_lexical_path(left: &Path, right: &Path) -> bool {
-    #[cfg(windows)]
-    {
-        left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
-    }
-    #[cfg(not(windows))]
-    {
-        left == right
-    }
-}
-
 /// Whether `listed` (`git ls-files -v -s -z`) names any gitlink whose folder in `folder` is
 /// non-empty, matching `git worktree remove`'s submodule refusal.
 async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
@@ -690,15 +657,6 @@ pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn relative_gitdir_normalizes_lexically_while_offline() {
-        let admin = Path::new("/tmp/repo/.git/worktrees/portable");
-        let target = normalize_lexical(&admin.join("../../../.kratos-worktrees/portable/.git"));
-        let expected = normalize_lexical(Path::new("/tmp/repo/.kratos-worktrees/portable/.git"));
-        assert!(same_lexical_path(&target, &expected));
-        assert_eq!(normalize_lexical(Path::new("/../repo")), Path::new("/repo"));
-    }
 
     #[test]
     fn trash_slot_is_never_longer_than_a_one_char_worktree_path() {
