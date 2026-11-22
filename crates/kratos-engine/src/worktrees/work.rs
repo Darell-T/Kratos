@@ -237,7 +237,7 @@ impl Worktrees {
     ) -> Result<(), PlaceError> {
         let listed = self
             .git
-            .run_bytes(cwd, &["ls-files", "--full-name", "-v", "-z"], git::QUICK)
+            .run_bytes(cwd, &["ls-files", "-v", "-z"], git::QUICK)
             .await?;
         self.git
             .run_in_index(cwd, &["read-tree", head], git::QUICK, index)
@@ -327,9 +327,9 @@ impl Worktrees {
         }
     }
 
-    /// Refuses while a thread may be editing files a commit of `folder` would take: a turn runs
-    /// or is starting there. Its folder must hold `folder` or lie inside it, in the checkout at
-    /// `top`.
+    /// Refuses while a thread may be editing files a commit of `resolved_folder` would take: a
+    /// turn runs or is starting there. Its folder must hold `resolved_folder` or lie inside it, in
+    /// the checkout at `top`.
     async fn refuse_while_edited(
         &self,
         store: &StoreThread,
@@ -433,7 +433,10 @@ impl Worktrees {
         body: &str,
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
-        let repository = self.located(folder).await?;
+        let repository = self
+            .locate(folder)
+            .await?
+            .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))?;
         let lock = self.lock_of(&repository.shared);
         let _one_at_a_time = lock.lock().await;
         let branch = self

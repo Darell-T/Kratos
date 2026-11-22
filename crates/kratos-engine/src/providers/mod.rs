@@ -24,9 +24,9 @@ use crate::worktrees::check_still_there;
 pub(crate) const MAX_PENDING_MESSAGES: usize = 10;
 
 /// Why the thread's next turn may not start: Kratos made the worktree it works in, and the worktree
-/// is gone from its path, removed or replaced by another checkout, so the agent would work in
-/// someone else's checkout. Checked as each turn starts, since the user may replace a worktree at
-/// any time.
+/// is gone from its path, unlocked in git, or replaced by another checkout, so the agent would work
+/// in someone else's checkout. Checked as each turn starts, since the user may replace a worktree
+/// at any time.
 pub(crate) async fn worktree_gone(store: &StoreThread, place: &Place) -> Option<String> {
     check_still_there(store, place)
         .await

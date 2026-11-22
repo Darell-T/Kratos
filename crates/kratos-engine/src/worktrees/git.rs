@@ -61,7 +61,6 @@ pub(super) struct LsFileEntry<'a> {
     pub path: &'a [u8],
 }
 
-/// Parses NUL-terminated `git ls-files -v` (with or without `--stage`) output.
 pub(super) fn ls_files_entries(listed: &[u8]) -> impl Iterator<Item = LsFileEntry<'_>> {
     listed.split(|&byte| byte == 0).filter_map(|record| {
         let (&tag, rest) = record.split_first()?;
@@ -254,7 +253,7 @@ fn text_of(stdout: &[u8]) -> String {
 
 /// Reads `child`'s output, keeping at most `max_bytes` of standard output and stopping the child
 /// once it writes more. Standard error is read at the same time, so the child never waits on a
-/// full pipe. Returns the process output and whether stdout was truncated.
+/// full pipe.
 async fn read_child(mut child: Child, max_bytes: usize) -> io::Result<(Output, bool)> {
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");

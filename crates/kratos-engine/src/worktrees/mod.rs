@@ -98,8 +98,8 @@ pub(crate) enum PlaceError {
     #[error("Nothing changed since the last commit, so there is nothing to commit.")]
     NothingToCommit,
     #[error(
-        "A thread that works in this folder is running a turn, or ran one while Kratos read the \
-         files. Commit once the turn ends, or stop it first."
+        "A thread that works in this folder is running a turn. Commit once the turn ends, or stop \
+         it first."
     )]
     BeingEdited,
     #[error(
@@ -144,8 +144,8 @@ pub(crate) enum PlaceError {
     #[error("gh could not open the pull request: {0}")]
     Gh(String),
     #[error(
-        "{0} is no longer the worktree this thread worked in. Kratos removed it, or another \
-         checkout took its place. Start a new thread to work there."
+        "{0} is no longer the worktree this thread worked in. Kratos removed it, it was unlocked \
+         in git, or another checkout took its place. Start a new thread to work there."
     )]
     NotItsWorktree(String),
     #[error(
@@ -421,13 +421,6 @@ impl Worktrees {
         Ok(found)
     }
 
-    /// The worktree `folder` is in, refusing folders outside any git repository.
-    async fn located(&self, folder: &Path) -> Result<Repository, PlaceError> {
-        self.locate(folder)
-            .await?
-            .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))
-    }
-
     /// The worktree `folder` is in, or `None` when it is in no git repository.
     async fn locate(&self, folder: &Path) -> Result<Option<Repository>, PlaceError> {
         let args = [
@@ -480,9 +473,6 @@ pub(super) async fn git_dir_of(folder: &Path) -> Option<PathBuf> {
     Some(folder.join(git_dir))
 }
 
-/// Locks the worktree Kratos just made at `path` with Kratos's reason and `id`, as
-/// `git worktree lock` does. Git then refuses to move or remove it, and the lock file tells
-/// Kratos's worktree apart from any other checkout at its path.
 async fn mark_as_kratoss(path: &Path, id: &WorktreeId) -> Result<(), PlaceError> {
     let git_dir = git_dir_of(path)
         .await
@@ -493,8 +483,8 @@ async fn mark_as_kratoss(path: &Path, id: &WorktreeId) -> Result<(), PlaceError>
 }
 
 /// Refuses a thread at `place` when it is a worktree Kratos made that is gone from its path,
-/// removed or replaced by another checkout, so the thread never acts on someone else's checkout.
-/// A borrowed worktree is the user's, whatever stands there.
+/// unlocked in git, or replaced by another checkout, so the thread never acts on someone else's
+/// checkout. A borrowed worktree is the user's, whatever stands there.
 pub(crate) async fn check_still_there(
     store: &StoreThread,
     place: &Place,

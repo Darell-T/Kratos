@@ -103,7 +103,8 @@ impl Worktrees {
             Removal::Done => return Ok(Cleanup::Removed),
             Removal::Started { repository } => repository,
         };
-        // Checked after `removing` is recorded so no new thread can start inside `path` unseen.
+        // Checked after `removing` is recorded so no new thread can start inside `recorded.path`
+        // unseen.
         let cleanup = if holds_a_thread(store, Path::new(&recorded.path)).await? {
             Cleanup::InUse
         } else {
@@ -169,7 +170,7 @@ impl Worktrees {
     ) -> Result<Cleanup, PlaceError> {
         let branch = self.branch_of(folder).await?;
         if branch.is_none()
-            && let Some(commit) = self.unsaved_head(folder).await?
+            && let Some(commit) = self.unreachable_head(folder).await?
         {
             return Ok(Cleanup::UnsavedCommit { commit });
         }
@@ -229,9 +230,8 @@ impl Worktrees {
         Ok(KeepCheck::Clean)
     }
 
-    /// The worktree's detached `HEAD` when no ref holds it, so only the worktree keeps it
-    /// reachable.
-    async fn unsaved_head(&self, folder: &Path) -> Result<Option<String>, PlaceError> {
+    /// `HEAD` when no ref holds it, so only the worktree keeps that commit reachable.
+    async fn unreachable_head(&self, folder: &Path) -> Result<Option<String>, PlaceError> {
         let holders = [
             "for-each-ref",
             "--count=1",
