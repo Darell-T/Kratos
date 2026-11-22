@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::ops::Deref;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use kratos_protocol::{ThreadDiff, ThreadId};
@@ -205,7 +205,7 @@ impl Worktrees {
         let resolved_folder = resolved_or_given(folder).await;
         let is_whole_checkout = resolved_folder == repository.top;
         let base = self
-            .capture_commit_base(folder, &resolved_folder, &repository.top, is_whole_checkout)
+            .capture_commit_base(folder, &repository.top, is_whole_checkout)
             .await?;
         let staged = self.scratch_index();
         let tree = self
@@ -222,7 +222,6 @@ impl Worktrees {
     async fn capture_commit_base(
         &self,
         folder: &Path,
-        resolved_folder: &Path,
         top: &Path,
         is_whole_checkout: bool,
     ) -> Result<CommitBase, PlaceError> {
@@ -233,11 +232,6 @@ impl Worktrees {
             return Err(PlaceError::PartialCommitDuring(underway));
         }
         let whole_index = self.whole_index(top).await?;
-        if !is_whole_checkout && has_staged_ancestor(&whole_index, resolved_folder, top) {
-            return Err(PlaceError::StagedAncestorConflict(
-                folder.display().to_string(),
-            ));
-        }
         Ok(CommitBase { tip, whole_index })
     }
 
@@ -663,59 +657,9 @@ fn skip_worktree_input(listed: &[u8]) -> Vec<u8> {
     out
 }
 
-fn has_staged_ancestor(whole_index: &[u8], folder: &Path, top: &Path) -> bool {
-    let Ok(relative) = folder.strip_prefix(top) else {
-        return false;
-    };
-    let rel = git_relative_bytes(relative);
-    if rel.is_empty() {
-        return false;
-    }
-    whole_index.split(|&byte| byte == 0).any(|record| {
-        let Some(tab) = record.iter().position(|&byte| byte == b'\t') else {
-            return false;
-        };
-        let path = &record[tab + 1..];
-        path == rel.as_slice() || (rel.starts_with(path) && rel.get(path.len()) == Some(&b'/'))
-    })
-}
-
-fn git_relative_bytes(relative: &Path) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for component in relative.components() {
-        if let Component::Normal(part) = component {
-            if !bytes.is_empty() {
-                bytes.push(b'/');
-            }
-            bytes.extend_from_slice(part.as_encoded_bytes());
-        }
-    }
-    bytes
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn staged_ancestor_check_catches_folder_and_parents_only() {
-        let index = b"H 100644 aaa 0\tbase.txt\0H 100644 bbb 0\tpackages/app\0\
-                      H 100644 ccc 0\tcomp\0";
-        let top = Path::new("/repo");
-
-        assert!(has_staged_ancestor(
-            index,
-            &top.join("packages").join("app"),
-            top
-        ));
-        assert!(has_staged_ancestor(
-            index,
-            &top.join("packages").join("app").join("src"),
-            top
-        ));
-        assert!(!has_staged_ancestor(index, &top.join("component"), top));
-        assert!(!has_staged_ancestor(index, &top.join("packages"), top));
-    }
 
     #[test]
     fn partial_commit_error_recommends_scoped_reset_after_lock_cleanup() {

@@ -892,50 +892,6 @@ fn a_replacement_merge_target_while_staging_stops_the_commit() {
 }
 
 #[test]
-fn a_commit_refuses_when_a_newer_staged_file_collides_with_a_staged_directory() {
-    // Catches a folder commit that proceeds after the user staged a colliding file at an ancestor
-    // path while Kratos prepared the commit.
-    let root = TempDir::new().unwrap();
-    let repository = repository_with_component_only(&root);
-    let head = git(&repository, &["rev-parse", "HEAD"]);
-    let nested = repository.join("component").join("newtree");
-    std::fs::create_dir(&nested).unwrap();
-    std::fs::write(nested.join("child"), "scratch snapshot\n").unwrap();
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "--cached");
-    let inner = workspace_at(&engine, &repository.join("component"));
-    let client = engine.client();
-    let thread = create(&client, &inner, "chat", PlaceRequest::default());
-    engine.hold(Gate::Git);
-    let committing = {
-        let (client, thread) = (client.clone(), thread.clone());
-        std::thread::spawn(move || commit(&client, &thread, "Nested child"))
-    };
-    engine.wait_until_held(Gate::Git);
-    std::fs::remove_file(nested.join("child")).unwrap();
-    std::fs::remove_dir(&nested).unwrap();
-    std::fs::write(&nested, "user staging\n").unwrap();
-    git(&repository, &["add", "component/newtree"]);
-    std::fs::write(&nested, "later working content\n").unwrap();
-    engine.release(Gate::Git);
-
-    let reply = committing.join().unwrap();
-    assert_eq!(reply.status, 409, "{}", reply.body);
-    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
-    assert_eq!(
-        git(&repository, &["show", ":component/newtree"]),
-        "user staging"
-    );
-    assert_eq!(
-        git(&repository, &["ls-files", "--", "component/newtree"]),
-        "component/newtree"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&nested).unwrap(),
-        "later working content\n"
-    );
-}
-
-#[test]
 fn a_commit_refuses_when_index_flags_change_while_it_stages_files() {
     // Catches a commit that proceeds after the user changed index flags while Kratos prepared it.
     let root = TempDir::new().unwrap();
@@ -969,58 +925,6 @@ fn a_commit_refuses_when_index_flags_change_while_it_stages_files() {
         git(&repository, &["ls-files", "-v", "component/part.txt"]),
         "h component/part.txt"
     );
-}
-
-#[test]
-fn a_folder_commit_refuses_when_the_project_folder_path_is_staged_as_a_file() {
-    // Catches a folder commit whose index check is scoped inside the folder and misses a file
-    // staged at the folder's own path, either before the request or while it prepares.
-    for concurrent in [false, true] {
-        let root = TempDir::new().unwrap();
-        let repository = repository_with_component_only(&root);
-        let head = git(&repository, &["rev-parse", "HEAD"]);
-        let component = repository.join("component");
-        let saved = root.path().join("saved-component");
-        let stage_ancestor = || {
-            std::fs::rename(&component, &saved).unwrap();
-            std::fs::write(&component, "only staged copy\n").unwrap();
-            git(&repository, &["add", "--", "component"]);
-            std::fs::remove_file(&component).unwrap();
-            std::fs::rename(&saved, &component).unwrap();
-        };
-        let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "--cached");
-        let inner = workspace_at(&engine, &component);
-        let client = engine.client();
-        let thread = create(&client, &inner, "chat", PlaceRequest::default());
-        std::fs::write(component.join("new.txt"), "thread addition\n").unwrap();
-        if !concurrent {
-            stage_ancestor();
-        }
-        let reply = if concurrent {
-            engine.hold(Gate::Git);
-            let committing = {
-                let (client, thread) = (client.clone(), thread.clone());
-                std::thread::spawn(move || commit(&client, &thread, "Finish component"))
-            };
-            engine.wait_until_held(Gate::Git);
-            stage_ancestor();
-            engine.release(Gate::Git);
-            committing.join().unwrap()
-        } else {
-            commit(&client, &thread, "Finish component")
-        };
-
-        assert_eq!(reply.status, 409, "concurrent={concurrent}: {}", reply.body);
-        assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
-        assert_eq!(
-            git(&repository, &["show", ":component"]),
-            "only staged copy"
-        );
-        assert_eq!(
-            std::fs::read_to_string(component.join("new.txt")).unwrap(),
-            "thread addition\n"
-        );
-    }
 }
 
 #[test]

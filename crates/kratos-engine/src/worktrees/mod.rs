@@ -117,11 +117,6 @@ pub(crate) enum PlaceError {
     )]
     ChangedMeanwhile,
     #[error(
-        "Cannot commit {0} while a file is staged at that folder's path or one of its parent \
-         folders. Unstage or commit that file in git first."
-    )]
-    StagedAncestorConflict(String),
-    #[error(
         "Kratos made commit {commit}, but could not update the index at {path}: {source}. Close \
          any program holding the index, remove {lock} if it remains, then run \
          `git -C \"{folder}\" reset --mixed HEAD -- .` to sync this folder's index without \
