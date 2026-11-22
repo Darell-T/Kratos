@@ -1192,9 +1192,13 @@ fn git_in_a_trashed_worktree_fails_and_never_touches_the_project() {
                 dir.display(),
                 String::from_utf8_lossy(&output.stdout)
             );
+            // Git 2.47 says "not a git repository"; later versions say the gitfile "does not point
+            // to a valid repository". Both mean git stopped at the sentinel.
+            let stderr_lower = stderr.to_ascii_lowercase();
             assert!(
-                stderr.to_ascii_lowercase().contains("not a git repository"),
-                "expected 'not a git repository' from git {args:?} in {}, got: {stderr}",
+                stderr_lower.contains("not a git repository")
+                    || stderr_lower.contains("does not point to a valid repository"),
+                "expected git to refuse the sentinel from git {args:?} in {}, got: {stderr}",
                 dir.display()
             );
         }
