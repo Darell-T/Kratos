@@ -315,8 +315,7 @@ impl From<PlaceError> for ApiError {
             | PlaceError::SubmodulesPresent { .. }
             | PlaceError::BeingEdited
             | PlaceError::PartialCommitDuring(_)
-            | PlaceError::IndexInUse(_)
-            | PlaceError::ChangedMeanwhile) => ApiError::new(StatusCode::CONFLICT, conflict),
+            | PlaceError::IndexInUse(_)) => ApiError::new(StatusCode::CONFLICT, conflict),
             refused => ApiError::bad_request(refused.to_string()),
         }
     }

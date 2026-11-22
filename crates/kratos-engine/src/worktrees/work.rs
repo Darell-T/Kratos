@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -25,50 +24,9 @@ const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 /// The number of the event that started each thread's last turn, when a commit looked.
 type Seen = HashMap<ThreadId, u64>;
 
-#[derive(Debug, PartialEq, Eq)]
-enum HeadTarget {
-    Branch {
-        reference: String,
-        oid: Option<String>,
-    },
-    Detached(String),
-}
-
-impl HeadTarget {
-    fn oid(&self) -> Option<&str> {
-        match self {
-            HeadTarget::Branch { oid, .. } => oid.as_deref(),
-            HeadTarget::Detached(oid) => Some(oid.as_str()),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct PendingCommit {
-    kind: Underway,
-    heads: Vec<String>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct Tip {
-    head: HeadTarget,
-    pending: Vec<PendingCommit>,
-}
-
-impl Tip {
-    fn underway(&self) -> Option<Underway> {
-        self.pending.first().map(|pending| pending.kind)
-    }
-
-    fn has_merge(&self) -> bool {
-        self.pending
-            .iter()
-            .any(|pending| pending.kind == Underway::Merge)
-    }
-}
-
 struct CommitBase {
-    tip: Tip,
+    head: Option<String>,
+    has_merge: bool,
     whole_index: Vec<u8>,
 }
 
@@ -202,6 +160,8 @@ impl Worktrees {
             .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))?;
         let lock = self.lock_of(&repository.shared);
         let _one_at_a_time = lock.lock().await;
+        let own = self.index_of(folder).await?;
+        let index_lock = IndexLock::take(&own).await?;
         let resolved_folder = resolved_or_given(folder).await;
         let is_whole_checkout = resolved_folder == repository.top;
         let base = self
@@ -215,7 +175,7 @@ impl Worktrees {
             staged: &staged,
             tree,
         };
-        self.publish_commit(store, thread, &repository.top, &base, &prepared, message)
+        self.publish_commit(store, thread, &own, index_lock, &prepared, message)
             .await
     }
 
@@ -225,14 +185,23 @@ impl Worktrees {
         top: &Path,
         is_whole_checkout: bool,
     ) -> Result<CommitBase, PlaceError> {
-        let tip = self.tip(folder).await?;
-        if let Some(underway) = tip.underway()
+        let pending = self.pending_commits(folder).await?;
+        if let Some(&underway) = pending.first()
             && !is_whole_checkout
         {
             return Err(PlaceError::PartialCommitDuring(underway));
         }
+        let head = match self.head_commit(folder).await {
+            Ok(head) => Some(head),
+            Err(PlaceError::NoCommits) => None,
+            Err(error) => return Err(error),
+        };
         let whole_index = self.whole_index(top).await?;
-        Ok(CommitBase { tip, whole_index })
+        Ok(CommitBase {
+            head,
+            has_merge: pending.contains(&Underway::Merge),
+            whole_index,
+        })
     }
 
     async fn prepare_commit_tree(
@@ -245,7 +214,7 @@ impl Worktrees {
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
         let seen = self.refuse_while_edited(store, folder, top, None).await?;
-        if let Some(head_oid) = base.tip.head.oid() {
+        if let Some(head_oid) = base.head.as_deref() {
             self.seed_private_index(top, head_oid, &base.whole_index, staged)
                 .await?;
         }
@@ -253,7 +222,7 @@ impl Worktrees {
         self.refuse_while_edited(store, folder, top, Some(&seen))
             .await?;
         check_still_there(store, &thread.place).await?;
-        self.refuse_unless_staged(folder, staged, base.tip.has_merge())
+        self.refuse_unless_staged(folder, staged, base.has_merge)
             .await?;
         Ok(self
             .git
@@ -332,19 +301,14 @@ impl Worktrees {
         &self,
         store: &StoreThread,
         thread: &ProviderThread,
-        top: &Path,
-        base: &CommitBase,
+        own: &Path,
+        index_lock: IndexLock,
         prepared: &PreparedCommit<'_>,
-    ) -> Result<(PathBuf, PreparedReplacement), PlaceError> {
+    ) -> Result<PreparedReplacement, PlaceError> {
         let folder = Path::new(&thread.folder);
-        let own = self.index_of(folder).await?;
-        let index_lock = IndexLock::take(&own).await?;
-        if self.tip(folder).await? != base.tip || self.whole_index(top).await? != base.whole_index {
-            return Err(PlaceError::ChangedMeanwhile);
-        }
         check_still_there(store, &thread.place).await?;
         let updated = self.scratch_index();
-        copy_preserving_mtime_if_present(&own, &updated).await?;
+        copy_preserving_mtime_if_present(own, &updated).await?;
         self.git
             .run_in_index(
                 folder,
@@ -353,22 +317,21 @@ impl Worktrees {
                 &updated,
             )
             .await?;
-        let replacement = index_lock.prepare_replacement(&updated).await?;
-        Ok((own, replacement))
+        index_lock.prepare_replacement(&updated).await
     }
 
     async fn publish_commit(
         &self,
         store: &StoreThread,
         thread: &ProviderThread,
-        top: &Path,
-        base: &CommitBase,
+        own: &Path,
+        index_lock: IndexLock,
         prepared: &PreparedCommit<'_>,
         message: &str,
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
-        let (own, replacement) = self
-            .prepare_locked_index(store, thread, top, base, prepared)
+        let replacement = self
+            .prepare_locked_index(store, thread, own, index_lock, prepared)
             .await?;
         let lock_path = replacement.lock_path().display().to_string();
         self.git
@@ -479,7 +442,7 @@ impl Worktrees {
             .is_some_and(|found| found.top == top))
     }
 
-    async fn pending_commits(&self, folder: &Path) -> Result<Vec<PendingCommit>, PlaceError> {
+    async fn pending_commits(&self, folder: &Path) -> Result<Vec<Underway>, PlaceError> {
         let mut args = vec!["rev-parse", "--path-format=absolute"];
         for (_, file) in Underway::FILES {
             args.extend(["--git-path", file]);
@@ -487,60 +450,17 @@ impl Worktrees {
         let paths = self.git.run(folder, &args, git::QUICK).await?;
         let mut pending = Vec::new();
         for (path, (kind, _)) in paths.lines().zip(Underway::FILES) {
-            match tokio::fs::read_to_string(path).await {
-                Ok(content) => {
-                    let heads = content
-                        .lines()
-                        .map(|line| line.trim().to_owned())
-                        .filter(|line| !line.is_empty())
-                        .collect();
-                    pending.push(PendingCommit { kind, heads });
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(PlaceError::Io {
-                        path: path.to_owned(),
-                        source,
-                    });
-                }
+            if tokio::fs::try_exists(path)
+                .await
+                .map_err(|source| PlaceError::Io {
+                    path: path.to_owned(),
+                    source,
+                })?
+            {
+                pending.push(kind);
             }
         }
         Ok(pending)
-    }
-
-    async fn tip(&self, folder: &Path) -> Result<Tip, PlaceError> {
-        let reference = self
-            .run_optional(folder, &["symbolic-ref", "--quiet", "HEAD"])
-            .await?;
-        let oid = self
-            .run_optional(folder, &["rev-parse", "--verify", "--quiet", "HEAD"])
-            .await?;
-        let head = match (reference, oid) {
-            (Some(reference), oid) => HeadTarget::Branch { reference, oid },
-            (None, Some(oid)) => HeadTarget::Detached(oid),
-            (None, None) => {
-                return Err(PlaceError::UnreadableGit {
-                    command: "rev-parse --verify --quiet HEAD".to_owned(),
-                    output: "HEAD is detached with no commit".to_owned(),
-                });
-            }
-        };
-        Ok(Tip {
-            head,
-            pending: self.pending_commits(folder).await?,
-        })
-    }
-
-    async fn run_optional(
-        &self,
-        folder: &Path,
-        args: &[&str],
-    ) -> Result<Option<String>, PlaceError> {
-        match self.git.run(folder, args, git::QUICK).await {
-            Ok(output) => Ok(Some(output)),
-            Err(error) if error.exited_with(1) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
     }
 
     /// The worktree's own index file.
@@ -659,6 +579,8 @@ fn skip_worktree_input(listed: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
 
     #[test]

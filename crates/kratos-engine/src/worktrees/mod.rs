@@ -111,12 +111,6 @@ pub(crate) enum PlaceError {
     #[error("Another git command or program is using the index at {0}. Commit again once it ends.")]
     IndexInUse(String),
     #[error(
-        "Another git command switched branches, committed, changed staged files, or started, \
-         changed, or ended a merge, cherry-pick, or revert, while Kratos staged the files. Look \
-         at what it changed, then commit again."
-    )]
-    ChangedMeanwhile,
-    #[error(
         "Kratos made commit {commit}, but could not update the index at {path}: {source}. Close \
          any program holding the index, remove {lock} if it remains, then run \
          `git -C \"{folder}\" reset --mixed HEAD -- .` to sync this folder's index without \

@@ -705,226 +705,46 @@ fn a_folder_commit_takes_its_files_as_staged_and_not_as_a_later_turn_rewrites_th
 }
 
 #[test]
-fn a_refused_commit_leaves_what_the_user_staged_meanwhile() {
-    // Catches a refused commit that puts back a copy of the whole index taken before it staged,
-    // which drops a version the user staged meanwhile and then edited further on disk.
+fn concurrent_git_commit_is_refused_while_a_folder_commit_runs() {
+    // Catches a commit that releases git's index lock while staging, letting another git commit
+    // advance HEAD concurrently instead of being refused by git.
     let root = TempDir::new().unwrap();
     let repository = repository_with_component_only(&root);
     let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "add");
     let inner = workspace_at(&engine, &repository.join("component"));
     let client = engine.client();
-    let idle = create(&client, &inner, "idle", PlaceRequest::default());
-    let editor = create(&client, &inner, "editor", PlaceRequest::default());
+    let thread = create(&client, &inner, "chat", PlaceRequest::default());
     std::fs::write(repository.join("component").join("part.txt"), "two\n").unwrap();
     engine.hold(Gate::Git);
     let committing = {
-        let (client, idle) = (client.clone(), idle.clone());
-        std::thread::spawn(move || commit(&client, &idle, "Two"))
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || commit(&client, &thread, "Two"))
     };
     engine.wait_until_held(Gate::Git);
     let readme = repository.join("README.md");
-    std::fs::write(&readme, "staged by the user\n").unwrap();
-    git(&repository, &["add", "README.md"]);
-    std::fs::write(&readme, "edited after staging\n").unwrap();
-    post(&client, &editor, "keep going");
-    engine.start_turn();
-    wait_for_turn(&client, &editor);
-    engine.release(Gate::Git);
-
-    let refused = committing.join().unwrap();
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(
-        git(&repository, &["show", ":README.md"]),
-        "staged by the user"
-    );
-    assert_eq!(
-        std::fs::read_to_string(&readme).unwrap(),
-        "edited after staging\n"
-    );
-    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
-}
-
-#[test]
-fn a_commit_the_user_makes_while_a_folder_commit_stages_files_is_not_undone() {
-    // Catches a folder commit whose files outside the folder come from HEAD as it was before it
-    // staged, put on top of the commit the user made meanwhile, which undoes that commit.
-    let root = TempDir::new().unwrap();
-    let repository = repository_with_component_only(&root);
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "add");
-    let inner = workspace_at(&engine, &repository.join("component"));
-    let client = engine.client();
-    let thread = create(&client, &inner, "chat", PlaceRequest::default());
-    std::fs::write(repository.join("component").join("part.txt"), "two\n").unwrap();
-    engine.hold(Gate::Git);
-    let committing = {
-        let (client, thread) = (client.clone(), thread.clone());
-        std::thread::spawn(move || commit(&client, &thread, "Two"))
-    };
-    engine.wait_until_held(Gate::Git);
-    std::fs::write(repository.join("README.md"), "the user's\n").unwrap();
-    git(&repository, &["commit", "--quiet", "-am", "The user's"]);
-    let users = git(&repository, &["rev-parse", "HEAD"]);
-    engine.release(Gate::Git);
-
-    let refused = committing.join().unwrap();
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), users);
-    assert!(!repository.join(".git").join("index.lock").exists());
-}
-
-#[test]
-fn a_merge_the_user_starts_while_a_folder_commit_stages_files_is_left_to_them() {
-    // Catches a commit that looks for a merge in progress only before it stages, so it concludes
-    // one the user starts meanwhile without the merged files outside the folder.
-    let root = TempDir::new().unwrap();
-    let repository = repository_with_component_only(&root);
-    git(&repository, &["switch", "--quiet", "--create", "feature"]);
-    std::fs::write(repository.join("feature.txt"), "feature\n").unwrap();
-    git(&repository, &["add", "feature.txt"]);
-    git(&repository, &["commit", "--quiet", "--message", "feature"]);
-    git(&repository, &["switch", "--quiet", "main"]);
-    let head = git(&repository, &["rev-parse", "HEAD"]);
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "add");
-    let inner = workspace_at(&engine, &repository.join("component"));
-    let client = engine.client();
-    let thread = create(&client, &inner, "chat", PlaceRequest::default());
-    std::fs::write(repository.join("component").join("part.txt"), "two\n").unwrap();
-    engine.hold(Gate::Git);
-    let committing = {
-        let (client, thread) = (client.clone(), thread.clone());
-        std::thread::spawn(move || commit(&client, &thread, "Two"))
-    };
-    engine.wait_until_held(Gate::Git);
-    git(
-        &repository,
-        &["merge", "--quiet", "--no-ff", "--no-commit", "feature"],
-    );
-    engine.release(Gate::Git);
-
-    let refused = committing.join().unwrap();
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
-    assert!(repository.join(".git").join("MERGE_HEAD").exists());
-}
-
-#[test]
-fn a_branch_switch_to_the_same_commit_while_staging_stops_the_commit() {
-    // Catches a tip check that compares only HEAD's commit id: switching to another branch at the
-    // same commit passed the check and advanced the wrong branch.
-    let root = TempDir::new().unwrap();
-    let repository = repository_with_component_only(&root);
-    let original = git(&repository, &["rev-parse", "HEAD"]);
-    git(&repository, &["switch", "--quiet", "--create", "feature"]);
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "--cached");
-    let inner = workspace_at(&engine, &repository.join("component"));
-    let client = engine.client();
-    let thread = create(&client, &inner, "chat", PlaceRequest::default());
-    std::fs::write(
-        repository.join("component").join("part.txt"),
-        "feature edit\n",
-    )
-    .unwrap();
-    engine.hold(Gate::Git);
-    let committing = {
-        let (client, thread) = (client.clone(), thread.clone());
-        std::thread::spawn(move || commit(&client, &thread, "Feature work"))
-    };
-    engine.wait_until_held(Gate::Git);
-    git(&repository, &["switch", "--quiet", "main"]);
-    git(&repository, &["restore", "--", "component/part.txt"]);
-    engine.release(Gate::Git);
-
-    let refused = committing.join().unwrap();
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["rev-parse", "main"]), original);
-    assert_eq!(git(&repository, &["rev-parse", "feature"]), original);
-    assert_eq!(
-        git(&repository, &["show", "main:component/part.txt"]),
-        "one"
-    );
-}
-
-#[test]
-fn a_replacement_merge_target_while_staging_stops_the_commit() {
-    // Catches a tip check that checks only whether MERGE_HEAD exists, not which parent it names:
-    // aborting one merge and starting another passed the check and committed the wrong tree on the
-    // new second parent.
-    let root = TempDir::new().unwrap();
-    let repository = repository_with_component_only(&root);
-    for topic in ["first", "second"] {
-        git(&repository, &["switch", "--quiet", "-c", topic, "main"]);
-        std::fs::write(
-            repository.join(format!("{topic}.txt")),
-            format!("{topic}\n"),
-        )
+    std::fs::write(&readme, "the user's\n").unwrap();
+    let user_commit = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["commit", "--quiet", "-am", "The user's"])
+        .output()
         .unwrap();
-        git(&repository, &["add", "."]);
-        git(&repository, &["commit", "--quiet", "--message", topic]);
-    }
-    git(&repository, &["switch", "--quiet", "main"]);
-    let head = git(&repository, &["rev-parse", "HEAD"]);
-    git(
-        &repository,
-        &["merge", "--quiet", "--no-ff", "--no-commit", "first"],
-    );
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "--cached");
-    let workspace = workspace_at(&engine, &repository);
-    let client = engine.client();
-    let thread = create(&client, &workspace, "merge", PlaceRequest::default());
-    engine.hold(Gate::Git);
-    let committing = {
-        let (client, thread) = (client.clone(), thread.clone());
-        std::thread::spawn(move || commit(&client, &thread, "Merge first"))
-    };
-    engine.wait_until_held(Gate::Git);
-    git(&repository, &["merge", "--abort"]);
-    git(
-        &repository,
-        &["merge", "--quiet", "--no-ff", "--no-commit", "second"],
-    );
-    let second_head = git(&repository, &["rev-parse", "MERGE_HEAD"]);
     engine.release(Gate::Git);
 
-    let refused = committing.join().unwrap();
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git(&repository, &["rev-parse", "MERGE_HEAD"]), second_head);
-}
-
-#[test]
-fn a_commit_refuses_when_index_flags_change_while_it_stages_files() {
-    // Catches a commit that proceeds after the user changed index flags while Kratos prepared it.
-    let root = TempDir::new().unwrap();
-    let repository = repository_with_component_only(&root);
-    let head = git(&repository, &["rev-parse", "HEAD"]);
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "--cached");
-    let inner = workspace_at(&engine, &repository.join("component"));
-    let client = engine.client();
-    let thread = create(&client, &inner, "chat", PlaceRequest::default());
-    std::fs::write(
-        repository.join("component").join("part.txt"),
-        "feature edit\n",
-    )
-    .unwrap();
-    engine.hold(Gate::Git);
-    let committing = {
-        let (client, thread) = (client.clone(), thread.clone());
-        std::thread::spawn(move || commit(&client, &thread, "Feature edit"))
-    };
-    engine.wait_until_held(Gate::Git);
-    git(
-        &repository,
-        &["update-index", "--assume-unchanged", "component/part.txt"],
+    assert!(
+        !user_commit.status.success(),
+        "git commit succeeded while Kratos held the index lock"
     );
-    engine.release(Gate::Git);
-
     let reply = committing.join().unwrap();
-    assert_eq!(reply.status, 409, "{}", reply.body);
-    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(git(&repository, &["log", "-1", "--format=%s"]), "Two");
     assert_eq!(
-        git(&repository, &["ls-files", "-v", "component/part.txt"]),
-        "h component/part.txt"
+        git(&repository, &["show", "HEAD:component/part.txt"]),
+        "two"
     );
+    assert_eq!(git(&repository, &["show", "HEAD:README.md"]), "hello");
+    assert_eq!(std::fs::read_to_string(&readme).unwrap(), "the user's\n");
+    assert!(!repository.join(".git").join("index.lock").exists());
 }
 
 #[test]
@@ -1032,11 +852,11 @@ fn a_subfolder_commit_preserves_unrelated_staged_working_versions_and_index_flag
 }
 
 #[test]
-fn a_commit_refuses_when_the_user_stages_in_the_folder_while_it_stages_files() {
-    // Catches a commit that proceeds after the user staged changes while Kratos prepared it.
+fn concurrent_git_add_is_refused_while_a_folder_commit_runs() {
+    // Catches a commit that does not hold git's index lock while staging, letting another git add
+    // mutate the index concurrently instead of being refused by git.
     let root = TempDir::new().unwrap();
     let repository = repository_with_component_only(&root);
-    let head = git(&repository, &["rev-parse", "HEAD"]);
     let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "add");
     let inner = workspace_at(&engine, &repository.join("component"));
     let client = engine.client();
@@ -1046,18 +866,31 @@ fn a_commit_refuses_when_the_user_stages_in_the_folder_while_it_stages_files() {
     engine.hold(Gate::Git);
     let committing = {
         let (client, thread) = (client.clone(), thread.clone());
-        std::thread::spawn(move || commit(&client, &thread, "Three"))
+        std::thread::spawn(move || commit(&client, &thread, "Two"))
     };
     engine.wait_until_held(Gate::Git);
-    git(&repository, &["add", "component/part.txt"]);
-    std::fs::write(&part, "three\n").unwrap();
+    let readme = repository.join("README.md");
+    std::fs::write(&readme, "user draft\n").unwrap();
+    let user_add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["add", "README.md"])
+        .output()
+        .unwrap();
     engine.release(Gate::Git);
 
+    assert!(
+        !user_add.status.success(),
+        "git add succeeded while Kratos held the index lock"
+    );
     let reply = committing.join().unwrap();
-    assert_eq!(reply.status, 409, "{}", reply.body);
-    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
-    assert_eq!(git(&repository, &["show", ":component/part.txt"]), "two");
-    assert_eq!(std::fs::read_to_string(&part).unwrap(), "three\n");
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(
+        git(&repository, &["show", "HEAD:component/part.txt"]),
+        "two"
+    );
+    assert_eq!(git(&repository, &["show", ":README.md"]), "hello");
+    assert_eq!(std::fs::read_to_string(&readme).unwrap(), "user draft\n");
     assert!(!repository.join(".git").join("index.lock").exists());
 }
 
