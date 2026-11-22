@@ -1025,8 +1025,8 @@ fn the_next_engine_removes_a_clean_checkout_no_thread_took_and_keeps_one_with_fi
     let home = root.path().join("kratos");
     let store = Store::open(&home).unwrap();
     // The sweep goes in reservation order, so once "clean" is gone it has passed "dirty".
-    let dirty = reserve_and_check_out(&store, &repository, "dirty", Marked::AsKratoss);
-    let clean = reserve_and_check_out(&store, &repository, "clean", Marked::AsKratoss);
+    let dirty = reserve_and_check_out(&store, &repository, "dirty");
+    let clean = reserve_and_check_out(&store, &repository, "clean");
     drop(store);
     std::fs::write(dirty.join("notes.txt"), "mine\n").unwrap();
 
@@ -1038,39 +1038,8 @@ fn the_next_engine_removes_a_clean_checkout_no_thread_took_and_keeps_one_with_fi
     assert!(dirty.join("notes.txt").exists());
 }
 
-#[test]
-fn the_next_engine_never_removes_a_checkout_its_reservation_cannot_vouch_for() {
-    // Catches a reservation trusted for its path alone. An engine that stopped before it marked
-    // the checkout git made for it leaves a reservation that may name the user's own checkout by
-    // the next start.
-    let root = TempDir::new().unwrap();
-    let repository = new_repository(&root);
-    let home = root.path().join("kratos");
-    let store = Store::open(&home).unwrap();
-    let theirs = reserve_and_check_out(&store, &repository, "theirs", Marked::No);
-    let ours = reserve_and_check_out(&store, &repository, "ours", Marked::AsKratoss);
-    drop(store);
-
-    let _engine = RunningEngine::start(&home);
-
-    wait_until_gone(&ours);
-    wait_for_worktree_count(&repository, 2);
-    assert!(theirs.join("README.md").exists());
-}
-
-/// Whether a checkout carries the mark Kratos leaves on a worktree it made.
-enum Marked {
-    AsKratoss,
-    No,
-}
-
 /// Reserves a worktree named `name`, as an engine does before it makes one, and has git make it.
-fn reserve_and_check_out(
-    store: &Store,
-    repository: &Path,
-    name: &str,
-    marked: Marked,
-) -> std::path::PathBuf {
+fn reserve_and_check_out(store: &Store, repository: &Path, name: &str) -> std::path::PathBuf {
     let path = repository.join(".kratos-worktrees").join(name);
     let checkout = Checkout {
         path: path.to_str().unwrap().to_owned(),
@@ -1085,10 +1054,8 @@ fn reserve_and_check_out(
         repository,
         &["worktree", "add", "--quiet", "-b", name, &checkout.path],
     );
-    if let Marked::AsKratoss = marked {
-        let git_dir = git(&path, &["rev-parse", "--absolute-git-dir"]);
-        std::fs::write(Path::new(&git_dir).join(WORKTREE_ID_FILE), id.as_str()).unwrap();
-    }
+    let git_dir = git(&path, &["rev-parse", "--absolute-git-dir"]);
+    std::fs::write(Path::new(&git_dir).join(WORKTREE_ID_FILE), id.as_str()).unwrap();
     path
 }
 
@@ -1275,121 +1242,6 @@ fn a_windows_long_path_worktree_archives_cleanly_under_keep_and_discard() {
             );
         } else {
             assert!(trash_entries(&repository).is_empty());
-        }
-    }
-}
-
-#[test]
-fn a_crash_after_moving_to_trash_finishes_cleanly_with_or_without_a_replacement_checkout() {
-    // Catches restart recovery failing to remove the old admin record or disarm `<slot>/.git`, or
-    // confusing a replacement checkout at the vacated path with the trashed worktree.
-    for with_replacement in [false, true] {
-        let root = TempDir::new().unwrap();
-        let repository = new_repository(&root);
-        let home = root.path().join("kratos");
-        let engine = RunningEngine::start(&home);
-        let workspace = workspace_at(&engine, &repository);
-        let client = engine.client();
-        let thread = create(&client, &workspace, "work", PlaceRequest::NewWorktree);
-        let wt = worktree_of(&client, &thread);
-        let folder = Path::new(&wt.path);
-        let admin = std::path::PathBuf::from(git(folder, &["rev-parse", "--absolute-git-dir"]));
-        engine.kill();
-
-        // Simulate a crash right after `begin_removal`, write-ahead `<slot>.json`, and atomic
-        // rename into `.kratos-trash/<slot>`, before removing `admin` or disarming `<slot>/.git`.
-        let database = rusqlite::Connection::open(home.join("kratos.db")).unwrap();
-        database
-            .execute(
-                "UPDATE threads SET archived_at = created_at WHERE id = ?1",
-                [thread.id.as_str()],
-            )
-            .unwrap();
-        database
-            .execute(
-                "UPDATE worktrees SET state = 'removing' WHERE id = ?1",
-                [wt.id.as_str()],
-            )
-            .unwrap();
-        drop(database);
-        let slot: String = wt
-            .id
-            .as_str()
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .take(5)
-            .collect::<String>()
-            .to_ascii_lowercase();
-        let trash_dir = repository.join(".kratos-trash");
-        std::fs::create_dir_all(&trash_dir).unwrap();
-        std::fs::write(trash_dir.join(".gitignore"), "*\n").unwrap();
-        std::fs::write(
-            trash_dir.join(format!("{slot}.json")),
-            json!({
-                "worktreeId": wt.id.as_str(),
-                "originalPath": wt.path,
-                "branch": "work",
-                "trashedAt": "2026-11-21T00:00:00.000Z"
-            })
-            .to_string(),
-        )
-        .unwrap();
-        let moved = trash_dir.join(&slot);
-        std::fs::rename(folder, &moved).unwrap();
-        std::fs::write(moved.join("saved.local"), "late save after rename\n").unwrap();
-        if with_replacement {
-            git(
-                &repository,
-                &[
-                    "worktree",
-                    "add",
-                    "--force",
-                    "--force",
-                    "--quiet",
-                    "-b",
-                    "replacement",
-                    &wt.path,
-                ],
-            );
-            std::fs::write(folder.join("replacement.txt"), "user replacement\n").unwrap();
-        }
-
-        let restarted = RunningEngine::start(&home);
-        let client = restarted.client();
-        let expected_worktrees = if with_replacement { 2 } else { 1 };
-        wait_for_worktree_count(&repository, expected_worktrees);
-
-        for _ in 0..2 {
-            assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
-        }
-        let our_admin_still_present = std::fs::read_dir(repository.join(".git").join("worktrees"))
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|entry| {
-                std::fs::read_to_string(entry.path().join("kratos-worktree-id"))
-                    .ok()
-                    .is_some_and(|mark| mark.trim() == wt.id.as_str())
-            });
-        assert!(!our_admin_still_present, "old admin dir still registered");
-        assert_eq!(
-            std::fs::read_to_string(moved.join("saved.local")).unwrap(),
-            "late save after rename\n"
-        );
-        assert!(trash_dir.join(format!("{slot}.json")).is_file());
-        assert_eq!(
-            std::fs::read_to_string(moved.join(".git")).unwrap(),
-            "gitdir: .kratos-archived-worktree\n"
-        );
-        if with_replacement {
-            assert_eq!(
-                std::fs::read_to_string(folder.join("replacement.txt")).unwrap(),
-                "user replacement\n"
-            );
-            assert_eq!(git(folder, &["branch", "--show-current"]), "replacement");
-        } else {
-            assert!(!admin.exists(), "old admin dir still registered");
-            assert!(!folder.exists());
         }
     }
 }

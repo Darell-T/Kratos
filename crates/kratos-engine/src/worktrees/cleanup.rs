@@ -137,16 +137,9 @@ impl Worktrees {
         let lock = self.lock_of(repository);
         let _one_at_a_time = lock.lock().await;
         let folder = Path::new(recorded.path.as_str());
-        let trash_dir = trash_root(folder)?;
-        let admin = find_our_admin(repository, recorded).await?;
-        if let Some(slot) = find_trashed_entry(&trash_dir, recorded).await? {
-            return self
-                .finish_trashed(&slot, admin.as_deref(), recorded, files)
-                .await;
-        }
-        match admin {
+        match find_our_admin(repository, recorded).await? {
             Some(admin) => {
-                self.remove_registered(folder, &trash_dir, &admin, recorded, files)
+                self.remove_registered(folder, &admin, recorded, files)
                     .await
             }
             None => self.remove_unregistered(folder).await,
@@ -156,7 +149,6 @@ impl Worktrees {
     async fn remove_registered(
         &self,
         folder: &Path,
-        trash_dir: &Path,
         admin: &Path,
         recorded: &KratosWorktree,
         files: LeftFiles,
@@ -164,7 +156,7 @@ impl Worktrees {
         ensure_our_lock(admin, &recorded.path).await?;
         if is_same_checkout_at(folder, recorded).await {
             return self
-                .remove_registered_live(folder, trash_dir, admin, recorded, files)
+                .remove_registered_live(folder, admin, recorded, files)
                 .await;
         }
         let outcome = self.remove_unregistered(folder).await?;
@@ -175,7 +167,6 @@ impl Worktrees {
     async fn remove_registered_live(
         &self,
         folder: &Path,
-        trash_dir: &Path,
         admin: &Path,
         recorded: &KratosWorktree,
         files: LeftFiles,
@@ -198,26 +189,26 @@ impl Worktrees {
         if !is_same_checkout_at(folder, recorded).await {
             return Ok(Cleanup::NotOwned);
         }
-        self.move_and_finish(folder, trash_dir, admin, recorded, files)
-            .await
+        self.move_and_finish(folder, admin, recorded, files).await
     }
 
     async fn move_and_finish(
         &self,
         folder: &Path,
-        trash_dir: &Path,
         admin: &Path,
         recorded: &KratosWorktree,
         files: LeftFiles,
     ) -> Result<Cleanup, PlaceError> {
+        if files == LeftFiles::Discard {
+            remove_tree(folder).await?;
+            remove_tree(admin).await?;
+            return Ok(Cleanup::Removed);
+        }
         let branch = self.branch_of(folder).await.ok().flatten();
-        ignore_everything_in(trash_dir).await?;
-        let slot = pick_free_trash_slot(trash_dir, recorded).await?;
-        // Write metadata before moving so a crash right after rename stays identifiable even if a
-        // replacement checkout overwrites git's admin folder at the vacated path.
-        write_trash_meta(&slot.meta, recorded, branch).await?;
+        let trash_dir = trash_root(folder)?;
+        ignore_everything_in(&trash_dir).await?;
+        let slot = pick_free_trash_slot(&trash_dir, recorded).await?;
         if let Err(source) = tokio::fs::rename(folder, &slot.dir).await {
-            let _ = tokio::fs::remove_file(&slot.meta).await;
             if source.kind() == io::ErrorKind::NotFound {
                 remove_tree(admin).await?;
                 return Ok(Cleanup::Removed);
@@ -227,66 +218,16 @@ impl Worktrees {
                 source,
             });
         }
-        self.finish_trashed(&slot, Some(admin), recorded, files)
-            .await
-    }
-
-    async fn finish_trashed(
-        &self,
-        slot: &TrashSlot,
-        admin: Option<&Path>,
-        recorded: &KratosWorktree,
-        files: LeftFiles,
-    ) -> Result<Cleanup, PlaceError> {
-        if let Some(admin) = admin {
-            ensure_our_lock(admin, &recorded.path).await?;
-        }
-        match files {
-            LeftFiles::Keep => self.finish_keep_trashed(slot, admin, recorded).await?,
-            LeftFiles::Discard => Self::finish_discard_trashed(slot, admin).await?,
-        }
-        Ok(Cleanup::Removed)
-    }
-
-    async fn finish_keep_trashed(
-        &self,
-        slot: &TrashSlot,
-        admin: Option<&Path>,
-        recorded: &KratosWorktree,
-    ) -> Result<(), PlaceError> {
-        if !is_our_trash_meta(&slot.meta, recorded).await {
-            let branch = self.branch_of(&slot.dir).await.ok().flatten();
-            write_trash_meta(&slot.meta, recorded, branch).await?;
-        }
-        if let Some(admin) = admin {
-            remove_tree(admin).await?;
-        }
+        write_trash_meta(&slot.meta, recorded, branch).await?;
+        remove_tree(admin).await?;
         let git_file = slot.dir.join(".git");
         tokio::fs::write(&git_file, TRASH_GIT_SENTINEL)
             .await
             .map_err(|source| PlaceError::Io {
                 path: git_file.display().to_string(),
                 source,
-            })
-    }
-
-    async fn finish_discard_trashed(
-        slot: &TrashSlot,
-        admin: Option<&Path>,
-    ) -> Result<(), PlaceError> {
-        remove_tree(&slot.dir).await?;
-        if let Err(source) = tokio::fs::remove_file(&slot.meta).await
-            && source.kind() != io::ErrorKind::NotFound
-        {
-            return Err(PlaceError::Io {
-                path: slot.meta.display().to_string(),
-                source,
-            });
-        }
-        if let Some(admin) = admin {
-            remove_tree(admin).await?;
-        }
-        Ok(())
+            })?;
+        Ok(Cleanup::Removed)
     }
 
     async fn remove_unregistered(&self, folder: &Path) -> Result<Cleanup, PlaceError> {
@@ -506,40 +447,6 @@ fn slot_candidates(id: &WorktreeId) -> Vec<String> {
         .collect()
 }
 
-async fn is_our_trash_meta(meta: &Path, recorded: &KratosWorktree) -> bool {
-    if !tokio::fs::symlink_metadata(meta)
-        .await
-        .is_ok_and(|meta| !meta.file_type().is_symlink() && meta.is_file())
-    {
-        return false;
-    }
-    tokio::fs::read(meta)
-        .await
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<TrashedWorktree>(&bytes).ok())
-        .is_some_and(|parsed| parsed.worktree_id == recorded.id.as_str())
-}
-
-async fn find_trashed_entry(
-    trash_dir: &Path,
-    recorded: &KratosWorktree,
-) -> Result<Option<TrashSlot>, PlaceError> {
-    for slot in slot_candidates(&recorded.id) {
-        let dir = trash_dir.join(&slot);
-        let Ok(dir_meta) = tokio::fs::symlink_metadata(&dir).await else {
-            continue;
-        };
-        if dir_meta.file_type().is_symlink() || !dir_meta.is_dir() {
-            continue;
-        }
-        let meta = trash_dir.join(format!("{slot}.json"));
-        if is_our_trash_meta(&meta, recorded).await || is_same_checkout_at(&dir, recorded).await {
-            return Ok(Some(TrashSlot { dir, meta }));
-        }
-    }
-    Ok(None)
-}
-
 async fn is_absent(path: &Path) -> bool {
     matches!(
         tokio::fs::symlink_metadata(path).await,
@@ -554,9 +461,7 @@ async fn pick_free_trash_slot(
     for slot in slot_candidates(&recorded.id) {
         let dir = trash_dir.join(&slot);
         let meta = trash_dir.join(format!("{slot}.json"));
-        if is_absent(&dir).await
-            && (is_absent(&meta).await || is_our_trash_meta(&meta, recorded).await)
-        {
+        if is_absent(&dir).await && is_absent(&meta).await {
             return Ok(TrashSlot { dir, meta });
         }
     }
