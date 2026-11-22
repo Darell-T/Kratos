@@ -47,10 +47,7 @@ impl IndexLock {
                     });
                 }
                 Err(error) if error.kind() != io::ErrorKind::AlreadyExists => {
-                    return Err(PlaceError::Io {
-                        path: lock.display().to_string(),
-                        source: error,
-                    });
+                    return Err(PlaceError::io(&lock, error));
                 }
                 Err(_) if Instant::now() >= deadline => {
                     return Err(PlaceError::IndexInUse(index.display().to_string()));
@@ -58,6 +55,12 @@ impl IndexLock {
                 Err(_) => tokio::time::sleep(RETRY).await,
             }
         }
+    }
+
+    /// Copies the locked index to `to` while preserving its modified time so git's racy-index
+    /// check still hashes same-second working edits.
+    pub(super) async fn copy_index_to(&self, to: &Path) -> Result<(), PlaceError> {
+        copy_mtime(&self.index, to, MissingSource::Skip).await
     }
 
     pub(super) async fn prepare_replacement(
@@ -107,14 +110,6 @@ impl Drop for IndexLock {
     }
 }
 
-/// Keeps `from`'s modified time so git's racy-index check still hashes same-second working edits.
-pub(super) async fn copy_preserving_mtime_if_present(
-    from: &Path,
-    to: &Path,
-) -> Result<(), PlaceError> {
-    copy_mtime(from, to, MissingSource::Skip).await
-}
-
 #[derive(Clone, Copy)]
 enum MissingSource {
     Error,
@@ -126,21 +121,12 @@ async fn copy_mtime(from: &Path, to: &Path, missing: MissingSource) -> Result<()
     let to_owned = to.to_owned();
     tokio::task::spawn_blocking(move || copy_mtime_sync(&from, &to_owned, missing))
         .await
-        .map_err(|error| PlaceError::Io {
-            path: to.display().to_string(),
-            source: io::Error::other(error),
-        })?
+        .map_err(|error| PlaceError::io(to, io::Error::other(error)))?
 }
 
 fn copy_mtime_sync(from: &Path, to: &Path, missing: MissingSource) -> Result<(), PlaceError> {
-    let from_err = |source| PlaceError::Io {
-        path: from.display().to_string(),
-        source,
-    };
-    let to_err = |source| PlaceError::Io {
-        path: to.display().to_string(),
-        source,
-    };
+    let from_err = |source| PlaceError::io(from, source);
+    let to_err = |source| PlaceError::io(to, source);
     let mut src = match File::open(from) {
         Ok(file) => file,
         Err(error)

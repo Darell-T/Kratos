@@ -176,6 +176,15 @@ pub(crate) enum PlaceError {
     },
 }
 
+impl PlaceError {
+    pub(super) fn io(path: impl AsRef<Path>, source: io::Error) -> PlaceError {
+        PlaceError::Io {
+            path: path.as_ref().display().to_string(),
+            source,
+        }
+    }
+}
+
 /// A repository as git names it: its main worktree's top folder and the git folder all its
 /// worktrees share.
 struct Repository {
@@ -257,21 +266,10 @@ impl Worktrees {
 
     /// The worktree whose top folder is `path`.
     async fn worktree_at(&self, path: &Path) -> Result<Repository, PlaceError> {
-        let shown = path.display().to_string();
-        let path = resolved(path)
-            .await
-            .map_err(|_| PlaceError::NotAFolder(shown.clone()))?;
-        let worktree = self
-            .locate(&path)
-            .await?
-            .ok_or(PlaceError::NotAWorktree(shown.clone()))?;
-        if worktree.top != path {
-            return Err(PlaceError::InsideWorktree {
-                path: shown,
-                top: worktree.top.display().to_string(),
-            });
-        }
-        Ok(worktree)
+        self.top_at(path, PlaceError::NotAWorktree, |path, top| {
+            PlaceError::InsideWorktree { path, top }
+        })
+        .await
     }
 
     async fn create(
@@ -397,21 +395,37 @@ impl Worktrees {
 
     /// The repository whose worktree the project folder is, which must be its top folder.
     async fn repository_of(&self, project: &Path) -> Result<Repository, PlaceError> {
-        let shown = project.display().to_string();
-        let project = resolved(project)
+        self.top_at(project, PlaceError::NotARepository, |project, top| {
+            PlaceError::ProjectNotAtTop { project, top }
+        })
+        .await
+    }
+
+    async fn top_at(
+        &self,
+        path: &Path,
+        not_found: fn(String) -> PlaceError,
+        not_top: fn(String, String) -> PlaceError,
+    ) -> Result<Repository, PlaceError> {
+        let shown = path.display().to_string();
+        let path = resolved(path)
             .await
             .map_err(|_| PlaceError::NotAFolder(shown.clone()))?;
         let found = self
-            .locate(&project)
+            .locate(&path)
             .await?
-            .ok_or_else(|| PlaceError::NotARepository(shown.clone()))?;
-        if found.top != project {
-            return Err(PlaceError::ProjectNotAtTop {
-                project: shown,
-                top: found.top.display().to_string(),
-            });
+            .ok_or_else(|| not_found(shown.clone()))?;
+        if found.top != path {
+            return Err(not_top(shown, found.top.display().to_string()));
         }
         Ok(found)
+    }
+
+    /// The worktree `folder` is in, refusing folders outside any git repository.
+    async fn located(&self, folder: &Path) -> Result<Repository, PlaceError> {
+        self.locate(folder)
+            .await?
+            .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))
     }
 
     /// The worktree `folder` is in, or `None` when it is in no git repository.
@@ -449,18 +463,6 @@ impl Worktrees {
         }
     }
 
-    /// The lock of the repository `folder` is in.
-    async fn lock_of_folder(
-        &self,
-        folder: &Path,
-    ) -> Result<Arc<tokio::sync::Mutex<()>>, PlaceError> {
-        let repository = self
-            .locate(folder)
-            .await?
-            .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))?;
-        Ok(self.lock_of(&repository.shared))
-    }
-
     fn lock_of(&self, repository: &Path) -> Arc<tokio::sync::Mutex<()>> {
         let mut repositories = self.repositories.lock().expect("lock poisoned");
         repositories
@@ -482,16 +484,12 @@ pub(super) async fn git_dir_of(folder: &Path) -> Option<PathBuf> {
 /// `git worktree lock` does. Git then refuses to move or remove it, and the lock file tells
 /// Kratos's worktree apart from any other checkout at its path.
 async fn mark_as_kratoss(path: &Path, id: &WorktreeId) -> Result<(), PlaceError> {
-    let shown = path.display().to_string();
     let git_dir = git_dir_of(path)
         .await
-        .ok_or_else(|| PlaceError::NotAWorktree(shown.clone()))?;
+        .ok_or_else(|| PlaceError::NotAWorktree(path.display().to_string()))?;
     tokio::fs::write(git_dir.join("locked"), lock_reason(id))
         .await
-        .map_err(|source| PlaceError::Io {
-            path: shown,
-            source,
-        })
+        .map_err(|source| PlaceError::io(path, source))
 }
 
 /// Refuses a thread at `place` when it is a worktree Kratos made that is gone from its path,
@@ -531,7 +529,7 @@ async fn close_if_replaced(store: &StoreThread, path: &str) -> Result<(), StoreE
 
 /// Whether the checkout at `worktree`'s path is the one Kratos made there, which holds its id. A
 /// checkout Kratos cannot read the id from is never taken for its own.
-pub(crate) async fn is_same_checkout(worktree: &KratosWorktree) -> bool {
+pub(super) async fn is_same_checkout(worktree: &KratosWorktree) -> bool {
     is_same_checkout_at(Path::new(&worktree.path), worktree).await
 }
 
@@ -551,10 +549,7 @@ pub(super) async fn is_same_checkout_dir(git_dir: &Path, worktree: &KratosWorktr
 /// Makes `folder` with a `.gitignore` that ignores everything in it, itself included, so the
 /// worktrees inside never show as changes in the project and no project file is edited.
 pub(super) async fn ignore_everything_in(folder: &Path) -> Result<(), PlaceError> {
-    let io_error = |source| PlaceError::Io {
-        path: folder.display().to_string(),
-        source,
-    };
+    let io_error = |source| PlaceError::io(folder, source);
     if tokio::fs::symlink_metadata(folder).await.is_ok() {
         // A repository can commit the folder as a link, and git would check out through it.
         if resolved(folder).await.ok().as_deref() != Some(folder) {
@@ -611,10 +606,7 @@ async fn resolved(path: &Path) -> io::Result<PathBuf> {
 async fn resolved_from_git(path: &str) -> Result<PathBuf, PlaceError> {
     resolved(Path::new(path))
         .await
-        .map_err(|source| PlaceError::Io {
-            path: path.to_owned(),
-            source,
-        })
+        .map_err(|source| PlaceError::io(path, source))
 }
 
 fn without_verbatim_prefix(path: PathBuf) -> PathBuf {

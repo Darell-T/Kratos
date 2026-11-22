@@ -2,34 +2,45 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{PlaceError, Worktrees, git, resolved, text};
+use kratos_protocol::{Ownership, ProjectWorktree};
 
-/// A worktree git lists, with its top folder's links resolved.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Listed {
-    pub path: String,
-    /// `None` when no branch is checked out.
-    pub branch: Option<String>,
-}
+use super::{PlaceError, Worktrees, git, is_same_checkout, resolved, text};
+use crate::store_thread::StoreThread;
 
 impl Worktrees {
     /// Every worktree of the repository whose top folder is `project`, other than the project
     /// folder itself. A worktree whose folder is gone is left out, since no thread can work there.
-    pub(crate) async fn list(&self, project: &Path) -> Result<Vec<Listed>, PlaceError> {
+    pub(crate) async fn list(
+        &self,
+        store: &StoreThread,
+        project: &Path,
+    ) -> Result<Vec<ProjectWorktree>, PlaceError> {
         let repository = self.repository_of(project).await?;
         let args = ["worktree", "list", "--porcelain", "-z"];
         let listed = self.git.run(&repository.top, &args, git::QUICK).await?;
+        let ours = store.call(|store| store.kratos_worktrees()).await?;
         let mut worktrees = Vec::new();
         for (path, branch) in entries(&listed) {
             let Ok(path) = resolved(&path).await else {
                 continue;
             };
-            if path != repository.top {
-                worktrees.push(Listed {
-                    path: text(&path)?,
-                    branch,
-                });
+            if path == repository.top {
+                continue;
             }
+            let path = text(&path)?;
+            let is_ours = match ours.iter().find(|ours| ours.path == path) {
+                Some(recorded) => is_same_checkout(recorded).await,
+                None => false,
+            };
+            worktrees.push(ProjectWorktree {
+                ownership: if is_ours {
+                    Ownership::CreatedByKratos
+                } else {
+                    Ownership::Borrowed
+                },
+                path,
+                branch,
+            });
         }
         Ok(worktrees)
     }

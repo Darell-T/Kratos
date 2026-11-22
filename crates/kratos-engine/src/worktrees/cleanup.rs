@@ -88,7 +88,7 @@ impl Worktrees {
                 Err(error) => eprintln!("cannot finish removing the worktree {path}: {error}"),
             }
         }
-        self.empty_expired_trash(store, TRASH_RETENTION).await;
+        self.empty_expired_trash(store).await;
     }
 
     async fn remove_worktree(
@@ -104,23 +104,21 @@ impl Worktrees {
             Removal::Started { repository } => repository,
         };
         // Checked after `removing` is recorded so no new thread can start inside `path` unseen.
-        if holds_a_thread(store, Path::new(&recorded.path)).await? {
-            let id = recorded.id.clone();
-            store
-                .call(move |store| store.end_removal(&id, RemovalEnd::Kept))
-                .await?;
-            return Ok(Cleanup::InUse);
-        }
-        let cleanup = self
-            .remove(Path::new(&repository), recorded, files)
-            .await
-            .unwrap_or_else(|error| Cleanup::Blocked {
-                error: error.to_string(),
-            });
+        let cleanup = if holds_a_thread(store, Path::new(&recorded.path)).await? {
+            Cleanup::InUse
+        } else {
+            self.remove(Path::new(&repository), recorded, files)
+                .await
+                .unwrap_or_else(|error| Cleanup::Blocked {
+                    error: error.to_string(),
+                })
+        };
         let end = match cleanup {
             Cleanup::Removed | Cleanup::NotOwned => RemovalEnd::Removed,
-            Cleanup::Kept { .. } | Cleanup::UnsavedCommit { .. } => RemovalEnd::Kept,
-            Cleanup::InUse | Cleanup::Blocked { .. } => return Ok(cleanup),
+            Cleanup::InUse | Cleanup::Kept { .. } | Cleanup::UnsavedCommit { .. } => {
+                RemovalEnd::Kept
+            }
+            Cleanup::Blocked { .. } => return Ok(cleanup),
         };
         let id = recorded.id.clone();
         store.call(move |store| store.end_removal(&id, end)).await?;
@@ -217,10 +215,7 @@ impl Worktrees {
         let git_file = slot.dir.join(".git");
         tokio::fs::write(&git_file, TRASH_GIT_SENTINEL)
             .await
-            .map_err(|source| PlaceError::Io {
-                path: git_file.display().to_string(),
-                source,
-            })?;
+            .map_err(|source| PlaceError::io(&git_file, source))?;
         Ok(Cleanup::Removed)
     }
 
@@ -288,7 +283,7 @@ impl Worktrees {
         Ok(Some(commit))
     }
 
-    async fn empty_expired_trash(&self, store: &StoreThread, retention: Duration) {
+    async fn empty_expired_trash(&self, store: &StoreThread) {
         let Ok(workspaces) = store.call(|store| store.list_workspaces()).await else {
             return;
         };
@@ -313,13 +308,13 @@ impl Worktrees {
                 Some(lock) => Some(lock.lock().await),
                 None => None,
             };
-            empty_expired_in(&trash_dir, retention).await;
+            empty_expired_in(&trash_dir).await;
         }
     }
 }
 
-async fn empty_expired_in(trash_dir: &Path, retention: Duration) {
-    let Some(cutoff) = SystemTime::now().checked_sub(retention) else {
+async fn empty_expired_in(trash_dir: &Path) {
+    let Some(cutoff) = SystemTime::now().checked_sub(TRASH_RETENTION) else {
         return;
     };
     let Ok(mut entries) = tokio::fs::read_dir(trash_dir).await else {
@@ -380,10 +375,7 @@ async fn find_our_admin(
     recorded: &KratosWorktree,
 ) -> Result<Option<PathBuf>, PlaceError> {
     let records = repository.join("worktrees");
-    let io_err = |source| PlaceError::Io {
-        path: records.display().to_string(),
-        source,
-    };
+    let io_err = |source| PlaceError::io(&records, source);
     let mut entries = match tokio::fs::read_dir(&records).await {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         entries => entries.map_err(io_err)?,
@@ -470,10 +462,8 @@ async fn write_trash_meta(
     recorded: &KratosWorktree,
     branch: Option<String>,
 ) -> Result<(), PlaceError> {
-    let trashed_at = Timestamp::now().map_err(|error| PlaceError::Io {
-        path: meta_path.display().to_string(),
-        source: io::Error::other(error),
-    })?;
+    let trashed_at =
+        Timestamp::now().map_err(|error| PlaceError::io(meta_path, io::Error::other(error)))?;
     let payload = TrashedWorktree {
         worktree_id: recorded.id.as_str().to_owned(),
         original_path: recorded.path.clone(),
@@ -483,10 +473,7 @@ async fn write_trash_meta(
     let bytes = serde_json::to_vec_pretty(&payload).expect("trash metadata serializes");
     tokio::fs::write(meta_path, bytes)
         .await
-        .map_err(|source| PlaceError::Io {
-            path: meta_path.display().to_string(),
-            source,
-        })
+        .map_err(|source| PlaceError::io(meta_path, source))
 }
 
 /// Avoids Git for Windows's 260-character path limit when `core.longpaths` is false.
@@ -507,7 +494,7 @@ async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
         if entry.mode != Some(GITLINK_MODE) {
             continue;
         }
-        let Some(dir) = file_in(folder, entry.path) else {
+        let Some(dir) = git::file_in(folder, entry.path) else {
             return true;
         };
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await
@@ -530,17 +517,6 @@ async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, St
         }
     }
     Ok(false)
-}
-
-#[cfg(unix)]
-pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
-    Some(folder.join(std::ffi::OsStr::from_bytes(path)))
-}
-
-#[cfg(not(unix))]
-pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
-    std::str::from_utf8(path).ok().map(|path| folder.join(path))
 }
 
 #[cfg(test)]
@@ -589,7 +565,7 @@ mod tests {
         std::fs::write(trash.join("...json"), &payload).unwrap();
         std::fs::write(trash.join("..json"), &payload).unwrap();
 
-        empty_expired_in(&trash, TRASH_RETENTION).await;
+        empty_expired_in(&trash).await;
 
         assert_eq!(
             std::fs::read_to_string(repo.join("keep.txt")).unwrap(),

@@ -10,20 +10,14 @@ use kratos_store::ProviderThread;
 use tokio::process::Command;
 use uuid::Uuid;
 
-use super::cleanup;
 use super::git::{self, CHECKOUT, Capped};
-use super::index_lock::{IndexLock, PreparedReplacement, copy_preserving_mtime_if_present};
+use super::index_lock::{IndexLock, PreparedReplacement};
 use super::{PlaceError, Worktrees, resolved};
 use crate::store_thread::StoreThread;
 
 /// The most patch text a diff returns, cut at a whole line. A client shows the rest by reading the
 /// folder itself.
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
-
-struct PreparedCommit<'a> {
-    staged: &'a Path,
-    tree: String,
-}
 
 /// A commit git is in the middle of making, which the next commit ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +47,7 @@ impl fmt::Display for Underway {
     }
 }
 
-pub(super) struct ScratchIndex(PathBuf);
+struct ScratchIndex(PathBuf);
 
 impl Deref for ScratchIndex {
     type Target = Path;
@@ -128,7 +122,7 @@ impl Worktrees {
             .await?)
     }
 
-    pub(super) fn scratch_index(&self) -> ScratchIndex {
+    fn scratch_index(&self) -> ScratchIndex {
         ScratchIndex(self.scratch.join(format!("index-{}", Uuid::new_v4())))
     }
 
@@ -139,10 +133,7 @@ impl Worktrees {
         message: &str,
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
-        let repository = self
-            .locate(folder)
-            .await?
-            .ok_or_else(|| PlaceError::NotARepository(folder.display().to_string()))?;
+        let repository = self.located(folder).await?;
         let lock = self.lock_of(&repository.shared);
         let _one_at_a_time = lock.lock().await;
         let own = self.index_of(folder).await?;
@@ -154,7 +145,7 @@ impl Worktrees {
         {
             return Err(PlaceError::PartialCommitDuring(underway));
         }
-        self.refuse_while_edited(store, folder, &repository.top)
+        self.refuse_while_edited(store, &resolved_folder, &repository.top)
             .await?;
         let staged = self.scratch_index();
         let tree = self
@@ -165,11 +156,7 @@ impl Worktrees {
                 &staged,
             )
             .await?;
-        let prepared = PreparedCommit {
-            staged: &staged,
-            tree,
-        };
-        self.publish_commit(thread, &own, index_lock, &prepared, message)
+        self.publish_commit(folder, &own, index_lock, &staged, &tree, message)
             .await
     }
 
@@ -218,7 +205,7 @@ impl Worktrees {
             if matches!(entry.tag, b'S' | b's') {
                 continue;
             }
-            let Some(file) = cleanup::file_in(folder, entry.path) else {
+            let Some(file) = git::file_in(folder, entry.path) else {
                 continue;
             };
             if tokio::fs::symlink_metadata(&file)
@@ -272,16 +259,15 @@ impl Worktrees {
     async fn prepare_locked_index(
         &self,
         folder: &Path,
-        own: &Path,
         index_lock: IndexLock,
-        prepared: &PreparedCommit<'_>,
+        tree: &str,
     ) -> Result<PreparedReplacement, PlaceError> {
         let updated = self.scratch_index();
-        copy_preserving_mtime_if_present(own, &updated).await?;
+        index_lock.copy_index_to(&updated).await?;
         self.git
             .run_in_index(
                 folder,
-                &["reset", "--quiet", &prepared.tree, "--", "."],
+                &["reset", "--quiet", tree, "--", "."],
                 git::QUICK,
                 &updated,
             )
@@ -291,23 +277,21 @@ impl Worktrees {
 
     async fn publish_commit(
         &self,
-        thread: &ProviderThread,
+        folder: &Path,
         own: &Path,
         index_lock: IndexLock,
-        prepared: &PreparedCommit<'_>,
+        staged: &Path,
+        tree: &str,
         message: &str,
     ) -> Result<String, PlaceError> {
-        let folder = Path::new(&thread.folder);
-        let replacement = self
-            .prepare_locked_index(folder, own, index_lock, prepared)
-            .await?;
+        let replacement = self.prepare_locked_index(folder, index_lock, tree).await?;
         let lock_path = replacement.lock_path().display().to_string();
         self.git
             .run_in_index(
                 folder,
                 &["commit", "--quiet", "--message", message],
                 git::QUICK,
-                prepared.staged,
+                staged,
             )
             .await?;
         let head = self
@@ -353,13 +337,12 @@ impl Worktrees {
     async fn refuse_while_edited(
         &self,
         store: &StoreThread,
-        folder: &Path,
+        resolved_folder: &Path,
         top: &Path,
     ) -> Result<(), PlaceError> {
         let folders = store.call(|store| store.busy_folders()).await?;
-        let folder = resolved_or_given(folder).await;
         for other in &folders {
-            if self.shares_files(&folder, top, other).await? {
+            if self.shares_files(resolved_folder, top, other).await? {
                 return Err(PlaceError::BeingEdited);
             }
         }
@@ -396,10 +379,7 @@ impl Worktrees {
         for (path, (kind, _)) in paths.lines().zip(Underway::FILES) {
             if tokio::fs::try_exists(path)
                 .await
-                .map_err(|source| PlaceError::Io {
-                    path: path.to_owned(),
-                    source,
-                })?
+                .map_err(|source| PlaceError::io(path, source))?
             {
                 pending.push(kind);
             }
@@ -408,7 +388,7 @@ impl Worktrees {
     }
 
     /// The worktree's own index file.
-    pub(super) async fn index_of(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
+    async fn index_of(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
         let args = ["rev-parse", "--path-format=absolute", "--git-path", "index"];
         Ok(PathBuf::from(
             self.git.run(folder, &args, git::QUICK).await?,
@@ -425,7 +405,8 @@ impl Worktrees {
         body: &str,
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
-        let lock = self.lock_of_folder(folder).await?;
+        let repository = self.located(folder).await?;
+        let lock = self.lock_of(&repository.shared);
         let _one_at_a_time = lock.lock().await;
         let branch = self
             .branch_of(folder)

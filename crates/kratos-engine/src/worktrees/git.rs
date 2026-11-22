@@ -1,6 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Output, Stdio};
+use std::process::{Output, Stdio};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
@@ -87,6 +87,17 @@ fn split_stage_header(rest: &[u8]) -> Option<(&[u8], &[u8])> {
         return None;
     }
     Some((mode, &rest[tab + 1..]))
+}
+
+#[cfg(unix)]
+pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    Some(folder.join(std::ffi::OsStr::from_bytes(path)))
+}
+
+#[cfg(not(unix))]
+pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
+    std::str::from_utf8(path).ok().map(|path| folder.join(path))
 }
 
 impl Git {
@@ -192,19 +203,18 @@ impl Git {
         let mut git = self.command(folder, args, Some(index));
         git.stdout(Stdio::piped()).stderr(Stdio::piped());
         let child = git.spawn().map_err(GitError::Missing)?;
-        let read = match tokio::time::timeout(budget, read_child(child, max_bytes)).await {
-            Err(_) => return Err(GitError::TimedOut { command, budget }),
-            Ok(Err(error)) => return Err(GitError::Read(error)),
-            Ok(Ok(read)) => read,
+        let (output, is_cut) =
+            match tokio::time::timeout(budget, read_child(child, max_bytes)).await {
+                Err(_) => return Err(GitError::TimedOut { command, budget }),
+                Ok(Err(error)) => return Err(GitError::Read(error)),
+                Ok(Ok(read)) => read,
+            };
+        let stdout = if is_cut {
+            output.stdout
+        } else {
+            succeeded(command, output)?
         };
-        if !read.is_cut && !read.status.success() {
-            return Err(GitError::Failed {
-                command,
-                code: read.status.code(),
-                stderr: String::from_utf8_lossy(&read.stderr).trim().to_owned(),
-            });
-        }
-        Ok(capped_text(&read.stdout, read.is_cut, max_bytes))
+        Ok(capped_text(&stdout, is_cut, max_bytes))
     }
 
     fn command(&self, folder: &Path, args: &[&str], index: Option<&Path>) -> Command {
@@ -242,19 +252,10 @@ fn text_of(stdout: &[u8]) -> String {
     text.trim_end_matches(['\r', '\n']).to_owned()
 }
 
-/// What a child wrote and how it ended.
-struct ChildOutput {
-    stdout: Vec<u8>,
-    /// Whether the child wrote more than the limit, so it was stopped.
-    is_cut: bool,
-    stderr: Vec<u8>,
-    status: ExitStatus,
-}
-
 /// Reads `child`'s output, keeping at most `max_bytes` of standard output and stopping the child
 /// once it writes more. Standard error is read at the same time, so the child never waits on a
-/// full pipe.
-async fn read_child(mut child: Child, max_bytes: usize) -> io::Result<ChildOutput> {
+/// full pipe. Returns the process output and whether stdout was truncated.
+async fn read_child(mut child: Child, max_bytes: usize) -> io::Result<(Output, bool)> {
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");
     let out = async {
@@ -278,12 +279,14 @@ async fn read_child(mut child: Child, max_bytes: usize) -> io::Result<ChildOutpu
     };
     let ((stdout, is_cut), stderr) = tokio::try_join!(out, err)?;
     let status = child.wait().await?;
-    Ok(ChildOutput {
-        stdout,
+    Ok((
+        Output {
+            status,
+            stdout,
+            stderr,
+        },
         is_cut,
-        stderr,
-        status,
-    })
+    ))
 }
 
 /// `bytes` as text of at most `max_bytes`, which ends at the last whole line within the limit when
@@ -363,12 +366,13 @@ mod tests {
         launcher.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let child = launcher.spawn().unwrap();
-        let read = tokio::time::timeout(Duration::from_secs(10), read_child(child, 1000))
-            .await
-            .expect("reading stops once the launcher's git wrote past the limit")
-            .unwrap();
+        let (output, is_cut) =
+            tokio::time::timeout(Duration::from_secs(10), read_child(child, 1000))
+                .await
+                .expect("reading stops once the launcher's git wrote past the limit")
+                .unwrap();
 
-        assert_eq!((read.stdout.len(), read.is_cut), (1000, true));
+        assert_eq!((output.stdout.len(), is_cut), (1000, true));
     }
 
     /// A shell that runs git as its own child and waits for it, as a launcher does.

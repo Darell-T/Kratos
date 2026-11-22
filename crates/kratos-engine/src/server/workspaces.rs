@@ -6,11 +6,10 @@ use axum::extract::State;
 use axum::extract::rejection::PathRejection;
 use axum::http::StatusCode;
 use axum::response::Response;
-use kratos_protocol::{CreateWorkspace, Ownership, ProjectWorktree, WorkspaceId};
+use kratos_protocol::{CreateWorkspace, WorkspaceId};
 
 use super::json::read_json;
 use super::{ApiError, ServerState, json_reply, path};
-use crate::worktrees::is_same_checkout;
 
 /// `GET /api/workspaces`: 200 with every workspace, oldest first.
 pub(super) async fn list_workspaces(
@@ -47,25 +46,10 @@ pub(super) async fn list_worktrees(
         .store
         .call(move |store| store.workspace(&workspace_id))
         .await?;
-    let listed = state.worktrees.list(FilePath::new(&workspace.path)).await?;
-    let ours = state.store.call(|store| store.kratos_worktrees()).await?;
-    let mut worktrees = Vec::new();
-    for listed in listed {
-        let recorded = ours.iter().find(|ours| ours.path == listed.path);
-        let is_ours = match recorded {
-            Some(recorded) => is_same_checkout(recorded).await,
-            None => false,
-        };
-        worktrees.push(ProjectWorktree {
-            ownership: if is_ours {
-                Ownership::CreatedByKratos
-            } else {
-                Ownership::Borrowed
-            },
-            path: listed.path,
-            branch: listed.branch,
-        });
-    }
+    let worktrees = state
+        .worktrees
+        .list(&state.store, FilePath::new(&workspace.path))
+        .await?;
     Ok(json_reply(StatusCode::OK, &worktrees))
 }
 
