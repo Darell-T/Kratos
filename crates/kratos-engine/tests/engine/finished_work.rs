@@ -1694,3 +1694,121 @@ fn windows_git_reads_succeed_while_a_commit_is_running() {
     );
     assert!(!repository.join(".git").join("index.lock").exists());
 }
+
+#[test]
+fn diff_and_commit_include_force_added_ignored_files_with_working_content() {
+    // Catches `git add --all` in the private index dropping files the user force-added past
+    // `.gitignore` (and `reset` then unstaging them), or glob-expanding literal bracket names.
+    let root = TempDir::new().unwrap();
+    let repository = repository_with_component_only(&root);
+    std::fs::write(repository.join(".gitignore"), "*.local\nignored_dir/\n").unwrap();
+    git(&repository, &["add", ".gitignore"]);
+    git(
+        &repository,
+        &["commit", "--quiet", "--message", "add gitignore"],
+    );
+
+    std::fs::create_dir_all(repository.join("ignored_dir")).unwrap();
+    std::fs::write(repository.join("forced.local"), "staged version\n").unwrap();
+    std::fs::write(
+        repository.join("ignored_dir").join("secret.txt"),
+        "secret\n",
+    )
+    .unwrap();
+    std::fs::write(repository.join("a[1].local"), "bracket\n").unwrap();
+    std::fs::write(repository.join("a1.local"), "leave ignored\n").unwrap();
+    std::fs::write(repository.join("plain.local"), "do not stage\n").unwrap();
+    std::fs::write(repository.join("gone.local"), "deleted later\n").unwrap();
+    git(
+        &repository,
+        &[
+            "--literal-pathspecs",
+            "add",
+            "--force",
+            "forced.local",
+            "ignored_dir/secret.txt",
+            "a[1].local",
+            "gone.local",
+        ],
+    );
+    std::fs::remove_file(repository.join("gone.local")).unwrap();
+    std::fs::write(repository.join("forced.local"), "working edit\n").unwrap();
+
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "forced", PlaceRequest::default());
+
+    let patch = diff(&client, &thread);
+    assert!(patch.patch.contains("forced.local"), "{}", patch.patch);
+    assert!(patch.patch.contains("working edit"), "{}", patch.patch);
+    assert!(
+        patch.patch.contains("ignored_dir/secret.txt"),
+        "{}",
+        patch.patch
+    );
+    assert!(patch.patch.contains("a[1].local"), "{}", patch.patch);
+    assert!(!patch.patch.contains("plain.local"), "{}", patch.patch);
+    assert!(!patch.patch.contains("a1.local"), "{}", patch.patch);
+    assert!(!patch.patch.contains("gone.local"), "{}", patch.patch);
+
+    let reply = commit(&client, &thread, "Include force-added ignored");
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(
+        git(&repository, &["show", "HEAD:forced.local"]),
+        "working edit"
+    );
+    assert_eq!(git(&repository, &["show", ":forced.local"]), "working edit");
+    assert_eq!(
+        git(&repository, &["show", "HEAD:ignored_dir/secret.txt"]),
+        "secret"
+    );
+    assert_eq!(
+        git(&repository, &["show", ":ignored_dir/secret.txt"]),
+        "secret"
+    );
+    assert_eq!(git(&repository, &["show", "HEAD:a[1].local"]), "bracket");
+    assert_eq!(git(&repository, &["show", ":a[1].local"]), "bracket");
+    let tracked = git(&repository, &["ls-files"]);
+    for absent in ["plain.local", "a1.local", "gone.local"] {
+        assert!(!tracked.lines().any(|line| line == absent), "{tracked}");
+    }
+
+    // Subfolder commit includes its own force-added ignored file and keeps outside staging intact.
+    let component = repository.join("component");
+    std::fs::write(component.join("sub.local"), "sub v1\n").unwrap();
+    std::fs::write(repository.join("outside.local"), "outside\n").unwrap();
+    git(
+        &repository,
+        &["add", "--force", "component/sub.local", "outside.local"],
+    );
+    std::fs::write(component.join("sub.local"), "sub v2\n").unwrap();
+    let inner = workspace_at(&engine, &component);
+    let sub_thread = create(&client, &inner, "sub-forced", PlaceRequest::default());
+
+    let sub_patch = diff(&client, &sub_thread);
+    assert!(
+        sub_patch.patch.contains("component/sub.local"),
+        "{}",
+        sub_patch.patch
+    );
+    assert!(
+        !sub_patch.patch.contains("outside.local"),
+        "{}",
+        sub_patch.patch
+    );
+
+    let sub_reply = commit(&client, &sub_thread, "Subfolder force-added");
+    assert_eq!(sub_reply.status, 201, "{}", sub_reply.body);
+    assert_eq!(
+        git(&repository, &["show", "HEAD:component/sub.local"]),
+        "sub v2"
+    );
+    assert_eq!(
+        git(&repository, &["show", ":component/sub.local"]),
+        "sub v2"
+    );
+    assert_eq!(git(&repository, &["show", ":outside.local"]), "outside");
+    let tree = git(&repository, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    assert!(!tree.lines().any(|line| line == "outside.local"), "{tree}");
+}

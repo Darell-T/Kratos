@@ -11,6 +11,7 @@ use kratos_store::ProviderThread;
 use tokio::process::Command;
 use uuid::Uuid;
 
+use super::cleanup;
 use super::git::{self, CHECKOUT, Capped};
 use super::index_lock::{IndexLock, PreparedReplacement, copy_preserving_mtime_if_present};
 use super::{PlaceError, Worktrees, check_still_there, resolved};
@@ -150,9 +151,7 @@ impl Worktrees {
             self.seed_private_index(folder, head, &listed, index)
                 .await?;
         }
-        self.git
-            .run_in_index(folder, &["add", "--all", "--", "."], CHECKOUT, index)
-            .await?;
+        self.stage_folder(folder, index).await?;
         // A diff or text-conversion program the user's config names would run outside every
         // sandbox, on files an agent wrote.
         let args = [
@@ -246,9 +245,7 @@ impl Worktrees {
             self.seed_private_index(top, head_oid, &base.whole_index, staged)
                 .await?;
         }
-        self.git
-            .run_in_index(folder, &["add", "--all", "--", "."], CHECKOUT, staged)
-            .await?;
+        self.stage_folder(folder, staged).await?;
         self.refuse_while_edited(store, folder, top, Some(&seen))
             .await?;
         check_still_there(store, &thread.place).await?;
@@ -258,6 +255,53 @@ impl Worktrees {
             .git
             .run_in_index(folder, &["write-tree"], git::QUICK, staged)
             .await?)
+    }
+
+    /// Stages working-tree files in `folder` into the private `index`, carrying over any
+    /// force-added ignored files still present on disk that `git add --all` skips.
+    async fn stage_folder(&self, folder: &Path, index: &Path) -> Result<(), PlaceError> {
+        self.git
+            .run_in_index(folder, &["add", "--all", "--", "."], CHECKOUT, index)
+            .await?;
+        let args = [
+            "ls-files",
+            "--cached",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ];
+        let listed = self.git.run_bytes(folder, &args, git::QUICK).await?;
+        let mut forced = Vec::new();
+        for path in listed
+            .split(|&byte| byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            let Some(file) = cleanup::file_in(folder, path) else {
+                continue;
+            };
+            if tokio::fs::symlink_metadata(&file)
+                .await
+                .is_ok_and(|meta| !meta.is_dir())
+            {
+                forced.extend_from_slice(b":(literal)");
+                forced.extend_from_slice(path);
+                forced.push(0);
+            }
+        }
+        if !forced.is_empty() {
+            let args = [
+                "add",
+                "--force",
+                "--pathspec-from-file=-",
+                "--pathspec-file-nul",
+            ];
+            self.git
+                .run_in_index_with_input(folder, &args, forced, CHECKOUT, index)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Populates `index` from `head` and reapplies any `skip-worktree` bits from `listed` so
