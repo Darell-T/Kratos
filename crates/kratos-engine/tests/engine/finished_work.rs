@@ -1812,3 +1812,57 @@ fn diff_and_commit_include_force_added_ignored_files_with_working_content() {
     let tree = git(&repository, &["ls-tree", "-r", "--name-only", "HEAD"]);
     assert!(!tree.lines().any(|line| line == "outside.local"), "{tree}");
 }
+
+#[test]
+fn commit_response_names_its_own_commit_even_when_another_git_races_after_commit() {
+    // Catches releasing `.git/index.lock` before `git rev-parse HEAD`, which lets a concurrent
+    // git commit advance HEAD in between and get returned as Kratos's commit ID.
+    let root = TempDir::new().unwrap();
+    let repository = repository_with_component_only(&root);
+    let component = repository.join("component");
+    std::fs::write(component.join("part.txt"), "engine change\n").unwrap();
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "rev-parse HEAD");
+    let inner = workspace_at(&engine, &component);
+    let client = engine.client();
+    let thread = create(&client, &inner, "race", PlaceRequest::default());
+
+    engine.hold(Gate::Git);
+    let committing = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || commit(&client, &thread, "engine request"))
+    };
+    engine.wait_until_held(Gate::Git);
+
+    let engine_oid = git(&repository, &["rev-parse", "HEAD"]);
+    std::fs::write(repository.join("sibling.txt"), "separate commit\n").unwrap();
+    let external_add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["add", "--", "sibling.txt"])
+        .output()
+        .unwrap();
+    if external_add.status.success() {
+        git(
+            &repository,
+            &["commit", "--quiet", "--message", "external user"],
+        );
+    }
+    engine.release(Gate::Git);
+    let reply = committing.join().unwrap();
+
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    let returned = reply.body["commit"].as_str().unwrap();
+    assert_eq!(
+        returned, engine_oid,
+        "response named external commit instead of Kratos's own commit"
+    );
+    assert_eq!(
+        git(&repository, &["show", "-s", "--format=%s", returned]),
+        "engine request"
+    );
+    assert!(
+        !external_add.status.success(),
+        "index.lock was already released before rev-parse HEAD ran"
+    );
+    assert!(!repository.join(".git").join("index.lock").exists());
+}

@@ -22,7 +22,7 @@ fn main() -> ExitCode {
     if let (Some(gate), Some(hold_on)) = (
         std::env::var_os("FAKE_GIT_GATE"),
         std::env::var_os("FAKE_GIT_HOLD_ON"),
-    ) && args.contains(&hold_on)
+    ) && matches_hold(&args, &hold_on)
     {
         wait_at(Path::new(&gate));
     }
@@ -38,6 +38,20 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+fn matches_hold(args: &[OsString], hold_on: &std::ffi::OsStr) -> bool {
+    let Some(text) = hold_on.to_str() else {
+        return args.iter().any(|arg| arg == hold_on);
+    };
+    let needle: Vec<&str> = text.split_whitespace().collect();
+    !needle.is_empty()
+        && args.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(&needle)
+                .all(|(arg, wanted)| arg == wanted)
+        })
 }
 
 fn wait_at(gate: &Path) {

@@ -381,24 +381,20 @@ impl Worktrees {
                 prepared.staged,
             )
             .await?;
+        let head = self
+            .git
+            .run(folder, &["rev-parse", "HEAD"], git::QUICK)
+            .await;
         if let Err(source) = replacement.commit().await {
-            let commit = self
-                .git
-                .run(folder, &["rev-parse", "HEAD"], git::QUICK)
-                .await
-                .unwrap_or_else(|_| "HEAD".to_owned());
             return Err(PlaceError::IndexNotUpdatedAfterCommit {
-                commit,
+                commit: head.unwrap_or_else(|_| "HEAD".to_owned()),
                 path: own.display().to_string(),
                 lock: lock_path,
                 folder: folder.display().to_string(),
                 source,
             });
         }
-        Ok(self
-            .git
-            .run(folder, &["rev-parse", "HEAD"], git::QUICK)
-            .await?)
+        Ok(head?)
     }
 
     /// Snapshot of every entry, stage, and flag in the checkout's real index, immune to stat-only
