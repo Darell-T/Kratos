@@ -174,18 +174,18 @@ impl Worktrees {
         {
             return Ok(Cleanup::UnsavedCommit { commit });
         }
-        if files == LeftFiles::Discard {
-            remove_tree(folder).await?;
-            remove_tree(admin).await?;
-            return Ok(Cleanup::Removed);
+        if files == LeftFiles::Keep {
+            match self.check_clean_for_keep(folder).await? {
+                KeepCheck::Clean => {}
+                KeepCheck::Dirty(left) => return Ok(Cleanup::Kept { files: left }),
+                KeepCheck::HasSubmodule => {
+                    return Err(PlaceError::SubmodulesPresent {
+                        path: recorded.path.clone(),
+                    });
+                }
+            }
         }
-        match self.check_clean_for_keep(folder).await? {
-            KeepCheck::Clean => move_to_trash(folder, admin, recorded, branch).await,
-            KeepCheck::Dirty(left) => Ok(Cleanup::Kept { files: left }),
-            KeepCheck::HasSubmodule => Err(PlaceError::SubmodulesPresent {
-                path: recorded.path.clone(),
-            }),
-        }
+        move_to_trash(folder, admin, recorded, branch, files).await
     }
 
     async fn remove_unregistered(&self, folder: &Path) -> Result<Cleanup, PlaceError> {
@@ -283,7 +283,10 @@ async fn move_to_trash(
     admin: &Path,
     recorded: &KratosWorktree,
     branch: Option<String>,
+    files: LeftFiles,
 ) -> Result<Cleanup, PlaceError> {
+    // Discard renames too: a held folder refuses the rename with nothing deleted, whereas an
+    // in-place delete would remove `.git` first and leave a folder no retry can recognize.
     let trash_dir = trash_root(folder)?;
     ignore_everything_in(&trash_dir).await?;
     let slot = pick_free_trash_slot(&trash_dir, recorded).await?;
@@ -299,6 +302,10 @@ async fn move_to_trash(
     }
     write_trash_meta(&slot.meta, recorded, branch).await?;
     remove_tree(admin).await?;
+    if files == LeftFiles::Discard {
+        expire_trash_slot(&slot).await;
+        return Ok(Cleanup::Removed);
+    }
     let git_file = slot.dir.join(".git");
     tokio::fs::write(&git_file, TRASH_GIT_SENTINEL)
         .await

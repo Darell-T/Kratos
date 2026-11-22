@@ -749,6 +749,42 @@ fn a_removal_a_held_folder_blocks_is_tried_again_by_the_next_archive() {
     assert_eq!(worktree_count(&repository), 1);
 }
 
+#[cfg(windows)]
+#[test]
+fn a_discard_a_held_subfolder_blocks_is_tried_again_by_the_next_archive() {
+    // Catches a Discard that deletes part of a held worktree, `.git` included, so no later
+    // archive can recognize and finish it.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "held", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &thread).path;
+    let src = Path::new(&path).join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("main.rs"), "fn main() {}\n").unwrap();
+    let mut holder = std::process::Command::new("ping")
+        .args(["-n", "60", "127.0.0.1"])
+        .current_dir(&src)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let blocked = archive(&client, &thread, LeftFiles::Discard);
+    holder.kill().unwrap();
+    holder.wait().unwrap();
+
+    assert!(matches!(blocked, Cleanup::Blocked { .. }), "{blocked:?}");
+    assert_eq!(
+        archive(&client, &thread, LeftFiles::Discard),
+        Cleanup::Removed,
+        "the retry after the folder is free must finish the Discard"
+    );
+    assert!(!Path::new(&path).exists());
+    assert_eq!(worktree_count(&repository), 1);
+}
+
 /// Waits for the engine's startup sweep to leave `expected` worktrees registered in `repository`.
 fn wait_for_worktree_count(repository: &Path, expected: usize) {
     let deadline = Instant::now() + WAIT;
