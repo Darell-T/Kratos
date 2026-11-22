@@ -1,7 +1,6 @@
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
-use std::ops::ControlFlow;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use kratos_protocol::{ClientMessage, Seq, ThreadId, routes};
 use tungstenite::client::IntoClientRequest;
@@ -75,63 +74,32 @@ impl EventSocket {
 
     /// The next message or close, waiting at most `wait`. `Ok(None)` when nothing arrived in time.
     pub fn next_incoming(&mut self, wait: Duration) -> Result<Option<Incoming>, ClientError> {
-        read_incoming(&mut self.socket, wait, |socket, timeout| {
-            socket.get_ref().set_read_timeout(Some(timeout))
-        })
+        self.socket.get_ref().set_read_timeout(Some(wait))?;
+        read_incoming(&mut self.socket)
     }
 }
 
 fn read_incoming<S: Read + Write>(
     socket: &mut WebSocket<S>,
-    wait: Duration,
-    mut set_timeout: impl FnMut(&mut WebSocket<S>, Duration) -> io::Result<()>,
 ) -> Result<Option<Incoming>, ClientError> {
-    if wait.is_zero() {
-        return Ok(None);
-    }
-    let deadline = Instant::now().checked_add(wait);
-    let mut remaining = wait;
     loop {
-        set_timeout(socket, remaining)?;
-        if let ControlFlow::Break(outcome) = classify_read(socket.read())? {
-            return Ok(outcome);
+        match socket.read() {
+            Ok(Message::Text(text)) => return Ok(Some(Incoming::Text(text.to_string()))),
+            Ok(Message::Close(frame)) => {
+                let code = frame.map(|frame| u16::from(frame.code));
+                return Ok(Some(Incoming::Closed(code)));
+            }
+            // The engine sends only text. tungstenite answers pings by itself.
+            Ok(_) => {}
+            // Linux socket reads with SO_RCVTIMEO do not auto-restart on signals (EINTR).
+            Err(Error::Io(error)) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(Error::Io(error)) if is_timeout(&error) => return Ok(None),
+            Err(Error::ConnectionClosed | Error::AlreadyClosed) => {
+                return Ok(Some(Incoming::Closed(None)));
+            }
+            Err(error) => return Err(error.into()),
         }
-        let Some(next) = remaining_wait(deadline, wait) else {
-            return Ok(None);
-        };
-        remaining = next;
     }
-}
-
-fn classify_read(
-    result: Result<Message, Error>,
-) -> Result<ControlFlow<Option<Incoming>>, ClientError> {
-    match result {
-        Ok(Message::Text(text)) => Ok(ControlFlow::Break(Some(Incoming::Text(text.to_string())))),
-        Ok(Message::Close(frame)) => {
-            let code = frame.map(|frame| u16::from(frame.code));
-            Ok(ControlFlow::Break(Some(Incoming::Closed(code))))
-        }
-        // The engine sends only text. tungstenite answers pings by itself.
-        Ok(_) => Ok(ControlFlow::Continue(())),
-        // Linux socket reads with SO_RCVTIMEO do not auto-restart on signals (EINTR).
-        Err(Error::Io(error)) if error.kind() == io::ErrorKind::Interrupted => {
-            Ok(ControlFlow::Continue(()))
-        }
-        Err(Error::Io(error)) if is_timeout(&error) => Ok(ControlFlow::Break(None)),
-        Err(Error::ConnectionClosed | Error::AlreadyClosed) => {
-            Ok(ControlFlow::Break(Some(Incoming::Closed(None))))
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn remaining_wait(deadline: Option<Instant>, fallback: Duration) -> Option<Duration> {
-    let Some(deadline) = deadline else {
-        return Some(fallback);
-    };
-    let left = deadline.saturating_duration_since(Instant::now());
-    (!left.is_zero()).then_some(left)
 }
 
 fn http_format_error(error: impl Into<tungstenite::http::Error>) -> Error {
@@ -157,7 +125,6 @@ mod tests {
     enum ReadStep {
         Interrupted,
         Bytes(Vec<u8>),
-        PauseThenInterrupted(Duration),
     }
 
     struct ScriptedStream {
@@ -168,10 +135,6 @@ mod tests {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             match self.steps.pop_front() {
                 Some(ReadStep::Interrupted) => Err(io::Error::from(io::ErrorKind::Interrupted)),
-                Some(ReadStep::PauseThenInterrupted(pause)) => {
-                    std::thread::sleep(pause);
-                    Err(io::Error::from(io::ErrorKind::Interrupted))
-                }
                 Some(ReadStep::Bytes(bytes)) => {
                     let count = bytes.len().min(buf.len());
                     buf[..count].copy_from_slice(&bytes[..count]);
@@ -181,9 +144,7 @@ mod tests {
                     }
                     Ok(count)
                 }
-                None => Err(io::Error::other(
-                    "scripted stream exhausted before deadline",
-                )),
+                None => Err(io::Error::from(io::ErrorKind::WouldBlock)),
             }
         }
     }
@@ -217,55 +178,8 @@ mod tests {
         };
         let mut socket = WebSocket::from_raw_socket(stream, Role::Client, None);
 
-        let received = read_incoming(&mut socket, Duration::from_secs(1), |_, timeout| {
-            assert!(!timeout.is_zero());
-            Ok(())
-        })
-        .unwrap();
+        let received = read_incoming(&mut socket).unwrap();
 
         assert_eq!(received, Some(Incoming::Text("hello".to_owned())));
-    }
-
-    #[test]
-    fn next_incoming_stops_at_deadline_across_repeated_interrupts() {
-        let mut steps = VecDeque::from([ReadStep::Interrupted]);
-        steps.extend((0..100).map(|_| ReadStep::PauseThenInterrupted(Duration::from_millis(15))));
-        let stream = ScriptedStream { steps };
-        let mut socket = WebSocket::from_raw_socket(stream, Role::Client, None);
-        let mut seen_timeouts = Vec::new();
-        let started = Instant::now();
-
-        let received = read_incoming(&mut socket, Duration::from_millis(60), |_, timeout| {
-            assert!(!timeout.is_zero());
-            seen_timeouts.push(timeout);
-            Ok(())
-        })
-        .unwrap();
-
-        assert_eq!(received, None);
-        assert!(seen_timeouts.len() >= 2, "{seen_timeouts:?}");
-        assert!(
-            seen_timeouts.last() < seen_timeouts.first(),
-            "{seen_timeouts:?}"
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
-    }
-
-    #[test]
-    fn next_incoming_with_zero_wait_returns_none_without_setting_timeout() {
-        let stream = ScriptedStream {
-            steps: VecDeque::new(),
-        };
-        let mut socket = WebSocket::from_raw_socket(stream, Role::Client, None);
-        let mut calls = 0;
-
-        let received = read_incoming(&mut socket, Duration::ZERO, |_, _| {
-            calls += 1;
-            Ok(())
-        })
-        .unwrap();
-
-        assert_eq!(received, None);
-        assert_eq!(calls, 0);
     }
 }
