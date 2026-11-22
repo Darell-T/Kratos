@@ -356,10 +356,10 @@ impl Worktrees {
         folder: &Path,
         top: &Path,
     ) -> Result<(), PlaceError> {
-        let threads = store.call(|store| store.thread_activity()).await?;
+        let folders = store.call(|store| store.busy_folders()).await?;
         let folder = resolved_or_given(folder).await;
-        for thread in &threads {
-            if thread.is_busy && self.shares_files(&folder, top, &thread.folder).await? {
+        for other in &folders {
+            if self.shares_files(&folder, top, other).await? {
                 return Err(PlaceError::BeingEdited);
             }
         }

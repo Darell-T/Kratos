@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use kratos_protocol::{Cleanup, LeftFiles, Ownership, Place, Timestamp, WorktreeId};
-use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError, UnfinishedWorktree};
+use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError};
 use serde::{Deserialize, Serialize};
 
 use super::git;
@@ -56,18 +56,22 @@ impl Worktrees {
     ) -> Result<Cleanup, StoreError> {
         match place {
             Place::Worktree(worktree) if worktree.ownership == Ownership::CreatedByKratos => {
-                self.remove_worktree(store, &worktree.id, &worktree.path, files)
-                    .await
+                let recorded = KratosWorktree {
+                    id: worktree.id.clone(),
+                    path: worktree.path.clone(),
+                };
+                self.remove_worktree(store, &recorded, files).await
             }
             Place::Worktree(_) | Place::ProjectFolder => Ok(Cleanup::NotOwned),
         }
     }
 
     /// Finishes worktrees left unfinished by an earlier engine and empties expired trash entries.
-    pub async fn sweep(&self, store: &StoreThread, unfinished: Vec<UnfinishedWorktree>) {
-        for UnfinishedWorktree { id, path } in unfinished {
+    pub async fn sweep(&self, store: &StoreThread, unfinished: Vec<KratosWorktree>) {
+        for worktree in unfinished {
+            let path = &worktree.path;
             match self
-                .remove_worktree(store, &id, &path, LeftFiles::Keep)
+                .remove_worktree(store, &worktree, LeftFiles::Keep)
                 .await
             {
                 Ok(Cleanup::Removed | Cleanup::InUse | Cleanup::NotOwned) => {}
@@ -90,30 +94,25 @@ impl Worktrees {
     async fn remove_worktree(
         &self,
         store: &StoreThread,
-        id: &WorktreeId,
-        path: &str,
+        recorded: &KratosWorktree,
         files: LeftFiles,
     ) -> Result<Cleanup, StoreError> {
-        let begin = id.clone();
+        let begin = recorded.id.clone();
         let repository = match store.call(move |store| store.begin_removal(&begin)).await? {
             Removal::InUse => return Ok(Cleanup::InUse),
             Removal::Done => return Ok(Cleanup::Removed),
             Removal::Started { repository } => repository,
         };
         // Checked after `removing` is recorded so no new thread can start inside `path` unseen.
-        if holds_a_thread(store, Path::new(path)).await? {
-            let id = id.clone();
+        if holds_a_thread(store, Path::new(&recorded.path)).await? {
+            let id = recorded.id.clone();
             store
                 .call(move |store| store.end_removal(&id, RemovalEnd::Kept))
                 .await?;
             return Ok(Cleanup::InUse);
         }
-        let recorded = KratosWorktree {
-            id: id.clone(),
-            path: path.to_owned(),
-        };
         let cleanup = self
-            .remove(Path::new(&repository), &recorded, files)
+            .remove(Path::new(&repository), recorded, files)
             .await
             .unwrap_or_else(|error| Cleanup::Blocked {
                 error: error.to_string(),
@@ -123,7 +122,7 @@ impl Worktrees {
             Cleanup::Kept { .. } | Cleanup::UnsavedCommit { .. } => RemovalEnd::Kept,
             Cleanup::InUse | Cleanup::Blocked { .. } => return Ok(cleanup),
         };
-        let id = id.clone();
+        let id = recorded.id.clone();
         store.call(move |store| store.end_removal(&id, end)).await?;
         Ok(cleanup)
     }

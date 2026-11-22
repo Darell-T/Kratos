@@ -18,13 +18,6 @@ pub struct Checkout {
     pub branch: Option<String>,
 }
 
-/// A worktree an earlier engine left unfinished.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct UnfinishedWorktree {
-    pub id: WorktreeId,
-    pub path: String,
-}
-
 /// A worktree Kratos made and has not removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KratosWorktree {
@@ -99,7 +92,7 @@ impl Store {
     /// archive that stopped before its removal began, and a worktree kept for its files, which
     /// goes once the user has dealt with them. Read before the engine serves, since a worktree
     /// reserved after that may be one a request is making.
-    pub fn unfinished_worktrees(&self) -> Result<Vec<UnfinishedWorktree>, StoreError> {
+    pub fn unfinished_worktrees(&self) -> Result<Vec<KratosWorktree>, StoreError> {
         let mut statement = self.connection.prepare(
             "SELECT id, path FROM worktrees
              WHERE state IN ('creating', 'removing')
@@ -109,7 +102,7 @@ impl Store {
              ORDER BY rowid",
         )?;
         let rows = statement.query_map([], |row| {
-            Ok(UnfinishedWorktree {
+            Ok(KratosWorktree {
                 id: WorktreeId::new(row.get(0)?),
                 path: row.get(1)?,
             })
@@ -136,25 +129,22 @@ impl Store {
         let Some((state, repository)) = found else {
             return Err(StoreError::UnknownWorktree(id.clone()));
         };
-        let removal = match state.as_str() {
-            "removed" => Removal::Done,
-            _ => {
-                let started = transaction.execute(
-                    "UPDATE worktrees SET state = 'removing'
-                     WHERE id = ?1 AND state IN ('creating', 'ready', 'removing')
-                       AND NOT EXISTS (SELECT 1 FROM threads
-                                       WHERE worktree_id = ?1 AND archived_at IS NULL)",
-                    [id.as_str()],
-                )?;
-                if started == 0 {
-                    Removal::InUse
-                } else {
-                    Removal::Started { repository }
-                }
-            }
-        };
+        if state == "removed" {
+            return Ok(Removal::Done);
+        }
+        let started = transaction.execute(
+            "UPDATE worktrees SET state = 'removing'
+             WHERE id = ?1
+               AND NOT EXISTS (SELECT 1 FROM threads
+                               WHERE worktree_id = ?1 AND archived_at IS NULL)",
+            [id.as_str()],
+        )?;
         transaction.commit()?;
-        Ok(removal)
+        if started == 0 {
+            Ok(Removal::InUse)
+        } else {
+            Ok(Removal::Started { repository })
+        }
     }
 
     /// Records how a removal [`Store::begin_removal`] started ended. A kept worktree may take

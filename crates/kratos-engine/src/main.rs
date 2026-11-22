@@ -25,7 +25,7 @@ use kratos_claude_client::locate_claude;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
 use kratos_store::{
-    BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError, UnfinishedWorktree,
+    BackupId, InvalidBackupId, KratosWorktree, OpenError, RestoreError, Store, StoreError,
 };
 
 use kratos_engine::config::{Config, ConfigError};
@@ -141,7 +141,7 @@ fn run_server(
     config: &Config,
     token: ClientToken,
     worktrees: Worktrees,
-    unfinished: Vec<UnfinishedWorktree>,
+    unfinished: Vec<KratosWorktree>,
 ) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

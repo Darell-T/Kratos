@@ -14,21 +14,6 @@ use crate::columns::{
 use crate::worktrees::{NewPlace, attach, place_from_row};
 use crate::{Store, StoreError, ThreadWrite};
 
-/// A thread, archived or not, as a commit of files near its folder sees it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ThreadActivity {
-    pub thread_id: ThreadId,
-    /// A worktree's path, or the project folder as the user gave it.
-    pub folder: String,
-    /// A turn runs, or a message is being sent to start one. Codex records a turn only once it
-    /// took the message, and its agent may act on it before then.
-    pub is_busy: bool,
-    /// The number of the event that started the thread's last turn, or 0 before its first. A
-    /// turn that started and ended since an earlier read shows here, even once its thread is
-    /// archived.
-    pub last_turn: u64,
-}
-
 /// What a provider needs to run a thread's turns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderThread {
@@ -164,30 +149,20 @@ impl Store {
         Ok(folders.collect::<Result<_, _>>()?)
     }
 
-    /// What each thread is doing in its folder, archived threads too.
-    pub fn thread_activity(&self) -> Result<Vec<ThreadActivity>, StoreError> {
+    /// The folders of threads currently running a turn or submitting a message, archived or not.
+    /// Codex records a turn only once it took the message, and its agent may act on it before then.
+    pub fn busy_folders(&self) -> Result<Vec<String>, StoreError> {
         let mut statement = self.connection.prepare_cached(
-            "SELECT threads.id, COALESCE(worktrees.path, workspaces.path),
-               threads.running_turn IS NOT NULL
-                 OR EXISTS (SELECT 1 FROM thread_messages
-                            WHERE thread_messages.thread_id = threads.id
-                              AND thread_messages.status = 'submitting'),
-               COALESCE((SELECT seq FROM thread_events
-                         WHERE thread_id = threads.id
-                           AND json_extract(event, '$.kind') = 'turn.started'
-                         ORDER BY seq DESC LIMIT 1), 0)
+            "SELECT DISTINCT COALESCE(worktrees.path, workspaces.path)
              FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
-               LEFT JOIN worktrees ON worktrees.id = threads.worktree_id",
+               LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
+             WHERE threads.running_turn IS NOT NULL
+                OR EXISTS (SELECT 1 FROM thread_messages
+                           WHERE thread_messages.thread_id = threads.id
+                             AND thread_messages.status = 'submitting')",
         )?;
-        let threads = statement.query_map([], |row| {
-            Ok(ThreadActivity {
-                thread_id: ThreadId::new(row.get(0)?),
-                folder: row.get(1)?,
-                is_busy: row.get(2)?,
-                last_turn: row.get(3)?,
-            })
-        })?;
-        Ok(threads.collect::<Result<_, _>>()?)
+        let folders = statement.query_map([], |row| row.get(0))?;
+        Ok(folders.collect::<Result<_, _>>()?)
     }
 }
 
