@@ -54,6 +54,41 @@ pub(super) struct Capped {
     pub is_cut: bool,
 }
 
+/// One record from `git ls-files -v` (with or without `--stage`) under `-z`.
+pub(super) struct LsFileEntry<'a> {
+    pub tag: u8,
+    pub mode: Option<&'a [u8]>,
+    pub path: &'a [u8],
+}
+
+/// Parses NUL-terminated `git ls-files -v` (with or without `--stage`) output.
+pub(super) fn ls_files_entries(listed: &[u8]) -> impl Iterator<Item = LsFileEntry<'_>> {
+    listed.split(|&byte| byte == 0).filter_map(|record| {
+        let (&tag, rest) = record.split_first()?;
+        let rest = rest.strip_prefix(b" ")?;
+        let (mode, path) = match split_stage_header(rest) {
+            Some((mode, path)) => (Some(mode), path),
+            None => (None, rest),
+        };
+        (!path.is_empty()).then_some(LsFileEntry { tag, mode, path })
+    })
+}
+
+fn split_stage_header(rest: &[u8]) -> Option<(&[u8], &[u8])> {
+    let tab = rest.iter().position(|&byte| byte == b'\t')?;
+    let mut fields = rest[..tab].split(|&byte| byte == b' ');
+    let mode = fields.next()?;
+    let _oid = fields.next()?;
+    let _stage = fields.next()?;
+    if fields.next().is_some()
+        || mode.len() != 6
+        || !mode.iter().all(|byte| (b'0'..=b'7').contains(byte))
+    {
+        return None;
+    }
+    Some((mode, &rest[tab + 1..]))
+}
+
 impl Git {
     /// `hooks_off` is an empty folder that git reads as the hooks folder.
     pub(super) fn new(hooks_off: PathBuf) -> Git {

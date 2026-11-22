@@ -504,11 +504,11 @@ async fn remove_tree(path: &Path) -> Result<(), PlaceError> {
 /// Whether `listed` (`git ls-files -v -s -z`) names any gitlink whose folder in `folder` is
 /// non-empty, matching `git worktree remove`'s submodule refusal.
 async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
-    for (_, mode, path) in ls_files_entries(listed) {
-        if mode != GITLINK_MODE {
+    for entry in git::ls_files_entries(listed) {
+        if entry.mode != Some(GITLINK_MODE) {
             continue;
         }
-        let Some(dir) = file_in(folder, path) else {
+        let Some(dir) = file_in(folder, entry.path) else {
             return true;
         };
         if let Ok(mut entries) = tokio::fs::read_dir(&dir).await
@@ -518,16 +518,6 @@ async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
         }
     }
     false
-}
-
-fn ls_files_entries(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8], &[u8])> {
-    listed.split(|&byte| byte == 0).filter_map(|entry| {
-        let tab = entry.iter().position(|&byte| byte == b'\t')?;
-        let mut fields = entry[..tab].split(|&byte| byte == b' ');
-        let tag = fields.next()?;
-        let mode = fields.next()?;
-        Some((tag, mode, &entry[tab + 1..]))
-    })
 }
 
 async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, StoreError> {

@@ -20,12 +20,6 @@ use crate::store_thread::StoreThread;
 /// folder itself.
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
-struct CommitBase {
-    head: Option<String>,
-    has_merge: bool,
-    whole_index: Vec<u8>,
-}
-
 struct PreparedCommit<'a> {
     staged: &'a Path,
     tree: String,
@@ -113,12 +107,7 @@ impl Worktrees {
         index: &Path,
     ) -> Result<Capped, PlaceError> {
         if let Some(head) = head {
-            let listed = self
-                .git
-                .run_bytes(folder, &["ls-files", "-v", "-z"], git::QUICK)
-                .await?;
-            self.seed_private_index(folder, head, &listed, index)
-                .await?;
+            self.seed_private_index(folder, head, index).await?;
         }
         self.stage_folder(folder, index).await?;
         // A diff or text-conversion program the user's config names would run outside every
@@ -159,13 +148,22 @@ impl Worktrees {
         let own = self.index_of(folder).await?;
         let index_lock = IndexLock::take(&own).await?;
         let resolved_folder = resolved_or_given(folder).await;
-        let is_whole_checkout = resolved_folder == repository.top;
-        let base = self
-            .capture_commit_base(folder, &repository.top, is_whole_checkout)
+        let pending = self.pending_commits(folder).await?;
+        if let Some(&underway) = pending.first()
+            && resolved_folder != repository.top
+        {
+            return Err(PlaceError::PartialCommitDuring(underway));
+        }
+        self.refuse_while_edited(store, folder, &repository.top)
             .await?;
         let staged = self.scratch_index();
         let tree = self
-            .prepare_commit_tree(store, thread, &repository.top, &base, &staged)
+            .prepare_commit_tree(
+                folder,
+                &repository.top,
+                pending.contains(&Underway::Merge),
+                &staged,
+            )
             .await?;
         let prepared = PreparedCommit {
             staged: &staged,
@@ -175,48 +173,23 @@ impl Worktrees {
             .await
     }
 
-    async fn capture_commit_base(
+    async fn prepare_commit_tree(
         &self,
         folder: &Path,
         top: &Path,
-        is_whole_checkout: bool,
-    ) -> Result<CommitBase, PlaceError> {
-        let pending = self.pending_commits(folder).await?;
-        if let Some(&underway) = pending.first()
-            && !is_whole_checkout
-        {
-            return Err(PlaceError::PartialCommitDuring(underway));
-        }
+        has_merge: bool,
+        staged: &Path,
+    ) -> Result<String, PlaceError> {
         let head = match self.head_commit(folder).await {
             Ok(head) => Some(head),
             Err(PlaceError::NoCommits) => None,
             Err(error) => return Err(error),
         };
-        let whole_index = self.whole_index(top).await?;
-        Ok(CommitBase {
-            head,
-            has_merge: pending.contains(&Underway::Merge),
-            whole_index,
-        })
-    }
-
-    async fn prepare_commit_tree(
-        &self,
-        store: &StoreThread,
-        thread: &ProviderThread,
-        top: &Path,
-        base: &CommitBase,
-        staged: &Path,
-    ) -> Result<String, PlaceError> {
-        let folder = Path::new(&thread.folder);
-        self.refuse_while_edited(store, folder, top).await?;
-        if let Some(head_oid) = base.head.as_deref() {
-            self.seed_private_index(top, head_oid, &base.whole_index, staged)
-                .await?;
+        if let Some(head) = head.as_deref() {
+            self.seed_private_index(top, head, staged).await?;
         }
         self.stage_folder(folder, staged).await?;
-        self.refuse_unless_staged(folder, staged, base.has_merge)
-            .await?;
+        self.refuse_unless_staged(folder, staged, has_merge).await?;
         Ok(self
             .git
             .run_in_index(folder, &["write-tree"], git::QUICK, staged)
@@ -241,8 +214,11 @@ impl Worktrees {
         ];
         let listed = self.git.run_bytes(folder, &args, git::QUICK).await?;
         let mut forced = Vec::new();
-        for path in non_sparse_paths(&listed) {
-            let Some(file) = cleanup::file_in(folder, path) else {
+        for entry in git::ls_files_entries(&listed) {
+            if matches!(entry.tag, b'S' | b's') {
+                continue;
+            }
+            let Some(file) = cleanup::file_in(folder, entry.path) else {
                 continue;
             };
             if tokio::fs::symlink_metadata(&file)
@@ -250,7 +226,7 @@ impl Worktrees {
                 .is_ok_and(|meta| meta.is_file() || meta.file_type().is_symlink())
             {
                 forced.extend_from_slice(b":(literal)");
-                forced.extend_from_slice(path);
+                forced.extend_from_slice(entry.path);
                 forced.push(0);
             }
         }
@@ -268,19 +244,22 @@ impl Worktrees {
         Ok(())
     }
 
-    /// Reapplies `skip-worktree` bits from `listed` so sparse-checkout files absent on disk are
-    /// not treated as deletions by `git add --all`.
+    /// Reapplies `skip-worktree` bits from the real index so sparse-checkout files absent on disk
+    /// are not treated as deletions by `git add --all`.
     async fn seed_private_index(
         &self,
         cwd: &Path,
         head: &str,
-        listed: &[u8],
         index: &Path,
     ) -> Result<(), PlaceError> {
+        let listed = self
+            .git
+            .run_bytes(cwd, &["ls-files", "--full-name", "-v", "-z"], git::QUICK)
+            .await?;
         self.git
             .run_in_index(cwd, &["read-tree", head], git::QUICK, index)
             .await?;
-        let skip_paths = skip_worktree_input(listed);
+        let skip_paths = skip_worktree_input(&listed);
         if !skip_paths.is_empty() {
             let args = ["update-index", "--skip-worktree", "-z", "--stdin"];
             self.git
@@ -345,19 +324,6 @@ impl Worktrees {
             });
         }
         Ok(head?)
-    }
-
-    /// Snapshot of every entry, stage, and flag in the checkout's real index, immune to stat-only
-    /// refreshes from commands such as `git status`.
-    async fn whole_index(&self, top: &Path) -> Result<Vec<u8>, PlaceError> {
-        Ok(self
-            .git
-            .run_bytes(
-                top,
-                &["ls-files", "--full-name", "-v", "--stage", "-z"],
-                git::QUICK,
-            )
-            .await?)
     }
 
     /// Refuses a commit of `staged` that would change no file, except to conclude a merge, which
@@ -523,30 +489,13 @@ async fn resolved_or_given(path: &Path) -> PathBuf {
     resolved(path).await.unwrap_or_else(|_| path.to_owned())
 }
 
-fn non_sparse_paths(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
-    listed.split(|&byte| byte == 0).filter_map(|record| {
-        let (&tag, rest) = record.split_first()?;
-        let path = rest.strip_prefix(b" ")?;
-        (!matches!(tag, b'S' | b's') && !path.is_empty()).then_some(path)
-    })
-}
-
 fn skip_worktree_input(listed: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    for record in listed.split(|&byte| byte == 0) {
-        let Some(&tag) = record.first() else {
-            continue;
-        };
-        if tag != b'S' && tag != b's' {
-            continue;
+    for entry in git::ls_files_entries(listed) {
+        if matches!(entry.tag, b'S' | b's') {
+            out.extend_from_slice(entry.path);
+            out.push(0);
         }
-        let path = match record.iter().position(|&byte| byte == b'\t') {
-            Some(tab) => &record[tab + 1..],
-            None if record.get(1) == Some(&b' ') => &record[2..],
-            None => continue,
-        };
-        out.extend_from_slice(path);
-        out.push(0);
     }
     out
 }
