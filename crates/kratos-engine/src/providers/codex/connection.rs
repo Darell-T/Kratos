@@ -207,7 +207,7 @@ impl Actor {
             return Ok(None);
         }
         let thread = self.threads.get(thread_id).expect("loaded above");
-        let effective = effective_settings(&thread.settings, limit);
+        let effective = thread.settings.limited_by(limit);
         let desired_npm_cache = NpmCache::for_profile(Profile::for_settings(&effective));
         let (reload, access) = match attach_action(thread, &effective, desired_npm_cache) {
             AttachAction::Ready(native_id) => return Ok(Some(native_id)),
@@ -328,7 +328,7 @@ impl Actor {
         limit: Option<kratos_protocol::AccessLimit>,
     ) -> bool {
         let thread = self.threads.get_mut(thread_id).expect("thread loaded");
-        let settings = effective_settings(&thread.settings, limit);
+        let settings = thread.settings.limited_by(limit);
         let Link::Attached {
             native_id, access, ..
         } = &thread.link
@@ -575,16 +575,6 @@ enum AttachAction {
         reload: Option<String>,
         access: kratos_protocol::AccessLimit,
     },
-}
-
-fn effective_settings(
-    settings: &kratos_protocol::ThreadSettings,
-    limit: Option<kratos_protocol::AccessLimit>,
-) -> kratos_protocol::ThreadSettings {
-    match limit {
-        Some(limit) => settings.limited_to(limit),
-        None => settings.clone(),
-    }
 }
 
 fn needs_access_fork(

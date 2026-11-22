@@ -62,7 +62,7 @@ impl Actor {
             .await;
             return;
         }
-        let wanted = SessionConfig::of(&effective(thread, &next));
+        let wanted = SessionConfig::of(&thread.settings.limited_by(next.origin.limit()));
         if let Some(open) = thread.open() {
             if let Some(reason) = open.message_wait_reason(&wanted) {
                 self.hub.publish(
@@ -558,15 +558,4 @@ fn accept_submitted(
         write.set_message_status(&message_id, accepted)?;
     }
     Ok(())
-}
-
-/// The thread's settings for a message: no more access than the thread that sent it has.
-fn effective(
-    thread: &super::threads::ThreadState,
-    message: &Message,
-) -> kratos_protocol::ThreadSettings {
-    match message.origin.limit() {
-        Some(limit) => thread.settings.limited_to(limit),
-        None => thread.settings.clone(),
-    }
 }

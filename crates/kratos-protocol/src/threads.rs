@@ -163,6 +163,14 @@ impl ThreadSettings {
             ..self.clone()
         }
     }
+
+    /// These settings with no more access than `limit`, or unchanged when `limit` is `None`.
+    pub fn limited_by(&self, limit: Option<AccessLimit>) -> ThreadSettings {
+        match limit {
+            Some(limit) => self.limited_to(limit),
+            None => self.clone(),
+        }
+    }
 }
 
 /// How much a thread may do: its permission, and whether it only plans. A thread that takes a

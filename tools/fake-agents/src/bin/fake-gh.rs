@@ -7,13 +7,9 @@
 use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
 
 /// The address every pull request the fake opens gets.
 const PULL_REQUEST: &str = "https://github.com/example/repo/pull/1";
-
-/// The longest the fake waits at a closed gate, so a test that never opens it still ends.
-const MAX_HOLD: Duration = Duration::from_secs(60);
 
 fn main() -> ExitCode {
     if let Some(gate) = std::env::var_os("FAKE_GH_GATE") {
@@ -46,8 +42,5 @@ fn wait_at(gate: &Path) {
         eprintln!("fake-gh: cannot write {}: {error}", gate.display());
         return;
     }
-    let deadline = Instant::now() + MAX_HOLD;
-    while !gate.join("open").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    fake_agents::wait_until_open(gate);
 }

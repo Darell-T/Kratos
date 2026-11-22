@@ -303,7 +303,6 @@ impl From<PlaceError> for ApiError {
             PlaceError::Store(error) => error.into(),
             failed @ (PlaceError::Git(_)
             | PlaceError::Io { .. }
-            | PlaceError::CannotRemove { .. }
             | PlaceError::IndexNotUpdatedAfterCommit { .. }
             | PlaceError::NoGh(_)
             | PlaceError::Gh(_)
@@ -311,7 +310,6 @@ impl From<PlaceError> for ApiError {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
             }
             conflict @ (PlaceError::NotItsWorktree(_)
-            | PlaceError::SubmodulesPresent { .. }
             | PlaceError::BeingEdited
             | PlaceError::PartialCommitDuring(_)
             | PlaceError::IndexInUse(_)) => ApiError::new(StatusCode::CONFLICT, conflict),

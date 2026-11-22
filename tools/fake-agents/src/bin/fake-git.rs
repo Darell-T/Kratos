@@ -5,10 +5,6 @@
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, ExitCode};
-use std::time::{Duration, Instant};
-
-/// The longest the fake waits at a closed gate, so a test that never opens it still ends.
-const MAX_HOLD: Duration = Duration::from_secs(60);
 
 fn main() -> ExitCode {
     let Some(real) = std::env::var_os("FAKE_GIT_REAL") else {
@@ -56,8 +52,5 @@ fn wait_at(gate: &Path) {
     if std::fs::rename(gate.join("hold"), gate.join("held")).is_err() {
         return;
     }
-    let deadline = Instant::now() + MAX_HOLD;
-    while !gate.join("open").exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    fake_agents::wait_until_open(gate);
 }
