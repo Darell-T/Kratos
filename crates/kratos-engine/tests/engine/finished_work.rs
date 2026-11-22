@@ -1127,48 +1127,6 @@ fn a_subfolder_commit_preserves_unrelated_staged_working_versions_and_index_flag
     );
 }
 
-#[cfg(windows)]
-#[test]
-fn a_commit_while_a_windows_reader_holds_the_index_is_refused_before_head_advances() {
-    // Catches a commit advancing HEAD and then silently failing to replace `.git/index` while
-    // another Windows process holds an ordinary read handle on it, leaving a staged reverse diff.
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_SHARE_READ: u32 = 0x1;
-    const FILE_SHARE_WRITE: u32 = 0x2;
-
-    let root = TempDir::new().unwrap();
-    let (repository, engine) = repository_with_component(&root);
-    let workspace = workspace_at(&engine, &repository);
-    let client = engine.client();
-    let thread = create(&client, &workspace, "chat", PlaceRequest::default());
-    std::fs::write(
-        repository.join("component").join("part.txt"),
-        "committed edit\n",
-    )
-    .unwrap();
-    let reader = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .open(repository.join(".git").join("index"))
-        .unwrap();
-
-    let reply = commit(&client, &thread, "Blocked by index reader");
-    drop(reader);
-
-    assert_eq!(reply.status, 409, "{}", reply.body);
-    assert_eq!(
-        git(&repository, &["show", "HEAD:component/part.txt"]),
-        "one"
-    );
-    assert_eq!(git(&repository, &["show", ":component/part.txt"]), "one");
-    assert_eq!(git(&repository, &["diff", "--cached", "--name-only"]), "");
-    assert_eq!(
-        git(&repository, &["status", "--porcelain"]),
-        "M component/part.txt"
-    );
-    assert!(!repository.join(".git").join("index.lock").exists());
-}
-
 #[test]
 fn a_commit_refuses_when_the_user_stages_in_the_folder_while_it_stages_files() {
     // Catches a commit that proceeds after the user staged changes while Kratos prepared it.
@@ -1196,60 +1154,6 @@ fn a_commit_refuses_when_the_user_stages_in_the_folder_while_it_stages_files() {
     assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
     assert_eq!(git(&repository, &["show", ":component/part.txt"]), "two");
     assert_eq!(std::fs::read_to_string(&part).unwrap(), "three\n");
-    assert!(!repository.join(".git").join("index.lock").exists());
-}
-
-#[cfg(windows)]
-#[test]
-fn a_windows_reader_cannot_hijack_the_prepared_index_lock_during_commit() {
-    // Catches a Windows reader without FILE_SHARE_DELETE opening `.git/index.lock` while `git
-    // commit` runs, causing rename failure after HEAD has already moved.
-    use std::os::windows::fs::OpenOptionsExt;
-    const FILE_SHARE_READ: u32 = 0x1;
-    const FILE_SHARE_WRITE: u32 = 0x2;
-
-    let root = TempDir::new().unwrap();
-    let repository = repository_with_component_only(&root);
-    let component = repository.join("component");
-    std::fs::write(repository.join("README.md"), "user staged version\n").unwrap();
-    git(&repository, &["add", "README.md"]);
-    std::fs::write(repository.join("README.md"), "user unstaged version\n").unwrap();
-    std::fs::write(component.join("part.txt"), "engine edit\n").unwrap();
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "commit");
-    let inner = workspace_at(&engine, &component);
-    let client = engine.client();
-    let thread = create(&client, &inner, "folder", PlaceRequest::default());
-    engine.hold(Gate::Git);
-    let committing = {
-        let (client, thread) = (client.clone(), thread.clone());
-        std::thread::spawn(move || commit(&client, &thread, "Finish component"))
-    };
-    engine.wait_until_held(Gate::Git);
-    let reader = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
-        .open(repository.join(".git").join("index.lock"));
-    engine.release(Gate::Git);
-    let reply = committing.join().unwrap();
-    drop(reader);
-
-    assert_eq!(reply.status, 201, "{}", reply.body);
-    assert_eq!(
-        git(&repository, &["show", "HEAD:component/part.txt"]),
-        "engine edit"
-    );
-    assert_eq!(
-        git(&repository, &["show", ":component/part.txt"]),
-        "engine edit"
-    );
-    assert_eq!(
-        git(&repository, &["show", ":README.md"]),
-        "user staged version"
-    );
-    assert_eq!(
-        std::fs::read_to_string(repository.join("README.md")).unwrap(),
-        "user unstaged version\n"
-    );
     assert!(!repository.join(".git").join("index.lock").exists());
 }
 
@@ -1725,4 +1629,68 @@ fn diff_and_commit_preserve_sparse_checkout_skip_worktree_files() {
         git(&repository, &["show", "HEAD:excluded/b.txt"]),
         "keep sparse"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_git_reads_succeed_while_a_commit_is_running() {
+    // Catches Windows DELETE handles on `.git/index` blocking ordinary `git status` and
+    // `git ls-files` readers in the same checkout while Kratos runs `git commit`.
+    let root = TempDir::new().unwrap();
+    let repository = repository_with_component_only(&root);
+    let component = repository.join("component");
+    std::fs::write(repository.join("README.md"), "user staged version\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    std::fs::write(repository.join("README.md"), "user unstaged version\n").unwrap();
+    std::fs::write(component.join("part.txt"), "engine edit\n").unwrap();
+    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "commit");
+    let inner = workspace_at(&engine, &component);
+    let client = engine.client();
+    let thread = create(&client, &inner, "folder", PlaceRequest::default());
+    engine.hold(Gate::Git);
+    let committing = {
+        let (client, thread) = (client.clone(), thread.clone());
+        std::thread::spawn(move || commit(&client, &thread, "Finish component"))
+    };
+    engine.wait_until_held(Gate::Git);
+
+    let status_out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["status", "--short"])
+        .output()
+        .unwrap();
+    let ls_out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["ls-files"])
+        .output()
+        .unwrap();
+    engine.release(Gate::Git);
+    let reply = committing.join().unwrap();
+
+    assert!(
+        status_out.status.success(),
+        "git status failed during Kratos commit: {}",
+        String::from_utf8_lossy(&status_out.stderr)
+    );
+    assert!(
+        ls_out.status.success(),
+        "git ls-files failed during Kratos commit: {}",
+        String::from_utf8_lossy(&ls_out.stderr)
+    );
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    assert_eq!(
+        git(&repository, &["show", "HEAD:component/part.txt"]),
+        "engine edit"
+    );
+    assert_eq!(
+        git(&repository, &["show", ":component/part.txt"]),
+        "engine edit"
+    );
+    assert_eq!(
+        git(&repository, &["show", ":README.md"]),
+        "user staged version"
+    );
+    assert!(!repository.join(".git").join("index.lock").exists());
 }

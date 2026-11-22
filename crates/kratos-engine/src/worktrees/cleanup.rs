@@ -279,18 +279,15 @@ impl Worktrees {
     }
 
     async fn remove_unregistered(&self, folder: &Path) -> Result<Cleanup, PlaceError> {
-        if self.is_live_checkout(folder).await? {
+        if self
+            .locate(folder)
+            .await?
+            .is_some_and(|worktree| worktree.top == folder)
+        {
             return Ok(Cleanup::NotOwned);
         }
         remove_empty_dir(folder).await?;
         Ok(Cleanup::Removed)
-    }
-
-    async fn is_live_checkout(&self, folder: &Path) -> Result<bool, PlaceError> {
-        Ok(self
-            .locate(folder)
-            .await?
-            .is_some_and(|worktree| worktree.top == folder))
     }
 
     async fn check_clean_for_keep(&self, folder: &Path) -> Result<KeepCheck, PlaceError> {
@@ -414,10 +411,12 @@ impl Worktrees {
             {
                 continue;
             }
-            let repo_lock = match self.locate(&root).await {
-                Ok(Some(repo)) => Some(self.lock_of(&repo.shared)),
-                _ => None,
-            };
+            let repo_lock = self
+                .locate(&root)
+                .await
+                .ok()
+                .flatten()
+                .map(|repo| self.lock_of(&repo.shared));
             let _one_at_a_time = match &repo_lock {
                 Some(lock) => Some(lock.lock().await),
                 None => None,
@@ -435,10 +434,9 @@ async fn empty_expired_in(trash_dir: &Path, retention: Duration) {
         return;
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
-        let Some(slot) = expired_trash_slot(trash_dir, &entry, cutoff).await else {
-            continue;
-        };
-        expire_trash_slot(&slot, cutoff).await;
+        if let Some(slot) = expired_trash_slot(trash_dir, &entry, cutoff).await {
+            expire_trash_slot(&slot).await;
+        }
     }
 }
 
@@ -464,7 +462,7 @@ async fn expired_trash_slot(
     (parsed.trashed_at.instant() <= cutoff).then_some(TrashSlot { dir, meta })
 }
 
-async fn expire_trash_slot(slot: &TrashSlot, cutoff: SystemTime) {
+async fn expire_trash_slot(slot: &TrashSlot) {
     match tokio::fs::symlink_metadata(&slot.dir).await {
         Ok(meta) if !meta.file_type().is_symlink() && meta.is_dir() => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -473,7 +471,7 @@ async fn expire_trash_slot(slot: &TrashSlot, cutoff: SystemTime) {
         }
         _ => return,
     }
-    if !has_entry_newer_than(&slot.dir, cutoff).await && remove_tree(&slot.dir).await.is_ok() {
+    if remove_tree(&slot.dir).await.is_ok() {
         let _ = tokio::fs::remove_file(&slot.meta).await;
     }
 }
@@ -485,61 +483,21 @@ fn is_valid_trash_slot(stem: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
 }
 
-async fn has_entry_newer_than(dir: &Path, cutoff: SystemTime) -> bool {
-    let dir = dir.to_path_buf();
-    tokio::task::spawn_blocking(move || has_entry_newer_than_sync(&dir, cutoff))
-        .await
-        .unwrap_or(true)
-}
-
-fn has_entry_newer_than_sync(dir: &Path, cutoff: SystemTime) -> bool {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return false,
-        Err(_) => return true,
-    };
-    for entry in entries {
-        let Ok(entry) = entry else {
-            return true;
-        };
-        let Ok(meta) = entry.metadata() else {
-            return true;
-        };
-        if meta.file_type().is_symlink() {
-            continue;
-        }
-        if meta.is_dir() {
-            if has_entry_newer_than_sync(&entry.path(), cutoff) {
-                return true;
-            }
-        } else if meta.modified().map_or(true, |modified| modified > cutoff) {
-            return true;
-        }
-    }
-    false
-}
-
 async fn find_our_admin(
     repository: &Path,
     recorded: &KratosWorktree,
 ) -> Result<Option<PathBuf>, PlaceError> {
     let records = repository.join("worktrees");
+    let io_err = |source| PlaceError::Io {
+        path: records.display().to_string(),
+        source,
+    };
     let mut entries = match tokio::fs::read_dir(&records).await {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        entries => entries.map_err(|source| PlaceError::Io {
-            path: records.display().to_string(),
-            source,
-        })?,
+        entries => entries.map_err(io_err)?,
     };
     let expected = normalize_lexical(&Path::new(&recorded.path).join(".git"));
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|source| PlaceError::Io {
-            path: records.display().to_string(),
-            source,
-        })?
-    {
+    while let Some(entry) = entries.next_entry().await.map_err(io_err)? {
         let record = entry.path();
         if !is_same_checkout_dir(&record, recorded).await {
             continue;
@@ -557,16 +515,20 @@ async fn find_our_admin(
 }
 
 fn trash_root(folder: &Path) -> Result<PathBuf, PlaceError> {
-    let parent = folder.parent().ok_or_else(|| PlaceError::CannotRemove {
-        path: folder.display().to_string(),
-        source: io::Error::new(io::ErrorKind::InvalidInput, "worktree has no parent folder"),
-    })?;
-    if parent.file_name().and_then(|name| name.to_str()) == Some(WORKTREES_FOLDER)
-        && let Some(repo_root) = parent.parent()
-    {
-        return Ok(repo_root.join(TRASH_FOLDER));
-    }
-    Ok(parent.join(TRASH_FOLDER))
+    folder
+        .parent()
+        .filter(|parent| {
+            parent.file_name().and_then(|name| name.to_str()) == Some(WORKTREES_FOLDER)
+        })
+        .and_then(Path::parent)
+        .map(|repo_root| repo_root.join(TRASH_FOLDER))
+        .ok_or_else(|| PlaceError::CannotRemove {
+            path: folder.display().to_string(),
+            source: io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "worktree is outside .kratos-worktrees",
+            ),
+        })
 }
 
 fn slot_candidates(id: &WorktreeId) -> Vec<String> {
@@ -623,6 +585,13 @@ async fn find_trashed_entry(
     Ok(None)
 }
 
+async fn is_absent(path: &Path) -> bool {
+    matches!(
+        tokio::fs::symlink_metadata(path).await,
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    )
+}
+
 async fn pick_free_trash_slot(
     trash_dir: &Path,
     recorded: &KratosWorktree,
@@ -630,15 +599,9 @@ async fn pick_free_trash_slot(
     for slot in slot_candidates(&recorded.id) {
         let dir = trash_dir.join(&slot);
         let meta = trash_dir.join(format!("{slot}.json"));
-        let dir_absent = matches!(
-            tokio::fs::symlink_metadata(&dir).await,
-            Err(error) if error.kind() == io::ErrorKind::NotFound
-        );
-        let meta_absent = matches!(
-            tokio::fs::symlink_metadata(&meta).await,
-            Err(error) if error.kind() == io::ErrorKind::NotFound
-        );
-        if dir_absent && (meta_absent || is_our_trash_meta(&meta, recorded).await) {
+        if is_absent(&dir).await
+            && (is_absent(&meta).await || is_our_trash_meta(&meta, recorded).await)
+        {
             return Ok(TrashSlot { dir, meta });
         }
     }
@@ -692,70 +655,15 @@ async fn remove_file_if_present(path: &Path) -> Result<(), PlaceError> {
     }
 }
 
-/// Removes `path` recursively through Rust's filesystem calls (with read-only clearing), avoiding
-/// Git for Windows's 260-character path limit when `core.longpaths` is false.
+/// Removes `path` recursively through Rust's filesystem calls, avoiding Git for Windows's
+/// 260-character path limit when `core.longpaths` is false.
 async fn remove_tree(path: &Path) -> Result<(), PlaceError> {
-    let target = path.to_path_buf();
-    tokio::task::spawn_blocking(move || remove_tree_sync(&target))
-        .await
-        .unwrap_or_else(|error| Err(io::Error::other(error)))
-        .map_err(|source| PlaceError::CannotRemove {
+    match tokio::fs::remove_dir_all(path).await {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(PlaceError::CannotRemove {
             path: path.display().to_string(),
-            source,
-        })
-}
-
-fn remove_tree_sync(target: &Path) -> io::Result<()> {
-    let remove = || match std::fs::remove_dir_all(target) {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        result => result,
-    };
-    if remove().is_ok() {
-        return Ok(());
-    }
-    clear_readonly_recursive(target);
-    remove()
-}
-
-fn clear_readonly_recursive(path: &Path) {
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return;
-    };
-    if meta.file_type().is_symlink() {
-        return;
-    }
-    make_owner_writable(path, &meta);
-    if meta.is_dir()
-        && let Ok(entries) = std::fs::read_dir(path)
-    {
-        for entry in entries.flatten() {
-            clear_readonly_recursive(&entry.path());
-        }
-    }
-}
-
-#[cfg(windows)]
-fn make_owner_writable(path: &Path, meta: &std::fs::Metadata) {
-    let mut perms = meta.permissions();
-    if perms.readonly() {
-        #[expect(
-            clippy::permissions_set_readonly_false,
-            reason = "Windows clears FILE_ATTRIBUTE_READONLY without changing POSIX world-write bits"
-        )]
-        perms.set_readonly(false);
-        let _ = std::fs::set_permissions(path, perms);
-    }
-}
-
-#[cfg(unix)]
-fn make_owner_writable(path: &Path, meta: &std::fs::Metadata) {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = meta.permissions();
-    let extra = if meta.is_dir() { 0o700 } else { 0o200 };
-    let mode = perms.mode();
-    if mode & extra != extra {
-        perms.set_mode(mode | extra);
-        let _ = std::fs::set_permissions(path, perms);
+            source: error,
+        }),
+        _ => Ok(()),
     }
 }
 
@@ -794,7 +702,10 @@ fn same_lexical_path(left: &Path, right: &Path) -> bool {
 /// Whether `listed` (`git ls-files -v -s -z`) names any gitlink whose folder in `folder` is
 /// non-empty, matching `git worktree remove`'s submodule refusal.
 async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
-    for path in submodules(listed) {
+    for (_, mode, path) in ls_files_entries(listed) {
+        if mode != GITLINK_MODE {
+            continue;
+        }
         let Some(dir) = file_in(folder, path) else {
             return true;
         };
@@ -815,10 +726,6 @@ fn ls_files_entries(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8], &[u8])
         let mode = fields.next()?;
         Some((tag, mode, &entry[tab + 1..]))
     })
-}
-
-fn submodules(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
-    ls_files_entries(listed).filter_map(|(_, mode, path)| (mode == GITLINK_MODE).then_some(path))
 }
 
 /// Whether an unarchived thread works at `worktree` or in a folder inside it.
@@ -852,13 +759,13 @@ fn changes(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
 }
 
 #[cfg(unix)]
-fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
+pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
     Some(folder.join(std::ffi::OsStr::from_bytes(path)))
 }
 
 #[cfg(not(unix))]
-fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
+pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(path).ok().map(|path| folder.join(path))
 }
 

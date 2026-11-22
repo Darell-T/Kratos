@@ -10,8 +10,8 @@ use tokio::time::Instant;
 
 use super::PlaceError;
 
-/// How long Kratos waits for a git command or reader that holds the index, such as an editor's
-/// `git status`, which takes it for a moment to save what it learned.
+/// How long Kratos waits for a git command or short-lived Windows reader that holds the index,
+/// such as an editor's `git status`.
 const WAIT: Duration = Duration::from_secs(2);
 
 const RETRY: Duration = Duration::from_millis(20);
@@ -27,19 +27,7 @@ pub(super) struct IndexLock {
     is_held: bool,
 }
 
-pub(super) struct PreparedReplacement {
-    lock_guard: Option<tokio::fs::File>,
-    replace_guard: Option<tokio::fs::File>,
-    lock: IndexLock,
-}
-
-impl Drop for PreparedReplacement {
-    fn drop(&mut self) {
-        // Release Windows DELETE share-check handles before `IndexLock::drop` removes `index.lock`.
-        self.lock_guard = None;
-        self.replace_guard = None;
-    }
-}
+pub(super) struct PreparedReplacement(IndexLock);
 
 impl IndexLock {
     /// Takes the lock, waiting a moment for a git command that holds it.
@@ -80,30 +68,22 @@ impl IndexLock {
         self,
         updated: &Path,
     ) -> Result<PreparedReplacement, PlaceError> {
-        copy_preserving_mtime(updated, &self.lock).await?;
-        let replace_guard = reserve_for_replace(&self.index).await?;
-        let lock_guard = reserve_for_replace(&self.lock).await?;
-        Ok(PreparedReplacement {
-            lock_guard,
-            replace_guard,
-            lock: self,
-        })
+        copy_mtime(updated, &self.lock, MissingSource::Error).await?;
+        Ok(PreparedReplacement(self))
     }
 }
 
 impl PreparedReplacement {
     pub(super) fn lock_path(&self) -> &Path {
-        &self.lock.lock
+        &self.0.lock
     }
 
     pub(super) async fn commit(mut self) -> io::Result<()> {
-        self.lock_guard = None;
-        self.replace_guard = None;
         // Take ownership of cleanup before entering the blocking pool so cancellation cannot race
         // `IndexLock::drop` against an in-flight rename.
-        self.lock.is_held = false;
-        let lock_path = self.lock.lock.clone();
-        let index_path = self.lock.index.clone();
+        self.0.is_held = false;
+        let lock_path = self.0.lock.clone();
+        let index_path = self.0.index.clone();
         tokio::task::spawn_blocking(move || commit_rename_sync(&lock_path, &index_path))
             .await
             .map_err(io::Error::other)?
@@ -135,18 +115,13 @@ impl Drop for IndexLock {
     }
 }
 
-/// Copies `from` to `to` while keeping `from`'s modified time, so git's racy-index check stays
-/// active on Linux where plain `fs::copy` writes a fresh timestamp.
-pub(super) async fn copy_preserving_mtime(from: &Path, to: &Path) -> Result<(), PlaceError> {
-    copy_mtime_inner(from, to, MissingSource::Error).await
-}
-
-/// Like [`copy_preserving_mtime`], returning `Ok(())` when `from` does not exist yet.
+/// Copies `from` to `to` while keeping `from`'s modified time (so git's racy-index check stays
+/// active on Linux), returning `Ok(())` when `from` does not exist yet.
 pub(super) async fn copy_preserving_mtime_if_present(
     from: &Path,
     to: &Path,
 ) -> Result<(), PlaceError> {
-    copy_mtime_inner(from, to, MissingSource::Skip).await
+    copy_mtime(from, to, MissingSource::Skip).await
 }
 
 #[derive(Clone, Copy)]
@@ -155,11 +130,7 @@ enum MissingSource {
     Skip,
 }
 
-async fn copy_mtime_inner(
-    from: &Path,
-    to: &Path,
-    missing: MissingSource,
-) -> Result<(), PlaceError> {
+async fn copy_mtime(from: &Path, to: &Path, missing: MissingSource) -> Result<(), PlaceError> {
     let from = from.to_owned();
     let to = to.to_owned();
     let dest = to.display().to_string();
@@ -172,6 +143,14 @@ async fn copy_mtime_inner(
 }
 
 fn copy_mtime_sync(from: &Path, to: &Path, missing: MissingSource) -> Result<(), PlaceError> {
+    let from_err = |source| PlaceError::Io {
+        path: from.display().to_string(),
+        source,
+    };
+    let to_err = |source| PlaceError::Io {
+        path: to.display().to_string(),
+        source,
+    };
     let mut src = match File::open(from) {
         Ok(file) => file,
         Err(error)
@@ -180,71 +159,15 @@ fn copy_mtime_sync(from: &Path, to: &Path, missing: MissingSource) -> Result<(),
         {
             return Ok(());
         }
-        Err(source) => {
-            return Err(PlaceError::Io {
-                path: from.display().to_string(),
-                source,
-            });
-        }
+        Err(source) => return Err(from_err(source)),
     };
     let modified = src
         .metadata()
         .and_then(|meta| meta.modified())
-        .map_err(|source| PlaceError::Io {
-            path: from.display().to_string(),
-            source,
-        })?;
-    let mut dst = File::create(to).map_err(|source| PlaceError::Io {
-        path: to.display().to_string(),
-        source,
-    })?;
-    io::copy(&mut src, &mut dst).map_err(|source| PlaceError::Io {
-        path: to.display().to_string(),
-        source,
-    })?;
-    dst.set_modified(modified).map_err(|source| PlaceError::Io {
-        path: to.display().to_string(),
-        source,
-    })
-}
-
-/// On Windows, opens `path` with `DELETE` access and full sharing so any existing reader without
-/// `FILE_SHARE_DELETE` fails this check before `git commit` runs, and new non-delete-sharing
-/// readers cannot sneak in while `git commit` runs on the scratch index.
-#[cfg(windows)]
-async fn reserve_for_replace(path: &Path) -> Result<Option<tokio::fs::File>, PlaceError> {
-    const DELETE: u32 = 0x0001_0000;
-    const FILE_SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
-
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let opened = tokio::fs::OpenOptions::new()
-            .access_mode(DELETE)
-            .share_mode(FILE_SHARE_ALL)
-            .open(path)
-            .await;
-        match opened {
-            Ok(file) => return Ok(Some(file)),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(error) if is_index_busy(&error) && Instant::now() < deadline => {
-                tokio::time::sleep(RETRY).await;
-            }
-            Err(error) if is_index_busy(&error) => {
-                return Err(PlaceError::IndexInUse(path.display().to_string()));
-            }
-            Err(source) => {
-                return Err(PlaceError::Io {
-                    path: path.display().to_string(),
-                    source,
-                });
-            }
-        }
-    }
-}
-
-#[cfg(not(windows))]
-async fn reserve_for_replace(_path: &Path) -> Result<Option<tokio::fs::File>, PlaceError> {
-    Ok(None)
+        .map_err(from_err)?;
+    let mut dst = File::create(to).map_err(to_err)?;
+    io::copy(&mut src, &mut dst).map_err(to_err)?;
+    dst.set_modified(modified).map_err(to_err)
 }
 
 #[cfg(windows)]

@@ -1686,60 +1686,40 @@ fn an_offline_locked_worktree_with_relative_git_links_stays_actionable_until_unl
 #[test]
 fn expired_trash_is_emptied_on_startup_without_deleting_recent_saves() {
     // Catches trash accumulating forever, or startup emptying trash that is still within the
-    // retention window or received a recent late save.
+    // 7-day retention window based on `trashedAt`.
     let root = TempDir::new().unwrap();
     let repository = new_repository(&root);
     let home = root.path().join("kratos");
     let engine = RunningEngine::start(&home);
     let workspace = workspace_at(&engine, &repository);
     let client = engine.client();
-    for title in ["expired", "fresh", "recently-saved"] {
+    for title in ["expired", "fresh"] {
         let thread = create(&client, &workspace, title, PlaceRequest::NewWorktree);
         assert_eq!(archive(&client, &thread, LeftFiles::Keep), Cleanup::Removed);
     }
     drop(engine);
 
-    let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 24 * 3600);
     let mut expired_dir = None;
     let mut fresh_dir = None;
-    let mut recent_save_dir = None;
     for (dir, mut meta) in trash_entries(&repository) {
-        let branch = meta["branch"].as_str().unwrap().to_owned();
-        if branch == "expired" || branch == "recently-saved" {
+        if meta["branch"].as_str() == Some("expired") {
             meta["trashedAt"] = json!("2020-01-01T00:00:00.000Z");
             std::fs::write(
                 dir.with_extension("json"),
                 serde_json::to_vec(&meta).unwrap(),
             )
             .unwrap();
-            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-                if entry.file_type().unwrap().is_file() {
-                    std::fs::OpenOptions::new()
-                        .write(true)
-                        .open(entry.path())
-                        .unwrap()
-                        .set_modified(old_time)
-                        .unwrap();
-                }
-            }
-            if branch == "recently-saved" {
-                std::fs::write(dir.join("late-save.txt"), "just saved\n").unwrap();
-                recent_save_dir = Some(dir);
-            } else {
-                expired_dir = Some(dir);
-            }
+            expired_dir = Some(dir);
         } else {
             fresh_dir = Some(dir);
         }
     }
     let expired_dir = expired_dir.unwrap();
     let fresh_dir = fresh_dir.unwrap();
-    let recent_save_dir = recent_save_dir.unwrap();
 
     let _restarted = RunningEngine::start(&home);
 
     wait_until_gone(&expired_dir);
     assert!(!expired_dir.with_extension("json").exists());
     assert!(fresh_dir.exists());
-    assert!(recent_save_dir.join("late-save.txt").is_file());
 }
