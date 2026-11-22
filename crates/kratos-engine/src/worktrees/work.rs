@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::git::{self, CHECKOUT, Capped};
 use super::index_lock::{IndexLock, PreparedReplacement};
-use super::{PlaceError, Worktrees, resolved};
+use super::{PlaceError, Worktrees, resolved, resolved_from_git};
 use crate::store_thread::StoreThread;
 
 /// The most patch text a diff returns, cut at a whole line. A client shows the rest by reading the
@@ -27,16 +27,6 @@ pub(crate) enum Underway {
     Revert,
 }
 
-impl Underway {
-    /// The file git keeps in the worktree's git folder while each is underway, which `git commit`
-    /// deletes as it ends it.
-    const FILES: [(Underway, &'static str); 3] = [
-        (Underway::Merge, "MERGE_HEAD"),
-        (Underway::CherryPick, "CHERRY_PICK_HEAD"),
-        (Underway::Revert, "REVERT_HEAD"),
-    ];
-}
-
 impl fmt::Display for Underway {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -45,6 +35,13 @@ impl fmt::Display for Underway {
             Underway::Revert => "revert",
         })
     }
+}
+
+struct CommitPaths {
+    top: PathBuf,
+    shared: PathBuf,
+    index: PathBuf,
+    pending: [(Underway, PathBuf); 3],
 }
 
 struct ScratchIndex(PathBuf);
@@ -133,30 +130,29 @@ impl Worktrees {
         message: &str,
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
-        let repository = self.located(folder).await?;
-        let lock = self.lock_of(&repository.shared);
+        let paths = self.commit_paths(folder).await?;
+        let lock = self.lock_of(&paths.shared);
         let _one_at_a_time = lock.lock().await;
-        let own = self.index_of(folder).await?;
-        let index_lock = IndexLock::take(&own).await?;
+        let index_lock = IndexLock::take(&paths.index).await?;
         let resolved_folder = resolved_or_given(folder).await;
-        let pending = self.pending_commits(folder).await?;
+        let pending = existing_underway(&paths.pending).await?;
         if let Some(&underway) = pending.first()
-            && resolved_folder != repository.top
+            && resolved_folder != paths.top
         {
             return Err(PlaceError::PartialCommitDuring(underway));
         }
-        self.refuse_while_edited(store, &resolved_folder, &repository.top)
+        self.refuse_while_edited(store, &resolved_folder, &paths.top)
             .await?;
         let staged = self.scratch_index();
         let tree = self
             .prepare_commit_tree(
                 folder,
-                &repository.top,
+                &paths.top,
                 pending.contains(&Underway::Merge),
                 &staged,
             )
             .await?;
-        self.publish_commit(folder, &own, index_lock, &staged, &tree, message)
+        self.publish_commit(folder, &paths.index, index_lock, &staged, &tree, message)
             .await
     }
 
@@ -369,30 +365,62 @@ impl Worktrees {
             .is_some_and(|found| found.top == top))
     }
 
-    async fn pending_commits(&self, folder: &Path) -> Result<Vec<Underway>, PlaceError> {
-        let mut args = vec!["rev-parse", "--path-format=absolute"];
-        for (_, file) in Underway::FILES {
-            args.extend(["--git-path", file]);
-        }
-        let paths = self.git.run(folder, &args, git::QUICK).await?;
-        let mut pending = Vec::new();
-        for (path, (kind, _)) in paths.lines().zip(Underway::FILES) {
-            if tokio::fs::try_exists(path)
-                .await
-                .map_err(|source| PlaceError::io(path, source))?
-            {
-                pending.push(kind);
+    async fn commit_paths(&self, folder: &Path) -> Result<CommitPaths, PlaceError> {
+        let args = [
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-common-dir",
+            "--git-path",
+            "index",
+            "--git-path",
+            "MERGE_HEAD",
+            "--git-path",
+            "CHERRY_PICK_HEAD",
+            "--git-path",
+            "REVERT_HEAD",
+        ];
+        let shown = match self.git.run(folder, &args, git::QUICK).await {
+            Ok(shown) => shown,
+            Err(error) if error.exited_with(128) => {
+                return Err(PlaceError::NotARepository(folder.display().to_string()));
             }
-        }
-        Ok(pending)
-    }
-
-    /// The worktree's own index file.
-    async fn index_of(&self, folder: &Path) -> Result<PathBuf, PlaceError> {
-        let args = ["rev-parse", "--path-format=absolute", "--git-path", "index"];
-        Ok(PathBuf::from(
-            self.git.run(folder, &args, git::QUICK).await?,
-        ))
+            Err(error) => return Err(error.into()),
+        };
+        let mut lines = shown.lines();
+        let (
+            Some(top),
+            Some(shared),
+            Some(index),
+            Some(merge),
+            Some(cherry_pick),
+            Some(revert),
+            None,
+        ) = (
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+        )
+        else {
+            return Err(PlaceError::UnreadableGit {
+                command: args.join(" "),
+                output: shown,
+            });
+        };
+        Ok(CommitPaths {
+            top: resolved_from_git(top).await?,
+            shared: resolved_from_git(shared).await?,
+            index: PathBuf::from(index),
+            pending: [
+                (Underway::Merge, PathBuf::from(merge)),
+                (Underway::CherryPick, PathBuf::from(cherry_pick)),
+                (Underway::Revert, PathBuf::from(revert)),
+            ],
+        })
     }
 
     /// Pushes the branch the thread's folder has checked out to `origin`, then opens a pull
@@ -464,6 +492,19 @@ impl Worktrees {
         }
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
+}
+
+async fn existing_underway(pending: &[(Underway, PathBuf)]) -> Result<Vec<Underway>, PlaceError> {
+    let mut found = Vec::new();
+    for (kind, path) in pending {
+        if tokio::fs::try_exists(path)
+            .await
+            .map_err(|source| PlaceError::io(path, source))?
+        {
+            found.push(*kind);
+        }
+    }
+    Ok(found)
 }
 
 async fn resolved_or_given(path: &Path) -> PathBuf {

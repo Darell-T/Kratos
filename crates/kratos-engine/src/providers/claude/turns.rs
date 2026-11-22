@@ -7,7 +7,7 @@
 
 use kratos_claude_client::{Control, TurnResult};
 use kratos_protocol::{
-    LiveUpdate, Message, MessageId, MessageStatus, Provider, ThreadId, TurnId, TurnOrigin,
+    LiveUpdate, Message, MessageId, MessageStatus, Place, Provider, ThreadId, TurnId, TurnOrigin,
 };
 use kratos_store::{StoreError, ThreadWrite};
 
@@ -36,7 +36,7 @@ impl Actor {
         if thread.is_busy() {
             return;
         }
-        let Some(next) = self.next_to_start(thread_id).await else {
+        let Some((next, place)) = self.next_to_start(thread_id).await else {
             // Nothing waits to be sent, so a pending start has no work.
             self.threads
                 .get_mut(thread_id)
@@ -45,7 +45,7 @@ impl Actor {
                 .cancel_timer();
             return;
         };
-        if let Some(error) = worktree_gone(&self.store, thread_id).await {
+        if let Some(error) = worktree_gone(&self.store, &place).await {
             self.pause_unavailable_if_waiting(thread_id, error).await;
             return;
         }
@@ -84,18 +84,20 @@ impl Actor {
 
     /// The thread's first waiting message when it may start: the queue is not paused, and the
     /// message is queued. A failed or uncertain message holds the queue until the user settles it.
-    async fn next_to_start(&self, thread_id: &ThreadId) -> Option<Message> {
+    async fn next_to_start(&self, thread_id: &ThreadId) -> Option<(Message, Place)> {
         let thread_id = thread_id.clone();
         let next = self
             .store
             .call(move |store| {
-                let paused = store.provider_thread(&thread_id)?.paused;
+                let thread = store.provider_thread(&thread_id)?;
                 let first = store.pending_messages(&thread_id)?.into_iter().next();
-                Ok::<_, kratos_store::StoreError>((paused, first))
+                Ok::<_, kratos_store::StoreError>((thread.paused, thread.place, first))
             })
             .await;
         match next {
-            Ok((None, Some(next))) if next.status == MessageStatus::Queued => Some(next),
+            Ok((None, place, Some(next))) if next.status == MessageStatus::Queued => {
+                Some((next, place))
+            }
             _ => None,
         }
     }

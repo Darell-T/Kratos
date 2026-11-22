@@ -176,6 +176,24 @@ impl Store {
         Ok(worktrees.collect::<Result<_, _>>()?)
     }
 
+    /// The worktree Kratos made with `id`, if it has not been removed.
+    pub fn kratos_worktree(&self, id: &WorktreeId) -> Result<Option<KratosWorktree>, StoreError> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT id, path FROM worktrees
+                 WHERE id = ?1 AND ownership = 'createdByKratos' AND state != 'removed'",
+                [id.as_str()],
+                |row| {
+                    Ok(KratosWorktree {
+                        id: WorktreeId::new(row.get(0)?),
+                        path: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
     /// Closes the record of a worktree Kratos made that no longer stands at its path, because
     /// another checkout took its place, so that checkout can be recorded as borrowed.
     pub fn close_replaced_worktree(&self, id: &WorktreeId) -> Result<(), StoreError> {

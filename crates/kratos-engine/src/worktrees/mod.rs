@@ -505,8 +505,8 @@ pub(crate) async fn check_still_there(
     if worktree.ownership == Ownership::Borrowed {
         return Ok(());
     }
-    let ours = store.call(|store| store.kratos_worktrees()).await?;
-    match ours.into_iter().find(|ours| ours.id == worktree.id) {
+    let id = worktree.id.clone();
+    match store.call(move |store| store.kratos_worktree(&id)).await? {
         Some(recorded) if is_same_checkout(&recorded).await => Ok(()),
         _ => Err(PlaceError::NotItsWorktree(worktree.path.clone())),
     }
@@ -603,7 +603,7 @@ async fn resolved(path: &Path) -> io::Result<PathBuf> {
     Ok(without_verbatim_prefix(path))
 }
 
-async fn resolved_from_git(path: &str) -> Result<PathBuf, PlaceError> {
+pub(super) async fn resolved_from_git(path: &str) -> Result<PathBuf, PlaceError> {
     resolved(Path::new(path))
         .await
         .map_err(|source| PlaceError::io(path, source))

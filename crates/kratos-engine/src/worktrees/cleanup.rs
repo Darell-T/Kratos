@@ -167,56 +167,24 @@ impl Worktrees {
         recorded: &KratosWorktree,
         files: LeftFiles,
     ) -> Result<Cleanup, PlaceError> {
-        if let Some(commit) = self.unsaved_head(folder).await? {
+        let branch = self.branch_of(folder).await?;
+        if branch.is_none()
+            && let Some(commit) = self.unsaved_head(folder).await?
+        {
             return Ok(Cleanup::UnsavedCommit { commit });
         }
-        if files == LeftFiles::Keep {
-            match self.check_clean_for_keep(folder).await? {
-                KeepCheck::Clean => {}
-                KeepCheck::Dirty(left) => return Ok(Cleanup::Kept { files: left }),
-                KeepCheck::HasSubmodule => {
-                    return Err(PlaceError::SubmodulesPresent {
-                        path: recorded.path.clone(),
-                    });
-                }
-            }
-        }
-        self.move_and_finish(folder, admin, recorded, files).await
-    }
-
-    async fn move_and_finish(
-        &self,
-        folder: &Path,
-        admin: &Path,
-        recorded: &KratosWorktree,
-        files: LeftFiles,
-    ) -> Result<Cleanup, PlaceError> {
         if files == LeftFiles::Discard {
             remove_tree(folder).await?;
             remove_tree(admin).await?;
             return Ok(Cleanup::Removed);
         }
-        let branch = self.branch_of(folder).await.ok().flatten();
-        let trash_dir = trash_root(folder)?;
-        ignore_everything_in(&trash_dir).await?;
-        let slot = pick_free_trash_slot(&trash_dir, recorded).await?;
-        if let Err(source) = tokio::fs::rename(folder, &slot.dir).await {
-            if source.kind() == io::ErrorKind::NotFound {
-                remove_tree(admin).await?;
-                return Ok(Cleanup::Removed);
-            }
-            return Err(PlaceError::CannotRemove {
+        match self.check_clean_for_keep(folder).await? {
+            KeepCheck::Clean => move_to_trash(folder, admin, recorded, branch).await,
+            KeepCheck::Dirty(left) => Ok(Cleanup::Kept { files: left }),
+            KeepCheck::HasSubmodule => Err(PlaceError::SubmodulesPresent {
                 path: recorded.path.clone(),
-                source,
-            });
+            }),
         }
-        write_trash_meta(&slot.meta, recorded, branch).await?;
-        remove_tree(admin).await?;
-        let git_file = slot.dir.join(".git");
-        tokio::fs::write(&git_file, TRASH_GIT_SENTINEL)
-            .await
-            .map_err(|source| PlaceError::io(&git_file, source))?;
-        Ok(Cleanup::Removed)
     }
 
     async fn remove_unregistered(&self, folder: &Path) -> Result<Cleanup, PlaceError> {
@@ -239,10 +207,6 @@ impl Worktrees {
     }
 
     async fn check_clean_for_keep(&self, folder: &Path) -> Result<KeepCheck, PlaceError> {
-        let listed = self
-            .git
-            .run_bytes(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
-            .await?;
         let status = [
             "status",
             "--porcelain",
@@ -255,18 +219,19 @@ impl Worktrees {
         if !left.is_empty() {
             return Ok(KeepCheck::Dirty(left));
         }
+        let listed = self
+            .git
+            .run_bytes(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
+            .await?;
         if has_initialized_submodule(folder, &listed).await {
             return Ok(KeepCheck::HasSubmodule);
         }
         Ok(KeepCheck::Clean)
     }
 
-    /// The worktree's `HEAD` when it is detached at a commit no ref holds, which only the
-    /// worktree keeps reachable.
+    /// The worktree's detached `HEAD` when no ref holds it, so only the worktree keeps it
+    /// reachable.
     async fn unsaved_head(&self, folder: &Path) -> Result<Option<String>, PlaceError> {
-        if self.branch_of(folder).await?.is_some() {
-            return Ok(None);
-        }
         let holders = [
             "for-each-ref",
             "--count=1",
@@ -311,6 +276,34 @@ impl Worktrees {
             empty_expired_in(&trash_dir).await;
         }
     }
+}
+
+async fn move_to_trash(
+    folder: &Path,
+    admin: &Path,
+    recorded: &KratosWorktree,
+    branch: Option<String>,
+) -> Result<Cleanup, PlaceError> {
+    let trash_dir = trash_root(folder)?;
+    ignore_everything_in(&trash_dir).await?;
+    let slot = pick_free_trash_slot(&trash_dir, recorded).await?;
+    if let Err(source) = tokio::fs::rename(folder, &slot.dir).await {
+        if source.kind() == io::ErrorKind::NotFound {
+            remove_tree(admin).await?;
+            return Ok(Cleanup::Removed);
+        }
+        return Err(PlaceError::CannotRemove {
+            path: recorded.path.clone(),
+            source,
+        });
+    }
+    write_trash_meta(&slot.meta, recorded, branch).await?;
+    remove_tree(admin).await?;
+    let git_file = slot.dir.join(".git");
+    tokio::fs::write(&git_file, TRASH_GIT_SENTINEL)
+        .await
+        .map_err(|source| PlaceError::io(&git_file, source))?;
+    Ok(Cleanup::Removed)
 }
 
 async fn empty_expired_in(trash_dir: &Path) {
