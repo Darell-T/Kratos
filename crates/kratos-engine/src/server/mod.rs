@@ -311,7 +311,6 @@ impl From<PlaceError> for ApiError {
                 ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
             }
             conflict @ (PlaceError::NotItsWorktree(_)
-            | PlaceError::WorktreeLocked { .. }
             | PlaceError::SubmodulesPresent { .. }
             | PlaceError::BeingEdited
             | PlaceError::PartialCommitDuring(_)

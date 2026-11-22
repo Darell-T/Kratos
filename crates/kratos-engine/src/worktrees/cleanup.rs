@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use super::git;
 use super::{
-    PlaceError, TRASH_FOLDER, WORKTREES_FOLDER, Worktrees, ensure_our_lock, ignore_everything_in,
+    PlaceError, TRASH_FOLDER, WORKTREES_FOLDER, Worktrees, ignore_everything_in,
     is_same_checkout_at, is_same_checkout_dir, resolved,
 };
 use crate::store_thread::StoreThread;
@@ -153,7 +153,6 @@ impl Worktrees {
         recorded: &KratosWorktree,
         files: LeftFiles,
     ) -> Result<Cleanup, PlaceError> {
-        ensure_our_lock(admin, &recorded.path).await?;
         if is_same_checkout_at(folder, recorded).await {
             return self
                 .remove_registered_live(folder, admin, recorded, files)
@@ -184,10 +183,6 @@ impl Worktrees {
                     });
                 }
             }
-        }
-        ensure_our_lock(admin, &recorded.path).await?;
-        if !is_same_checkout_at(folder, recorded).await {
-            return Ok(Cleanup::NotOwned);
         }
         self.move_and_finish(folder, admin, recorded, files).await
     }

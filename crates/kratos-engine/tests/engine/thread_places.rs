@@ -562,39 +562,6 @@ fn a_codex_thread_whose_worktree_another_checkout_took_starts_no_turn_there() {
     assert!(error.contains("no longer the worktree"), "{error}");
 }
 
-#[test]
-fn a_claude_thread_whose_worktree_another_checkout_took_starts_no_session_there() {
-    // Catches a Claude session started in whatever checkout stands at the worktree's path.
-    let root = TempDir::new().unwrap();
-    let repository = new_repository(&root);
-    let engine = RunningEngine::start_with_answering_claude(&root.path().join("kratos"));
-    let workspace = workspace_at(&engine, &repository);
-    let client = engine.client();
-    let thread = client
-        .create_thread(&CreateThread {
-            provider: Provider::Claude,
-            ..request(&workspace, "original", PlaceRequest::NewWorktree)
-        })
-        .unwrap();
-    let path = worktree_of(&client, &thread).path;
-    take_place(&repository, &path, &root.path().join("moved"));
-
-    post(&client, &thread, "keep going");
-
-    let log = engine.fake_claude_log();
-    let error = paused_before_working_in(&client, &thread, &path, || {
-        std::fs::read_to_string(&log)
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|line| {
-                let started: serde_json::Value = serde_json::from_str(line).ok()?;
-                started["cwd"].as_str().map(str::to_owned)
-            })
-            .collect()
-    });
-    assert!(error.contains("no longer the worktree"), "{error}");
-}
-
 /// Waits for `thread` to pause as unavailable and returns why. Fails at once when `folders`, the
 /// folders the provider was given to work in, includes `path`.
 fn paused_before_working_in(

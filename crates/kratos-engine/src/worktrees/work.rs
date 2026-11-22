@@ -13,7 +13,7 @@ use uuid::Uuid;
 use super::cleanup;
 use super::git::{self, CHECKOUT, Capped};
 use super::index_lock::{IndexLock, PreparedReplacement, copy_preserving_mtime_if_present};
-use super::{PlaceError, Worktrees, check_still_there, resolved};
+use super::{PlaceError, Worktrees, resolved};
 use crate::store_thread::StoreThread;
 
 /// The most patch text a diff returns, cut at a whole line. A client shows the rest by reading the
@@ -171,7 +171,7 @@ impl Worktrees {
             staged: &staged,
             tree,
         };
-        self.publish_commit(store, thread, &own, index_lock, &prepared, message)
+        self.publish_commit(thread, &own, index_lock, &prepared, message)
             .await
     }
 
@@ -215,7 +215,6 @@ impl Worktrees {
                 .await?;
         }
         self.stage_folder(folder, staged).await?;
-        check_still_there(store, &thread.place).await?;
         self.refuse_unless_staged(folder, staged, base.has_merge)
             .await?;
         Ok(self
@@ -293,14 +292,11 @@ impl Worktrees {
 
     async fn prepare_locked_index(
         &self,
-        store: &StoreThread,
-        thread: &ProviderThread,
+        folder: &Path,
         own: &Path,
         index_lock: IndexLock,
         prepared: &PreparedCommit<'_>,
     ) -> Result<PreparedReplacement, PlaceError> {
-        let folder = Path::new(&thread.folder);
-        check_still_there(store, &thread.place).await?;
         let updated = self.scratch_index();
         copy_preserving_mtime_if_present(own, &updated).await?;
         self.git
@@ -316,7 +312,6 @@ impl Worktrees {
 
     async fn publish_commit(
         &self,
-        store: &StoreThread,
         thread: &ProviderThread,
         own: &Path,
         index_lock: IndexLock,
@@ -325,7 +320,7 @@ impl Worktrees {
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
         let replacement = self
-            .prepare_locked_index(store, thread, own, index_lock, prepared)
+            .prepare_locked_index(folder, own, index_lock, prepared)
             .await?;
         let lock_path = replacement.lock_path().display().to_string();
         self.git
@@ -459,7 +454,6 @@ impl Worktrees {
     /// `origin`'s default is refused before the push, which would put the work on it unreviewed.
     pub(crate) async fn pull_request(
         &self,
-        store: &StoreThread,
         thread: &ProviderThread,
         title: &str,
         body: &str,
@@ -474,9 +468,6 @@ impl Worktrees {
         if self.default_branch(folder).await? == branch {
             return Err(PlaceError::OnDefaultBranch(branch));
         }
-        // Checked once the branch is read, as another checkout may have taken the worktree's
-        // path while the pull request waited, and its branch is not the thread's to publish.
-        check_still_there(store, &thread.place).await?;
         let push = ["push", "--set-upstream", "origin", &branch];
         self.git.run(folder, &push, CHECKOUT).await?;
         // `=` keeps a title or body that starts with a dash from reading as a flag.

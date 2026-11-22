@@ -60,7 +60,7 @@ pub(super) async fn pull_request(
     let CreatePullRequest { title, body } = read_json(body).await?;
     let url = state
         .worktrees
-        .pull_request(&state.store, &thread, title.as_str(), &body)
+        .pull_request(&thread, title.as_str(), &body)
         .await?;
     Ok(json_reply(StatusCode::CREATED, &PullRequest { url }))
 }
