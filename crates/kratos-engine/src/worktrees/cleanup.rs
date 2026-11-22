@@ -694,6 +694,8 @@ fn same_lexical_path(left: &Path, right: &Path) -> bool {
     }
 }
 
+/// Whether `listed` (`git ls-files -v -s -z`) names any gitlink whose folder in `folder` is
+/// non-empty, matching `git worktree remove`'s submodule refusal.
 async fn has_initialized_submodule(folder: &Path, listed: &[u8]) -> bool {
     for (_, mode, path) in ls_files_entries(listed) {
         if mode != GITLINK_MODE {

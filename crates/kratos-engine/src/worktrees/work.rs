@@ -122,6 +122,10 @@ impl Drop for ScratchIndex {
 }
 
 impl Worktrees {
+    /// What `folder` holds that `base` does not, or that its `HEAD` does not without a base, and
+    /// nothing from the rest of the repository. Built in a fresh private index from `HEAD` so new
+    /// files show, the user's staging stays untouched, and a copied stat cache cannot hide a
+    /// same-size edit.
     pub(crate) async fn diff(
         &self,
         folder: &Path,

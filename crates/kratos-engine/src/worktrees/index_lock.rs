@@ -1,3 +1,6 @@
+//! Git's lock on a worktree's index, which a commit holds as git's own commit does. Git commands
+//! that stage files or make a commit take the same lock, so none runs while Kratos commits.
+
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -7,6 +10,8 @@ use tokio::time::Instant;
 
 use super::PlaceError;
 
+/// How long Kratos waits for another git command's `index.lock` or a short-lived Windows reader
+/// blocking the index rename, such as an editor's `git status`.
 const WAIT: Duration = Duration::from_secs(2);
 const RETRY: Duration = Duration::from_millis(20);
 
@@ -95,6 +100,7 @@ fn commit_rename_sync(lock: &mut IndexLock) -> io::Result<()> {
 
 impl Drop for IndexLock {
     fn drop(&mut self) {
+        // Once the lock file became the index, the name may already be another git command's lock.
         if self.is_held {
             let _ = std::fs::remove_file(&self.lock);
         }
