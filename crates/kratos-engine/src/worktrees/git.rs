@@ -95,17 +95,6 @@ impl Git {
         ))
     }
 
-    /// [`Git::run_bytes`] with `index` as git's index file, as [`Git::run_in_index`] runs it.
-    pub(super) async fn run_bytes_in_index(
-        &self,
-        folder: &Path,
-        args: &[&str],
-        budget: Duration,
-        index: &Path,
-    ) -> Result<Vec<u8>, GitError> {
-        self.output(folder, args, budget, Some(index)).await
-    }
-
     /// [`Git::run_in_index`] with `input` as git's standard input, for lists too long for a
     /// command line.
     pub(super) async fn run_in_index_with_input(

@@ -12,7 +12,6 @@ use kratos_store::{KratosWorktree, Removal, RemovalEnd, StoreError, UnfinishedWo
 use serde::{Deserialize, Serialize};
 
 use super::git;
-use super::index_lock::copy_preserving_mtime_if_present;
 use super::{
     PlaceError, TRASH_FOLDER, WORKTREES_FOLDER, Worktrees, ensure_our_lock, ignore_everything_in,
     is_same_checkout_at, is_same_checkout_dir, resolved,
@@ -314,7 +313,6 @@ impl Worktrees {
             .git
             .run_bytes(folder, &["ls-files", "-v", "-s", "-z"], git::QUICK)
             .await?;
-        let overlooked = self.overlooked_edits(folder, &listed).await?;
         let status = [
             "status",
             "--porcelain",
@@ -323,8 +321,7 @@ impl Worktrees {
             "--ignore-submodules=none",
         ];
         let status = self.git.run(folder, &status, git::QUICK).await?;
-        let mut left: Vec<String> = status.lines().map(str::to_owned).collect();
-        left.extend(overlooked);
+        let left: Vec<String> = status.lines().map(str::to_owned).collect();
         if !left.is_empty() {
             return Ok(KeepCheck::Dirty(left));
         }
@@ -354,63 +351,6 @@ impl Worktrees {
             .run(folder, &["rev-parse", "HEAD"], git::QUICK)
             .await?;
         Ok(Some(commit))
-    }
-
-    /// Edits `git status` does not show because the file is marked assume-unchanged or
-    /// skip-worktree.
-    async fn overlooked_edits(
-        &self,
-        folder: &Path,
-        listed: &[u8],
-    ) -> Result<Vec<String>, PlaceError> {
-        let mut edited = Vec::new();
-        let mut on_disk = Vec::new();
-        for path in overlooked(listed) {
-            let Some(file) = file_in(folder, path) else {
-                edited.push(status_line(b"M", path));
-                continue;
-            };
-            // A skip-worktree file a sparse checkout left out has nothing on disk to lose.
-            if tokio::fs::symlink_metadata(file).await.is_ok() {
-                on_disk.push(path);
-            }
-        }
-        if on_disk.is_empty() {
-            return Ok(edited);
-        }
-        let own = self.index_of(folder).await?;
-        let index = self.scratch_index();
-        copy_preserving_mtime_if_present(&own, &index).await?;
-        edited.extend(self.changed_once_unmarked(folder, &index, &on_disk).await?);
-        Ok(edited)
-    }
-
-    async fn changed_once_unmarked(
-        &self,
-        folder: &Path,
-        index: &Path,
-        paths: &[&[u8]],
-    ) -> Result<Vec<String>, PlaceError> {
-        let listed: Vec<u8> = paths
-            .iter()
-            .flat_map(|path| path.iter().copied().chain([0]))
-            .collect();
-        for unmark in ["--no-assume-unchanged", "--no-skip-worktree"] {
-            let args = ["update-index", unmark, "-z", "--stdin"];
-            self.git
-                .run_in_index_with_input(folder, &args, listed.clone(), git::QUICK, index)
-                .await?;
-        }
-        let args = ["diff", "--name-status", "--no-renames", "-z"];
-        let changed = self
-            .git
-            .run_bytes_in_index(folder, &args, git::QUICK, index)
-            .await?;
-        let paths: HashSet<&[u8]> = paths.iter().copied().collect();
-        Ok(changes(&changed)
-            .filter(|(_, path)| paths.contains(path))
-            .map(|(status, path)| status_line(status, path))
-            .collect())
     }
 
     async fn empty_expired_trash(&self, store: &StoreThread, retention: Duration) {
@@ -736,21 +676,6 @@ async fn holds_a_thread(store: &StoreThread, worktree: &Path) -> Result<bool, St
     Ok(false)
 }
 
-fn overlooked(listed: &[u8]) -> impl Iterator<Item = &[u8]> {
-    ls_files_entries(listed).filter_map(|(tag, _, path)| {
-        let is_overlooked = tag == b"S" || tag.iter().all(u8::is_ascii_lowercase);
-        is_overlooked.then_some(path)
-    })
-}
-
-fn changes(listed: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
-    let mut fields = listed.split(|&byte| byte == 0);
-    std::iter::from_fn(move || {
-        let status = fields.next().filter(|status| !status.is_empty())?;
-        Some((status, fields.next()?))
-    })
-}
-
 #[cfg(unix)]
 pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
     use std::os::unix::ffi::OsStrExt;
@@ -762,38 +687,9 @@ pub(super) fn file_in(folder: &Path, path: &[u8]) -> Option<PathBuf> {
     std::str::from_utf8(path).ok().map(|path| folder.join(path))
 }
 
-fn status_line(status: &[u8], path: &[u8]) -> String {
-    format!(
-        " {} {}",
-        String::from_utf8_lossy(status),
-        String::from_utf8_lossy(path)
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_files_git_is_told_to_overlook_are_listed() {
-        let listed = b"H 100644 1111 0\tplain.txt\0h 100644 2222 0\tassumed.txt\0\
-                      S 100644 3333 0\tsparse.txt\0s 100644 4444 0\tboth.txt\0";
-
-        assert_eq!(
-            overlooked(listed).collect::<Vec<_>>(),
-            [&b"assumed.txt"[..], b"sparse.txt", b"both.txt"]
-        );
-    }
-
-    #[test]
-    fn each_change_pairs_its_status_with_its_path() {
-        let listed = b"M\0tool.sh\0T\0link\ttab.txt\0";
-
-        assert_eq!(
-            changes(listed).collect::<Vec<_>>(),
-            [(&b"M"[..], &b"tool.sh"[..]), (b"T", b"link\ttab.txt")]
-        );
-    }
 
     #[test]
     fn relative_gitdir_normalizes_lexically_while_offline() {
