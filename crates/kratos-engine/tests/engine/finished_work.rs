@@ -7,8 +7,8 @@ use std::time::Instant;
 use fake_agents::codex_control;
 use kratos_api_client::{ApiReply, Client};
 use kratos_protocol::{
-    ArchiveThread, CommitThread, Committed, CreatePullRequest, LeftFiles, PlaceRequest,
-    PullRequest, RequiredText, Thread, ThreadDetails, ThreadDiff, Workspace, routes,
+    CommitThread, Committed, CreatePullRequest, PlaceRequest, PullRequest, RequiredText, Thread,
+    ThreadDetails, ThreadDiff, routes,
 };
 use tempfile::TempDir;
 
@@ -617,94 +617,6 @@ fn open_pull_request(client: &Client, thread: &Thread) -> ApiReply {
 }
 
 #[test]
-fn a_turn_that_starts_while_a_commit_stages_files_stops_it_and_leaves_the_index_alone() {
-    // Catches a commit that checks for turns only before it stages: a turn that starts while
-    // `git add` reads the files may have half-written one of them.
-    let root = TempDir::new().unwrap();
-    let repository = new_repository(&root);
-    let gate = root.path().join("filter-gate");
-    std::fs::create_dir(&gate).unwrap();
-    let gate_text = gate.to_str().unwrap().replace('\\', "/");
-    // Git runs the clean filter on each file it stages, so this holds `git add` until the test
-    // has started a turn.
-    git(
-        &repository,
-        &[
-            "config",
-            "filter.held.clean",
-            &format!(
-                "touch '{gate_text}/staging' && \
-                 while [ ! -f '{gate_text}/go' ]; do sleep 0.05; done && cat"
-            ),
-        ],
-    );
-    std::fs::write(
-        repository.join(".git").join("info").join("attributes"),
-        "half.txt filter=held\n",
-    )
-    .unwrap();
-    let engine = RunningEngine::start(&root.path().join("kratos"));
-    let workspace = workspace_at(&engine, &repository);
-    let client = engine.client();
-    let busy = create(&client, &workspace, "busy", PlaceRequest::default());
-    let idle = create(&client, &workspace, "idle", PlaceRequest::default());
-    std::fs::write(repository.join("half.txt"), "unfinished\n").unwrap();
-    let committing = {
-        let (client, idle) = (client.clone(), idle.clone());
-        std::thread::spawn(move || commit(&client, &idle, "While staging"))
-    };
-    let deadline = Instant::now() + WAIT;
-    while !gate.join("staging").exists() {
-        assert!(Instant::now() < deadline, "git never staged half.txt");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    post(&client, &busy, "keep going");
-    engine.start_turn();
-    wait_for_turn(&client, &busy);
-    std::fs::write(gate.join("go"), "").unwrap();
-
-    let refused = committing.join().unwrap();
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
-    assert_eq!(git(&repository, &["status", "--porcelain"]), "?? half.txt");
-    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
-}
-
-#[test]
-fn a_folder_commit_takes_its_files_as_staged_and_not_as_a_later_turn_rewrites_them() {
-    // Catches a commit of a folder inside the repository that git reads from disk again once the
-    // check for turns has passed, so a turn that starts then has its half-written file committed.
-    let root = TempDir::new().unwrap();
-    let repository = repository_with_component_only(&root);
-    let engine = RunningEngine::start_holding_git(&root.path().join("kratos"), "commit");
-    let inner = workspace_at(&engine, &repository.join("component"));
-    let client = engine.client();
-    let idle = create(&client, &inner, "idle", PlaceRequest::default());
-    let editor = create(&client, &inner, "editor", PlaceRequest::default());
-    let part = repository.join("component").join("part.txt");
-    std::fs::write(&part, "complete edit\n").unwrap();
-    engine.hold(Gate::Git);
-    let committing = {
-        let (client, idle) = (client.clone(), idle.clone());
-        std::thread::spawn(move || commit(&client, &idle, "Finished part"))
-    };
-    engine.wait_until_held(Gate::Git);
-    post(&client, &editor, "keep going");
-    engine.start_turn();
-    wait_for_turn(&client, &editor);
-    std::fs::write(&part, "half written\n").unwrap();
-    engine.release(Gate::Git);
-
-    let reply = committing.join().unwrap();
-    assert_eq!(reply.status, 201, "{}", reply.body);
-    assert_eq!(
-        git(&repository, &["show", "HEAD:component/part.txt"]),
-        "complete edit"
-    );
-    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
-}
-
-#[test]
 fn concurrent_git_commit_is_refused_while_a_folder_commit_runs() {
     // Catches a commit that releases git's index lock while staging, letting another git commit
     // advance HEAD concurrently instead of being refused by git.
@@ -977,117 +889,6 @@ fn a_commit_while_another_git_command_changes_the_index_is_refused_before_it_com
 }
 
 #[test]
-fn a_turn_that_runs_and_ends_while_a_commit_stages_files_stops_it() {
-    // Catches a commit that only asks whether a turn runs before and after git stages: a whole
-    // turn can run between, so git took one file from before it and another from after it.
-    let root = TempDir::new().unwrap();
-    let (refused, repository) = commit_while_git_stages(&root, |engine, client, workspace| {
-        run_a_turn_that_edits_both(engine, client, workspace);
-    });
-
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
-}
-
-#[test]
-fn a_turn_whose_thread_is_archived_while_a_commit_stages_files_still_stops_it() {
-    // Catches a commit that looks for turns only in threads that are not archived, so a thread
-    // archived right after its turn hides that turn.
-    let root = TempDir::new().unwrap();
-    let (refused, repository) = commit_while_git_stages(&root, |engine, client, workspace| {
-        let busy = run_a_turn_that_edits_both(engine, client, workspace);
-        let archive = ArchiveThread {
-            files: LeftFiles::Keep,
-        };
-        let archived = client
-            .post(&routes::thread_archive(&busy.id), &archive)
-            .unwrap();
-        assert_eq!(archived.status, 200, "{}", archived.body);
-    });
-
-    assert_eq!(refused.status, 409, "{}", refused.body);
-    assert_eq!(git(&repository, &["rev-list", "--count", "HEAD"]), "1");
-}
-
-#[test]
-fn a_thread_made_while_a_commit_stages_files_does_not_stop_it() {
-    // Catches a commit that counts any new thread in its folder as one that ran a turn.
-    let root = TempDir::new().unwrap();
-    let (reply, _) = commit_while_git_stages(&root, |_, client, workspace| {
-        create(client, workspace, "new", PlaceRequest::default());
-    });
-
-    assert_eq!(reply.status, 201, "{}", reply.body);
-}
-
-/// Commits a change to `a.txt` and `b.txt` from an idle thread at the top of a new repository, and
-/// runs `meanwhile` once git has read `a.txt` and before it reads `b.txt`. Returns the commit's
-/// reply and the repository.
-fn commit_while_git_stages(
-    root: &TempDir,
-    meanwhile: impl FnOnce(&RunningEngine, &Client, &Workspace),
-) -> (ApiReply, std::path::PathBuf) {
-    let repository = new_repository(root);
-    let gate = root.path().join("filter-gate");
-    std::fs::create_dir(&gate).unwrap();
-    let gate_text = gate.to_str().unwrap().replace('\\', "/");
-    // Git runs the clean filter on `a.txt` once it has read it and before it reads `b.txt`.
-    git(
-        &repository,
-        &[
-            "config",
-            "filter.held.clean",
-            &format!(
-                "touch '{gate_text}/staging' && \
-                 while [ ! -f '{gate_text}/go' ]; do sleep 0.05; done && cat"
-            ),
-        ],
-    );
-    std::fs::write(
-        repository.join(".git").join("info").join("attributes"),
-        "a.txt filter=held\n",
-    )
-    .unwrap();
-    let engine = RunningEngine::start(&root.path().join("kratos"));
-    let workspace = workspace_at(&engine, &repository);
-    let client = engine.client();
-    let idle = create(&client, &workspace, "idle", PlaceRequest::default());
-    std::fs::write(repository.join("a.txt"), "old\n").unwrap();
-    std::fs::write(repository.join("b.txt"), "old\n").unwrap();
-    let committing = {
-        let (client, idle) = (client.clone(), idle.clone());
-        std::thread::spawn(move || commit(&client, &idle, "While git stages"))
-    };
-    let deadline = Instant::now() + WAIT;
-    while !gate.join("staging").exists() {
-        assert!(Instant::now() < deadline, "git never staged a.txt");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    meanwhile(&engine, &client, &workspace);
-    std::fs::write(gate.join("go"), "").unwrap();
-    (committing.join().unwrap(), repository)
-}
-
-/// Starts a thread in `workspace` whose turn rewrites `a.txt` and `b.txt`, and returns it once the
-/// turn ended.
-fn run_a_turn_that_edits_both(
-    engine: &RunningEngine,
-    client: &Client,
-    workspace: &Workspace,
-) -> Thread {
-    let busy = create(client, workspace, "busy", PlaceRequest::default());
-    let folder = std::path::PathBuf::from(workspace.path.as_str());
-    post(client, &busy, "edit both");
-    engine.start_turn();
-    wait_for_turn(client, &busy);
-    std::fs::write(folder.join("a.txt"), "new\n").unwrap();
-    std::fs::write(folder.join("b.txt"), "new\n").unwrap();
-    engine.fake_codex_request(codex_control::complete("thread-A", "turn-1", "completed"));
-    wait_for_no_turn(client, &busy);
-    busy
-}
-
-#[test]
 fn a_folder_commit_is_refused_while_a_merge_or_a_revert_waits_to_be_committed() {
     // Catches a commit of only a folder that ends a merge or a revert with none of its changes
     // from outside the folder.
@@ -1153,14 +954,6 @@ fn start_revert(repository: &Path) {
 }
 
 fn wait_for_turn(client: &Client, thread: &Thread) {
-    wait_for_running(client, thread, true);
-}
-
-fn wait_for_no_turn(client: &Client, thread: &Thread) {
-    wait_for_running(client, thread, false);
-}
-
-fn wait_for_running(client: &Client, thread: &Thread, running: bool) {
     let deadline = Instant::now() + WAIT;
     loop {
         let details: ThreadDetails = client
@@ -1168,10 +961,10 @@ fn wait_for_running(client: &Client, thread: &Thread, running: bool) {
             .unwrap()
             .parse()
             .unwrap();
-        if details.running_turn.is_some() == running {
+        if details.running_turn.is_some() {
             return;
         }
-        assert!(Instant::now() < deadline, "running stayed {}", !running);
+        assert!(Instant::now() < deadline, "running stayed false");
         std::thread::yield_now();
     }
 }

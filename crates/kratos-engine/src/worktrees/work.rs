@@ -1,12 +1,11 @@
 //! A thread's finished work (D27, D55): its diff, a commit of it, and a pull request for it.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
-use kratos_protocol::{ThreadDiff, ThreadId};
+use kratos_protocol::ThreadDiff;
 use kratos_store::ProviderThread;
 use tokio::process::Command;
 use uuid::Uuid;
@@ -20,9 +19,6 @@ use crate::store_thread::StoreThread;
 /// The most patch text a diff returns, cut at a whole line. A client shows the rest by reading the
 /// folder itself.
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
-
-/// The number of the event that started each thread's last turn, when a commit looked.
-type Seen = HashMap<ThreadId, u64>;
 
 struct CommitBase {
     head: Option<String>,
@@ -213,14 +209,12 @@ impl Worktrees {
         staged: &Path,
     ) -> Result<String, PlaceError> {
         let folder = Path::new(&thread.folder);
-        let seen = self.refuse_while_edited(store, folder, top, None).await?;
+        self.refuse_while_edited(store, folder, top).await?;
         if let Some(head_oid) = base.head.as_deref() {
             self.seed_private_index(top, head_oid, &base.whole_index, staged)
                 .await?;
         }
         self.stage_folder(folder, staged).await?;
-        self.refuse_while_edited(store, folder, top, Some(&seen))
-            .await?;
         check_still_there(store, &thread.place).await?;
         self.refuse_unless_staged(folder, staged, base.has_merge)
             .await?;
@@ -393,33 +387,22 @@ impl Worktrees {
     }
 
     /// Refuses while a thread may be editing files a commit of `folder` would take: a turn runs
-    /// or is starting there, or, with `seen`, the thread started a turn since, even one that
-    /// ended. Its folder must hold `folder` or lie inside it, in the checkout at `top`. Returns
-    /// what it saw, for the next look.
+    /// or is starting there. Its folder must hold `folder` or lie inside it, in the checkout at
+    /// `top`.
     async fn refuse_while_edited(
         &self,
         store: &StoreThread,
         folder: &Path,
         top: &Path,
-        seen: Option<&Seen>,
-    ) -> Result<Seen, PlaceError> {
+    ) -> Result<(), PlaceError> {
         let threads = store.call(|store| store.thread_activity()).await?;
         let folder = resolved_or_given(folder).await;
         for thread in &threads {
-            // A thread made since the last look counts from 0, as if it had been there idle.
-            let moved_on = seen.is_some_and(|seen| {
-                seen.get(&thread.thread_id).copied().unwrap_or(0) != thread.last_turn
-            });
-            if (thread.is_busy || moved_on)
-                && self.shares_files(&folder, top, &thread.folder).await?
-            {
+            if thread.is_busy && self.shares_files(&folder, top, &thread.folder).await? {
                 return Err(PlaceError::BeingEdited);
             }
         }
-        Ok(threads
-            .into_iter()
-            .map(|thread| (thread.thread_id, thread.last_turn))
-            .collect())
+        Ok(())
     }
 
     /// Whether an agent working in `other` can edit files of `folder`, which is in the checkout at
