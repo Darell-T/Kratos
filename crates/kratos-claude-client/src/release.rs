@@ -11,6 +11,7 @@
 //! their own manager, which replaces files a running CLI still loads, so Kratos neither reads their
 //! newest release nor updates them.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,7 @@ pub const UPDATE_LIMIT: Duration =
 /// How much of a failed command's output an error keeps.
 const OUTPUT_KEPT: usize = 2_000;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_FEED_BYTES: usize = 256;
 
 /// A Claude Code release number, such as `2.1.303`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -146,6 +148,12 @@ pub async fn latest_version(
     let url = format!("{feed}/{channel}");
     let args = feed_curl_args(&url)?;
     let body = run(Path::new("curl"), &args, &[], READ_TIMEOUT).await?;
+    if body.len() > MAX_FEED_BYTES {
+        return Err(ReleaseError::Unreadable {
+            what: url,
+            output: kept(&body),
+        });
+    }
     body.trim()
         .parse()
         .map(Latest::Release)
@@ -208,13 +216,73 @@ fn doctor_line<'a>(doctor: &'a str, label: &str) -> Option<&'a str> {
 }
 
 fn feed_curl_args(url: &str) -> Result<Vec<&str>, ReleaseError> {
-    Ok(vec!["--fail", "--silent", "--show-error", "--location", url])
+    if url.chars().any(char::is_control) {
+        return Err(ReleaseError::Unreadable {
+            what: url.to_owned(),
+            output: "unsupported release feed URL".to_owned(),
+        });
+    }
+    if url.starts_with("https://") {
+        Ok(vec![
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-redirs",
+            "5",
+            "--max-filesize",
+            "65536",
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--",
+            url,
+        ])
+    } else if url.starts_with("file://") {
+        // Omit `--location` instead of passing `--proto-redir =none`, which Windows curl rejects.
+        Ok(vec![
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-filesize",
+            "65536",
+            "--proto",
+            "=file",
+            "--",
+            url,
+        ])
+    } else {
+        Err(ReleaseError::Unreadable {
+            what: url.to_owned(),
+            output: "unsupported release feed URL".to_owned(),
+        })
+    }
 }
 
-async fn read_tail<R: AsyncRead + Unpin>(mut reader: R, _limit: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    let _ = reader.read_to_end(&mut out).await;
-    out
+async fn read_tail<R: AsyncRead + Unpin>(mut reader: R, limit: usize) -> Vec<u8> {
+    let mut kept = VecDeque::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let bytes = &chunk[..n];
+                if limit == 0 {
+                    continue;
+                }
+                if bytes.len() >= limit {
+                    kept.clear();
+                    kept.extend(&bytes[bytes.len() - limit..]);
+                } else {
+                    let overflow = kept.len().saturating_add(bytes.len()).saturating_sub(limit);
+                    kept.drain(..overflow);
+                    kept.extend(bytes);
+                }
+            }
+        }
+    }
+    kept.into()
 }
 
 /// Runs `program` with no input and returns what it printed, stdout then stderr. The whole
