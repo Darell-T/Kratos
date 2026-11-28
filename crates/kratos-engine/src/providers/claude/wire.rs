@@ -2,7 +2,9 @@
 //! Claude is sent, the items its replies become, and the plan that pays for the session.
 
 use kratos_claude_client::{Assistant, Initialized, SessionId, StreamEvent};
-use kratos_protocol::{AgentItem, Message, MessageId, MessageInput, SlashCommand, ThreadId, TurnId};
+use kratos_protocol::{
+    AgentItem, Message, MessageId, MessageInput, SlashCommand, ThreadId, TurnId,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 

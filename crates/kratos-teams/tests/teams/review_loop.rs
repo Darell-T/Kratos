@@ -394,11 +394,7 @@ fn security_and_regressions_passes_do_not_drop_confirmed_findings_outside_the_di
     // Catches `check_step` setting `ranges_base` on non-standard passes, which drops confirmed
     // findings in unchanged callers or sinks as `OutsideDiff` instead of blocking.
     let mut script = script(
-        vec![
-            implements(),
-            fix_f1(),
-            implements_answering(vec![fixed(2)]),
-        ],
+        vec![implements(), fix_f1(), implements_answering(vec![fixed(2)])],
         vec![
             approves(),
             requests_changes(vec![bug("sink-outside-diff", "cmd1")]),
