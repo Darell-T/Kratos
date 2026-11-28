@@ -138,16 +138,40 @@ impl Actor {
     /// thread's folder. Nothing starts it again: the store refuses an archived thread's messages.
     pub(super) fn close_archived(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
         let key = ServerKey::Thread(thread_id.clone());
-        let closing = match self.servers.get(&key).map(|slot| &slot.server) {
-            Some(Server::Closing(codex)) => Some(codex.clone()),
-            _ => self.servers.begin_close(&key),
-        };
-        tokio::spawn(async move {
-            if let Some(codex) = closing {
-                codex.close().await;
-            }
+        self.servers.cancel_wait(&key);
+        let Some(slot) = self.servers.get_mut(&key) else {
             let _ = reply.send(Ok(()));
-        });
+            return;
+        };
+        for deferred in std::mem::take(&mut slot.deferred) {
+            deferred.fail_deferred(ProviderError::Conflict("The thread is archived".into()));
+        }
+        let closing = match &mut slot.server {
+            Server::Starting => {
+                slot.server = Server::ClosingStart(vec![reply]);
+                return;
+            }
+            Server::ClosingStart(waiters) => {
+                waiters.push(reply);
+                return;
+            }
+            Server::Closing(codex) => Some(codex.clone()),
+            Server::Up(codex) => {
+                let codex = codex.clone();
+                slot.server = Server::Closing(codex.clone());
+                Some(codex)
+            }
+            Server::Down => None,
+        };
+        if let Some(codex) = closing {
+            tokio::spawn(async move {
+                codex.close().await;
+                let _ = reply.send(Ok(()));
+            });
+        } else {
+            self.servers.forget_if_unused(&key);
+            let _ = reply.send(Ok(()));
+        }
     }
 
     /// Codex can finish a background terminal without notifying the engine.

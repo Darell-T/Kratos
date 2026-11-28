@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use kratos_codex_client::Codex;
 use kratos_protocol::ThreadId;
 
-use super::actor::Command;
+use super::actor::{Command, Reply};
 use super::connection::Restarts;
 
 pub(super) const MAX_SERVERS: usize = 8;
@@ -31,6 +31,7 @@ impl ServerKey {
 pub(super) enum Server {
     Down,
     Starting,
+    ClosingStart(Vec<Reply<()>>),
     Up(Codex),
     Closing(Codex),
 }
@@ -100,12 +101,20 @@ impl Servers {
         self.waiting.contains(key)
     }
 
+    pub(super) fn cancel_wait(&mut self, key: &ServerKey) {
+        self.waiting.retain(|queued| queued != key);
+    }
+
     pub(super) fn slot(&mut self, key: &ServerKey) -> &mut Slot {
         self.slots.entry(key.clone()).or_insert_with(Slot::new)
     }
 
     pub(super) fn get(&self, key: &ServerKey) -> Option<&Slot> {
         self.slots.get(key)
+    }
+
+    pub(super) fn get_mut(&mut self, key: &ServerKey) -> Option<&mut Slot> {
+        self.slots.get_mut(key)
     }
 
     pub(super) fn generation(&self, key: &ServerKey) -> u64 {
@@ -121,7 +130,7 @@ impl Servers {
     pub(super) fn codex(&self, key: &ServerKey) -> Option<Codex> {
         match &self.slots.get(key)?.server {
             Server::Up(codex) => Some(codex.clone()),
-            Server::Down | Server::Starting | Server::Closing(_) => None,
+            Server::Down | Server::Starting | Server::Closing(_) | Server::ClosingStart(_) => None,
         }
     }
 

@@ -152,6 +152,14 @@ impl Actor {
         key: ServerKey,
         result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     ) {
+        if self
+            .servers
+            .get(&key)
+            .is_some_and(|slot| matches!(slot.server, Server::ClosingStart(_)))
+        {
+            self.finish_closing_start(&key, result);
+            return;
+        }
         match result {
             Ok((codex, incoming)) => {
                 let generation = self.servers.generation(&key);
@@ -190,6 +198,32 @@ impl Actor {
         }
     }
 
+    fn finish_closing_start(
+        &mut self,
+        key: &ServerKey,
+        result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
+    ) {
+        let slot = self.servers.slot(key);
+        let Server::ClosingStart(waiters) = std::mem::replace(&mut slot.server, Server::Down)
+        else {
+            unreachable!("checked ClosingStart before finishing");
+        };
+        for deferred in std::mem::take(&mut slot.deferred) {
+            deferred.fail_deferred(ProviderError::Conflict("The thread is archived".into()));
+        }
+        self.servers.advance_generation(key);
+        self.servers.forget_if_unused(key);
+        self.admit_waiting();
+        tokio::spawn(async move {
+            if let Ok((codex, _)) = result {
+                codex.close().await;
+            }
+            for reply in waiters {
+                let _ = reply.send(Ok(()));
+            }
+        });
+    }
+
     /// Loads the thread into the running app-server, resuming its Codex thread or starting one for
     /// a thread that has none. Returns its Codex id once loaded; `None` while that is under way.
     pub(super) async fn attached(
@@ -202,7 +236,7 @@ impl Actor {
         if self
             .servers
             .get(&key)
-            .is_some_and(|slot| matches!(slot.server, Server::Closing(_)))
+            .is_some_and(|slot| matches!(slot.server, Server::Closing(_) | Server::ClosingStart(_)))
         {
             return Ok(None);
         }
@@ -513,7 +547,7 @@ impl Actor {
                     let codex = codex.clone();
                     Some(async move { codex.close().await })
                 }
-                Server::Down | Server::Starting => None,
+                Server::Down | Server::Starting | Server::ClosingStart(_) => None,
             }
         });
         futures_util::future::join_all(closes).await;
