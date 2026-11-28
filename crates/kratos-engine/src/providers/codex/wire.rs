@@ -5,11 +5,10 @@ use std::collections::{BTreeMap, HashMap};
 
 use kratos_codex_client::{RequestError, ServerRequest, ServerResponse, types};
 use kratos_protocol::{
-    AccessLimit, AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult,
-    ContextUsage, ExtraAccess, FileChange, FileChangeKind, ItemStatus, Message, MessageInput,
-    MessageOrigin, NetworkAccess, PathAccess, PathAccessMode, Permission, Provider, Question,
-    QuestionId, QuestionItem, QuestionOption, ThreadId, Timestamp, TimestampError, TurnId,
-    TurnOutcome, UsageBucket, UsageWindow,
+    AccountUsage, AgentItem, Allowance, ApprovalDecision, CappedText, CommandResult, ContextUsage,
+    ExtraAccess, FileChange, FileChangeKind, ItemStatus, Message, MessageInput, NetworkAccess,
+    PathAccess, PathAccessMode, Provider, Question, QuestionId, QuestionItem, QuestionOption,
+    Timestamp, TimestampError, TurnId, TurnOutcome, UsageBucket, UsageWindow,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -30,12 +29,7 @@ pub(super) fn required<T: DeserializeOwned>(fields: Value) -> T {
 /// the way Codex's own composer inserts a file's path. A message from another thread opens with
 /// a label that names the sender and what this thread may now do.
 pub(super) fn user_input(message: &Message) -> Vec<types::UserInput> {
-    let label = match &message.origin {
-        MessageOrigin::Thread { thread_id, limit } => {
-            Some(text_input(&sender_label(thread_id, *limit)))
-        }
-        MessageOrigin::User | MessageOrigin::Continuation { .. } => None,
-    };
+    let label = crate::providers::sender_label(&message.origin).map(|text| text_input(&text));
     let parts = message.input.iter().map(|part| match part {
         MessageInput::Text { text } => text_input(text.as_str()),
         MessageInput::Image { path } => types::UserInput::LocalImageUserInput {
@@ -46,22 +40,6 @@ pub(super) fn user_input(message: &Message) -> Vec<types::UserInput> {
         MessageInput::File { path } => text_input(&format!("Attached file: {}", path.as_str())),
     });
     label.into_iter().chain(parts).collect()
-}
-
-fn sender_label(thread_id: &ThreadId, limit: AccessLimit) -> String {
-    let access = match (limit.plan_mode, limit.permission) {
-        (true, _) => "Plan mode, which changes nothing",
-        (false, Permission::AskMe) => "Ask me",
-        (false, Permission::ApproveForMe) => "Approve for me",
-        (false, Permission::FullAccess) => "Full access",
-    };
-    format!(
-        "[Message from Kratos thread {}. From this turn on, this thread runs with no more than that \
-         thread's permission, {access}, until the user raises it. If that stops you from doing \
-         something, say so in your reply instead of working around it. Answer in your reply, which \
-         that thread reads. Message it back only if it asks you to.]",
-        thread_id.as_str()
-    )
 }
 
 fn text_input(text: &str) -> types::UserInput {
