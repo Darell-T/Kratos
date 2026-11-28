@@ -10,7 +10,8 @@
 //! | Full access    | destructive commands, the ones Kratos's dangerous-command check flags (D18) |
 //!
 //! A write outside the worktree asks only under Ask me, unless the command is flagged as dangerous
-//! or destructive. A write to a protected folder asks under every permission (D20).
+//! or destructive. Any action in a protected folder asks for the implementer and is denied for the
+//! planner and reviewer (D20).
 //!
 //! These rules are pure. The engine calls `approval` where the action runs, so the policy the user
 //! sees is the policy in effect, and a permission change cannot reach a turn already in progress,
@@ -63,7 +64,7 @@ pub enum Approval {
 /// What `role` may do with `action`. `permission` is the Team's, and only the implementer follows
 /// it.
 pub fn approval(role: Role, permission: Permission, action: Action) -> Approval {
-    if action.kind == ActionKind::Read {
+    if action.kind == ActionKind::Read && action.place != Place::ProtectedFolder {
         return Approval::Allow;
     }
     match role {
