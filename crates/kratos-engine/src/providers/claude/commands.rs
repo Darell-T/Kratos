@@ -114,6 +114,14 @@ impl Actor {
                 });
                 let _ = reply.send(access);
             }
+            Command::RunsBackgroundWork { thread_id, reply } => {
+                let runs = self
+                    .threads
+                    .get(&thread_id)
+                    .is_some_and(super::threads::ThreadState::holds_background_work);
+                let _ = reply.send(Ok(runs));
+            }
+            Command::Close { thread_id, reply } => self.close_archived(&thread_id, reply),
             Command::Shutdown { reply } => drop(reply.send(())),
         }
     }

@@ -6,7 +6,7 @@ use kratos_command_safety::DangerousCommandPlatform;
 use kratos_protocol::{
     CreateThread, CreateWorkspace, MessageOrigin, MessageStatus, RequiredText, TurnId,
 };
-use kratos_store::Store;
+use kratos_store::{NewPlace, Store};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -29,7 +29,7 @@ impl Harness {
         #[cfg(windows)]
         kratos_process::contain_current_process().unwrap();
         let root = tempfile::tempdir().unwrap();
-        let store = Store::open(&root.path().join("kratos")).unwrap();
+        let mut store = Store::open(&root.path().join("kratos")).unwrap();
         let request: CreateWorkspace = serde_json::from_value(json!({
             "name": "project", "path": root.path(),
         }))
@@ -39,7 +39,15 @@ impl Harness {
             "workspaceId": workspace.id, "title": "chat", "provider": "codex",
         }))
         .unwrap();
-        let thread_id = store.create_thread(&request).unwrap().id;
+        let thread_id = store
+            .create_thread(
+                &request,
+                &NewPlace::ProjectFolder {
+                    folder: workspace.path.clone(),
+                },
+            )
+            .unwrap()
+            .id;
         let (store_thread, jobs) = store_thread::channel();
         let store_runner = std::thread::spawn(move || jobs.run(store));
         let hub = Hub::new(store_thread.clone());
@@ -78,7 +86,7 @@ impl Harness {
 
     async fn attached_reply_for(&mut self, thread_id: &ThreadId) -> Completion {
         loop {
-            self.actor.attached(thread_id).await.unwrap();
+            self.actor.attached(thread_id, None).await.unwrap();
             let done = self
                 .completion(|done| matches!(done, Done::Connected { .. } | Done::Attached { .. }))
                 .await;
@@ -322,7 +330,11 @@ async fn an_old_attach_reply_does_not_detach_a_replacement_process() {
     let loaded = harness.actor.threads[&harness.thread_id]
         .native_id()
         .map(str::to_owned);
-    let attached = harness.actor.attached(&harness.thread_id).await.unwrap();
+    let attached = harness
+        .actor
+        .attached(&harness.thread_id, None)
+        .await
+        .unwrap();
     harness.close().await;
     assert_eq!(loaded, Some(native_id.clone()));
     assert_eq!(attached, Some(native_id));
@@ -835,5 +847,64 @@ async fn the_idle_check_asks_a_server_found_busy_again_after_another_idle_time()
             break;
         }
     }
+    harness.close().await;
+}
+
+#[tokio::test]
+async fn close_archived_cancels_a_starting_server_and_waits_for_it_to_close() {
+    // Catches `close_archived` ignoring `Server::Starting`, answering early and letting a later
+    // `Done::Connected` transition the archived thread's slot to `Server::Up` and leak a process.
+    let mut harness = Harness::start().await;
+    let key = harness.key();
+    assert!(harness.actor.connection(&key).unwrap().is_none());
+
+    let (reply_tx, mut reply_rx) = oneshot::channel();
+    harness
+        .actor
+        .close_archived(&harness.thread_id.clone(), reply_tx);
+    tokio::task::yield_now().await;
+    assert!(
+        matches!(
+            reply_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ),
+        "close_archived must wait until the starting Codex process connects and closes"
+    );
+
+    let done = harness
+        .completion(|done| matches!(done, Done::Connected { .. }))
+        .await;
+    done.apply(&mut harness.actor).await;
+
+    let closed = tokio::time::timeout(WAIT, reply_rx)
+        .await
+        .expect("close_archived replies after closing the connected process")
+        .unwrap();
+    assert!(closed.is_ok(), "{closed:?}");
+    assert!(harness.actor.servers.codex(&key).is_none());
+    assert!(harness.actor.servers.get(&key).is_none());
+    harness.close().await;
+}
+
+#[tokio::test]
+async fn close_archived_removes_a_queued_thread_from_the_wait_queue() {
+    // Catches `close_archived` leaving an archived thread in `servers.waiting` so `admit_waiting`
+    // can later start a Codex process for it.
+    let mut harness = Harness::start().await;
+    let key = harness.key();
+    harness.actor.servers.wait(&key);
+    assert!(harness.actor.servers.waits(&key));
+
+    let (reply_tx, reply_rx) = oneshot::channel();
+    harness
+        .actor
+        .close_archived(&harness.thread_id.clone(), reply_tx);
+
+    let closed = tokio::time::timeout(WAIT, reply_rx)
+        .await
+        .expect("close_archived replies for a queued thread")
+        .unwrap();
+    assert!(closed.is_ok(), "{closed:?}");
+    assert!(!harness.actor.servers.waits(&key));
     harness.close().await;
 }

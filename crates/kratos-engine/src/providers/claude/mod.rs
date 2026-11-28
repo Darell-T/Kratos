@@ -350,6 +350,18 @@ impl ClaudeProvider {
             .await
     }
 
+    /// Whether the thread still runs a background command, which outlives its turns.
+    pub async fn runs_background_work(&self, thread_id: ThreadId) -> Result<bool, ProviderError> {
+        self.ask(|reply| actor::Command::RunsBackgroundWork { thread_id, reply })
+            .await
+    }
+
+    /// Ends an archived thread's process. Returns once it exited.
+    pub async fn close_archived(&self, thread_id: ThreadId) -> Result<(), ProviderError> {
+        self.ask(|reply| actor::Command::Close { thread_id, reply })
+            .await
+    }
+
     /// Settles an update in flight, then closes every CLI and ends the actor.
     pub async fn shutdown(&self) {
         self.release.settle_for_shutdown().await;

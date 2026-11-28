@@ -428,6 +428,36 @@ async fn a_model_change_waits_for_a_background_command_and_the_turn_that_reports
 }
 
 #[tokio::test]
+async fn a_background_command_counts_as_running_until_the_cli_reports_it_gone() {
+    // Catches an archive check that sees an idle thread while the command the agent left running
+    // after its turn, such as a dev server, still runs.
+    let mut harness = Harness::start(Options::default()).await;
+    let launch = a_command_runs_on_after_the_turn(&mut harness).await;
+    let runs = || {
+        harness
+            .provider
+            .runs_background_work(harness.thread_id.clone())
+    };
+
+    assert!(runs().await.unwrap(), "the command runs after the turn");
+
+    harness
+        .emit(
+            &launch,
+            json!({ "type": "system", "subtype": "background_tasks_changed", "tasks": [] }),
+        )
+        .await;
+    let deadline = tokio::time::Instant::now() + crate::harness::WAIT;
+    while runs().await.unwrap() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the ended command still counts"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
 async fn a_message_waiting_for_a_background_command_goes_ahead_when_no_report_turn_follows() {
     let mut harness = Harness::start(Options {
         report_turn_wait: Duration::from_millis(300),

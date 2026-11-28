@@ -7,7 +7,7 @@
 
 use kratos_claude_client::{Control, TurnResult};
 use kratos_protocol::{
-    LiveUpdate, Message, MessageId, MessageStatus, Provider, ThreadId, TurnId, TurnOrigin,
+    LiveUpdate, Message, MessageId, MessageStatus, Place, Provider, ThreadId, TurnId, TurnOrigin,
 };
 use kratos_store::{StoreError, ThreadWrite};
 
@@ -16,6 +16,7 @@ use super::ends::{Stop, TurnEnd, end_turn};
 use super::threads::{ActiveTurn, InFlight, SessionConfig};
 use super::{ProviderError, wire};
 use crate::providers::queue::mark_refused;
+use crate::providers::worktree_gone;
 use crate::usage::LimitStop;
 
 /// Why Kratos ends a CLI that was asked to stop and did not.
@@ -35,7 +36,7 @@ impl Actor {
         if thread.is_busy() {
             return;
         }
-        let Some(next) = self.next_to_start(thread_id).await else {
+        let Some((next, place)) = self.next_to_start(thread_id).await else {
             // Nothing waits to be sent, so a pending start has no work.
             self.threads
                 .get_mut(thread_id)
@@ -44,6 +45,10 @@ impl Actor {
                 .cancel_timer();
             return;
         };
+        if let Some(error) = worktree_gone(&self.store, &place).await {
+            self.pause_unavailable_if_waiting(thread_id, error).await;
+            return;
+        }
         self.dispatch_message(thread_id, next).await;
     }
 
@@ -57,7 +62,7 @@ impl Actor {
             .await;
             return;
         }
-        let wanted = SessionConfig::of(&effective(thread, &next));
+        let wanted = SessionConfig::of(&thread.settings.limited_by(next.origin.limit()));
         if let Some(open) = thread.open() {
             if let Some(reason) = open.message_wait_reason(&wanted) {
                 self.hub.publish(
@@ -79,18 +84,20 @@ impl Actor {
 
     /// The thread's first waiting message when it may start: the queue is not paused, and the
     /// message is queued. A failed or uncertain message holds the queue until the user settles it.
-    async fn next_to_start(&self, thread_id: &ThreadId) -> Option<Message> {
+    async fn next_to_start(&self, thread_id: &ThreadId) -> Option<(Message, Place)> {
         let thread_id = thread_id.clone();
         let next = self
             .store
             .call(move |store| {
-                let paused = store.provider_thread(&thread_id)?.paused;
+                let thread = store.provider_thread(&thread_id)?;
                 let first = store.pending_messages(&thread_id)?.into_iter().next();
-                Ok::<_, kratos_store::StoreError>((paused, first))
+                Ok::<_, kratos_store::StoreError>((thread.paused, thread.place, first))
             })
             .await;
         match next {
-            Ok((None, Some(next))) if next.status == MessageStatus::Queued => Some(next),
+            Ok((None, place, Some(next))) if next.status == MessageStatus::Queued => {
+                Some((next, place))
+            }
             _ => None,
         }
     }
@@ -551,15 +558,4 @@ fn accept_submitted(
         write.set_message_status(&message_id, accepted)?;
     }
     Ok(())
-}
-
-/// The thread's settings for a message: no more access than the thread that sent it has.
-fn effective(
-    thread: &super::threads::ThreadState,
-    message: &Message,
-) -> kratos_protocol::ThreadSettings {
-    match message.origin.limit() {
-        Some(limit) => thread.settings.limited_to(limit),
-        None => thread.settings.clone(),
-    }
 }

@@ -7,12 +7,24 @@
 
 use std::collections::HashMap;
 use std::io::BufRead;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 pub mod codex_control;
 pub mod responses;
+
+/// The longest a fake waits at a closed gate, so a test that never opens it still ends.
+const MAX_HOLD: Duration = Duration::from_secs(60);
+
+/// Waits until `gate/open` appears or [`MAX_HOLD`] passes.
+pub fn wait_until_open(gate: &Path) {
+    let deadline = Instant::now() + MAX_HOLD;
+    while !gate.join("open").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
 
 /// The path of the fake named `name`, such as `fake-codex`, built on first use.
 ///

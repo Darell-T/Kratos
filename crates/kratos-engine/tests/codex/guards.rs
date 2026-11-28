@@ -231,3 +231,131 @@ async fn a_thread_with_a_model_starts_codex_on_that_model() {
     let opened = harness.control("test/threadRequests", json!({})).await;
     assert_eq!(opened[0]["params"]["model"], "other-model");
 }
+
+#[tokio::test]
+async fn only_writable_sandbox_threads_receive_the_temp_npm_cache() {
+    // Catches leaking `%TEMP%/kratos-npm-cache` into the app-server process or Full access
+    // threads, which would let a prompt-injected sandboxed thread poison packages that an
+    // unsandboxed thread later executes.
+    let sandbox_cache = std::env::temp_dir()
+        .join("kratos-npm-cache")
+        .to_string_lossy()
+        .into_owned();
+    let host_cache = std::env::var("npm_config_cache").ok();
+
+    for (permission, plan_mode, expects_sandbox_cache) in [
+        (Permission::FullAccess, false, false),
+        (Permission::FullAccess, true, false),
+        (Permission::AskMe, false, true),
+        (Permission::ApproveForMe, false, true),
+    ] {
+        let mut harness = Harness::start(settings(permission, plan_mode)).await;
+        harness.send("a", "first").await;
+        harness.held("turn/start", 1).await;
+
+        let environment = harness.control("test/environment", json!({})).await;
+        assert_eq!(
+            environment["npmConfigCache"],
+            json!(host_cache),
+            "app-server process must not override npm_config_cache ({permission:?}, plan {plan_mode})"
+        );
+
+        let opened = harness.control("test/threadRequests", json!({})).await;
+        let policy_set = &opened[0]["params"]["config"]["shell_environment_policy"]["set"];
+        if expects_sandbox_cache {
+            assert_eq!(
+                policy_set["npm_config_cache"],
+                json!(sandbox_cache),
+                "writable sandbox must redirect npm_config_cache into temp ({permission:?})"
+            );
+        } else {
+            assert!(
+                policy_set["npm_config_cache"].is_null(),
+                "unsandboxed or read-only thread must not use temp npm cache: {opened}"
+            );
+        }
+        harness.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn switching_between_sandboxed_and_full_access_updates_the_thread_npm_cache() {
+    // Catches a thread upgraded from Approve for me to Full access retaining the sandboxed
+    // temp npm cache on later turns, or downgraded back to Ask me losing its writable cache.
+    let sandbox_cache = std::env::temp_dir()
+        .join("kratos-npm-cache")
+        .to_string_lossy()
+        .into_owned();
+    let mut harness = Harness::start(settings(Permission::ApproveForMe, false)).await;
+    harness.running_turn("a", "turn-1").await;
+    harness.complete("thread-A", "turn-1", "completed").await;
+    harness
+        .wait_for(|event| {
+            matches!(
+                event,
+                kratos_protocol::ThreadEventBody::TurnCompleted { .. }
+            )
+        })
+        .await;
+
+    harness
+        .provider
+        .set_settings(
+            harness.thread_id.clone(),
+            settings(Permission::FullAccess, false).settings,
+        )
+        .await
+        .unwrap();
+    harness.running_turn("b", "turn-2").await;
+    let opened = harness.control("test/threadRequests", json!({})).await;
+    let methods: Vec<&str> = opened
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|req| req["method"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        methods,
+        ["thread/start", "thread/unsubscribe", "thread/resume"]
+    );
+    assert_eq!(
+        opened[0]["params"]["config"]["shell_environment_policy"]["set"]["npm_config_cache"],
+        json!(sandbox_cache)
+    );
+    assert_eq!(
+        opened[2]["params"]["config"]["shell_environment_policy"]["set"],
+        json!({})
+    );
+
+    harness.complete("thread-A", "turn-2", "completed").await;
+    harness
+        .wait_for(|event| {
+            matches!(
+                event,
+                kratos_protocol::ThreadEventBody::TurnCompleted { .. }
+            )
+        })
+        .await;
+    harness
+        .provider
+        .set_settings(
+            harness.thread_id.clone(),
+            settings(Permission::AskMe, false).settings,
+        )
+        .await
+        .unwrap();
+    harness.send("c", "downgraded").await;
+    harness.held("turn/start", 3).await;
+    let opened = harness.control("test/threadRequests", json!({})).await;
+    let fork = opened
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|req| req["method"] == "thread/fork")
+        .expect("downgrade forks the native session");
+    assert_eq!(
+        fork["params"]["config"]["shell_environment_policy"]["set"]["npm_config_cache"],
+        json!(sandbox_cache)
+    );
+    harness.stop().await;
+}

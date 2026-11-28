@@ -279,13 +279,31 @@ impl Actor {
     /// Ends the thread's CLI while it is idle, so the next message starts one with the settings
     /// then in force. Its exit is not heard.
     pub(super) fn retire_session(&mut self, thread_id: &ThreadId) {
-        let Some(thread) = self.threads.get_mut(thread_id) else {
-            return;
-        };
-        thread.epoch += 1;
-        if let Session::Open(open) = std::mem::replace(&mut thread.session, Session::Closed) {
+        if let Some(open) = self.take_session(thread_id) {
             self.retiring
                 .spawn(async move { open.claude.close().await });
+        }
+    }
+
+    /// Ends an archived thread's CLI and answers once it exited, so no process holds the thread's
+    /// folder. Nothing starts it again: the store refuses an archived thread's messages.
+    pub(super) fn close_archived(&mut self, thread_id: &ThreadId, reply: Reply<()>) {
+        let open = self.take_session(thread_id);
+        self.retiring.spawn(async move {
+            if let Some(open) = open {
+                open.claude.close().await;
+            }
+            let _ = reply.send(Ok(()));
+        });
+    }
+
+    /// Takes the thread's CLI out of its state, so its exit is not heard.
+    fn take_session(&mut self, thread_id: &ThreadId) -> Option<OpenSession> {
+        let thread = self.threads.get_mut(thread_id)?;
+        thread.epoch += 1;
+        match std::mem::replace(&mut thread.session, Session::Closed) {
+            Session::Open(open) => Some(*open),
+            Session::Closed | Session::Opening => None,
         }
     }
 

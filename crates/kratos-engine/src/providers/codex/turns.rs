@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use kratos_codex_client::{Codex, RequestError, methods, rejected_before_execution, types};
 use kratos_protocol::{
-    Message, MessageId, MessageStatus, PauseReason, ThreadEventBody, ThreadId, ThreadSettings,
-    TurnId, TurnOutcome,
+    Message, MessageId, MessageStatus, PauseReason, Place, ThreadEventBody, ThreadId,
+    ThreadSettings, TurnId, TurnOutcome,
 };
 use serde_json::json;
 
@@ -17,6 +17,7 @@ use super::profiles::Profile;
 use super::servers::ServerKey;
 use super::threads::{Turn, TurnWork};
 use super::{ProviderError, policy, wire};
+use crate::providers::worktree_gone;
 use crate::providers::{queue, report_item};
 
 /// How long `turn/interrupt` may take to answer.
@@ -77,9 +78,13 @@ impl Actor {
         if !matches!(thread.turn, Turn::Idle) || !thread.steering.is_empty() {
             return;
         }
-        let Some(next) = self.next_to_start(thread_id).await else {
+        let Some((next, place)) = self.next_to_start(thread_id).await else {
             return;
         };
+        if let Some(error) = worktree_gone(&self.store, &place).await {
+            self.pause_unavailable_if_waiting(thread_id, error).await;
+            return;
+        }
         if let Err(error) = self.threads[thread_id].settings.validate_report_format() {
             self.pause_unavailable_if_waiting(
                 thread_id,
@@ -88,7 +93,7 @@ impl Actor {
             .await;
             return;
         }
-        let native_id = match self.attached(thread_id).await {
+        let native_id = match self.attached(thread_id, next.origin.limit()).await {
             Ok(Some(native_id)) => native_id,
             // Loading; the load's completion dispatches again.
             Ok(None) => return,
@@ -106,18 +111,20 @@ impl Actor {
 
     /// The thread's first waiting message when it may start: the queue is not paused, and the
     /// message is queued. A failed or uncertain message holds the queue until the user settles it.
-    async fn next_to_start(&self, thread_id: &ThreadId) -> Option<Message> {
+    async fn next_to_start(&self, thread_id: &ThreadId) -> Option<(Message, Place)> {
         let thread_id = thread_id.clone();
         let next = self
             .store
             .call(move |store| {
-                let paused = store.provider_thread(&thread_id)?.paused;
+                let thread = store.provider_thread(&thread_id)?;
                 let first = store.pending_messages(&thread_id)?.into_iter().next();
-                Ok::<_, kratos_store::StoreError>((paused, first))
+                Ok::<_, kratos_store::StoreError>((thread.paused, thread.place, first))
             })
             .await;
         match next {
-            Ok((None, Some(next))) if next.status == MessageStatus::Queued => Some(next),
+            Ok((None, place, Some(next))) if next.status == MessageStatus::Queued => {
+                Some((next, place))
+            }
             _ => None,
         }
     }

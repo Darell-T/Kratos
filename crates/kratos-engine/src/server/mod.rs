@@ -7,10 +7,12 @@ mod json;
 mod local_only;
 mod socket;
 mod threads;
+mod work;
 mod workspaces;
 
 use std::future::{Future, IntoFuture};
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
@@ -23,9 +25,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use kratos_protocol::routes::{
     APPROVAL, CLAUDE_CLI, CLAUDE_CLI_UPDATE, CONTINUATION_SCHEDULE, EVENTS, HEALTH, MESSAGE,
-    MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_EVENTS,
-    THREAD_MESSAGES, THREAD_RESUME, THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE,
-    WORKSPACES,
+    MESSAGE_DISCARD, MESSAGE_RETRY, MESSAGE_STEER, QUESTION, THREAD, THREAD_ARCHIVE, THREAD_COMMIT,
+    THREAD_DIFF, THREAD_EVENTS, THREAD_MESSAGES, THREAD_PULL_REQUEST, THREAD_RESUME,
+    THREAD_SETTINGS, THREAD_SKILLS, THREAD_STOP, THREADS, USAGE, WORKSPACE_WORKTREES, WORKSPACES,
 };
 use kratos_protocol::{ErrorBody, Health, MessageId, ThreadId};
 use kratos_store::{Refusal, StoreError};
@@ -39,6 +41,7 @@ use crate::providers::{ProviderError, Providers};
 use crate::scheduler::{SchedulerError, SchedulerHandle};
 use crate::store_thread::StoreThread;
 use crate::usage::UsageTracker;
+use crate::worktrees::{PlaceError, Worktrees};
 
 pub use auth::ClientToken;
 
@@ -61,6 +64,7 @@ pub struct ServerState {
     pub scheduler: Option<SchedulerHandle>,
     pub usage: UsageTracker,
     pub token: ClientToken,
+    pub worktrees: Arc<Worktrees>,
 }
 
 impl ServerState {
@@ -182,11 +186,16 @@ fn user_routes() -> Router<ServerState> {
     Router::new()
         .route(HEALTH, get(health))
         .route(WORKSPACES, post(workspaces::create_workspace))
+        .route(WORKSPACE_WORKTREES, get(workspaces::list_worktrees))
         .route(MESSAGE, delete(agents::remove_message))
         .route(MESSAGE_STEER, post(agents::steer))
         .route(MESSAGE_RETRY, post(agents::retry_message))
         .route(MESSAGE_DISCARD, post(agents::discard_message))
         .route(THREAD_RESUME, post(agents::resume))
+        .route(THREAD_ARCHIVE, post(threads::archive_thread))
+        .route(THREAD_DIFF, get(work::diff))
+        .route(THREAD_COMMIT, post(work::commit))
+        .route(THREAD_PULL_REQUEST, post(work::pull_request))
         .route(THREAD_SETTINGS, put(agents::put_settings))
         .route(THREAD_SKILLS, get(agents::skills))
         .route(CONTINUATION_SCHEDULE, post(agents::schedule))
@@ -282,6 +291,30 @@ impl From<StoreError> for ApiError {
             Some(Refusal::Unknown) => ApiError::new(StatusCode::NOT_FOUND, error),
             Some(Refusal::Conflict) => ApiError::new(StatusCode::CONFLICT, error),
             None => ApiError::internal(&error),
+        }
+    }
+}
+
+impl From<PlaceError> for ApiError {
+    /// A place the git state rules out answers 400, git failing answers 500, and both say what
+    /// happened in plain words (L12).
+    fn from(error: PlaceError) -> ApiError {
+        match error {
+            PlaceError::Store(error) => error.into(),
+            failed @ (PlaceError::Git(_)
+            | PlaceError::Io { .. }
+            | PlaceError::IndexNotUpdatedAfterCommit { .. }
+            | PlaceError::NoGh(_)
+            | PlaceError::Gh(_)
+            | PlaceError::UnreadableGit { .. }) => {
+                ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, failed)
+            }
+            conflict @ (PlaceError::NotItsWorktree(_)
+            | PlaceError::BeingEdited
+            | PlaceError::PartialCommitDuring(_)
+            | PlaceError::UnresolvedConflicts
+            | PlaceError::IndexInUse(_)) => ApiError::new(StatusCode::CONFLICT, conflict),
+            refused => ApiError::bad_request(refused.to_string()),
         }
     }
 }

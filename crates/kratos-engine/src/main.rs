@@ -15,6 +15,7 @@ use std::ffi::OsString;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -23,7 +24,9 @@ use kratos_api_client::{Client, ClientError};
 use kratos_claude_client::locate_claude;
 use kratos_codex_client::{LocateError, locate_codex};
 use kratos_command_safety::DangerousCommandPlatform;
-use kratos_store::{BackupId, InvalidBackupId, OpenError, RestoreError, Store, StoreError};
+use kratos_store::{
+    BackupId, InvalidBackupId, KratosWorktree, OpenError, RestoreError, Store, StoreError,
+};
 
 use kratos_engine::config::{Config, ConfigError};
 use kratos_engine::hub::Hub;
@@ -35,6 +38,7 @@ use kratos_engine::scheduler;
 use kratos_engine::server::{self, ClientToken, ServerState};
 use kratos_engine::store_thread::{self, StoreThread};
 use kratos_engine::usage::{LimitStop, UsageTracker};
+use kratos_engine::worktrees::Worktrees;
 
 /// How long a request to Codex may take, from the TypeScript provider. A turn has no deadline: a
 /// live CLI is working, and every way it can die reports its own error.
@@ -106,6 +110,9 @@ fn serve(config: &Config) -> Result<(), StartError> {
     listener.set_nonblocking(true)?;
     let port = listener.local_addr()?.port();
     let token = ClientToken::issue(&config.home).map_err(StartError::Token)?;
+    let worktrees =
+        Worktrees::open(&config.home, config.gh_exe.clone()).map_err(StartError::Hooks)?;
+    let unfinished = store.unfinished_worktrees()?;
     // The listener already accepts into its backlog, so a client may connect as soon as it reads
     // this.
     println!(
@@ -114,8 +121,16 @@ fn serve(config: &Config) -> Result<(), StartError> {
     );
     let (store_thread, store_jobs) = store_thread::channel();
     let server_config = config.clone();
-    let server =
-        std::thread::spawn(move || run_server(listener, store_thread, &server_config, token));
+    let server = std::thread::spawn(move || {
+        run_server(
+            listener,
+            store_thread,
+            &server_config,
+            token,
+            worktrees,
+            unfinished,
+        )
+    });
     store_jobs.run(store);
     server.join().expect("the server thread does not panic")
 }
@@ -125,6 +140,8 @@ fn run_server(
     store: StoreThread,
     config: &Config,
     token: ClientToken,
+    worktrees: Worktrees,
+    unfinished: Vec<KratosWorktree>,
 ) -> Result<(), StartError> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -152,7 +169,10 @@ fn run_server(
             scheduler,
             usage,
             token,
+            worktrees: Arc::new(worktrees),
         };
+        let (worktrees, sweep_store) = (state.worktrees.clone(), state.store.clone());
+        tokio::spawn(async move { worktrees.sweep(&sweep_store, unfinished).await });
         server::serve(listener, state.clone(), shutdown_signal()).await?;
         // The agents end before the store closes, so nothing they report goes unrecorded (L2).
         if let Ok(claude) = &state.providers.claude {
@@ -349,6 +369,8 @@ enum StartError {
     },
     #[error("cannot run the server: {0}")]
     Server(#[from] io::Error),
+    #[error("cannot make the folders Kratos's git commands use: {0}")]
+    Hooks(#[source] io::Error),
     #[error("cannot write the client token: {0}")]
     Token(#[source] io::Error),
     #[error("cannot read what the last engine left unfinished: {0}")]

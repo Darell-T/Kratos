@@ -2,12 +2,15 @@
 //! `allow(dead_code)`: each file uses a different part of it.
 
 mod agents;
+mod archive;
 mod caller_errors;
 mod claude_threads;
 mod codex_process;
 mod data_directory;
 mod event_stream;
+mod finished_work;
 mod mcp;
 mod running_engine;
 mod server;
 mod startup;
+mod thread_places;

@@ -93,6 +93,7 @@ fn create_threads(client: &Client) -> Result<Vec<Thread>, BenchError> {
                     .expect("the title is not blank"),
                 provider: Provider::Codex,
                 settings: None,
+                place: None,
             })
         })
         .collect::<Result<_, _>>()

@@ -24,7 +24,9 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   workspaces
   create-workspace <name> <path>
   threads <workspace-id>
+  worktrees <workspace-id>
   create-thread <workspace-id> <title> <provider> [--settings <settings-json>]
+                [--worktree new|<path>]
   post <thread-id> <text>
   send <thread-id> <text> [--message-id <id>] [--image <path>]... [--file <path>]...
   thread <thread-id>
@@ -34,6 +36,10 @@ usage: kratos-client [--url <url>] [--normalize] <command>
   discard <thread-id> <message-id>
   stop <thread-id>
   resume <thread-id>
+  archive <thread-id> [--files keep|discard]
+  diff <thread-id>
+  commit <thread-id> <message>
+  pull-request <thread-id> <title> [--body <text>]
   settings <thread-id> <settings-json>
   skills <thread-id>
   approve <approval-id> <decision>
@@ -50,6 +56,11 @@ usage: kratos-client [--url <url>] [--normalize] <command>
 create-thread's --settings sets a thread's model, permission, planMode, and reportFormat (a JSON
 Schema object the final reply must match), such as
 '{\"model\":\"claude-haiku-5-5\",\"permission\":\"askMe\",\"planMode\":false,\"contextLimitTokens\":null}'.
+Without --worktree the thread works in the project folder. --worktree new makes a worktree on a new
+branch named after the title, and --worktree <path> uses that existing worktree of the project.
+archive removes a worktree Kratos made once none of its threads is left. With --files discard it
+also deletes the changed, untracked, and ignored files a removal would lose; it keeps them by
+default.
 The engine is --url, else $KRATOS_URL, else http://127.0.0.1:4200. Requests carry the token the
 engine wrote to $KRATOS_HOME/client-token (default ~/.kratos/client-token), when there is one.
 --normalize replaces ids and times, so two engines' output compares with a plain diff.
@@ -98,13 +109,14 @@ struct Command {
 }
 
 #[rustfmt::skip]
-const COMMANDS: [Command; 26] = [
+const COMMANDS: [Command; 31] = [
     Command { name: "health", positional: 0, options: &[], run: health },
     Command { name: "workspaces", positional: 0, options: &[], run: workspaces },
     Command { name: "create-workspace", positional: 2, options: &[], run: create_workspace },
     Command { name: "threads", positional: 1, options: &[], run: threads },
+    Command { name: "worktrees", positional: 1, options: &[], run: worktrees },
     Command {
-        name: "create-thread", positional: 3, options: &["--settings"], run: create_thread,
+        name: "create-thread", positional: 3, options: &["--settings", "--worktree"], run: create_thread,
     },
     Command { name: "post", positional: 2, options: &[], run: post },
     Command {
@@ -117,6 +129,10 @@ const COMMANDS: [Command; 26] = [
     Command { name: "discard", positional: 2, options: &[], run: discard },
     Command { name: "stop", positional: 1, options: &[], run: stop },
     Command { name: "resume", positional: 1, options: &[], run: resume },
+    Command { name: "archive", positional: 1, options: &["--files"], run: archive },
+    Command { name: "diff", positional: 1, options: &[], run: diff },
+    Command { name: "commit", positional: 2, options: &[], run: commit },
+    Command { name: "pull-request", positional: 2, options: &["--body"], run: pull_request },
     Command { name: "settings", positional: 2, options: &[], run: settings },
     Command { name: "skills", positional: 1, options: &[], run: skills },
     Command { name: "approve", positional: 2, options: &[], run: approve },
@@ -283,11 +299,21 @@ fn threads(session: &mut Session, args: &Args) -> Result<(), Failure> {
     session.get(&routes::threads_in(&workspace_id))
 }
 
+fn worktrees(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let workspace_id = WorkspaceId::new(args.positional[0].clone());
+    session.get(&routes::workspace_worktrees(&workspace_id))
+}
+
 fn create_thread(session: &mut Session, args: &Args) -> Result<(), Failure> {
     let [workspace_id, title, provider] = [0, 1, 2].map(|index| &args.positional[index]);
     let mut body = json!({ "workspaceId": workspace_id, "title": title, "provider": provider });
     if let Some(settings) = args.option("--settings") {
         body["settings"] = json_argument(settings, "settings-json")?;
+    }
+    match args.option("--worktree") {
+        None => {}
+        Some("new") => body["place"] = json!({ "kind": "newWorktree" }),
+        Some(path) => body["place"] = json!({ "kind": "existingWorktree", "path": path }),
     }
     session.post(routes::THREADS, &body)
 }
@@ -362,6 +388,29 @@ fn stop(session: &mut Session, args: &Args) -> Result<(), Failure> {
 
 fn resume(session: &mut Session, args: &Args) -> Result<(), Failure> {
     session.post(&routes::thread_resume(&thread_id(args)), &json!({}))
+}
+
+fn archive(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let files = args.option("--files").unwrap_or("keep");
+    let body = json!({ "files": files });
+    session.post(&routes::thread_archive(&thread_id(args)), &body)
+}
+
+fn diff(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    session.get(&routes::thread_diff(&thread_id(args)))
+}
+
+fn commit(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let body = json!({ "message": args.positional[1] });
+    session.post(&routes::thread_commit(&thread_id(args)), &body)
+}
+
+fn pull_request(session: &mut Session, args: &Args) -> Result<(), Failure> {
+    let body = json!({
+        "title": args.positional[1],
+        "body": args.option("--body").unwrap_or_default(),
+    });
+    session.post(&routes::thread_pull_request(&thread_id(args)), &body)
 }
 
 fn settings(session: &mut Session, args: &Args) -> Result<(), Failure> {

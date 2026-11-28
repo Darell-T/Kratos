@@ -44,6 +44,29 @@ const FAKE_CODEX_CONTROL: &str = "fake-codex-control";
 /// Where the scripted fake Claude logs each process it starts.
 const FAKE_CLAUDE_LOG: &str = "fake-claude.log";
 
+/// Where the stand-in `gh` logs the arguments of each run.
+const FAKE_GH_LOG: &str = "fake-gh.log";
+
+/// A stand-in that waits at a folder until a test lets it go on.
+#[derive(Clone, Copy)]
+pub enum Gate {
+    /// `gh`, which answers once let go. Kratos holds the repository's lock while `gh` opens a
+    /// pull request, so holding it holds the lock too.
+    Gh,
+    /// The git an engine from [`RunningEngine::start_holding_git`] runs, which starts the real git
+    /// once let go.
+    Git,
+}
+
+impl Gate {
+    fn folder(self) -> &'static str {
+        match self {
+            Gate::Gh => "fake-gh-gate",
+            Gate::Git => "fake-git-gate",
+        }
+    }
+}
+
 impl RunningEngine {
     pub fn start(home: &Path) -> RunningEngine {
         RunningEngine::start_on(home, 0)
@@ -51,6 +74,28 @@ impl RunningEngine {
 
     pub fn start_on(home: &Path, port: u16) -> RunningEngine {
         Self::from_child(home, spawn(home, port))
+    }
+
+    /// Starts with a git that waits at [`Gate::Git`], once it is held, in the first run that has
+    /// `on` among its arguments, such as `status`.
+    pub fn start_holding_git(home: &Path, on: &str) -> RunningEngine {
+        let shim = home.join("fake-git");
+        std::fs::create_dir_all(&shim).unwrap();
+        let git = format!("git{}", std::env::consts::EXE_SUFFIX);
+        std::fs::copy(fake_agents::executable("fake-git"), shim.join(&git)).unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let real = std::env::split_paths(&path)
+            .map(|folder| folder.join(&git))
+            .find(|candidate| candidate.is_file())
+            .expect("git is on PATH");
+        let searched = std::iter::once(shim).chain(std::env::split_paths(&path));
+        let mut command = command(home, "0");
+        command
+            .env("PATH", std::env::join_paths(searched).unwrap())
+            .env("FAKE_GIT_REAL", real)
+            .env("FAKE_GIT_HOLD_ON", on)
+            .env("FAKE_GIT_GATE", home.join(Gate::Git.folder()));
+        Self::from_child(home, command.spawn().unwrap())
     }
 
     /// Starts with a scripted Claude that answers, so a Claude thread runs its messages.
@@ -75,6 +120,15 @@ impl RunningEngine {
     }
 
     /// The file where the scripted `fake-claude` logs each process the engine starts.
+    /// The arguments of each run of the stand-in `gh`, oldest first.
+    pub fn fake_gh_runs(&self) -> Vec<Vec<String>> {
+        std::fs::read_to_string(self.home.join(FAKE_GH_LOG))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
     pub fn fake_claude_log(&self) -> PathBuf {
         self.home.join(FAKE_CLAUDE_LOG)
     }
@@ -200,6 +254,15 @@ impl RunningEngine {
             .collect()
     }
 
+    /// Every `thread/start`, `thread/resume`, and `thread/unsubscribe` the fake Codexes got.
+    pub fn fake_codex_thread_requests(&self) -> Vec<serde_json::Value> {
+        self.every_fake_codex("test/threadRequests")
+            .into_iter()
+            .filter_map(|answer| answer["result"].as_array().cloned())
+            .flatten()
+            .collect()
+    }
+
     pub fn fake_codex_request(&self, request: ControlRequest) {
         self.fake_codex(request.method, request.params);
     }
@@ -271,12 +334,38 @@ impl RunningEngine {
             title: RequiredText::new("chat").unwrap(),
             provider,
             settings: None,
+            place: None,
         };
         self.client().create_thread(&request).unwrap()
     }
 
     pub fn home(&self) -> &Path {
         &self.home
+    }
+
+    /// Makes the stand-in wait at `gate` once it runs, until [`RunningEngine::release`].
+    pub fn hold(&self, gate: Gate) {
+        let folder = self.home.join(gate.folder());
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("hold"), "").unwrap();
+    }
+
+    /// Waits until a run of the stand-in waits at `gate`.
+    pub fn wait_until_held(&self, gate: Gate) {
+        let held = self.home.join(gate.folder()).join("held");
+        let deadline = Instant::now() + WAIT;
+        while !held.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "nothing waited at {}",
+                gate.folder()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    pub fn release(&self, gate: Gate) {
+        std::fs::write(self.home.join(gate.folder()).join("open"), "").unwrap();
     }
 
     pub fn client(&self) -> Client {
@@ -400,6 +489,9 @@ fn command(home: &Path, port: &str) -> Command {
         // It never finishes starting, so a Claude thread's log holds one `message.queued` event
         // per message and nothing a process would add. Tests of a working Claude remove this.
         .env("FAKE_CLAUDE_SILENT", "1")
+        .env("GH_EXE", fake_agents::executable("fake-gh"))
+        .env("FAKE_GH_LOG", home.join(FAKE_GH_LOG))
+        .env("FAKE_GH_GATE", home.join(Gate::Gh.folder()))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
@@ -506,7 +598,11 @@ fn console_helper_preparation_does_not_use_the_engine_startup_deadline() {
     engine.shutdown();
 }
 
-fn fake_codex_at(port: u16, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
+pub fn fake_codex_at(
+    port: u16,
+    method: &str,
+    params: serde_json::Value,
+) -> Option<serde_json::Value> {
     let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
     stream.set_read_timeout(Some(WAIT)).ok()?;
     let request = json!({ "id": 1, "method": method, "params": params });

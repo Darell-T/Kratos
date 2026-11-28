@@ -8,20 +8,23 @@ use kratos_protocol::{
     CreateThread, CreateWorkspace, Seq, Thread, ThreadEvent, ThreadEventBody, ThreadId, WorkspaceId,
 };
 use kratos_store::{
-    BackupId, DirectoryError, OpenError, RestoreError, SCHEMA_VERSION, Store, StoreError, restore,
+    BackupId, Checkout, DirectoryError, NewPlace, OpenError, Removal, RemovalEnd, RestoreError,
+    SCHEMA_VERSION, Store, StoreError, restore,
 };
 use rusqlite::Connection;
 use rusqlite::types::Value;
 use serde_json::json;
 use tempfile::TempDir;
 
-const STEPS: [&str; 6] = [
+const STEPS: [&str; 8] = [
     include_str!("../migrations/0001_workspaces_and_threads.sql"),
     include_str!("../migrations/0002_codex_threads.sql"),
     include_str!("../migrations/0003_claude_threads.sql"),
     include_str!("../migrations/0004_plan_mode.sql"),
     include_str!("../migrations/0005_thread_sandbox_and_usage.sql"),
     include_str!("../migrations/0006_messages_from_threads.sql"),
+    include_str!("../migrations/0007_report_format.sql"),
+    include_str!("../migrations/0008_thread_places.sql"),
 ];
 
 /// The last schema version the TypeScript engine wrote.
@@ -72,12 +75,17 @@ fn append(
     Ok(write.commit()?.pop().expect("the write appended one event"))
 }
 
-fn seed_thread(store: &Store, title: &str) -> Thread {
+fn seed_thread(store: &mut Store, title: &str) -> Thread {
     let workspace = store
         .create_workspace(&workspace_request("repo", "/tmp/repo"))
         .unwrap();
     store
-        .create_thread(&thread_request(&workspace.id, title, "codex"))
+        .create_thread(
+            &thread_request(&workspace.id, title, "codex"),
+            &NewPlace::ProjectFolder {
+                folder: workspace.path.clone(),
+            },
+        )
         .unwrap()
 }
 
@@ -222,9 +230,9 @@ fn numbers_events_per_thread_from_one() {
     // log.
     let home = home();
     let mut store = Store::open(home.path()).unwrap();
-    let first = seed_thread(&store, "first");
-    let second = seed_thread(&store, "second");
-    let quiet = seed_thread(&store, "quiet");
+    let first = seed_thread(&mut store, "first");
+    let second = seed_thread(&mut store, "second");
+    let quiet = seed_thread(&mut store, "quiet");
 
     let appended = [
         append(&mut store, &first.id, message("a")).unwrap().seq,
@@ -260,7 +268,7 @@ fn keeps_events_across_reopening() {
             store.backup_taken().is_none(),
             "a new database has nothing to back up"
         );
-        let thread = seed_thread(&store, "persisted");
+        let thread = seed_thread(&mut store, "persisted");
         append(&mut store, &thread.id, message("before restart")).unwrap();
         thread
     };
@@ -292,7 +300,7 @@ fn appending_sets_the_thread_updated_at_to_the_event_time() {
     // Catches an append that forgets the thread, which would sort the thread list wrongly.
     let home = home();
     let mut store = Store::open(home.path()).unwrap();
-    let thread = seed_thread(&store, "clock");
+    let thread = seed_thread(&mut store, "clock");
 
     thread::sleep(Duration::from_millis(10));
     let event = append(&mut store, &thread.id, message("tick")).unwrap();
@@ -325,7 +333,7 @@ fn refuses_events_for_an_unknown_thread_without_writing() {
 fn lists_only_a_workspace_own_threads_oldest_first() {
     // Catches a missing WHERE (another workspace's threads leak in) or a descending order.
     let home = home();
-    let store = Store::open(home.path()).unwrap();
+    let mut store = Store::open(home.path()).unwrap();
     let mine = store
         .create_workspace(&workspace_request("mine", "/tmp/mine"))
         .unwrap();
@@ -333,16 +341,36 @@ fn lists_only_a_workspace_own_threads_oldest_first() {
         .create_workspace(&workspace_request("other", "/tmp/other"))
         .unwrap();
     let a = store
-        .create_thread(&thread_request(&mine.id, "a", "claude"))
+        .create_thread(
+            &thread_request(&mine.id, "a", "claude"),
+            &NewPlace::ProjectFolder {
+                folder: mine.path.clone(),
+            },
+        )
         .unwrap();
     let b = store
-        .create_thread(&thread_request(&mine.id, "b", "codex"))
+        .create_thread(
+            &thread_request(&mine.id, "b", "codex"),
+            &NewPlace::ProjectFolder {
+                folder: mine.path.clone(),
+            },
+        )
         .unwrap();
     let elsewhere = store
-        .create_thread(&thread_request(&other.id, "elsewhere", "codex"))
+        .create_thread(
+            &thread_request(&other.id, "elsewhere", "codex"),
+            &NewPlace::ProjectFolder {
+                folder: other.path.clone(),
+            },
+        )
         .unwrap();
     let c = store
-        .create_thread(&thread_request(&mine.id, "c", "claude"))
+        .create_thread(
+            &thread_request(&mine.id, "c", "claude"),
+            &NewPlace::ProjectFolder {
+                folder: mine.path.clone(),
+            },
+        )
         .unwrap();
 
     assert_eq!(store.list_threads(&mine.id).unwrap(), [a, b, c]);
@@ -354,8 +382,8 @@ fn lists_only_a_workspace_own_threads_oldest_first() {
 fn refuses_a_thread_whose_stored_provider_it_does_not_know() {
     // Catches a provider name this build does not know read back as some provider it does.
     let home = home();
-    let store = Store::open(home.path()).unwrap();
-    let thread = seed_thread(&store, "from a later build");
+    let mut store = Store::open(home.path()).unwrap();
+    let thread = seed_thread(&mut store, "from a later build");
     let connection = Connection::open(live_database(home.path())).unwrap();
     connection
         .execute_batch("PRAGMA ignore_check_constraints = ON;")
@@ -380,14 +408,19 @@ fn reports_an_unknown_workspace_when_listing_or_creating_threads() {
     // Catches an empty list where the API must answer 404, and a thread created in a missing
     // workspace.
     let home = home();
-    let store = Store::open(home.path()).unwrap();
+    let mut store = Store::open(home.path()).unwrap();
     let unknown = WorkspaceId::new("nope".into());
 
     let listing = store.list_threads(&unknown).unwrap_err();
     assert!(matches!(&listing, StoreError::UnknownWorkspace(id) if *id == unknown));
     assert_eq!(listing.to_string(), "Unknown workspace nope");
     let creating = store
-        .create_thread(&thread_request(&unknown, "t", "codex"))
+        .create_thread(
+            &thread_request(&unknown, "t", "codex"),
+            &NewPlace::ProjectFolder {
+                folder: "/work/repo".into(),
+            },
+        )
         .unwrap_err();
     assert!(matches!(&creating, StoreError::UnknownWorkspace(id) if *id == unknown));
     assert!(rows_of(&contents(&live_database(home.path())), "threads").is_empty());
@@ -399,7 +432,7 @@ fn pages_events_by_size_and_always_moves_forward() {
     // budget.
     let home = home();
     let mut store = Store::open(home.path()).unwrap();
-    let thread = seed_thread(&store, "paged");
+    let thread = seed_thread(&mut store, "paged");
     // Each of these events is stored as `{"kind":"user.message","text":"xxxx…"}`: 133 bytes.
     let text = "x".repeat(100);
     for _ in 0..3 {
@@ -554,8 +587,10 @@ fn backs_up_each_older_version_before_migrating_it() {
                 Value::Null,
                 Value::Null,
                 Value::Null,
+                Value::Null,
+                Value::Null,
             ],
-            "a thread from before migration 5 gets the default settings, unpaused and idle, with              no report format"
+            "a thread from before migration 5 gets the default settings, unpaused and idle, with              no report format, in its project folder, and not archived"
         );
     }
 }
@@ -894,4 +929,164 @@ fn refuses_a_second_open_and_a_restore_while_the_directory_is_held() {
         matches!(after, RestoreError::UnknownBackup { .. }),
         "the lock was free, so restore got as far as the lookup: {after}"
     );
+}
+
+#[test]
+fn a_reserved_worktree_stays_reserved_until_a_thread_uses_it_or_git_never_made_it() {
+    // Catches a failed thread insert that drops the reservation, which would leave a worktree git
+    // made with no record of being Kratos's, or a released path that stays blocked.
+    let home = home();
+    let mut store = Store::open(home.path()).unwrap();
+    let workspace = store
+        .create_workspace(&workspace_request("repo", "/work/repo"))
+        .unwrap();
+    let checkout = Checkout {
+        path: "/work/repo/.kratos-worktrees/chat".into(),
+        repository: "/work/repo/.git".into(),
+        branch: Some("chat".into()),
+    };
+    let reserved = store.reserve_worktree(&checkout, "0000000").unwrap();
+    let unknown = WorkspaceId::new("gone".into());
+
+    let failed = store.create_thread(
+        &thread_request(&unknown, "chat", "codex"),
+        &NewPlace::Created(reserved.clone()),
+    );
+    assert!(matches!(failed, Err(StoreError::UnknownWorkspace(_))));
+    assert!(matches!(
+        store.reserve_worktree(&checkout, "0000000"),
+        Err(StoreError::WorktreeTaken(_))
+    ));
+
+    store
+        .create_thread(
+            &thread_request(&workspace.id, "chat", "codex"),
+            &NewPlace::Created(reserved.clone()),
+        )
+        .unwrap();
+    store.release_reservation(&reserved).unwrap();
+    assert!(
+        matches!(
+            store.reserve_worktree(&checkout, "0000000"),
+            Err(StoreError::WorktreeTaken(_))
+        ),
+        "a worktree a thread uses is no longer a reservation to release"
+    );
+
+    let other = Checkout {
+        path: "/work/repo/.kratos-worktrees/never-made".into(),
+        ..checkout
+    };
+    let never_made = store.reserve_worktree(&other, "0000000").unwrap();
+    store.release_reservation(&never_made).unwrap();
+    store.reserve_worktree(&other, "0000000").unwrap();
+}
+
+#[test]
+fn a_version_8_database_an_earlier_build_made_still_records_worktrees() {
+    // Catches a column added to step 8 after builds had run it: a database already at version 8
+    // never runs the step again, so every query of the new column fails there.
+    let home = home();
+    drop(Store::open(home.path()).unwrap());
+    let connection = Connection::open(live_database(home.path())).unwrap();
+    connection
+        .execute_batch(
+            "DROP TABLE worktrees;
+             CREATE TABLE worktrees (
+               id TEXT PRIMARY KEY,
+               path TEXT NOT NULL,
+               repository TEXT NOT NULL,
+               branch TEXT,
+               base TEXT,
+               ownership TEXT NOT NULL CHECK (ownership IN ('createdByKratos', 'borrowed')),
+               state TEXT NOT NULL CHECK (state IN ('creating', 'ready', 'removing', 'removed')),
+               created_at TEXT NOT NULL,
+               CHECK (ownership = 'createdByKratos' OR state = 'ready'),
+               CHECK (ownership = 'borrowed' OR (branch IS NOT NULL AND base IS NOT NULL))
+             );
+             CREATE UNIQUE INDEX worktrees_by_path ON worktrees (path) WHERE state != 'removed';",
+        )
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(home.path()).unwrap();
+    let workspace = store
+        .create_workspace(&workspace_request("repo", "/work/repo"))
+        .unwrap();
+    let checkout = Checkout {
+        path: "/work/repo/.kratos-worktrees/chat".into(),
+        repository: "/work/repo/.git".into(),
+        branch: Some("chat".into()),
+    };
+
+    let id = store.reserve_worktree(&checkout, "0000000").unwrap();
+    store
+        .create_thread(
+            &thread_request(&workspace.id, "chat", "codex"),
+            &NewPlace::Created(id.clone()),
+        )
+        .unwrap();
+
+    let ours = store.kratos_worktrees().unwrap();
+    assert_eq!(ours.len(), 1);
+    assert_eq!(ours[0].id, id);
+    assert!(store.unfinished_worktrees().unwrap().is_empty());
+}
+
+#[test]
+fn a_worktree_is_removed_only_once_every_thread_in_it_is_archived_and_no_thread_joins_meanwhile() {
+    // Catches a removal that starts while a thread still works in the worktree, a thread that
+    // joins a worktree being removed, or a removed worktree whose path stays blocked.
+    let home = home();
+    let mut store = Store::open(home.path()).unwrap();
+    let workspace = store
+        .create_workspace(&workspace_request("repo", "/work/repo"))
+        .unwrap();
+    let checkout = Checkout {
+        path: "/work/repo/.kratos-worktrees/chat".into(),
+        repository: "/work/repo/.git".into(),
+        branch: Some("chat".into()),
+    };
+    let id = store.reserve_worktree(&checkout, "0000000").unwrap();
+    let thread = store
+        .create_thread(
+            &thread_request(&workspace.id, "chat", "codex"),
+            &NewPlace::Created(id.clone()),
+        )
+        .unwrap();
+
+    assert_eq!(store.begin_removal(&id).unwrap(), Removal::InUse);
+    let mut write = store.write_thread(&thread.id).unwrap();
+    write.archive().unwrap();
+    write.commit().unwrap();
+    let started = Removal::Started {
+        repository: checkout.repository.clone(),
+    };
+    assert_eq!(store.begin_removal(&id).unwrap(), started);
+    let joining = store.create_thread(
+        &thread_request(&workspace.id, "late", "codex"),
+        &NewPlace::Borrowed(checkout.clone()),
+    );
+    assert!(
+        matches!(joining, Err(StoreError::WorktreeTaken(_))),
+        "{joining:?}"
+    );
+    let inside = store.create_thread(
+        &thread_request(&workspace.id, "inside", "codex"),
+        &NewPlace::ProjectFolder {
+            folder: "/work/repo/.kratos-worktrees/chat/src".into(),
+        },
+    );
+    assert!(
+        matches!(inside, Err(StoreError::InsideRemoval(_))),
+        "{inside:?}"
+    );
+    assert_eq!(
+        store.begin_removal(&id).unwrap(),
+        started,
+        "a removal git refused starts again"
+    );
+
+    store.end_removal(&id, RemovalEnd::Removed).unwrap();
+    assert_eq!(store.begin_removal(&id).unwrap(), Removal::Done);
+    store.reserve_worktree(&checkout, "0000000").unwrap();
 }
