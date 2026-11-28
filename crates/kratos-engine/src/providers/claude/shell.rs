@@ -102,6 +102,33 @@ mod tests {
     }
 
     #[test]
+    fn valid_powershell_and_bash_syntax_is_not_flagged_by_posix_shlex() {
+        // Catches POSIX `shlex::split` misparsing valid PowerShell paths, backtick escapes, block
+        // comments, and Bash comments with apostrophes as syntax errors while still flagging real
+        // unterminated quotes.
+        for (shell, text, expected) in [
+            (Shell::PowerShell, r"Get-ChildItem C:\", false),
+            (Shell::PowerShell, r#"Write-Output "a`"b""#, false),
+            (Shell::PowerShell, "<# don't #> Get-ChildItem", false),
+            (Shell::PowerShell, "git log --format=oneline", false),
+            (Shell::Bash, "echo ok # don't", false),
+            (Shell::Bash, "echo 'unterminated", true),
+            (Shell::PowerShell, "Write-Output 'unterminated", true),
+            (
+                Shell::PowerShell,
+                r"Write-Output `'; Remove-Item -Recurse -Force .\src",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                flagged(shell, text),
+                Action::Command { flagged: expected },
+                "{shell:?} {text}"
+            );
+        }
+    }
+
+    #[test]
     fn a_request_without_readable_command_text_is_invalid() {
         for input in [
             json!({}),
