@@ -1,6 +1,7 @@
 use kratos_claude_client::CanUseTool;
 use kratos_command_safety::{
-    DangerousCommandPlatform, dangerous_command, reads_commands_from_input, split_command_text,
+    DangerousCommandPlatform, dangerous_command, has_bash_syntax_error,
+    has_powershell_syntax_error, reads_commands_from_input,
 };
 use kratos_protocol::{ApprovalRequest, ExtraAccess};
 use serde_json::Value;
@@ -39,11 +40,18 @@ impl Shell {
         }
     }
 
+    fn has_syntax_error(self, text: &str) -> bool {
+        match self {
+            Self::Bash => has_bash_syntax_error(text),
+            Self::PowerShell => has_powershell_syntax_error(text),
+        }
+    }
+
     fn flags(self, text: &str) -> bool {
         let (words, platform) = self.words(text);
         dangerous_command(&words, platform).is_some()
             || reads_commands_from_input(&words)
-            || split_command_text(text).is_none()
+            || self.has_syntax_error(text)
     }
 }
 

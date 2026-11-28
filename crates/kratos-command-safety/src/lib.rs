@@ -60,6 +60,26 @@ pub fn split_command_text(text: &str) -> Option<Vec<String>> {
     shlex::split(text)
 }
 
+/// Whether `script` fails to parse cleanly as Bash syntax.
+pub fn has_bash_syntax_error(script: &str) -> bool {
+    bash::try_parse_shell(script).is_none_or(|tree| tree.root_node().has_error())
+}
+
+/// Whether `script` fails to parse cleanly as PowerShell syntax.
+pub fn has_powershell_syntax_error(script: &str) -> bool {
+    if powershell::parse_powershell_script_into_plain_commands(script).is_some() {
+        return false;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    let language = tree_sitter_powershell::LANGUAGE.into();
+    parser
+        .set_language(&language)
+        .expect("load powershell grammar");
+    parser
+        .parse(script, None)
+        .is_none_or(|tree| tree.root_node().has_error())
+}
+
 /// Whether `command` starts a shell or an interpreter that reads commands from its input, such as
 /// a bare `bash` or `python`. Text an agent later types into that process never reaches Kratos, so
 /// Kratos cannot check those commands. A `bash -lc` script or a PowerShell `-Command` body is
