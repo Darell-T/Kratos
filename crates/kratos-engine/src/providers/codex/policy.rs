@@ -9,7 +9,9 @@ use kratos_codex_client::types;
 use kratos_command_safety::{
     DangerousCommandPlatform, dangerous_command, reads_commands_from_input, split_command_text,
 };
-use kratos_protocol::{AskReason, FileChange, FileChangeKind, Permission, ThreadSettings};
+use kratos_protocol::{
+    AskReason, ExtraAccess, FileChange, FileChangeKind, Permission, ThreadSettings,
+};
 
 use super::profiles::{Profile, ProtectedFolders};
 use crate::providers::writes::{self, Destination};
@@ -102,6 +104,16 @@ pub fn decide_patch(
         return Verdict::Ask(AskReason::Escalation);
     }
     Verdict::Accept
+}
+
+pub(super) fn decide_permissions(settings: &ThreadSettings, access: &ExtraAccess) -> Verdict {
+    if Profile::for_settings(settings) != Profile::FullAccess
+        && !access.paths.is_empty()
+        && access.network.is_none()
+    {
+        return Verdict::Decline;
+    }
+    Verdict::Ask(AskReason::Escalation)
 }
 
 /// Every sandboxed profile denies Kratos's data folder, so the agent cannot read the client token.

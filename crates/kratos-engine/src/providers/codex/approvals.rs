@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use kratos_codex_client::{IncomingRequest, RequestId, ServerRequest, ServerResponse, types};
 use kratos_protocol::{
     AccessLimit, Approval, ApprovalDecision, ApprovalId, ApprovalOutcome, ApprovalRequest,
-    AskReason, QuestionId, QuestionOutcome, ThreadId, TurnId,
+    QuestionId, QuestionOutcome, ThreadId, TurnId,
 };
 use kratos_store::{Settle, StoreError, ThreadWrite};
 use uuid::Uuid;
@@ -163,13 +163,14 @@ impl Actor {
         };
         match &request.request {
             ServerRequest::CommandApproval(params) => {
+                let access = wire::command_access(params);
                 let verdict = {
                     let thread = &self.threads[&thread_id];
                     let ask = CommandRequest {
                         command: params.command.as_deref(),
                         reason: params.reason.as_deref(),
-                        wants_more_permissions: params.additional_permissions.is_some(),
-                        wants_network: params.network_approval_context.is_some(),
+                        wants_more_permissions: !access.paths.is_empty(),
+                        wants_network: access.network.is_some(),
                     };
                     policy::decide_command(thread.turn_settings(), &ask, self.settings.platform)
                 };
@@ -177,7 +178,7 @@ impl Actor {
                     command: params.command.clone().unwrap_or_default(),
                     cwd: params.cwd.as_ref().map(|cwd| cwd.0.clone()),
                     reason: params.reason.clone(),
-                    access: wire::command_access(params),
+                    access,
                 };
                 let turn_id = TurnId::new(params.turn_id.clone());
                 self.settle_or_ask(
@@ -216,15 +217,17 @@ impl Actor {
                 .await;
             }
             ServerRequest::Permissions(params) => {
+                let access = wire::permissions_access(&params.permissions);
+                let verdict =
+                    policy::decide_permissions(self.threads[&thread_id].turn_settings(), &access);
                 let shown = ApprovalRequest::Permissions {
                     reason: params.reason.clone(),
-                    access: wire::permissions_access(&params.permissions),
+                    access,
                 };
                 let (turn_id, requested) = (
                     TurnId::new(params.turn_id.clone()),
                     params.permissions.clone(),
                 );
-                let verdict = Verdict::Ask(AskReason::Escalation);
                 self.settle_or_ask(
                     thread_id,
                     turn_id,
