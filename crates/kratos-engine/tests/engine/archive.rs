@@ -334,6 +334,76 @@ fn a_thread_cannot_start_in_a_worktree_an_archive_is_removing() {
 }
 
 #[test]
+fn concurrent_archives_of_the_same_worktree_serialize_and_record_removed() {
+    // Catches two concurrent `remove_worktree` calls both passing `begin_removal`, letting Keep
+    // reset DB state to `ready` before Discard deletes the folder and `end_removal(Removed)`
+    // updates zero rows.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    let remote = root.path().join("remote.git");
+    let remote_text = remote.to_str().unwrap();
+    git(
+        root.path(),
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            remote_text,
+        ],
+    );
+    git(&repository, &["remote", "add", "origin", remote_text]);
+    git(&repository, &["push", "--quiet", "origin", "main"]);
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let owner = create(&client, &workspace, "owner", PlaceRequest::NewWorktree);
+    let path = worktree_of(&client, &owner).path;
+    std::fs::write(Path::new(&path).join("keep.txt"), "untracked\n").unwrap();
+    let reviewed = create(&client, &workspace, "reviewed", PlaceRequest::NewWorktree);
+    engine.hold(Gate::Gh);
+    let pull_request = {
+        let (client, reviewed) = (client.clone(), reviewed.clone());
+        std::thread::spawn(move || {
+            let request = CreatePullRequest {
+                title: RequiredText::new("Review").unwrap(),
+                body: String::new(),
+            };
+            let route = routes::thread_pull_request(&reviewed.id);
+            client.post(&route, &request).unwrap().status
+        })
+    };
+    engine.wait_until_held(Gate::Gh);
+    let keep = {
+        let (client, owner) = (client.clone(), owner.clone());
+        std::thread::spawn(move || archive(&client, &owner, LeftFiles::Keep))
+    };
+    wait_for_worktree_state(&engine, &path, "removing");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let discard = {
+        let (client, owner) = (client.clone(), owner.clone());
+        std::thread::spawn(move || archive(&client, &owner, LeftFiles::Discard))
+    };
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    engine.release(Gate::Gh);
+
+    assert_eq!(pull_request.join().unwrap(), 201);
+    let kept = keep.join().unwrap();
+    assert!(matches!(kept, Cleanup::Kept { .. }), "{kept:?}");
+    assert_eq!(discard.join().unwrap(), Cleanup::Removed);
+    assert!(!Path::new(&path).exists());
+    let database = rusqlite::Connection::open(engine.home().join("kratos.db")).unwrap();
+    let state: String = database
+        .query_row(
+            "SELECT state FROM worktrees WHERE path = ?1",
+            [&path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "removed");
+}
+
+#[test]
 fn a_worktree_stays_while_a_thread_works_in_a_worktree_made_inside_it() {
     // Catches a removal that counts only project threads inside the worktree, and so deletes a
     // worktree made from a project opened there along with it.
