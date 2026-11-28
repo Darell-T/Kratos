@@ -186,7 +186,7 @@ fn toml_key(path: &Path) -> String {
     key
 }
 
-fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn resolve_destination(path: &Path) -> io::Result<PathBuf> {
     #[cfg(windows)]
     if let Some(Component::Prefix(prefix)) = path.components().next()
         && matches!(
