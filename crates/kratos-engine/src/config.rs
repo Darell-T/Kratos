@@ -19,6 +19,8 @@ pub struct Config {
     pub user_home: Option<PathBuf>,
     pub codex_exe: Option<OsString>,
     pub claude_exe: Option<OsString>,
+    /// The GitHub CLI that opens pull requests. `GH_EXE`, else `gh` found on `PATH`.
+    pub gh_exe: OsString,
     pub path: Option<OsString>,
     /// Codex's data folder: `CODEX_HOME`, else `.codex` in the user's home folder, made absolute.
     pub codex_home: Option<PathBuf>,
@@ -49,6 +51,7 @@ impl Config {
             port,
             codex_exe: std::env::var_os("CODEX_EXE"),
             claude_exe: std::env::var_os("CLAUDE_EXE"),
+            gh_exe: non_empty_var("GH_EXE").unwrap_or_else(|| "gh".into()),
             path: std::env::var_os("PATH"),
             codex_home: non_empty_var("CODEX_HOME")
                 .map(PathBuf::from)

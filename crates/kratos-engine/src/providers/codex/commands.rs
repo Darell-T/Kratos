@@ -2,6 +2,7 @@
 //! and the two commands that only pass a request through to Codex, listing skills and running a
 //! command, are served here.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use kratos_codex_client::{Codex, methods, types};
@@ -9,7 +10,7 @@ use kratos_protocol::{CommandResult, Skill, ThreadId};
 use serde_json::json;
 
 use super::actor::{Actor, Command, Reply};
-use super::profiles::Profile;
+use super::profiles::{NpmCache, Profile};
 use super::servers::ServerKey;
 use super::{ProviderError, wire};
 
@@ -117,6 +118,10 @@ impl Actor {
                 let _ = reply.send(continued);
                 self.dispatch(&thread_id).await;
             }
+            Command::RunsBackgroundWork { thread_id, reply } => {
+                self.runs_background_work(&thread_id, reply);
+            }
+            Command::Close { thread_id, reply } => self.close_archived(&thread_id, reply),
             Command::Shutdown { reply } => drop(reply.send(())),
         }
     }
@@ -180,7 +185,7 @@ impl Actor {
             }
         };
         let thread = &self.threads[&thread_id];
-        let profile = Profile::for_settings(&thread.settings).id().to_owned();
+        let profile = Profile::for_settings(&thread.settings);
         let folder = thread.folder.clone();
         let pending_request = self.servers.request_guard(&key);
         tokio::spawn(async move {
@@ -230,13 +235,19 @@ async fn exec(
     codex: &Codex,
     command: Vec<String>,
     folder: String,
-    profile: String,
+    profile: Profile,
     timeout: Duration,
     process_id: &str,
 ) -> CommandResult {
     let mut params: types::CommandExecParams = wire::required(json!({ "command": command }));
     params.cwd = Some(folder);
-    params.permission_profile = Some(profile);
+    params.permission_profile = Some(profile.id().to_owned());
+    if let Some(cache) = NpmCache::for_profile(profile).path() {
+        params.env = Some(HashMap::from([(
+            "npm_config_cache".to_owned(),
+            Some(cache.to_string_lossy().into_owned()),
+        )]));
+    }
     params.process_id = Some(process_id.to_owned());
     params.timeout_ms = Some(i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX));
     // The runner's own deadline answers first; this one only bounds a Codex that never answers.

@@ -200,6 +200,7 @@ fn create_thread(call: &Call, arguments: Value) -> Answer {
             title: request.title,
             provider: Provider::Codex,
             settings: Some(settings),
+            place: None,
         },
     )
 }

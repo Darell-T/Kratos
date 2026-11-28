@@ -39,6 +39,7 @@ mod cli;
 mod context_limit;
 mod events;
 mod messages;
+mod places;
 mod report_format;
 pub mod routes;
 mod skills;
@@ -64,6 +65,10 @@ pub use events::{PauseReason, Seq, ThreadEvent, ThreadEventBody, TurnOrigin};
 pub use messages::{
     MAX_MESSAGE_ID_CHARS, Message, MessageId, MessageInput, MessageOrigin, MessageStatus,
     PostMessage, QueueFull, SendMessage,
+};
+pub use places::{
+    ArchiveThread, ArchivedThread, Cleanup, CommitThread, Committed, CreatePullRequest, LeftFiles,
+    Ownership, Place, PlaceRequest, ProjectWorktree, PullRequest, ThreadDiff, Worktree, WorktreeId,
 };
 pub use report_format::{ReportFormat, ReportFormatError};
 pub use skills::{Skill, SlashCommand, ThreadSkills};

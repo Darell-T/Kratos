@@ -1,5 +1,6 @@
 use kratos_protocol::{
     ApprovalId, ContinuationId, MessageId, MessageStatus, QuestionId, Seq, ThreadId, WorkspaceId,
+    WorktreeId,
 };
 use kratos_store::{Refusal, StoreError};
 
@@ -46,6 +47,25 @@ fn each_store_error_has_one_request_refusal_classification() {
         ),
         (
             StoreError::MessageIdTaken(MessageId::new("m".into())),
+            Some(Refusal::Conflict),
+        ),
+        (
+            StoreError::UnknownWorktree(WorktreeId::new("w".into())),
+            Some(Refusal::Unknown),
+        ),
+        (
+            StoreError::WorktreeTaken("/work/repo".into()),
+            Some(Refusal::Conflict),
+        ),
+        (
+            StoreError::ThreadArchived(ThreadId::new("t".into())),
+            Some(Refusal::Conflict),
+        ),
+        (
+            StoreError::ArchiveRefused {
+                thread_id: ThreadId::new("t".into()),
+                why: "a turn runs",
+            },
             Some(Refusal::Conflict),
         ),
         (

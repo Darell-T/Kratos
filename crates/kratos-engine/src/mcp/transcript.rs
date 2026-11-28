@@ -28,6 +28,7 @@ pub(super) fn line(event: &ThreadEventBody) -> Option<String> {
             Some(format!("waiting for an answer to question {}", question.id))
         }
         ThreadEventBody::ThreadPaused { reason } => Some(format!("paused: {}", pause_text(reason))),
+        ThreadEventBody::ThreadArchived => Some("archived".to_owned()),
         ThreadEventBody::MessageStatusChanged { .. }
         | ThreadEventBody::TurnStarted { .. }
         | ThreadEventBody::ApprovalDecided { .. }

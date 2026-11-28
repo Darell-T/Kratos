@@ -235,3 +235,186 @@ async fn plan_mode_real_codex_sandbox_refuses_a_write_after_a_successful_read() 
     );
     harness.stop().await;
 }
+
+#[cfg(windows)]
+const WRITES: [&str; 2] = [
+    "Set-Content -LiteralPath control.txt -Value KRATOS_WORKSPACE_WRITE",
+    "Set-Content -LiteralPath .git/hooks/pre-commit -Value planted",
+];
+#[cfg(not(windows))]
+const WRITES: [&str; 2] = [
+    "echo KRATOS_WORKSPACE_WRITE > control.txt",
+    "echo planted > .git/hooks/pre-commit",
+];
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
+async fn a_sandboxed_command_cannot_plant_a_git_hook() {
+    // Catches a sandbox profile that leaves `.git` writable, as Codex's own workspace profile does
+    // not: a hook planted there runs outside every sandbox at the user's next commit.
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::command(WRITES[0]),
+            Reply::command(WRITES[1]),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    let folder = harness.folder();
+    let initialized = std::process::Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&folder)
+        .status()
+        .unwrap();
+    assert!(initialized.success());
+    let hook = folder.join(".git").join("hooks").join("pre-commit");
+    harness.send("plant-a-hook");
+    loop {
+        match harness.next_event().await {
+            ThreadEventBody::ApprovalRequested { approval } => {
+                let declined = harness
+                    .client
+                    .post(
+                        &format!("/api/approvals/{}", approval.id),
+                        &json!({ "decision": "decline" }),
+                    )
+                    .unwrap();
+                assert_eq!(declined.status, 200, "{:?}", declined.body);
+            }
+            ThreadEventBody::ThreadPaused { reason } => panic!("real Codex paused: {reason:?}"),
+            ThreadEventBody::TurnCompleted { .. } => break,
+            _ => {}
+        }
+    }
+
+    let control = std::fs::read_to_string(folder.join("control.txt")).unwrap_or_default();
+    assert!(
+        control.contains("KRATOS_WORKSPACE_WRITE"),
+        "the workspace write control did not run: {:?}",
+        harness.model.tool_outputs()
+    );
+    assert!(
+        !hook.exists(),
+        "a sandboxed command planted a git hook: {:?}",
+        harness.model.tool_outputs()
+    );
+    let refused = harness
+        .model
+        .tool_outputs()
+        .iter()
+        .find(|output| output["call_id"] == "call-2")
+        .unwrap()
+        .to_string()
+        .to_lowercase();
+    assert!(
+        refused.contains("read-only") || refused.contains("denied"),
+        "the hook write must fail on the sandbox's refusal: {refused}"
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1, npm, the npm registry, and a provisioned Windows sandbox home; CI runs it"]
+async fn npm_install_works_in_a_sandboxed_thread() {
+    // Catches npm writing its default cache, which sits outside every folder the sandbox lets a
+    // thread write, so every install below Full access fails.
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::command("npm install --no-audit --no-fund --no-package-lock is-number@7.0.0"),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    let installed = harness
+        .folder()
+        .join("node_modules")
+        .join("is-number")
+        .join("package.json");
+    harness.send("npm-install");
+    loop {
+        match harness.next_event().await {
+            ThreadEventBody::ApprovalRequested { approval } => {
+                panic!("a plain install asked for approval: {approval:?}")
+            }
+            ThreadEventBody::ThreadPaused { reason } => panic!("real Codex paused: {reason:?}"),
+            ThreadEventBody::TurnCompleted { .. } => break,
+            _ => {}
+        }
+    }
+
+    assert!(
+        installed.exists(),
+        "npm install failed in the sandbox: {:?}",
+        harness.model.tool_outputs()
+    );
+    harness.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires pinned Codex 0.159.1 and a provisioned Windows sandbox home; CI runs it"]
+async fn a_request_to_leave_the_sandbox_is_declined_without_asking() {
+    // Catches asking the user a question whose yes changes nothing. Measured on Codex 0.159.1:
+    // an accepted request still ran in the sandbox, because the profile denies Kratos's folder,
+    // and the write failed with a read-only file system error.
+    let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    std::fs::create_dir_all(&target).unwrap();
+    let outside = tempfile::Builder::new()
+        .prefix("escalation-")
+        .tempdir_in(target)
+        .unwrap();
+    let written = std::fs::canonicalize(outside.path())
+        .unwrap()
+        .join("escalated.txt");
+    let command = if cfg!(windows) {
+        format!(
+            "Set-Content -LiteralPath '{}' -Value escalated",
+            written.display()
+        )
+    } else {
+        format!("echo escalated > '{}'", written.display())
+    };
+    let mut harness = Harness::start(
+        ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        vec![
+            Reply::EscalatedCommand(command),
+            Reply::Text("Done.".into()),
+        ],
+    )
+    .await;
+    harness.send("escalate");
+    loop {
+        match harness.next_event().await {
+            ThreadEventBody::ApprovalRequested { approval } => {
+                panic!("Kratos asked about a request Codex cannot grant: {approval:?}")
+            }
+            ThreadEventBody::ThreadPaused { reason } => panic!("real Codex paused: {reason:?}"),
+            ThreadEventBody::TurnCompleted { .. } => break,
+            _ => {}
+        }
+    }
+
+    let outputs = harness.model.tool_outputs();
+    assert!(!written.exists(), "the declined command wrote: {outputs:?}");
+    let answer = outputs
+        .iter()
+        .find(|output| output["call_id"] == "call-1")
+        .unwrap()
+        .to_string()
+        .to_lowercase();
+    assert!(
+        answer.contains("reject") || answer.contains("declin") || answer.contains("denied"),
+        "the agent must learn its request was refused: {answer}"
+    );
+    harness.stop().await;
+}

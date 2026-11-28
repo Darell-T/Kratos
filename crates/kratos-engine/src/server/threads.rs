@@ -1,14 +1,18 @@
 //! The thread records: the list, a new thread, a thread's details, and its event pages. The routes
 //! that drive a thread's agent are in `agents`.
 
+use std::path::Path as FilePath;
+
 use axum::body::Body;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use kratos_protocol::{
-    ACTING_THREAD_HEADER, AccessLimit, CreateThread, ListEvents, ListThreads, Seq, ThreadId,
+    ACTING_THREAD_HEADER, AccessLimit, ArchiveThread, ArchivedThread, CreateThread, ListEvents,
+    ListThreads, Seq, ThreadId,
 };
+use kratos_store::NewPlace;
 
 use super::acting::Acting;
 use super::json::read_json;
@@ -32,14 +36,15 @@ pub(super) async fn list_threads(
 
 /// `POST /api/threads`: 201 with the thread. Body (413 or 400), then the acting thread's access
 /// (400 or 403), then the settings the thread's provider supports (400), then the workspace (404),
-/// then the insert.
+/// then the place, which git checks and may make (400 or 500), then the insert.
 pub(super) async fn create_thread(
     State(state): State<ServerState>,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
     let request: CreateThread = read_json(body).await?;
-    if let Some(acting) = Acting::of(&state, &headers).await? {
+    let acting = Acting::of(&state, &headers).await?;
+    if let Some(acting) = &acting {
         acting.check_workspace_access(&request.workspace_id)?;
         acting.may_create(&request.settings_or_default())?;
     }
@@ -47,11 +52,75 @@ pub(super) async fn create_thread(
         let agent = state.agent_of(request.provider)?;
         agent.check_settings(settings.clone()).await?;
     }
+    let place = prepare_place(&state, &request, acting.as_ref()).await?;
+    // A worktree made for a thread whose insert then fails stays reserved, and the next start's
+    // sweep removes it.
     let thread = state
         .store
-        .call(move |store| store.create_thread(&request))
+        .call(move |store| store.create_thread(&request, &place))
         .await?;
     Ok(json_reply(StatusCode::CREATED, &thread))
+}
+
+/// The request's place, checked against git in its workspace's folder, and made when it is new.
+async fn prepare_place(
+    state: &ServerState,
+    request: &CreateThread,
+    acting: Option<&Acting>,
+) -> Result<NewPlace, ApiError> {
+    let place = match acting {
+        Some(acting) => acting.place_for(&request.workspace_id, request.place.clone())?,
+        None => request.place.clone().unwrap_or_default(),
+    };
+    let workspace_id = request.workspace_id.clone();
+    let workspace = state
+        .store
+        .call(move |store| store.workspace(&workspace_id))
+        .await?;
+    let project = FilePath::new(&workspace.path);
+    let title = request.title.as_str();
+    Ok(state
+        .worktrees
+        .prepare(&state.store, project, &place, title)
+        .await?)
+}
+
+/// `POST /api/threads/{id}/archive`: 200 with what happened to the thread's folder, once the
+/// thread is archived and its process has exited. 409 while the thread runs anything, a turn or a
+/// background command, or anything waits in it. Archiving an archived thread tries its
+/// worktree's removal again.
+pub(super) async fn archive_thread(
+    State(state): State<ServerState>,
+    id: ThreadPath,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let thread_id = path(id)?;
+    let ArchiveThread { files } = read_json(body).await?;
+    let lookup = thread_id.clone();
+    let stored = state
+        .store
+        .call(move |store| store.provider_thread(&lookup))
+        .await?;
+    // A provider that cannot run has no process, so nothing of the thread's runs. Nor does an
+    // archived thread's, whose process was ended.
+    let agent = state.providers.agent(stored.thread.provider).ok();
+    if let Some(agent) = &agent {
+        agent.refuse_while_running(thread_id.clone()).await?;
+    }
+    // A background command starts only in a turn, which this write refuses.
+    let thread = state
+        .hub
+        .write(thread_id.clone(), |write| write.archive())
+        .await?
+        .value;
+    if let Some(agent) = &agent {
+        agent.close_archived(thread_id).await?;
+    }
+    let cleanup = state
+        .worktrees
+        .clean_up(&state.store, &thread.place, files)
+        .await?;
+    Ok(json_reply(StatusCode::OK, &ArchivedThread { cleanup }))
 }
 
 /// `GET /api/threads/{id}`: 200 with the thread, its settings, its queue, and what waits on the

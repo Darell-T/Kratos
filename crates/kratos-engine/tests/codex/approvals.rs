@@ -525,3 +525,44 @@ async fn a_request_for_a_thread_kratos_does_not_run_is_refused() {
     let answers = harness.answered(1).await;
     assert_eq!(answers[0]["result"], json!({ "decision": "cancel" }));
 }
+
+#[tokio::test]
+async fn a_sandboxed_command_requesting_only_network_access_reaches_the_user() {
+    // Catches `additionalPermissions` with only `network: { enabled: true }` being treated as a
+    // filesystem escalation without network and declined under a sandboxed profile.
+    let mut harness = Harness::start(with_permission(Permission::ApproveForMe)).await;
+    harness.running_turn("a", "turn-1").await;
+    let mut params = command("item-1", "cargo fetch");
+    params["additionalPermissions"] = json!({ "network": { "enabled": true } });
+
+    harness.ask("ask-1", COMMAND, params).await;
+
+    let approval = requested(&mut harness).await;
+    assert_eq!(approval.why, AskReason::Escalation);
+    assert!(
+        harness.answers().await.is_empty(),
+        "Codex waits for the user"
+    );
+}
+
+#[tokio::test]
+async fn a_sandboxed_permissions_request_for_filesystem_only_is_declined_without_asking() {
+    // Catches `item/permissions/requestApproval` asking the user for filesystem-only widening on a
+    // sandboxed thread whose deny-profile sandbox cannot honor it.
+    let mut harness = Harness::start(with_permission(Permission::ApproveForMe)).await;
+    harness.running_turn("a", "turn-1").await;
+    let wanted = json!({ "fileSystem": { "write": ["/tmp/outside"] } });
+
+    harness
+        .ask(
+            "ask-1",
+            "item/permissions/requestApproval",
+            json!({ "threadId": THREAD, "turnId": "turn-1", "itemId": "item-1", "startedAtMs": 0,
+                    "cwd": "/work", "permissions": wanted, "reason": "write outside workspace" }),
+        )
+        .await;
+
+    let answers = harness.answered(1).await;
+    assert_eq!(answers[0]["result"]["permissions"], json!({}));
+    assert!(harness.details().await.approvals.is_empty());
+}

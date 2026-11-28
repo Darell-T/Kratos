@@ -73,3 +73,50 @@ async fn a_command_runs_in_the_thread_s_folder_under_its_permission_s_sandbox() 
         }
     );
 }
+
+#[tokio::test]
+async fn a_command_sets_the_sandbox_npm_cache_only_for_writable_sandboxes() {
+    // Catches `command/exec` handing `%TEMP%/kratos-npm-cache` to a Full access command, or
+    // failing to pass it to a sandboxed command after removing the process-wide override.
+    let sandbox_cache = std::env::temp_dir()
+        .join("kratos-npm-cache")
+        .to_string_lossy()
+        .into_owned();
+    for (permission, expects_cache) in [
+        (Permission::ApproveForMe, true),
+        (Permission::FullAccess, false),
+    ] {
+        let mut harness = Harness::start(Options {
+            settings: ThreadSettings {
+                permission,
+                ..ThreadSettings::default()
+            },
+            ..Options::default()
+        })
+        .await;
+        let provider = harness.provider.clone();
+        let thread_id = harness.thread_id.clone();
+        let run = tokio::spawn(async move {
+            provider
+                .run_command(thread_id, vec!["npm".into()], Duration::from_secs(30))
+                .await
+        });
+        let exec = &harness.held("command/exec", 1).await[0]["params"];
+        if expects_cache {
+            assert_eq!(exec["env"]["npm_config_cache"], json!(sandbox_cache));
+        } else {
+            assert!(
+                exec["env"]["npm_config_cache"].is_null(),
+                "Full access command must not read temp npm cache: {exec}"
+            );
+        }
+        harness
+            .settle(
+                "command/exec",
+                json!({ "exitCode": 0, "stdout": "", "stderr": "" }),
+            )
+            .await;
+        run.await.unwrap().unwrap();
+        harness.stop().await;
+    }
+}

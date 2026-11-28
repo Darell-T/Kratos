@@ -5,7 +5,7 @@ use crate::OpenError;
 /// The schema steps, oldest first. Step `n` (counting from 1) takes the database from version
 /// `n - 1` to `n`. Append only: a shipped step never changes, because databases in the field have
 /// already run it.
-const STEPS: [&str; 7] = [
+const STEPS: [&str; 8] = [
     include_str!("../migrations/0001_workspaces_and_threads.sql"),
     include_str!("../migrations/0002_codex_threads.sql"),
     include_str!("../migrations/0003_claude_threads.sql"),
@@ -13,10 +13,11 @@ const STEPS: [&str; 7] = [
     include_str!("../migrations/0005_thread_sandbox_and_usage.sql"),
     include_str!("../migrations/0006_messages_from_threads.sql"),
     include_str!("../migrations/0007_report_format.sql"),
+    include_str!("../migrations/0008_thread_places.sql"),
 ];
 
 /// The schema version this build writes: the number of steps.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 const _: () = assert!(STEPS.len() == SCHEMA_VERSION as usize);
 
 pub(crate) fn schema_version(connection: &Connection) -> rusqlite::Result<u32> {

@@ -1,23 +1,27 @@
 use kratos_protocol::{
-    ContextLimit, ContextUsage, CreateThread, PauseReason, Permission, Provider, RequiredText,
-    Thread, ThreadDetails, ThreadEventBody, ThreadId, ThreadSandbox, ThreadSettings, TurnChanges,
-    TurnId, TurnOrigin, TurnOutcome, WorkspaceId,
+    ContextLimit, ContextUsage, ContinuationState, CreateThread, PauseReason, Permission, Place,
+    Provider, RequiredText, Thread, ThreadDetails, ThreadEventBody, ThreadId, ThreadSandbox,
+    ThreadSettings, Timestamp, TurnChanges, TurnId, TurnOrigin, TurnOutcome, WorkspaceId,
+    WorktreeId,
 };
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::columns::{
-    from_column, from_stored_name, permission_name, provider_name, timestamp_column, to_column,
-    unreadable,
+    from_column, from_stored_name, optional_timestamp_column, permission_name, provider_name,
+    timestamp_column, to_column, unreadable,
 };
+use crate::worktrees::{NewPlace, attach, place_from_row};
 use crate::{Store, StoreError, ThreadWrite};
 
 /// What a provider needs to run a thread's turns.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProviderThread {
     pub thread: Thread,
-    /// The folder the agent works in: the workspace's path until R5 gives threads their own.
+    /// The folder the agent works in: its worktree's, or else its project folder.
     pub folder: String,
+    pub place: Place,
+    pub archived_at: Option<Timestamp>,
     pub settings: ThreadSettings,
     pub sandbox: Option<ThreadSandbox>,
     pub paused: Option<PauseReason>,
@@ -28,10 +32,14 @@ pub struct ProviderThread {
 }
 
 impl Store {
-    /// Records a thread with a new UUID, `created_at = updated_at = now`, and the request's
-    /// settings or the defaults. `Err(UnknownWorkspace)` when the workspace does not exist; nothing
-    /// is written then.
-    pub fn create_thread(&self, request: &CreateThread) -> Result<Thread, StoreError> {
+    /// Records a thread in `place` with a new UUID, `created_at = updated_at = now`, and the
+    /// request's settings or the defaults. The engine resolved `request.place` into `place`.
+    /// `Err(UnknownWorkspace)` when the workspace does not exist; nothing is written then.
+    pub fn create_thread(
+        &mut self,
+        request: &CreateThread,
+        place: &NewPlace,
+    ) -> Result<Thread, StoreError> {
         let now = crate::columns::timestamp_now()?;
         let thread = Thread {
             id: ThreadId::new(Uuid::new_v4().to_string()),
@@ -42,11 +50,15 @@ impl Store {
             updated_at: now,
         };
         let settings = request.settings_or_default();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let worktree_id = attach(&transaction, place)?;
         // One statement, so the workspace cannot go missing between the check and the insert.
-        let inserted = self.connection.execute(
+        let inserted = transaction.execute(
             "INSERT INTO threads (id, workspace_id, title, provider, created_at, updated_at, model,
-               permission, plan_mode, context_limit_tokens, report_format)
-             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11
+               permission, plan_mode, context_limit_tokens, report_format, worktree_id)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
              WHERE EXISTS (SELECT 1 FROM workspaces WHERE id = ?2)",
             params![
                 thread.id.as_str(),
@@ -60,11 +72,13 @@ impl Store {
                 settings.plan_mode,
                 settings.context_limit_tokens.map(i64::from),
                 report_format_text(&settings),
+                worktree_id.as_ref().map(WorktreeId::as_str),
             ],
         )?;
         if inserted == 0 {
             return Err(StoreError::UnknownWorkspace(thread.workspace_id));
         }
+        transaction.commit()?;
         Ok(thread)
     }
 
@@ -98,6 +112,8 @@ impl Store {
         let thread = self.provider_thread(thread_id)?;
         Ok(ThreadDetails {
             thread: thread.thread,
+            place: thread.place,
+            archived_at: thread.archived_at,
             settings: thread.settings,
             paused: thread.paused,
             running_turn: thread.running_turn,
@@ -118,6 +134,35 @@ impl Store {
             Ok((ThreadId::new(row.get(0)?), TurnId::new(row.get(1)?)))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The folders threads that are not archived work in: a worktree's path, or the project
+    /// folder as the user gave it.
+    pub fn folders_in_use(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT COALESCE(worktrees.path, workspaces.path)
+             FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
+               LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
+             WHERE threads.archived_at IS NULL",
+        )?;
+        let folders = statement.query_map([], |row| row.get(0))?;
+        Ok(folders.collect::<Result<_, _>>()?)
+    }
+
+    /// The folders of threads currently running a turn or submitting a message, archived or not.
+    /// Codex records a turn only once it took the message, and its agent may act on it before then.
+    pub fn busy_folders(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.connection.prepare_cached(
+            "SELECT DISTINCT COALESCE(worktrees.path, workspaces.path)
+             FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
+               LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
+             WHERE threads.running_turn IS NOT NULL
+                OR EXISTS (SELECT 1 FROM thread_messages
+                           WHERE thread_messages.thread_id = threads.id
+                             AND thread_messages.status = 'submitting')",
+        )?;
+        let folders = statement.query_map([], |row| row.get(0))?;
+        Ok(folders.collect::<Result<_, _>>()?)
     }
 }
 
@@ -172,6 +217,56 @@ impl ThreadWrite<'_> {
         }
         self.append(ThreadEventBody::ThreadResumed)?;
         Ok(true)
+    }
+
+    /// Archives the thread and cancels its open continuation, so nothing starts in it again, and
+    /// returns it as archived. Refused while a turn runs or anything waits: a message, an
+    /// approval, or a question. Archiving an archived thread changes nothing.
+    pub fn archive(&mut self) -> Result<ProviderThread, StoreError> {
+        let thread = self.provider_thread()?;
+        if thread.archived_at.is_some() {
+            return Ok(thread);
+        }
+        let refusals = [
+            (thread.running_turn.is_some(), "a turn runs; stop it first"),
+            (
+                !self.pending_messages()?.is_empty(),
+                "messages wait in its queue; remove or discard them first",
+            ),
+            (
+                self.waits_on_user()?,
+                "an approval or a question waits on you",
+            ),
+        ];
+        if let Some(&(_, why)) = refusals.iter().find(|(refused, _)| *refused) {
+            return Err(StoreError::ArchiveRefused {
+                thread_id: self.thread_id().clone(),
+                why,
+            });
+        }
+        if let Some(open) = self.open_continuation()? {
+            let reason = "The thread was archived".to_owned();
+            self.update_continuation(
+                &open.id,
+                open.resets_at,
+                ContinuationState::Cancelled { reason },
+            )?;
+        }
+        self.transaction.execute(
+            "UPDATE threads SET archived_at = ?1 WHERE id = ?2",
+            params![self.at().as_str(), self.thread_id().as_str()],
+        )?;
+        self.append(ThreadEventBody::ThreadArchived)?;
+        self.provider_thread()
+    }
+
+    fn waits_on_user(&self) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS (SELECT 1 FROM approvals WHERE thread_id = ?1 AND settled_at IS NULL)
+               OR EXISTS (SELECT 1 FROM questions WHERE thread_id = ?1 AND settled_at IS NULL)",
+            [self.thread_id().as_str()],
+            |row| row.get(0),
+        )?)
     }
 
     /// Records that `turn_id` started. It stays the thread's running turn until
@@ -243,14 +338,18 @@ fn provider_thread(
     let thread = connection
         .query_row(
             "SELECT threads.id, threads.workspace_id, threads.title, threads.provider,
-               threads.created_at, threads.updated_at, workspaces.path, threads.model,
+               threads.created_at, threads.updated_at,
+               COALESCE(worktrees.path, workspaces.path), threads.model,
                threads.permission, threads.plan_mode, threads.context_limit_tokens, threads.sandbox,
                threads.paused, threads.running_turn,
                (SELECT native_id FROM provider_sessions
                 WHERE thread_id = threads.id AND ended_at IS NULL
                 ORDER BY started_at DESC LIMIT 1),
-               threads.report_format
+               threads.report_format,
+               worktrees.id, worktrees.path, worktrees.branch, worktrees.ownership, worktrees.base,
+               threads.archived_at
              FROM threads JOIN workspaces ON workspaces.id = threads.workspace_id
+               LEFT JOIN worktrees ON worktrees.id = threads.worktree_id
              WHERE threads.id = ?1",
             [thread_id.as_str()],
             provider_thread_from_row,
@@ -263,6 +362,8 @@ fn provider_thread_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderThread> {
     Ok(ProviderThread {
         thread: thread_from_row(row)?,
         folder: row.get(6)?,
+        place: place_from_row(row, 16)?,
+        archived_at: optional_timestamp_column(row, 21, "archived_at")?,
         settings: settings_from_row(row)?,
         sandbox: from_column(row, 11)?,
         paused: from_column(row, 12)?,

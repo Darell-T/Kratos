@@ -1,5 +1,5 @@
 use kratos_protocol::{CreateWorkspace, Workspace, WorkspaceId};
-use rusqlite::{Row, params};
+use rusqlite::{OptionalExtension, Row, params};
 use uuid::Uuid;
 
 use crate::columns::{timestamp_column, timestamp_now};
@@ -35,6 +35,20 @@ impl Store {
         )?;
         let workspaces = statement.query_map([], workspace_from_row)?;
         Ok(workspaces.collect::<Result<_, _>>()?)
+    }
+}
+
+impl Store {
+    /// The workspace with this id. `Err(UnknownWorkspace)` when there is none.
+    pub fn workspace(&self, id: &WorkspaceId) -> Result<Workspace, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT id, name, path, created_at FROM workspaces WHERE id = ?1",
+                [id.as_str()],
+                workspace_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| StoreError::UnknownWorkspace(id.clone()))
     }
 }
 

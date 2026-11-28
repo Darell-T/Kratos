@@ -4,8 +4,8 @@ use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Approval, ContextLimit, Message, PauseReason, Question, ReportFormat, RequiredText, Seq,
-    Timestamp, TurnId, WorkspaceId,
+    Approval, ContextLimit, Message, PauseReason, Place, PlaceRequest, Question, ReportFormat,
+    RequiredText, Seq, Timestamp, TurnId, WorkspaceId,
 };
 
 string_id! {
@@ -63,6 +63,10 @@ pub struct CreateThread {
     /// The defaults when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<ThreadSettings>,
+    /// `None` starts the user's thread in the project folder, and an agent's in the agent's own
+    /// place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<PlaceRequest>,
 }
 
 impl CreateThread {
@@ -159,6 +163,14 @@ impl ThreadSettings {
             ..self.clone()
         }
     }
+
+    /// These settings with no more access than `limit`, or unchanged when `limit` is `None`.
+    pub fn limited_by(&self, limit: Option<AccessLimit>) -> ThreadSettings {
+        match limit {
+            Some(limit) => self.limited_to(limit),
+            None => self.clone(),
+        }
+    }
 }
 
 /// How much a thread may do: its permission, and whether it only plans. A thread that takes a
@@ -240,6 +252,9 @@ pub struct ListEvents {
 pub struct ThreadDetails {
     #[serde(flatten)]
     pub thread: Thread,
+    pub place: Place,
+    /// When the user archived the thread, after which it takes no more messages.
+    pub archived_at: Option<Timestamp>,
     pub settings: ThreadSettings,
     pub paused: Option<PauseReason>,
     pub running_turn: Option<TurnId>,

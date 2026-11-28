@@ -41,6 +41,31 @@ impl Profile {
     }
 }
 
+/// Where npm writes its cache for a Codex thread or command. Only writable sandboxes redirect into
+/// the temp folder; Full access and Plan keep the user's own environment so an unsandboxed command
+/// never reads a cache a sandboxed thread can write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum NpmCache {
+    Default,
+    SandboxTemp,
+}
+
+impl NpmCache {
+    pub(super) fn for_profile(profile: Profile) -> Self {
+        match profile {
+            Profile::AskMe | Profile::ApproveForMe => Self::SandboxTemp,
+            Profile::Plan | Profile::FullAccess => Self::Default,
+        }
+    }
+
+    pub(super) fn path(self) -> Option<PathBuf> {
+        match self {
+            Self::Default => None,
+            Self::SandboxTemp => Some(temp_folder().join("kratos-npm-cache")),
+        }
+    }
+}
+
 /// Folders an agent may not change without the user (D20), and Kratos's own data folder, which an
 /// agent may not even read (D19).
 #[derive(Clone, Debug, PartialEq, Eq)]

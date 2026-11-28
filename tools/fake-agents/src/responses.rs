@@ -16,6 +16,8 @@ use serde_json::{Value, json};
 /// One response in a deterministic model script.
 pub enum Reply {
     Command(String),
+    /// A command that asks to run outside the sandbox, with the agent's reason.
+    EscalatedCommand(String),
     Text(String),
 }
 
@@ -124,15 +126,21 @@ async fn respond(State(script): State<Arc<Mutex<Script>>>, body: Bytes) -> Respo
     };
     let response_id = format!("resp-{number}");
     let item_id = format!("item-{number}");
+    let exec = |command: String| json!({ "cmd": command, "yield_time_ms": 10000, "max_output_tokens": 2000 });
+    let tool_call = |arguments: Value| {
+        json!({
+            "type": "custom_tool_call", "id": item_id, "call_id": format!("call-{number}"),
+            "namespace": "functions", "name": "exec",
+            "input": format!("text(await tools.exec_command({arguments}));"),
+        })
+    };
     let item = match reply {
-        Reply::Command(command) => {
-            let arguments =
-                json!({ "cmd": command, "yield_time_ms": 10000, "max_output_tokens": 2000 });
-            json!({
-                "type": "custom_tool_call", "id": item_id, "call_id": format!("call-{number}"),
-                "namespace": "functions", "name": "exec",
-                "input": format!("text(await tools.exec_command({arguments}));"),
-            })
+        Reply::Command(command) => tool_call(exec(command)),
+        Reply::EscalatedCommand(command) => {
+            let mut arguments = exec(command);
+            arguments["sandbox_permissions"] = json!("require_escalated");
+            arguments["justification"] = json!("The test writes outside the workspace.");
+            tool_call(arguments)
         }
         Reply::Text(text) => json!({
             "type": "message", "id": item_id, "role": "assistant", "status": "completed",

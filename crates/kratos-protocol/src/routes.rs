@@ -9,6 +9,7 @@ pub const USAGE: &str = "/api/usage";
 pub const CLAUDE_CLI: &str = "/api/agents/claude/cli";
 pub const CLAUDE_CLI_UPDATE: &str = "/api/agents/claude/cli/update";
 pub const WORKSPACES: &str = "/api/workspaces";
+pub const WORKSPACE_WORKTREES: &str = "/api/workspaces/{id}/worktrees";
 pub const THREADS: &str = "/api/threads";
 pub const THREAD: &str = "/api/threads/{id}";
 pub const THREAD_EVENTS: &str = "/api/threads/{id}/events";
@@ -17,6 +18,10 @@ pub const THREAD_STOP: &str = "/api/threads/{id}/stop";
 pub const THREAD_RESUME: &str = "/api/threads/{id}/resume";
 pub const THREAD_SETTINGS: &str = "/api/threads/{id}/settings";
 pub const THREAD_SKILLS: &str = "/api/threads/{id}/skills";
+pub const THREAD_ARCHIVE: &str = "/api/threads/{id}/archive";
+pub const THREAD_DIFF: &str = "/api/threads/{id}/diff";
+pub const THREAD_COMMIT: &str = "/api/threads/{id}/commit";
+pub const THREAD_PULL_REQUEST: &str = "/api/threads/{id}/pull-request";
 pub const MESSAGE: &str = "/api/threads/{id}/messages/{message_id}";
 pub const MESSAGE_STEER: &str = "/api/threads/{id}/messages/{message_id}/steer";
 pub const MESSAGE_RETRY: &str = "/api/threads/{id}/messages/{message_id}/retry";
@@ -27,6 +32,10 @@ pub const CONTINUATION_SCHEDULE: &str = "/api/continuations/{id}/schedule";
 
 pub fn threads_in(workspace_id: &WorkspaceId) -> String {
     format!("{THREADS}?workspaceId={}", encode(workspace_id.as_str()))
+}
+
+pub fn workspace_worktrees(id: &WorkspaceId) -> String {
+    fill(WORKSPACE_WORKTREES, &[id.as_str()])
 }
 
 pub fn thread(id: &ThreadId) -> String {
@@ -59,6 +68,22 @@ pub fn thread_settings(id: &ThreadId) -> String {
 
 pub fn thread_skills(id: &ThreadId) -> String {
     fill(THREAD_SKILLS, &[id.as_str()])
+}
+
+pub fn thread_diff(id: &ThreadId) -> String {
+    fill(THREAD_DIFF, &[id.as_str()])
+}
+
+pub fn thread_commit(id: &ThreadId) -> String {
+    fill(THREAD_COMMIT, &[id.as_str()])
+}
+
+pub fn thread_pull_request(id: &ThreadId) -> String {
+    fill(THREAD_PULL_REQUEST, &[id.as_str()])
+}
+
+pub fn thread_archive(id: &ThreadId) -> String {
+    fill(THREAD_ARCHIVE, &[id.as_str()])
 }
 
 pub fn message(thread_id: &ThreadId, message_id: &MessageId) -> String {

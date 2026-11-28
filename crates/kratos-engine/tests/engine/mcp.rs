@@ -121,6 +121,7 @@ fn thread(
             permission,
             ..ThreadSettings::default()
         }),
+        place: None,
     };
     engine.client().create_thread(&request).unwrap()
 }
