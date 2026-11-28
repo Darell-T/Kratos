@@ -259,6 +259,54 @@ fn a_commit_at_the_top_concludes_a_merge_that_changes_no_file() {
 }
 
 #[test]
+fn a_commit_at_the_top_refuses_unresolved_merge_conflicts_until_resolved() {
+    // Catches a top-level commit staging raw conflict markers in a private index and wiping
+    // unmerged stages from `.git/index` instead of refusing until the conflict is resolved.
+    let root = TempDir::new().unwrap();
+    let repository = new_repository(&root);
+    git(&repository, &["switch", "--quiet", "--create", "feature"]);
+    std::fs::write(repository.join("README.md"), "feature version\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    git(&repository, &["commit", "--quiet", "--message", "feature"]);
+    git(&repository, &["switch", "--quiet", "main"]);
+    std::fs::write(repository.join("README.md"), "main version\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    git(&repository, &["commit", "--quiet", "--message", "main"]);
+    let head = git(&repository, &["rev-parse", "HEAD"]);
+    let merge = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repository)
+        .args(["merge", "--no-commit", "feature"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success(), "expected a merge conflict");
+    assert!(repository.join(".git").join("MERGE_HEAD").exists());
+    assert!(!git(&repository, &["ls-files", "--unmerged"]).is_empty());
+
+    let engine = RunningEngine::start(&root.path().join("kratos"));
+    let workspace = workspace_at(&engine, &repository);
+    let client = engine.client();
+    let thread = create(&client, &workspace, "merge", PlaceRequest::default());
+
+    let refused = commit(&client, &thread, "Should refuse conflict");
+    assert_eq!(refused.status, 409, "{}", refused.body);
+    assert!(repository.join(".git").join("MERGE_HEAD").exists());
+    assert_eq!(git(&repository, &["rev-parse", "HEAD"]), head);
+    assert!(!git(&repository, &["ls-files", "--unmerged"]).is_empty());
+
+    std::fs::write(repository.join("README.md"), "resolved version\n").unwrap();
+    git(&repository, &["add", "README.md"]);
+    let resolved = commit(&client, &thread, "Resolved merge");
+    assert_eq!(resolved.status, 201, "{}", resolved.body);
+    let parents = git(
+        &repository,
+        &["rev-list", "--parents", "--max-count=1", "HEAD"],
+    );
+    assert_eq!(parents.split(' ').count(), 3, "{parents}");
+    assert!(!repository.join(".git").join("MERGE_HEAD").exists());
+}
+
+#[test]
 fn commits_sent_together_make_one_commit_and_the_rest_find_nothing_to_commit() {
     // Catches two git commands racing for the repository's index lock, which git answers with an
     // error that tells the user to delete the lock file.
