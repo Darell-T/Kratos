@@ -50,6 +50,14 @@ pub fn dangerous_command(
             .iter()
             .find_map(|command| dangerous_powershell_words_match(command, platform));
     }
+    if platform == DangerousCommandPlatform::Windows
+        && let Some(commands) = parse_powershell_command_literal_commands(command)
+        && let Some(found) = commands
+            .iter()
+            .find_map(|command| dangerous_powershell_words_match(command, platform))
+    {
+        return Some(found);
+    }
     dangerous_command_match_for_platform(command, platform)
 }
 
@@ -67,17 +75,7 @@ pub fn has_bash_syntax_error(script: &str) -> bool {
 
 /// Whether `script` fails to parse cleanly as PowerShell syntax.
 pub fn has_powershell_syntax_error(script: &str) -> bool {
-    if powershell::parse_powershell_script_into_plain_commands(script).is_some() {
-        return false;
-    }
-    let mut parser = tree_sitter::Parser::new();
-    let language = tree_sitter_powershell::LANGUAGE.into();
-    parser
-        .set_language(&language)
-        .expect("load powershell grammar");
-    parser
-        .parse(script, None)
-        .is_none_or(|tree| tree.root_node().has_error())
+    parse_powershell_tree(script).is_none()
 }
 
 /// Whether `command` starts a shell or an interpreter that reads commands from its input, such as
@@ -87,6 +85,137 @@ pub fn has_powershell_syntax_error(script: &str) -> bool {
 pub fn reads_commands_from_input(command: &[String]) -> bool {
     let commands = bash::parse_shell_lc_literal_commands(command)
         .or_else(|| powershell::parse_powershell_command_into_plain_commands(command))
+        .or_else(|| parse_powershell_command_literal_commands(command))
         .unwrap_or_else(|| vec![command.to_vec()]);
     commands.iter().any(|words| interactive::reads_input(words))
+}
+
+fn parse_powershell_tree(script: &str) -> Option<tree_sitter::Tree> {
+    if script
+        .chars()
+        .any(|ch| matches!(ch, '‘' | '’' | '“' | '”' | '–' | '—' | '―'))
+    {
+        return None;
+    }
+    let masked = mask_double_dash_equals(script);
+    let mut parser = tree_sitter::Parser::new();
+    let language = tree_sitter_powershell::LANGUAGE.into();
+    parser
+        .set_language(&language)
+        .expect("load powershell grammar");
+    let tree = parser.parse(&masked, None)?;
+    (!tree.root_node().has_error()).then_some(tree)
+}
+
+/// tree-sitter-powershell rejects bare `--flag=value`; replacing `=` with a space preserves byte
+/// offsets so literal extraction still reads the original text from `script`.
+fn mask_double_dash_equals(script: &str) -> String {
+    let mut bytes = script.as_bytes().to_vec();
+    let mut start = 0;
+    for (index, ch) in script.char_indices() {
+        if ch.is_whitespace() || "|&;#><(){}".contains(ch) {
+            mask_token_equals(&mut bytes, script, start, index);
+            start = index + ch.len_utf8();
+        }
+    }
+    mask_token_equals(&mut bytes, script, start, script.len());
+    String::from_utf8(bytes).expect("replacing ASCII `=` with space preserves UTF-8")
+}
+
+fn mask_token_equals(bytes: &mut [u8], script: &str, start: usize, end: usize) {
+    let token = &script[start..end];
+    if token.starts_with("--")
+        && !token
+            .chars()
+            .any(|ch| matches!(ch, '\'' | '"' | '`' | '$' | '#'))
+        && let Some(equals) = token.find('=')
+        && equals > 2
+        && equals + 1 < token.len()
+    {
+        bytes[start + equals] = b' ';
+    }
+}
+
+fn parse_powershell_command_literal_commands(command: &[String]) -> Option<Vec<Vec<String>>> {
+    let (_, script) = powershell::extract_powershell_command(command)?;
+    let tree = parse_powershell_tree(script)?;
+    let mut commands = Vec::new();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        if node.kind() == "command"
+            && let Some(words) = literal_powershell_words(node, script)
+        {
+            commands.push(words);
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+    Some(commands)
+}
+
+fn literal_powershell_words(command: tree_sitter::Node<'_>, script: &str) -> Option<Vec<String>> {
+    let mut words = Vec::new();
+    let mut cursor = command.walk();
+    for child in command.named_children(&mut cursor) {
+        match child.kind() {
+            "command_name" => {
+                let text = child.utf8_text(script.as_bytes()).ok()?;
+                words.push(unquote_powershell_token(text));
+            }
+            "command_elements" => {
+                let mut elem_cursor = child.walk();
+                for elem in child.named_children(&mut elem_cursor) {
+                    if matches!(
+                        elem.kind(),
+                        "command_argument_sep"
+                            | "redirection"
+                            | "sub_expression"
+                            | "parenthesized_expression"
+                            | "script_block_expression"
+                    ) {
+                        continue;
+                    }
+                    if let Ok(text) = elem.utf8_text(script.as_bytes()) {
+                        let word = unquote_powershell_token(text);
+                        if !word.is_empty() {
+                            words.push(word);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    (!words.is_empty()).then_some(words)
+}
+
+fn unquote_powershell_token(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if let Some(inner) = trimmed
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+    {
+        return inner.replace("''", "'");
+    }
+    if let Some(inner) = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return unescape_powershell_backticks(inner);
+    }
+    unescape_powershell_backticks(trimmed)
+}
+
+fn unescape_powershell_backticks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '`'
+            && let Some(next) = chars.next()
+        {
+            out.push(next);
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }

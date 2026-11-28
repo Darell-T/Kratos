@@ -36,6 +36,8 @@ pub const UPDATE_LIMIT: Duration =
 /// How much of a failed command's output an error keeps.
 const OUTPUT_KEPT: usize = 2_000;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_FEED_FILESIZE_ARG: &str = "65536";
+const _: () = assert!(MAX_OUTPUT_BYTES == 65_536);
 const MAX_FEED_BYTES: usize = 256;
 
 /// A Claude Code release number, such as `2.1.303`.
@@ -231,7 +233,7 @@ fn feed_curl_args(url: &str) -> Result<Vec<&str>, ReleaseError> {
             "--max-redirs",
             "5",
             "--max-filesize",
-            "65536",
+            MAX_FEED_FILESIZE_ARG,
             "--proto",
             "=https",
             "--proto-redir",
@@ -246,7 +248,7 @@ fn feed_curl_args(url: &str) -> Result<Vec<&str>, ReleaseError> {
             "--silent",
             "--show-error",
             "--max-filesize",
-            "65536",
+            MAX_FEED_FILESIZE_ARG,
             "--proto",
             "=file",
             "--",

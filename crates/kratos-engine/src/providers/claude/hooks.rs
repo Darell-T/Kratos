@@ -63,6 +63,7 @@ fn edits_in_plan_directory(hook: &HookCallback, home: &Path) -> bool {
     resolve_destination(&expected_plans).is_ok_and(|plans| plans == expected_plans)
         && resolve_destination(path)
             .is_ok_and(|resolved| resolved.parent() == Some(expected_plans.as_path()))
+        && !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 fn direct_plan_edit_path(hook: &HookCallback) -> Option<&Path> {
@@ -71,8 +72,7 @@ fn direct_plan_edit_path(hook: &HookCallback) -> Option<&Path> {
     let direct = path.is_absolute()
         && !path
             .components()
-            .any(|part| matches!(part, Component::ParentDir))
-        && !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
+            .any(|part| matches!(part, Component::ParentDir));
     direct.then_some(path)
 }
 

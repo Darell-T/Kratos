@@ -39,8 +39,7 @@ pub(super) fn turn_of(message_id: &MessageId) -> TurnId {
 }
 
 /// The content blocks of a user message. A file or an image is named by its path in a text block,
-/// which Claude opens with its own tools (D86). A message from another thread opens with a label
-/// naming the sender and what this thread may now do.
+/// which Claude opens with its own tools (D86).
 pub(super) fn user_content(message: &Message) -> Value {
     let label = crate::providers::sender_label(&message.origin)
         .map(|text| json!({ "type": "text", "text": text }));

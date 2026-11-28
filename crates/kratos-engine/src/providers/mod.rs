@@ -30,8 +30,6 @@ pub(crate) fn report_item(turn_id: &TurnId, report: serde_json::Value) -> AgentI
     }
 }
 
-/// The opening label prepended to a message sent by another Kratos thread, naming the sender and
-/// the permission cap now in force.
 pub(crate) fn sender_label(origin: &MessageOrigin) -> Option<String> {
     let MessageOrigin::Thread { thread_id, limit } = origin else {
         return None;

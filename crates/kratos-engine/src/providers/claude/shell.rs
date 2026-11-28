@@ -119,12 +119,28 @@ mod tests {
             (Shell::PowerShell, r#"Write-Output "a`"b""#, false),
             (Shell::PowerShell, "<# don't #> Get-ChildItem", false),
             (Shell::PowerShell, "git log --format=oneline", false),
+            (
+                Shell::PowerShell,
+                "$b = 'main'; git log --format=oneline $b",
+                false,
+            ),
             (Shell::Bash, "echo ok # don't", false),
             (Shell::Bash, "echo 'unterminated", true),
             (Shell::PowerShell, "Write-Output 'unterminated", true),
             (
                 Shell::PowerShell,
                 r"Write-Output `'; Remove-Item -Recurse -Force .\src",
+                true,
+            ),
+            (
+                Shell::PowerShell,
+                r"<#'#> $x = 1; Remove-Item -Recurse -Force .\src",
+                true,
+            ),
+            (Shell::PowerShell, "$x = 1; powershell", true),
+            (
+                Shell::PowerShell,
+                "Write-Output \u{2019}; Remove-Item -Recurse -Force .\\src",
                 true,
             ),
         ] {

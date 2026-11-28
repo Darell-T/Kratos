@@ -46,6 +46,7 @@ async fn powershell_quoting_cannot_hide_a_forced_delete_from_the_check() {
         for (index, command) in [
             r"Write-Output `'; Remove-Item -Recurse -Force .\src",
             r"<#'#> Remove-Item -Recurse -Force .\src",
+            r"<#'#> $x = 1; Remove-Item -Recurse -Force .\src",
             r"Remove-Item -Recurse -Force .\src",
         ]
         .into_iter()
