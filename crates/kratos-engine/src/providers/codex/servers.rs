@@ -117,6 +117,17 @@ impl Servers {
         self.slots.get_mut(key)
     }
 
+    pub(super) fn take_closing_start(&mut self, key: &ServerKey) -> Option<Vec<Reply<()>>> {
+        let slot = self.slots.get_mut(key)?;
+        if !matches!(slot.server, Server::ClosingStart(_)) {
+            return None;
+        }
+        match std::mem::replace(&mut slot.server, Server::Down) {
+            Server::ClosingStart(waiters) => Some(waiters),
+            _ => None,
+        }
+    }
+
     pub(super) fn generation(&self, key: &ServerKey) -> u64 {
         self.slots.get(key).map_or(0, |slot| slot.generation)
     }

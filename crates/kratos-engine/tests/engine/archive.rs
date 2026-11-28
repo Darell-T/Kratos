@@ -379,7 +379,6 @@ fn concurrent_archives_of_the_same_worktree_serialize_and_record_removed() {
         std::thread::spawn(move || archive(&client, &owner, LeftFiles::Keep))
     };
     wait_for_worktree_state(&engine, &path, "removing");
-    std::thread::sleep(std::time::Duration::from_millis(100));
     let discard = {
         let (client, owner) = (client.clone(), owner.clone());
         std::thread::spawn(move || archive(&client, &owner, LeftFiles::Discard))

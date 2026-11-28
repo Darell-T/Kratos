@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use kratos_protocol::{Ownership, Place, PlaceRequest, WorktreeId};
 use kratos_store::{Checkout, KratosWorktree, NewPlace, StoreError};
@@ -55,8 +55,7 @@ pub struct Worktrees {
     scratch: PathBuf,
     /// One lock per repository, keyed by its shared git folder.
     repositories: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
-    /// One lock per worktree removal, always acquired outside `repositories`.
-    removals: Mutex<HashMap<WorktreeId, Arc<tokio::sync::Mutex<()>>>>,
+    removals: Mutex<HashMap<WorktreeId, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 /// Why a thread cannot work where it asked. Every message says what to do in plain words
@@ -473,35 +472,40 @@ impl Worktrees {
     }
 
     pub(super) async fn lock_removal(&self, id: &WorktreeId) -> RemovalLock<'_> {
-        let lock = {
-            let mut removals = self.removals.lock().expect("lock poisoned");
-            removals.entry(id.clone()).or_default().clone()
-        };
-        let entry = RemovalEntry {
+        let slot = RemovalSlot {
             removals: &self.removals,
             id: id.clone(),
-            lock: Arc::clone(&lock),
         };
-        let _guard = lock.lock_owned().await;
+        let lock = {
+            let mut removals = self.removals.lock().expect("lock poisoned");
+            match removals.get(id).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(tokio::sync::Mutex::new(()));
+                    removals.insert(id.clone(), Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        let guard = lock.lock_owned().await;
         RemovalLock {
-            _guard,
-            _entry: entry,
+            guard: Some(guard),
+            _slot: slot,
         }
     }
 }
 
-struct RemovalEntry<'a> {
-    removals: &'a Mutex<HashMap<WorktreeId, Arc<tokio::sync::Mutex<()>>>>,
+struct RemovalSlot<'a> {
+    removals: &'a Mutex<HashMap<WorktreeId, Weak<tokio::sync::Mutex<()>>>>,
     id: WorktreeId,
-    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
-impl Drop for RemovalEntry<'_> {
+impl Drop for RemovalSlot<'_> {
     fn drop(&mut self) {
         let mut removals = self.removals.lock().expect("lock poisoned");
         if removals
             .get(&self.id)
-            .is_some_and(|entry| Arc::ptr_eq(entry, &self.lock) && Arc::strong_count(entry) == 2)
+            .is_some_and(|weak| weak.strong_count() == 0)
         {
             removals.remove(&self.id);
         }
@@ -509,9 +513,14 @@ impl Drop for RemovalEntry<'_> {
 }
 
 pub(super) struct RemovalLock<'a> {
-    // Release the mutex guard before `_entry` checks strong_count and prunes the map entry.
-    _guard: tokio::sync::OwnedMutexGuard<()>,
-    _entry: RemovalEntry<'a>,
+    guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _slot: RemovalSlot<'a>,
+}
+
+impl Drop for RemovalLock<'_> {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+    }
 }
 
 /// The folder git keeps for the linked worktree at `folder`, which its `.git` file names. `None`

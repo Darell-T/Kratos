@@ -152,12 +152,8 @@ impl Actor {
         key: ServerKey,
         result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     ) {
-        if self
-            .servers
-            .get(&key)
-            .is_some_and(|slot| matches!(slot.server, Server::ClosingStart(_)))
-        {
-            self.finish_closing_start(&key, result);
+        if let Some(waiters) = self.servers.take_closing_start(&key) {
+            self.finish_closing_start(&key, waiters, result);
             return;
         }
         match result {
@@ -201,15 +197,13 @@ impl Actor {
     fn finish_closing_start(
         &mut self,
         key: &ServerKey,
+        waiters: Vec<super::actor::Reply<()>>,
         result: Result<(Codex, mpsc::Receiver<Incoming>), StartError>,
     ) {
-        let slot = self.servers.slot(key);
-        let Server::ClosingStart(waiters) = std::mem::replace(&mut slot.server, Server::Down)
-        else {
-            unreachable!("checked ClosingStart before finishing");
-        };
-        for deferred in std::mem::take(&mut slot.deferred) {
-            deferred.fail_deferred(ProviderError::Conflict("The thread is archived".into()));
+        if let Some(slot) = self.servers.get_mut(key) {
+            for deferred in std::mem::take(&mut slot.deferred) {
+                deferred.fail_deferred(ProviderError::Conflict("The thread is archived".into()));
+            }
         }
         self.servers.advance_generation(key);
         self.servers.forget_if_unused(key);

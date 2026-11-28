@@ -107,10 +107,7 @@ pub fn decide_patch(
 }
 
 pub(super) fn decide_permissions(settings: &ThreadSettings, access: &ExtraAccess) -> Verdict {
-    if Profile::for_settings(settings) != Profile::FullAccess
-        && !access.paths.is_empty()
-        && access.network.is_none()
-    {
+    if denies_sandbox_widening(settings, !access.paths.is_empty(), access.network.is_some()) {
         return Verdict::Decline;
     }
     Verdict::Ask(AskReason::Escalation)
@@ -122,7 +119,15 @@ pub(super) fn decide_permissions(settings: &ThreadSettings, access: &ExtraAccess
 /// for network access is the exception: Codex still honors it.
 fn sandbox_cannot_grant(settings: &ThreadSettings, request: &CommandRequest<'_>) -> bool {
     let wants_out = request.reason.is_some() || request.wants_more_permissions;
-    wants_out && !request.wants_network && Profile::for_settings(settings) != Profile::FullAccess
+    denies_sandbox_widening(settings, wants_out, request.wants_network)
+}
+
+fn denies_sandbox_widening(
+    settings: &ThreadSettings,
+    wants_out: bool,
+    wants_network: bool,
+) -> bool {
+    wants_out && !wants_network && Profile::for_settings(settings) != Profile::FullAccess
 }
 
 fn asks_every_action(permission: Permission) -> bool {
