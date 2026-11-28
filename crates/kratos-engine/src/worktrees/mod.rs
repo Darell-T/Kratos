@@ -55,6 +55,8 @@ pub struct Worktrees {
     scratch: PathBuf,
     /// One lock per repository, keyed by its shared git folder.
     repositories: Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
+    /// One lock per worktree removal, always acquired outside `repositories`.
+    removals: Mutex<HashMap<WorktreeId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// Why a thread cannot work where it asked. Every message says what to do in plain words
@@ -209,6 +211,7 @@ impl Worktrees {
             gh,
             scratch,
             repositories: Mutex::default(),
+            removals: Mutex::default(),
         })
     }
 
@@ -463,6 +466,47 @@ impl Worktrees {
             .or_default()
             .clone()
     }
+
+    pub(super) async fn lock_removal(&self, id: &WorktreeId) -> RemovalLock<'_> {
+        let lock = {
+            let mut removals = self.removals.lock().expect("lock poisoned");
+            removals.entry(id.clone()).or_default().clone()
+        };
+        let entry = RemovalEntry {
+            removals: &self.removals,
+            id: id.clone(),
+            lock: Arc::clone(&lock),
+        };
+        let _guard = lock.lock_owned().await;
+        RemovalLock {
+            _guard,
+            _entry: entry,
+        }
+    }
+}
+
+struct RemovalEntry<'a> {
+    removals: &'a Mutex<HashMap<WorktreeId, Arc<tokio::sync::Mutex<()>>>>,
+    id: WorktreeId,
+    lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl Drop for RemovalEntry<'_> {
+    fn drop(&mut self) {
+        let mut removals = self.removals.lock().expect("lock poisoned");
+        if removals
+            .get(&self.id)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &self.lock) && Arc::strong_count(entry) == 2)
+        {
+            removals.remove(&self.id);
+        }
+    }
+}
+
+pub(super) struct RemovalLock<'a> {
+    // Release the mutex guard before `_entry` checks strong_count and prunes the map entry.
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+    _entry: RemovalEntry<'a>,
 }
 
 /// The folder git keeps for the linked worktree at `folder`, which its `.git` file names. `None`

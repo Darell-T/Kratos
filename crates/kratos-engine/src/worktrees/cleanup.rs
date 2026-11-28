@@ -97,6 +97,7 @@ impl Worktrees {
         recorded: &KratosWorktree,
         files: LeftFiles,
     ) -> Result<Cleanup, StoreError> {
+        let _removing = self.lock_removal(&recorded.id).await;
         let begin = recorded.id.clone();
         let repository = match store.call(move |store| store.begin_removal(&begin)).await? {
             Removal::InUse => return Ok(Cleanup::InUse),
