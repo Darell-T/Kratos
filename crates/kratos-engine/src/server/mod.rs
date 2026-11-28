@@ -312,6 +312,7 @@ impl From<PlaceError> for ApiError {
             conflict @ (PlaceError::NotItsWorktree(_)
             | PlaceError::BeingEdited
             | PlaceError::PartialCommitDuring(_)
+            | PlaceError::UnresolvedConflicts
             | PlaceError::IndexInUse(_)) => ApiError::new(StatusCode::CONFLICT, conflict),
             refused => ApiError::bad_request(refused.to_string()),
         }

@@ -141,6 +141,7 @@ impl Worktrees {
         {
             return Err(PlaceError::PartialCommitDuring(underway));
         }
+        self.refuse_unmerged(folder).await?;
         self.refuse_while_edited(store, &resolved_folder, &paths.top)
             .await?;
         let staged = self.scratch_index();
@@ -304,6 +305,21 @@ impl Worktrees {
             });
         }
         Ok(head?)
+    }
+
+    async fn refuse_unmerged(&self, folder: &Path) -> Result<(), PlaceError> {
+        let unmerged = self
+            .git
+            .run_bytes(
+                folder,
+                &["ls-files", "--unmerged", "-z", "--", "."],
+                git::QUICK,
+            )
+            .await?;
+        if !unmerged.is_empty() {
+            return Err(PlaceError::UnresolvedConflicts);
+        }
+        Ok(())
     }
 
     /// Refuses a commit of `staged` that would change no file, except to conclude a merge, which

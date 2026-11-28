@@ -110,6 +110,11 @@ pub(crate) enum PlaceError {
          in the repository's top folder."
     )]
     PartialCommitDuring(work::Underway),
+    #[error(
+        "This folder has unresolved merge conflicts. Resolve them in git and mark them resolved, \
+         then commit again."
+    )]
+    UnresolvedConflicts,
     #[error("Another git command or program is using the index at {0}. Commit again once it ends.")]
     IndexInUse(String),
     #[error(
