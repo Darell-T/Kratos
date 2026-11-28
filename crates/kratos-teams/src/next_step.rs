@@ -101,8 +101,8 @@ pub struct CheckStep {
     pub step: StepId,
     pub commit: Sha,
     /// The commit the lines of a finding must fall inside the diff of, which is the one the
-    /// reviewer diffed against. `None` in the first standard review, where every confirmed finding
-    /// counts as inside.
+    /// reviewer diffed against. `None` in the first standard review and in the other passes, where
+    /// every confirmed finding counts as inside.
     pub ranges_base: Option<Sha>,
     pub candidates: Vec<Candidate>,
     /// Open bugs whose commands Kratos reruns on `commit`. The exit code decides if they are fixed.
@@ -200,8 +200,7 @@ fn check_step(view: &TaskView, step: StepId, job: &ReviewJob, report: &ReviewDon
         triggers: view.triggers.clone(),
         base: view.base.clone(),
     });
-    let is_first_standard = is_standard && view.last_reviewed.is_none();
-    let ranges_base = (!is_first_standard).then(|| job.diff_base.clone());
+    let ranges_base = (is_standard && view.last_reviewed.is_some()).then(|| job.diff_base.clone());
     Step::Check {
         check: Box::new(CheckStep {
             step,
