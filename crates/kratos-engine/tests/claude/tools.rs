@@ -46,6 +46,7 @@ async fn powershell_quoting_cannot_hide_a_forced_delete_from_the_check() {
         for (index, command) in [
             r"Write-Output `'; Remove-Item -Recurse -Force .\src",
             r"<#'#> Remove-Item -Recurse -Force .\src",
+            r"<#'#> $x = 1; Remove-Item -Recurse -Force .\src",
             r"Remove-Item -Recurse -Force .\src",
         ]
         .into_iter()
@@ -70,6 +71,48 @@ async fn powershell_quoting_cannot_hide_a_forced_delete_from_the_check() {
             assert_eq!(response(&harness, &launch, &id).await["behavior"], "deny");
         }
     }
+}
+
+#[tokio::test]
+async fn powershell_windows_path_runs_without_asking_under_approve_for_me() {
+    // Catches POSIX `shlex::split` treating a trailing backslash in a Windows path as an
+    // unterminated escape and asking the user as `AskReason::Dangerous`.
+    let harness = Harness::start(Options {
+        settings: ThreadSettings {
+            permission: Permission::ApproveForMe,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    })
+    .await;
+    let launch = harness.begin(A, 1).await;
+    send(
+        &harness,
+        &launch,
+        "win-path",
+        "PowerShell",
+        json!({ "command": r"Get-ChildItem C:\" }),
+    )
+    .await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    let answer = loop {
+        let approvals = harness.details().await.approvals;
+        assert!(
+            approvals.is_empty(),
+            "ordinary PowerShell Windows path must not ask for approval: {approvals:?}"
+        );
+        if let Some(frame) = harness.received(&launch).await.into_iter().find(|frame| {
+            frame["type"] == "control_response" && frame["response"]["request_id"] == "win-path"
+        }) {
+            break frame["response"]["response"].clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "win-path was never answered"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(answer["behavior"], "allow", "{answer}");
 }
 
 #[tokio::test]

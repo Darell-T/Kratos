@@ -13,7 +13,8 @@ pub(crate) use agent::Agent;
 pub use agent::Providers;
 
 use kratos_protocol::{
-    AgentItem, ApprovalId, Message, MessageId, Place, QuestionId, ThreadId, TurnId,
+    AgentItem, ApprovalId, Message, MessageId, MessageOrigin, Permission, Place, QuestionId,
+    ThreadId, TurnId,
 };
 use kratos_store::StoreError;
 
@@ -41,6 +42,25 @@ pub(crate) fn report_item(turn_id: &TurnId, report: serde_json::Value) -> AgentI
         id: format!("{turn_id}-report"),
         report,
     }
+}
+
+pub(crate) fn sender_label(origin: &MessageOrigin) -> Option<String> {
+    let MessageOrigin::Thread { thread_id, limit } = origin else {
+        return None;
+    };
+    let access = match (limit.plan_mode, limit.permission) {
+        (true, _) => "Plan mode, which changes nothing",
+        (false, Permission::AskMe) => "Ask me",
+        (false, Permission::ApproveForMe) => "Approve for me",
+        (false, Permission::FullAccess) => "Full access",
+    };
+    Some(format!(
+        "[Message from Kratos thread {}. From this turn on, this thread runs with no more than that \
+         thread's permission, {access}, until the user raises it. If that stops you from doing \
+         something, say so in your reply instead of working around it. Answer in your reply, which \
+         that thread reads. Message it back only if it asks you to.]",
+        thread_id.as_str()
+    ))
 }
 
 /// What became of a continuation the scheduler sent (D39).

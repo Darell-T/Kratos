@@ -200,6 +200,36 @@ fn a_protected_folder_asks_under_every_permission_even_for_an_ordinary_write() {
 }
 
 #[test]
+fn reading_a_protected_folder_follows_role_policy_while_other_reads_stay_allowed() {
+    // Catches `approval()` returning `Allow` for `ActionKind::Read` before checking
+    // `Place::ProtectedFolder`, letting every role read credential and Kratos data folders.
+    for permission in PERMISSIONS {
+        assert_eq!(
+            approval(Role::Planner, permission, read(Place::ProtectedFolder)),
+            Deny,
+            "planner protected read under {permission:?}"
+        );
+        assert_eq!(
+            approval(Role::Reviewer, permission, read(Place::ProtectedFolder)),
+            Deny,
+            "reviewer protected read under {permission:?}"
+        );
+        assert_eq!(
+            approval(Role::Implementer, permission, read(Place::ProtectedFolder)),
+            Ask,
+            "implementer protected read under {permission:?}"
+        );
+        for role in [Role::Planner, Role::Reviewer, Role::Implementer] {
+            assert_eq!(
+                approval(role, permission, read(Place::OutsideWorktree)),
+                Allow,
+                "{role:?} outside read under {permission:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn approve_for_me_is_not_full_access_a_dangerous_command_tells_them_apart() {
     let dangerous = command(Place::InsideWorktree, Risk::PotentiallyDangerous);
 

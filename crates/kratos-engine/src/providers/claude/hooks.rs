@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use super::actor::Actor;
 use super::permissions::edit_path;
 use super::shell::{Shell, command_text};
+use crate::providers::codex::resolve_destination;
 
 const PRE: &str = "kratos-pre";
 const POST: &str = "kratos-post";
@@ -37,8 +38,8 @@ pub(super) fn initialize(report_format: Option<ReportFormat>) -> Initialize {
 }
 
 /// Asking here routes CLI allow rules through Kratos. In plan mode the CLI decides direct edits in its plans directory.
-fn pre_tool(hook: &HookCallback, plans: Option<&Path>) -> Value {
-    if plans.is_some_and(|plans| edits_in_plan_directory(hook, plans)) {
+fn pre_tool(hook: &HookCallback, home: Option<&Path>) -> Value {
+    if home.is_some_and(|home| edits_in_plan_directory(hook, home)) {
         return json!({ "continue": true });
     }
     json!({
@@ -51,18 +52,28 @@ fn pre_tool(hook: &HookCallback, plans: Option<&Path>) -> Value {
     })
 }
 
-fn edits_in_plan_directory(hook: &HookCallback, plans: &Path) -> bool {
-    let Some(name) = hook.input["tool_name"].as_str() else {
+fn edits_in_plan_directory(hook: &HookCallback, home: &Path) -> bool {
+    let Some(path) = direct_plan_edit_path(hook) else {
         return false;
     };
-    let Some(path) = edit_path(name, &hook.input["tool_input"]).map(Path::new) else {
+    let Ok(resolved_home) = resolve_destination(home) else {
         return false;
     };
-    path.is_absolute()
-        && path.parent() == Some(plans)
+    let expected_plans = resolved_home.join(".claude").join("plans");
+    resolve_destination(&expected_plans).is_ok_and(|plans| plans == expected_plans)
+        && resolve_destination(path)
+            .is_ok_and(|resolved| resolved.parent() == Some(expected_plans.as_path()))
+        && !std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+}
+
+fn direct_plan_edit_path(hook: &HookCallback) -> Option<&Path> {
+    let name = hook.input["tool_name"].as_str()?;
+    let path = Path::new(edit_path(name, &hook.input["tool_input"])?);
+    let direct = path.is_absolute()
         && !path
             .components()
-            .any(|part| matches!(part, Component::ParentDir))
+            .any(|part| matches!(part, Component::ParentDir));
+    direct.then_some(path)
 }
 
 fn item(hook: &HookCallback) -> Option<AgentItem> {
@@ -123,13 +134,12 @@ impl Actor {
             return;
         }
         if hook.callback_id == PRE {
-            let plans = self
+            let home = self
                 .threads
                 .get(thread_id)
                 .filter(|thread| thread.turn_settings().plan_mode)
-                .and(self.settings.protected.home())
-                .map(|home| home.join(".claude").join("plans"));
-            let _ = control.answer(pre_tool(&hook, plans.as_deref()));
+                .and(self.settings.protected.home());
+            let _ = control.answer(pre_tool(&hook, home));
             return;
         }
         if let Some(thread) = self.threads.get_mut(thread_id)

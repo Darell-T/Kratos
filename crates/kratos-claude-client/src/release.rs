@@ -11,6 +11,7 @@
 //! their own manager, which replaces files a running CLI still loads, so Kratos neither reads their
 //! newest release nor updates them.
 
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -19,7 +20,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use kratos_process::OwnedChild;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 use crate::launch::set_environment;
@@ -34,6 +35,10 @@ pub const UPDATE_LIMIT: Duration =
     Duration::from_secs(READ_TIMEOUT.as_secs() + UPDATE_TIMEOUT.as_secs() + READ_TIMEOUT.as_secs());
 /// How much of a failed command's output an error keeps.
 const OUTPUT_KEPT: usize = 2_000;
+const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const MAX_FEED_FILESIZE_ARG: &str = "65536";
+const _: () = assert!(MAX_OUTPUT_BYTES == 65_536);
+const MAX_FEED_BYTES: usize = 256;
 
 /// A Claude Code release number, such as `2.1.303`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -143,13 +148,14 @@ pub async fn latest_version(
         )));
     }
     let url = format!("{feed}/{channel}");
-    let body = run(
-        Path::new("curl"),
-        &["--fail", "--silent", "--show-error", "--location", &url],
-        &[],
-        READ_TIMEOUT,
-    )
-    .await?;
+    let args = feed_curl_args(&url)?;
+    let body = run(Path::new("curl"), &args, &[], READ_TIMEOUT).await?;
+    if body.len() > MAX_FEED_BYTES {
+        return Err(ReleaseError::Unreadable {
+            what: url,
+            output: kept(&body),
+        });
+    }
     body.trim()
         .parse()
         .map(Latest::Release)
@@ -211,6 +217,76 @@ fn doctor_line<'a>(doctor: &'a str, label: &str) -> Option<&'a str> {
         .filter(|value| !value.is_empty())
 }
 
+fn feed_curl_args(url: &str) -> Result<Vec<&str>, ReleaseError> {
+    if url.chars().any(char::is_control) {
+        return Err(ReleaseError::Unreadable {
+            what: url.to_owned(),
+            output: "unsupported release feed URL".to_owned(),
+        });
+    }
+    if url.starts_with("https://") {
+        Ok(vec![
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-redirs",
+            "5",
+            "--max-filesize",
+            MAX_FEED_FILESIZE_ARG,
+            "--proto",
+            "=https",
+            "--proto-redir",
+            "=https",
+            "--",
+            url,
+        ])
+    } else if url.starts_with("file://") {
+        // Omit `--location` instead of passing `--proto-redir =none`, which Windows curl rejects.
+        Ok(vec![
+            "--fail",
+            "--silent",
+            "--show-error",
+            "--max-filesize",
+            MAX_FEED_FILESIZE_ARG,
+            "--proto",
+            "=file",
+            "--",
+            url,
+        ])
+    } else {
+        Err(ReleaseError::Unreadable {
+            what: url.to_owned(),
+            output: "unsupported release feed URL".to_owned(),
+        })
+    }
+}
+
+async fn read_tail<R: AsyncRead + Unpin>(mut reader: R, limit: usize) -> Vec<u8> {
+    let mut kept = VecDeque::new();
+    let mut chunk = [0_u8; 8 * 1024];
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let bytes = &chunk[..n];
+                if limit == 0 {
+                    continue;
+                }
+                if bytes.len() >= limit {
+                    kept.clear();
+                    kept.extend(&bytes[bytes.len() - limit..]);
+                } else {
+                    let overflow = kept.len().saturating_add(bytes.len()).saturating_sub(limit);
+                    kept.drain(..overflow);
+                    kept.extend(bytes);
+                }
+            }
+        }
+    }
+    kept.into()
+}
+
 /// Runs `program` with no input and returns what it printed, stdout then stderr. The whole
 /// process tree ends when it fails or runs out of time.
 async fn run(
@@ -234,14 +310,12 @@ async fn run(
         program: program.to_owned(),
         source,
     })?;
-    let mut stdout = child.take_stdout().expect("stdout was piped");
-    let mut stderr = child.take_stderr().expect("stderr was piped");
+    let stdout = child.take_stdout().expect("stdout was piped");
+    let stderr = child.take_stderr().expect("stderr was piped");
     let finished = async {
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let (_, _, status) = tokio::join!(
-            stdout.read_to_end(&mut out),
-            stderr.read_to_end(&mut err),
+        let (out, err, status) = tokio::join!(
+            read_tail(stdout, MAX_OUTPUT_BYTES),
+            read_tail(stderr, MAX_OUTPUT_BYTES),
             child.wait()
         );
         (status, out, err)
@@ -306,5 +380,85 @@ mod tests {
         );
         assert_eq!(doctor_line(doctor, "Auto-update channel:"), Some("latest"));
         assert_eq!(doctor_line(doctor, "Missing:"), None);
+    }
+
+    #[test]
+    fn https_feed_curl_args_pin_protocol_redirects_size_and_end_of_options() {
+        // Catches unhardened `curl` calls allowing protocol downgrades, unlimited redirects,
+        // unbounded downloads, or option injection before the URL.
+        let url = "https://example.com/latest";
+        let args = feed_curl_args(url).unwrap();
+        assert_eq!(
+            args,
+            vec![
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--location",
+                "--max-redirs",
+                "5",
+                "--max-filesize",
+                "65536",
+                "--proto",
+                "=https",
+                "--proto-redir",
+                "=https",
+                "--",
+                url,
+            ]
+        );
+    }
+
+    #[test]
+    fn file_feed_curl_args_pin_file_protocol_and_disable_redirects() {
+        // Catches local `file://` test feeds allowing redirects or missing `--proto =file`,
+        // `--max-filesize`, and `--`.
+        let url = "file:///tmp/feed/latest";
+        let args = feed_curl_args(url).unwrap();
+        assert!(!args.contains(&"--location"), "{args:?}");
+        assert_eq!(
+            args,
+            vec![
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-filesize",
+                "65536",
+                "--proto",
+                "=file",
+                "--",
+                url,
+            ]
+        );
+    }
+
+    #[test]
+    fn unsupported_and_malformed_feed_urls_are_rejected_before_spawning_curl() {
+        // Catches `http://`, `ftp://`, curl flag injection, and control characters reaching curl.
+        for bad in [
+            "http://example.com/latest",
+            "ftp://example.com/latest",
+            "-K/etc/passwd",
+            "https://example.com/latest\n--output=/tmp/pwn",
+        ] {
+            let err = feed_curl_args(bad).unwrap_err();
+            assert!(
+                matches!(err, ReleaseError::Unreadable { .. }),
+                "{bad:?}: {err:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_tail_caps_large_output_and_keeps_exact_trailing_bytes() {
+        // Catches unbounded `read_to_end` allowing a noisy or hostile child process to exhaust memory.
+        let total = 200 * 1024;
+        let data: Vec<u8> = (0..total).map(|i| (i % 251) as u8).collect();
+        let limit = 64 * 1024;
+
+        let kept = read_tail(std::io::Cursor::new(&data), limit).await;
+
+        assert_eq!(kept.len(), limit);
+        assert_eq!(kept, data[total - limit..]);
     }
 }

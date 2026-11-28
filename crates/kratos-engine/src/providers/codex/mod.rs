@@ -39,7 +39,7 @@ use crate::store_thread::StoreThread;
 use crate::usage::{LimitStop, UsageTracker};
 
 pub use profiles::ProtectedFolders;
-pub(crate) use profiles::sandbox_may_write;
+pub(crate) use profiles::{resolve_destination, sandbox_may_write};
 
 /// How the provider starts Codex and how long it waits on it.
 #[derive(Clone, Debug)]

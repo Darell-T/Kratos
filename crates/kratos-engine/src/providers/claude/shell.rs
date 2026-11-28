@@ -1,6 +1,7 @@
 use kratos_claude_client::CanUseTool;
 use kratos_command_safety::{
-    DangerousCommandPlatform, dangerous_command, reads_commands_from_input, split_command_text,
+    DangerousCommandPlatform, dangerous_command, has_bash_syntax_error,
+    has_powershell_syntax_error, reads_commands_from_input,
 };
 use kratos_protocol::{ApprovalRequest, ExtraAccess};
 use serde_json::Value;
@@ -39,11 +40,18 @@ impl Shell {
         }
     }
 
+    fn has_syntax_error(self, text: &str) -> bool {
+        match self {
+            Self::Bash => has_bash_syntax_error(text),
+            Self::PowerShell => has_powershell_syntax_error(text),
+        }
+    }
+
     fn flags(self, text: &str) -> bool {
         let (words, platform) = self.words(text);
         dangerous_command(&words, platform).is_some()
             || reads_commands_from_input(&words)
-            || split_command_text(text).is_none()
+            || self.has_syntax_error(text)
     }
 }
 
@@ -92,6 +100,49 @@ mod tests {
             (Shell::PowerShell, "Remove-Item build -Recurse -Force", true),
             (Shell::PowerShell, "Get-ChildItem", false),
             (Shell::PowerShell, "powershell", true),
+        ] {
+            assert_eq!(
+                flagged(shell, text),
+                Action::Command { flagged: expected },
+                "{shell:?} {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_powershell_and_bash_syntax_is_not_flagged_by_posix_shlex() {
+        // Catches POSIX `shlex::split` misparsing valid PowerShell paths, backtick escapes, block
+        // comments, and Bash comments with apostrophes as syntax errors while still flagging real
+        // unterminated quotes.
+        for (shell, text, expected) in [
+            (Shell::PowerShell, r"Get-ChildItem C:\", false),
+            (Shell::PowerShell, r#"Write-Output "a`"b""#, false),
+            (Shell::PowerShell, "<# don't #> Get-ChildItem", false),
+            (Shell::PowerShell, "git log --format=oneline", false),
+            (
+                Shell::PowerShell,
+                "$b = 'main'; git log --format=oneline $b",
+                false,
+            ),
+            (Shell::Bash, "echo ok # don't", false),
+            (Shell::Bash, "echo 'unterminated", true),
+            (Shell::PowerShell, "Write-Output 'unterminated", true),
+            (
+                Shell::PowerShell,
+                r"Write-Output `'; Remove-Item -Recurse -Force .\src",
+                true,
+            ),
+            (
+                Shell::PowerShell,
+                r"<#'#> $x = 1; Remove-Item -Recurse -Force .\src",
+                true,
+            ),
+            (Shell::PowerShell, "$x = 1; powershell", true),
+            (
+                Shell::PowerShell,
+                "Write-Output \u{2019}; Remove-Item -Recurse -Force .\\src",
+                true,
+            ),
         ] {
             assert_eq!(
                 flagged(shell, text),

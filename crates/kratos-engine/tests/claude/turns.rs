@@ -4,10 +4,13 @@
 use std::time::Duration;
 
 use kratos_engine::providers::Sent;
-use kratos_protocol::{MessageStatus, PauseReason, Provider, ThreadEventBody, TurnId, TurnOutcome};
+use kratos_protocol::{
+    AccessLimit, MessageOrigin, MessageStatus, PauseReason, Permission, Provider, ThreadEventBody,
+    TurnId, TurnOutcome,
+};
 use serde_json::json;
 
-use crate::harness::{A, B, C, D, E, Harness, Options, interrupted, message_id};
+use crate::harness::{A, B, C, D, E, Harness, Options, interrupted, message_id, text_input};
 
 fn accepted_by(status: &MessageStatus, turn: &str) -> bool {
     matches!(status, MessageStatus::Accepted { turn_id } if turn_id.as_str() == turn)
@@ -537,5 +540,49 @@ async fn a_turn_that_runs_past_the_idle_window_keeps_its_process() {
             }
         ),
         "{ended:?}"
+    );
+}
+
+#[tokio::test]
+async fn cross_thread_message_prepends_sender_label_and_permission_limit_for_claude() {
+    // Catches `claude::wire::user_content` ignoring `message.origin`, omitting the sender thread
+    // label and lowered permission notice that Codex delivers on cross-thread messages.
+    let harness = Harness::start(Options::default()).await;
+    let sender = harness.another_thread("sender").await;
+    let origin = MessageOrigin::Thread {
+        thread_id: sender.clone(),
+        limit: AccessLimit {
+            permission: Permission::AskMe,
+            plan_mode: false,
+        },
+    };
+    harness
+        .provider
+        .send(
+            harness.thread_id.clone(),
+            message_id(A),
+            text_input("Please review the helper"),
+            origin,
+        )
+        .await
+        .unwrap();
+    let launch = harness.launch(1).await;
+    harness.wait_written(&launch, &[A]).await;
+
+    let received = harness.received(&launch).await;
+    let user = received
+        .iter()
+        .find(|frame| frame["type"] == "user")
+        .unwrap();
+    let blocks = user["message"]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2, "{blocks:?}");
+    assert_eq!(blocks[0]["type"], "text");
+    let label = blocks[0]["text"].as_str().unwrap();
+    assert!(label.starts_with("[Message from Kratos thread "), "{label}");
+    assert!(label.contains(sender.as_str()), "{label}");
+    assert!(label.contains("Ask me"), "{label}");
+    assert_eq!(
+        blocks[1],
+        json!({ "type": "text", "text": "Please review the helper" })
     );
 }

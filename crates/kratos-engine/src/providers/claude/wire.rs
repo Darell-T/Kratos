@@ -2,7 +2,9 @@
 //! Claude is sent, the items its replies become, and the plan that pays for the session.
 
 use kratos_claude_client::{Assistant, Initialized, SessionId, StreamEvent};
-use kratos_protocol::{AgentItem, MessageId, MessageInput, SlashCommand, ThreadId, TurnId};
+use kratos_protocol::{
+    AgentItem, Message, MessageId, MessageInput, SlashCommand, ThreadId, TurnId,
+};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -38,19 +40,18 @@ pub(super) fn turn_of(message_id: &MessageId) -> TurnId {
 
 /// The content blocks of a user message. A file or an image is named by its path in a text block,
 /// which Claude opens with its own tools (D86).
-pub(super) fn user_content(input: &[MessageInput]) -> Value {
-    let blocks: Vec<Value> = input
-        .iter()
-        .map(|part| {
-            let text = match part {
-                MessageInput::Text { text } => text.as_str().to_owned(),
-                MessageInput::Image { path } => format!("Attached image: {}", path.as_str()),
-                MessageInput::File { path } => format!("Attached file: {}", path.as_str()),
-            };
-            json!({ "type": "text", "text": text })
-        })
-        .collect();
-    Value::Array(blocks)
+pub(super) fn user_content(message: &Message) -> Value {
+    let label = crate::providers::sender_label(&message.origin)
+        .map(|text| json!({ "type": "text", "text": text }));
+    let parts = message.input.iter().map(|part| {
+        let text = match part {
+            MessageInput::Text { text } => text.as_str().to_owned(),
+            MessageInput::Image { path } => format!("Attached image: {}", path.as_str()),
+            MessageInput::File { path } => format!("Attached file: {}", path.as_str()),
+        };
+        json!({ "type": "text", "text": text })
+    });
+    Value::Array(label.into_iter().chain(parts).collect())
 }
 
 /// The items a completed assistant message holds. Each text block is a reply, saved whole (D88);
@@ -130,7 +131,7 @@ pub(super) fn plan(initialized: &Initialized) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use kratos_protocol::RequiredText;
+    use kratos_protocol::{MessageOrigin, MessageStatus, RequiredText, Timestamp};
 
     use super::*;
 
@@ -152,15 +153,22 @@ mod tests {
     fn attachments_reach_claude_as_text_naming_their_path() {
         // Catches an attachment dropped on the way to Claude, which would answer without it.
         let text = |text: &str| RequiredText::new(text).unwrap();
-        let content = user_content(&[
-            MessageInput::Text { text: text("look") },
-            MessageInput::Image {
-                path: text("/p/a.png"),
-            },
-            MessageInput::File {
-                path: text("/p/b.rs"),
-            },
-        ]);
+        let message = Message {
+            id: id("m-1"),
+            input: vec![
+                MessageInput::Text { text: text("look") },
+                MessageInput::Image {
+                    path: text("/p/a.png"),
+                },
+                MessageInput::File {
+                    path: text("/p/b.rs"),
+                },
+            ],
+            origin: MessageOrigin::User,
+            status: MessageStatus::Queued,
+            queued_at: Timestamp::now().unwrap(),
+        };
+        let content = user_content(&message);
         assert_eq!(
             content,
             json!([

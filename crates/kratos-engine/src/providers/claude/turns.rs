@@ -150,7 +150,7 @@ impl Actor {
         });
         let epoch = thread.epoch;
         let (thread_id, message_id) = (thread_id.clone(), message.id.clone());
-        let content = wire::user_content(&message.input);
+        let content = wire::user_content(message);
         self.spawn(async move {
             let result = claude.send(&native, content).await;
             Done::Sent {

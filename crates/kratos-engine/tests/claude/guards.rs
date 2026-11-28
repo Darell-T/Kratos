@@ -432,3 +432,94 @@ async fn in_plan_mode_the_cli_writes_its_own_plan_file_without_asking_the_user()
         }
     }
 }
+
+fn link_dir(target: &std::path::Path, link: &std::path::Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let output = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink /J failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn try_link_file(target: &std::path::Path, link: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+}
+
+#[tokio::test]
+async fn plan_mode_pre_tool_hook_refuses_to_exempt_linked_plans_dir_or_plan_file_symlink() {
+    // Catches `edits_in_plan_directory` checking paths lexically, letting a linked `.claude/plans`
+    // directory or a file symlink inside it bypass Kratos's PreToolUse `ask` gate in plan mode.
+    let plan_options = || Options {
+        settings: ThreadSettings {
+            plan_mode: true,
+            ..ThreadSettings::default()
+        },
+        ..Options::default()
+    };
+
+    let harness = Harness::start(plan_options()).await;
+    let launch = harness.begin(A, 1).await;
+    let outside = harness.root.path().join("outside");
+    let claude_dir = harness.claude_home().join(".claude");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(&claude_dir).unwrap();
+    let plans = claude_dir.join("plans");
+    link_dir(&outside, &plans);
+    let answer = hook(
+        &harness,
+        &launch,
+        "linked-dir",
+        "PreToolUse",
+        "Write",
+        json!({ "file_path": plans.join("plan.md"), "content": "escape" }),
+    )
+    .await;
+    assert_eq!(
+        answer["hookSpecificOutput"]["permissionDecision"], "ask",
+        "linked plans dir must not be exempt: {answer}"
+    );
+
+    let harness = Harness::start(plan_options()).await;
+    let launch = harness.begin(A, 1).await;
+    let outside = harness.root.path().join("outside");
+    let plans = harness.claude_home().join(".claude").join("plans");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::create_dir_all(&plans).unwrap();
+    let target = outside.join("target.txt");
+    std::fs::write(&target, "original").unwrap();
+    let escape = plans.join("escape.md");
+    if try_link_file(&target, &escape) {
+        let answer = hook(
+            &harness,
+            &launch,
+            "linked-file",
+            "PreToolUse",
+            "Write",
+            json!({ "file_path": escape, "content": "escape" }),
+        )
+        .await;
+        assert_eq!(
+            answer["hookSpecificOutput"]["permissionDecision"], "ask",
+            "symlinked plan file must not be exempt: {answer}"
+        );
+    }
+}
