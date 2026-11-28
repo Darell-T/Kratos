@@ -2,6 +2,7 @@
 //! security pass. Ported from the TypeScript `teams-task.test.ts`.
 
 use kratos_teams::decisions::{Decision, DecisionKind};
+use kratos_teams::facts::ChangeSize;
 use kratos_teams::members::Role;
 use kratos_teams::security_triggers::TriggerHit;
 use kratos_teams::view::{
@@ -385,6 +386,67 @@ fn the_security_pass_runs_once_on_the_approved_commit_and_its_blocking_finding_c
     );
     assert_eq!(view.rounds.len(), 2);
     assert_eq!(task.script.scans.len(), 1, "the second scan never ran");
+    assert_replayable(&task);
+}
+
+#[test]
+fn security_and_regressions_passes_do_not_drop_confirmed_findings_outside_the_diff() {
+    // Catches `check_step` setting `ranges_base` on non-standard passes, which drops confirmed
+    // findings in unchanged callers or sinks as `OutsideDiff` instead of blocking.
+    let mut script = script(
+        vec![
+            implements(),
+            fix_f1(),
+            implements_answering(vec![fixed(2)]),
+        ],
+        vec![
+            approves(),
+            requests_changes(vec![bug("sink-outside-diff", "cmd1")]),
+            approves(),
+            requests_changes(vec![bug("caller-outside-diff", "cmd2")]),
+            approves(),
+        ],
+    );
+    script.sizes.insert(
+        1,
+        ChangeSize {
+            files: 12,
+            lines: 50,
+        },
+    );
+    script.scans = vec![vec![]].into();
+    script.outside_diff = vec![
+        "sink-outside-diff".to_owned(),
+        "caller-outside-diff".to_owned(),
+    ];
+    script_commands(&mut script, "cmd1", vec![fails(), passes()]);
+    script_commands(&mut script, "cmd2", vec![fails(), passes()]);
+    let mut task = Task::two()
+        .security_pass()
+        .large_change(10, 400)
+        .script(script);
+
+    task.step_until(|task| checks(task).len() == 2);
+    assert_eq!(
+        checks(&task)[1].ranges_base,
+        None,
+        "security pass must not filter by diff ranges"
+    );
+
+    task.run();
+
+    let all = checks(&task);
+    assert_eq!(all[0].ranges_base, None);
+    assert_eq!(all[1].ranges_base, None);
+    assert_eq!(all[2].ranges_base, Some(sha(1)));
+    assert_eq!(
+        all[3].ranges_base, None,
+        "regressions pass must not filter by diff ranges"
+    );
+    assert_eq!(all[4].ranges_base, Some(sha(2)));
+    let view = task.view();
+    assert_eq!(view.phase, approved(3, ApprovedBy::Reviewer));
+    assert_eq!(outcomes(&view), ["Closed Fixed", "Closed Fixed"]);
     assert_replayable(&task);
 }
 
